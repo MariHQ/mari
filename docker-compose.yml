@@ -1,0 +1,88 @@
+# Mari Cloud — one-command deploy: `cp .env.example .env && docker compose up --build`
+# Web UI on http://localhost:8080. First-run admin token: `docker compose logs api`.
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: mari
+      POSTGRES_PASSWORD: mari
+      POSTGRES_DB: mari_cloud
+    volumes:
+      - mari-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mari -d mari_cloud"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # One-shot schema load. The SQL files are idempotent, so re-running
+  # `docker compose up` is safe.
+  db-init:
+    image: pgvector/pgvector:pg16
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: mari
+    volumes:
+      - ./server/init.sql:/sql/init.sql:ro
+    entrypoint:
+      - psql
+      - -h
+      - db
+      - -U
+      - mari
+      - -d
+      - mari_cloud
+      - -v
+      - ON_ERROR_STOP=1
+      - -f
+      - /sql/init.sql
+    restart: "no"
+
+  api:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    depends_on:
+      db-init:
+        condition: service_completed_successfully
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      MARI_DB: postgresql://mari:mari@db:5432/mari_cloud
+      # Ollama running on the docker host (optional — the app degrades
+      # gracefully without it). To use the compose-managed ollama service
+      # below instead, change this to http://ollama:11434.
+      MARI_OLLAMA_HOST: ${MARI_OLLAMA_HOST:-http://host.docker.internal:11434}
+      # OAuth / S3 credentials come from .env (see .env.example), e.g.:
+      # MARI_GITHUB_CLIENT_ID / MARI_GITHUB_CLIENT_SECRET
+      # MARI_GOOGLE_CLIENT_ID / MARI_GOOGLE_CLIENT_SECRET
+      # MARI_S3_BUCKET
+    extra_hosts:
+      # Makes host.docker.internal resolve on Linux (no-op on Docker Desktop).
+      - host.docker.internal:host-gateway
+
+  web:
+    build: web
+    ports:
+      - "8080:80"
+    depends_on:
+      - api
+
+  # Optional: run ollama inside compose instead of on the host.
+  # Uncomment this service, set MARI_OLLAMA_HOST=http://ollama:11434 in .env,
+  # then pull the models the app expects:
+  #   docker compose exec ollama ollama pull nomic-embed-text
+  #   docker compose exec ollama ollama pull gemma3:4b
+  #
+  # ollama:
+  #   image: ollama/ollama
+  #   volumes:
+  #     - mari-ollama-data:/root/.ollama
+
+volumes:
+  mari-db-data:
+  # mari-ollama-data:

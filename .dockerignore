@@ -1,0 +1,21 @@
+# Scoped for the api image build (context = repo root, server/Dockerfile).
+
+# Not needed by the server image
+output/
+DESIGN.md
+FLOWS-DESIGN.md
+README.md
+mari.toml.example
+docker-compose.yml
+.env
+.env.example
+
+# Python cruft
+**/__pycache__/
+**/*.pyc
+server/.venv/
+**/node_modules/
+**/dist/
+
+# Runtime output (recreated at startup)
+server/builds/

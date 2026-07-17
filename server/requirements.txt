@@ -1,0 +1,9 @@
+fastapi
+strawberry-graphql[fastapi]
+uvicorn[standard]
+psycopg[binary]
+psycopg_pool
+nh3
+markdown
+boto3
+pydantic

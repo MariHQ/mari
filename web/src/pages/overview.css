@@ -1,0 +1,14 @@
+/* Overview page — digest card layout only. Shared idioms (.topic*, .card)
+   live in styles.css; everything else on Overview styles from there too. */
+
+.ov-digest .topic { margin-bottom: 10px; }
+.ov-digest .topic:last-child { margin-bottom: 0; }
+
+.digest-note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font: italic 12.5px var(--serif);
+  color: var(--ink-soft);
+  padding: 2px 2px 10px;
+}

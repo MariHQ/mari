@@ -1,0 +1,36 @@
+# Mari Cloud configuration — copy to mari.toml (or set MARI_CONFIG).
+# Every value can also be set by environment variable (see server/config.py),
+# which is how docker-compose.yml configures the containers.
+
+[database]
+url = "postgresql://mari:mari@localhost:5432/mari_cloud"
+
+[server]
+host = "0.0.0.0"
+port = 8000
+cors_origins = ["http://localhost:5173"]
+
+[ollama]
+# Local models stand in for the configurable cloud providers (DESIGN.md §5, §10).
+host = "http://localhost:11434"
+embed_model = "nomic-embed-text"
+gen_model = "gemma3:4b"
+
+[auth]
+session_days = 14
+# OAuth apps are optional; the buttons stay disabled (with a hint) until set.
+github_client_id = ""
+github_client_secret = ""
+google_client_id = ""
+google_client_secret = ""
+oauth_redirect_base = "http://localhost:8000"
+
+[s3]
+# Leave empty for local builds; set to really deploy doc sites.
+bucket = ""
+region = "us-west-2"
+
+[audit]
+# The audit scans the connected GitHub source (Settings → Sources).
+languages = ["es", "fr"]
+default_tag = "customer-facing"

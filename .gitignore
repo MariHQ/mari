@@ -1,0 +1,10 @@
+node_modules/
+dist/
+__pycache__/
+*.pyc
+.venv/
+.idea/
+.env
+mari.toml
+server/builds/
+deploy/lambda/mari_cloud.dump

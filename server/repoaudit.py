@@ -1,0 +1,282 @@
+"""Mari Cloud — repository audit engine (DESIGN.md §20, FLOWS-DESIGN.md).
+
+Scans the connected GitHub repo (sources with kind='github') for markdown
+docs, localization variants, git authorship, and tag coverage. Findings land in
+audit_findings with per-finding fix actions; re-audit any time. Clean by
+design: every finding has exactly one obvious fix.
+"""
+
+from __future__ import annotations
+
+import json
+import pathlib
+import re
+import subprocess
+
+import psycopg
+from psycopg.rows import dict_row
+
+import config
+
+DB_URL_REF: dict = {"url": config.get("database", "url")}
+
+
+def _conn():
+    return psycopg.connect(DB_URL_REF["url"], row_factory=dict_row)
+
+
+def ensure_schema() -> None:
+    with _conn() as conn:
+        conn.execute("""CREATE TABLE IF NOT EXISTS audit_runs (
+            id serial PRIMARY KEY, provider text NOT NULL DEFAULT 'github',
+            repo text NOT NULL DEFAULT '', findings int NOT NULL DEFAULT 0,
+            fixed int NOT NULL DEFAULT 0, ran_at timestamptz NOT NULL DEFAULT now())""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS audit_findings (
+            id serial PRIMARY KEY, run_id int NOT NULL REFERENCES audit_runs(id) ON DELETE CASCADE,
+            kind text NOT NULL, title text NOT NULL, detail text NOT NULL DEFAULT '',
+            fix_action text NOT NULL DEFAULT '', fix_payload jsonb NOT NULL DEFAULT '{}',
+            status text NOT NULL DEFAULT 'open',
+            UNIQUE (run_id, kind, title))""")
+
+
+# ——— real GitHub repo resolution (sources with kind='github') ———
+
+BUILDS_DIR = pathlib.Path(__file__).parent / "builds" / "audit"
+
+
+def _github_source() -> dict | None:
+    """First connected GitHub source (lowest id) with a repo configured."""
+    with _conn() as conn:
+        return conn.execute(
+            "SELECT id, provider, config FROM sources WHERE kind = 'github' "
+            "AND coalesce(config->>'repo', '') <> '' ORDER BY id LIMIT 1").fetchone()
+
+
+def _git(args: list[str], cwd: pathlib.Path | None = None, timeout: int = 120) -> str:
+    """Run git, never leaking the token into exceptions or logs."""
+    tok = (config.get("github", "token") or "").strip()
+    r = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, timeout=timeout)
+    if r.returncode != 0:
+        msg = (r.stderr or r.stdout or "").strip()
+        if tok:
+            msg = msg.replace(tok, "***")
+        raise RuntimeError(f"git {args[0]} failed: {msg[:400]}")
+    return r.stdout
+
+
+def _sync_github_repo(repo_slug: str) -> pathlib.Path:
+    """Shallow-clone (or update) owner/name into builds/audit/owner__name.
+
+    The token is only ever passed on the command line at call time; the
+    on-disk remote URL is always the plain https URL (no token persisted).
+    """
+    owner, _, name = repo_slug.partition("/")
+    dest = BUILDS_DIR / f"{owner}__{name}"
+    plain_url = f"https://github.com/{repo_slug}.git"
+    tok = (config.get("github", "token") or "").strip()
+    fetch_url = f"https://x-access-token:{tok}@github.com/{repo_slug}.git" if tok else plain_url
+    if (dest / ".git").exists():
+        # remote HEAD == default branch; avoids hardcoding its name
+        _git(["fetch", "--depth", "50", fetch_url, "HEAD"], cwd=dest)
+        _git(["reset", "--hard", "FETCH_HEAD"], cwd=dest)
+    else:
+        BUILDS_DIR.mkdir(parents=True, exist_ok=True)
+        _git(["clone", "--depth", "50", fetch_url, str(dest)], timeout=300)
+        _git(["remote", "set-url", "origin", plain_url], cwd=dest)
+    return dest
+
+
+def _clone_dir(repo_slug: str) -> pathlib.Path:
+    owner, _, name = repo_slug.partition("/")
+    return BUILDS_DIR / f"{owner}__{name}"
+
+
+def _fix_repo_base() -> tuple[pathlib.Path, pathlib.Path]:
+    """(repo root, markdown base dir) for fix actions — reuses an existing
+    clone without touching the network."""
+    src = _github_source()
+    if src:
+        cfg = src["config"] if isinstance(src["config"], dict) else json.loads(src["config"])
+        dest = _clone_dir(cfg.get("repo", ""))
+        if (dest / ".git").exists():
+            return dest, dest
+    raise RuntimeError("No connected GitHub repository clone is available.")
+
+
+def _git_authors(repo: pathlib.Path) -> dict[str, str]:
+    """path-less author map: email -> name from git log."""
+    try:
+        out = subprocess.run(["git", "log", "--format=%an|%ae"], cwd=repo,
+                             capture_output=True, text=True, timeout=15).stdout
+        authors = {}
+        for line in out.splitlines():
+            if "|" in line:
+                name, email = line.split("|", 1)
+                authors[email.strip()] = name.strip()
+        return authors
+    except (OSError, subprocess.SubprocessError):
+        return {}
+
+
+LOC_RE = re.compile(r"^(?P<stem>.+)\.(?P<lang>[a-z]{2})\.md$")
+
+
+def run_audit(provider: str = "github") -> int:
+    """Scan the repo; returns the audit run id."""
+    languages = config.get("audit", "languages", ["es", "fr"])
+    default_tag = config.get("audit", "default_tag", "customer-facing")
+
+    src = _github_source()
+    if not src:
+        raise RuntimeError("Connect a GitHub repository before running the audit.")
+    # real connected repo: clone/update and scan the whole tree
+    cfg = src["config"] if isinstance(src["config"], dict) else json.loads(src["config"])
+    repo_label = cfg.get("repo", "")
+    repo = _sync_github_repo(repo_label)
+    base = repo
+    md_files = sorted(p for p in repo.rglob("*.md") if ".git" not in p.parts)
+
+    # keys are the doc path relative to `base` without the .md suffix
+    base_docs: dict[str, pathlib.Path] = {}
+    variants: dict[str, dict[str, pathlib.Path]] = {}
+    for f in md_files:
+        rel = f.relative_to(base).as_posix()
+        m = LOC_RE.match(rel)
+        if m:
+            variants.setdefault(m.group("stem"), {})[m.group("lang")] = f
+        else:
+            base_docs[rel[:-3]] = f
+
+    findings: list[dict] = []
+
+    with _conn() as conn:
+        indexed = {r["external_id"]: r for r in conn.execute(
+            "SELECT d.*, array_remove(array_agg(t.tag), NULL) AS tags FROM documents d "
+            "LEFT JOIN tags t ON t.document_id = d.id WHERE d.source = 'github' GROUP BY d.id").fetchall()}
+        members = {r["email"]: r["name"] for r in conn.execute("SELECT name, email FROM users").fetchall()}
+
+    # 1. coverage: repo files not indexed
+    for stem, f in base_docs.items():
+        ext_id = f"repo-{stem}"
+        if ext_id not in indexed:
+            findings.append(dict(kind="coverage", title=f"{stem}.md is not indexed",
+                                 detail="Markdown file exists in the repo but not in the knowledge base.",
+                                 fix_action="ingest", fix_payload={"stem": stem}))
+
+    # 2. tags: indexed docs without the default tag set
+    for ext_id, doc in indexed.items():
+        if not doc["tags"]:
+            findings.append(dict(kind="tags", title=f"{doc['title']} is untagged",
+                                 detail=f"Suggested: {default_tag} (repo docs default).",
+                                 fix_action="apply_tag", fix_payload={"doc_id": doc["id"], "tag": default_tag}))
+
+    # 3. localization: expected languages missing per base doc; found variants unlinked
+    for stem in base_docs:
+        have = variants.get(stem, {})
+        for lang in languages:
+            if lang in have:
+                findings.append(dict(kind="localization", title=f"{stem}.{lang}.md found",
+                                     detail="Variant exists — link it as a translation.",
+                                     fix_action="link_translation", fix_payload={"stem": stem, "lang": lang}))
+            else:
+                findings.append(dict(kind="localization", title=f"{stem}.md has no {lang.upper()} variant",
+                                     detail=f"No {stem}.{lang}.md in the repo.",
+                                     fix_action="translation_task", fix_payload={"stem": stem, "lang": lang}))
+
+    # 4. authorship: git authors not mapped to members
+    for email, name in _git_authors(repo).items():
+        if email not in members and name not in members.values():
+            findings.append(dict(kind="authorship", title=f"Commits by {name} <{email}> are unmapped",
+                                 detail="This git author isn't a workspace member.",
+                                 fix_action="invite_member", fix_payload={"name": name, "email": email}))
+
+    # 5. repo hygiene
+    for required, why in (("README.md", "Repos should carry a README."),
+                          ("LICENSE", "No license file found.")):
+        if not (repo / required).exists():
+            findings.append(dict(kind="hygiene", title=f"{required} missing",
+                                 detail=why, fix_action="hygiene_task", fix_payload={"file": required}))
+
+    with _conn() as conn:
+        run = conn.execute("INSERT INTO audit_runs (provider, repo, findings) VALUES (%s, %s, %s) RETURNING id",
+                           (provider, repo_label, len(findings))).fetchone()
+        for f in findings:
+            conn.execute("""INSERT INTO audit_findings (run_id, kind, title, detail, fix_action, fix_payload)
+                            VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING""",
+                         (run["id"], f["kind"], f["title"], f["detail"], f["fix_action"], json.dumps(f["fix_payload"])))
+        conn.execute("INSERT INTO events (actor, verb, target) VALUES ('Mari', 'ran repository audit', %s)",
+                     (f"{repo_label}: {len(findings)} findings",))
+    return run["id"]
+
+
+def fix_finding(finding_id: int, actor: str, member_name: str = "") -> str:
+    """Apply a finding's fix. Returns a human summary of what happened."""
+    with _conn() as conn:
+        f = conn.execute("SELECT * FROM audit_findings WHERE id = %s", (finding_id,)).fetchone()
+        if not f or f["status"] != "open":
+            return "already handled"
+        payload = f["fix_payload"] if isinstance(f["fix_payload"], dict) else json.loads(f["fix_payload"])
+        action = f["fix_action"]
+        summary = "done"
+
+        if action == "ingest":
+            stem = payload["stem"]
+            _, base = _fix_repo_base()
+            path = base / f"{stem}.md"
+            if path.exists():  # index the file from the connected repo
+                text = path.read_text(errors="replace")
+                title = pathlib.PurePosixPath(stem).name.replace("-", " ").replace("_", " ").title()
+                conn.execute("""INSERT INTO documents (source, external_id, title, snippet, body, author,
+                                author_initials, kind, updated_src, created_src)
+                                VALUES ('github', %s, %s, %s, %s, 'CI', 'CI', 'page', now(), now())
+                                ON CONFLICT (source, external_id) DO UPDATE SET body = EXCLUDED.body""",
+                             (f"repo-{stem}", title, text[:180].replace("\n", " "), text))
+                summary = f"indexed {stem}.md"
+        elif action == "apply_tag":
+            conn.execute("INSERT INTO tags (document_id, tag) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                         (payload["doc_id"], payload["tag"]))
+            summary = f"tagged '{payload['tag']}'"
+        elif action == "link_translation":
+            stem, lang = payload["stem"], payload["lang"]
+            src = conn.execute("SELECT id FROM documents WHERE external_id = %s", (f"repo-{stem}",)).fetchone()
+            _, base = _fix_repo_base()
+            vf = base / f"{stem}.{lang}.md"
+            text = vf.read_text() if vf.exists() else ""
+            title = f"{stem} ({lang.upper()} translation)"
+            conn.execute("""INSERT INTO documents (source, external_id, title, snippet, body, author,
+                            author_initials, kind, updated_src, created_src)
+                            VALUES ('github', %s, %s, %s, %s, 'CI', 'CI', 'page', now(), now())
+                            ON CONFLICT (source, external_id) DO NOTHING""",
+                         (f"repo-{stem}-{lang}", title, text[:180].replace("\n", " "), text))
+            tgt = conn.execute("SELECT id FROM documents WHERE external_id = %s", (f"repo-{stem}-{lang}",)).fetchone()
+            if src and tgt:
+                conn.execute("""INSERT INTO edges (from_doc, to_doc, rel, day, curve, meta, created_at)
+                                SELECT %s, %s, 'translates', 16, 10, '{"derived":"audit"}', CURRENT_DATE
+                                WHERE NOT EXISTS (SELECT 1 FROM edges WHERE from_doc = %s AND to_doc = %s)""",
+                             (src["id"], tgt["id"], src["id"], tgt["id"]))
+            summary = f"linked {stem}.{lang}.md as a translation"
+        elif action == "translation_task":
+            title = f"Translate {payload['stem']}.md to {payload['lang'].upper()}"
+            conn.execute("""INSERT INTO tasks (title, assignee, assignee_initials, assignee_tint, kind, kind_label)
+                            VALUES (%s, 'Lena S.', 'LS', 1, 'approval', 'Translation')
+                            ON CONFLICT (title) DO NOTHING""", (title,))
+            summary = "translation task created"
+        elif action == "invite_member":
+            name = member_name or payload["name"]
+            initials = "".join(w[0].upper() for w in name.split()[:2]) or "??"
+            conn.execute("""INSERT INTO users (name, initials, tint, email, role, provider)
+                            VALUES (%s, %s, 3, %s, 'user', 'manual') ON CONFLICT (name) DO NOTHING""",
+                         (name, initials, payload["email"]))
+            summary = f"mapped to member {name}"
+        elif action == "hygiene_task":
+            title = f"Add {payload['file']} to the repo"
+            conn.execute("""INSERT INTO tasks (title, assignee, assignee_initials, assignee_tint, kind, kind_label)
+                            VALUES (%s, 'Alex R.', 'AR', 3, 'approval', 'Repo hygiene')
+                            ON CONFLICT (title) DO NOTHING""", (title,))
+            summary = "hygiene task created"
+
+        conn.execute("UPDATE audit_findings SET status = 'fixed' WHERE id = %s", (finding_id,))
+        conn.execute("UPDATE audit_runs SET fixed = fixed + 1 WHERE id = %s", (f["run_id"],))
+        conn.execute("INSERT INTO events (actor, verb, target) VALUES (%s, 'fixed audit finding', %s)",
+                     (actor, f["title"]))
+    return summary

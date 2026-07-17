@@ -1,0 +1,58 @@
+/* ————— library page: live-data additions ————— */
+
+/* Tag row grows a second tool (two-step delete) for custom tags. */
+.tag-definition { grid-template-columns: minmax(210px, 1.55fr) minmax(150px, 1.15fr) 145px 92px 52px minmax(64px, auto); }
+.tag-definition__tools { display: flex; justify-content: flex-end; gap: 4px; }
+
+/* Inline search-weight editor. */
+.tag-weight { align-self: flex-start; padding: 0; border-radius: 5px; text-align: left; }
+.tag-weight strong { font: 600 14px var(--sans); color: var(--ink); font-variant-numeric: tabular-nums; border-bottom: 1px dashed transparent; }
+.tag-weight:hover strong { color: var(--terra); border-bottom-color: rgba(176, 78, 44, 0.5); }
+.tag-weight-input { width: 68px; min-height: 26px; padding: 2px 6px; font: 600 13px var(--sans); }
+
+/* Corpus analysis panel (replaces the old mocked suggestion queue). */
+.tag-coverage { display: flex; flex-direction: column; padding: 6px 14px 8px; }
+.tag-coverage--empty { padding: 22px 14px; color: var(--ink-faint); font: italic 13px var(--serif); text-align: center; }
+.tag-coverage__row { display: grid; grid-template-columns: 160px minmax(0, 1fr) 130px; align-items: center; gap: 12px; min-height: 34px; border-bottom: 1px solid var(--line-soft); }
+.tag-coverage__row:last-child { border-bottom: 0; }
+.tag-coverage__bar { display: block; height: 7px; overflow: hidden; border-radius: 999px; background: rgba(84, 68, 44, 0.09); }
+.tag-coverage__bar span { display: block; height: 100%; border-radius: 999px; background: linear-gradient(90deg, #c8973a, var(--terra)); }
+.tag-coverage__row--untagged .tag-coverage__bar span { background: #b9ad93; }
+.tag-coverage__count { font: 11.5px var(--sans); color: var(--ink-soft); text-align: right; font-variant-numeric: tabular-nums; }
+.tag-coverage__label { font: 600 12px var(--sans); color: var(--ink-faint); }
+
+/* Guide cards: action row + sample-rule expander. */
+.guide-card { cursor: default; }
+.guide-card__actions { grid-column: 2 / -1; display: flex; align-items: center; gap: 14px; margin-top: -3px; padding-bottom: 2px; }
+.guide-card__actions .btn--link { font: 11.5px var(--sans); color: var(--blue); }
+.guide-card__default { display: inline-flex; align-items: center; gap: 4px; color: var(--green-deep); font: 600 11px var(--sans); }
+.guide-card__rulelist { grid-column: 2 / -1; margin: 2px 0 8px; padding: 9px 12px 9px 26px; border: 1px dashed var(--line); border-radius: 8px; background: var(--card-inner); }
+.guide-card__rulelist li { font: 12px/1.6 var(--sans); color: var(--ink-soft); }
+.guide-card__rulelist-more { list-style: none; margin-left: -14px; font: italic 11px var(--serif); color: var(--ink-faint); }
+
+/* Project-layer editor is a headed Card; body keeps the stacked-form rhythm. */
+.guide-editor > .card__body { display: flex; flex-direction: column; gap: 11px; }
+.guide-editor__intro { margin: 0; font: 12.5px var(--sans); color: var(--ink-soft); }
+
+/* Template composer reuses the tag composer chrome with its own column mix. */
+.template-composer { grid-template-columns: 1.1fr 150px 1.8fr 92px auto; }
+
+/* Category filter row spacing inside the templates card. */
+.template-tabs { padding-top: 12px; }
+.template-tabs .ds-tabs--filter { margin-bottom: 0; }
+
+/* Kebab menu trigger on template cards. */
+.template-card__menu { margin-left: auto; }
+
+/* Section preview expander. */
+.template-card__sections { margin: 10px 0 0; padding: 8px 10px 8px 28px; border: 1px dashed var(--line); border-radius: 8px; background: var(--card-inner); }
+.template-card__sections li { font: 11.5px/1.55 var(--sans); color: var(--ink-soft); }
+
+.template-grid__empty { grid-column: 1 / -1; }
+.template-card__actions .saved-note { margin-right: 0; font-size: 11.5px; }
+
+/* Rules panel: findings list affordances around the ds primitives. */
+.rule-view-filter { margin: 11px 0 4px; padding-bottom: 8px; border-bottom: 1px solid var(--line-soft); }
+.rule-view-filter .ds-tabs--filter { margin-bottom: 0; }
+.rule-finding__zero { margin-left: auto; }
+.rule-finding__ignore { margin-top: 6px; font: 10.5px var(--sans); }
