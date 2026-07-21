@@ -1,0 +1,49 @@
+/* ImpactPanel — shared by Facts and Decisions. Consolidates the old
+   .dec-impact__head/__summary/__docs/.dec-doc rules and Facts' inline copy. */
+
+.impact-panel { font: 13px/1.45 var(--sans); }
+.impact-panel--boxed {
+  border: 1px solid var(--line-soft);
+  border-radius: 10px;
+  padding: 10px 14px;
+  background: var(--card-inner);
+}
+
+.impact-panel__head { display: flex; align-items: center; gap: 9px; }
+.impact-panel__head b { font: 600 13.5px var(--serif); color: var(--ink); }
+.impact-panel__head .btn--icon { margin-left: auto; }
+
+.impact-panel__summary { margin: 6px 0 0; color: var(--ink-soft); max-width: 640px; }
+
+.impact-panel__docs { margin-top: 9px; display: flex; flex-direction: column; }
+.impact-doc {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 7px 0;
+  border-top: 1px solid var(--line-soft);
+}
+.impact-doc:first-child { border-top: none; }
+.impact-doc .ds-chip { flex: none; align-self: center; }
+.impact-doc b { font: 600 13px var(--serif); color: var(--ink); white-space: nowrap; }
+.impact-doc__src { font: 11.5px var(--sans); color: var(--ink-faint); white-space: nowrap; }
+.impact-doc__reason { margin-left: auto; text-align: right; font: 12px/1.4 var(--sans); color: var(--ink-soft); max-width: 46%; }
+
+.impact-panel__foot { display: flex; align-items: center; gap: 12px; margin-top: 10px; }
+
+.impact-running {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  color: var(--green-deep);
+  font: italic 13.5px var(--serif);
+}
+.impact-running .dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--green);
+  animation: impact-pulse 1.1s ease-in-out infinite;
+}
+@keyframes impact-pulse {
+  0%, 100% { opacity: 0.35; transform: scale(0.85); }
+  50% { opacity: 1; transform: scale(1.1); }
+}
