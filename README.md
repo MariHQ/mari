@@ -200,6 +200,8 @@ npm run build     # production build
 
 Contributing UI? Read the design-system rules first: components live in `web/src/components/ui/`, exhibited at **/lookbook**. Pages compose primitives — zero bespoke cards, menus, or chips — and all colors come from the brandable tokens in `web/src/styles.css`. (The repo ships a `design-system-first` skill that holds agents to the same rule.)
 
+Want to contribute? Read [CONTRIBUTING.md](CONTRIBUTING.md) — commits must be signed off under the [Developer Certificate of Origin](DCO) (`git commit -s`).
+
 Deeper docs: [DESIGN.md](DESIGN.md) (product design), [LINEAGE-DESIGN.md](LINEAGE-DESIGN.md), [FLOWS-DESIGN.md](FLOWS-DESIGN.md), and the frozen integration contracts (`*-CONTRACT.md`).
 
 ---
