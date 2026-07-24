@@ -24,16 +24,60 @@ BUILDS = pathlib.Path(os.environ.get("MARI_BUILDS_DIR", pathlib.Path(__file__).p
 
 FONTS = "https://fonts.googleapis.com/css2?family=Playfair+Display:wght@500;600&family=Lora:ital@0;1&family=Source+Sans+3:wght@400;600&display=swap"
 
+# Fallback copy of the presets seeded into site_theme_presets. The table is the
+# source of truth (the Publish page reads it, and an operator can edit a row);
+# this dict keeps a build working when the table is missing or empty, e.g. in a
+# unit test with no database.
 THEME_PRESETS = {
-    "Mari Editorial": {"bg": "#f6f0e3", "card": "#fcf9f1", "ink": "#2d2a22", "line": "#e2d8c2",
+    "Mari Editorial": {"accent": "#b04e2c", "bg": "#f6f0e3", "card": "#fcf9f1", "ink": "#2d2a22", "line": "#e2d8c2",
                        "display": "'Playfair Display', Georgia, serif", "serif": "'Lora', Georgia, serif"},
-    "Minimal": {"bg": "#ffffff", "card": "#fafafa", "ink": "#1a1a1a", "line": "#e5e5e5",
+    "Minimal": {"accent": "#1f6feb", "bg": "#ffffff", "card": "#fafafa", "ink": "#1a1a1a", "line": "#e5e5e5",
                 "display": "'Source Sans 3', system-ui, sans-serif", "serif": "'Source Sans 3', system-ui, sans-serif"},
-    "Material": {"bg": "#f5f5f6", "card": "#ffffff", "ink": "#202124", "line": "#dadce0",
+    "Material": {"accent": "#1a73e8", "bg": "#f5f5f6", "card": "#ffffff", "ink": "#202124", "line": "#dadce0",
                  "display": "'Source Sans 3', Roboto, sans-serif", "serif": "'Source Sans 3', Roboto, sans-serif"},
-    "Starlight": {"bg": "#17181c", "card": "#1f2127", "ink": "#e7e9ee", "line": "#33363f",
+    "Starlight": {"accent": "#7c9cff", "bg": "#17181c", "card": "#1f2127", "ink": "#e7e9ee", "line": "#33363f",
                   "display": "'Source Sans 3', system-ui, sans-serif", "serif": "'Source Sans 3', system-ui, sans-serif"},
 }
+
+# The switches this generator honours, and what they do when nothing overrides
+# them. site_feature_defs carries the same keys with the labels the console
+# shows; this dict is the fallback for a build with no database, and the list
+# of keys is what makes each toggle on the Publish page mean something.
+FEATURE_DEFAULTS = {"sidebar": True, "search": True, "customizer": True,
+                    "provenance": True, "source_path": False}
+
+
+def _rows(sql: str) -> list[dict]:
+    """Read config rows, tolerating a build that has no database at all."""
+    try:
+        from db import q
+        return q(sql)
+    except Exception:
+        return []
+
+
+def theme_presets() -> dict:
+    """Presets keyed by the name stored in sites.theme->>'theme'."""
+    rows = _rows("SELECT * FROM site_theme_presets ORDER BY sort, key")
+    if not rows:
+        return THEME_PRESETS
+    return {r["key"]: {"accent": r["accent"], "bg": r["bg"], "card": r["card"], "ink": r["ink"],
+                       "line": r["line"], "display": r["display_font"], "serif": r["serif_font"]}
+            for r in rows}
+
+
+def site_features(site: dict) -> dict[str, bool]:
+    """Which switches are on for this site: the shipped default for each key,
+    overlaid with what the site stored. Unknown stored keys are ignored — the
+    generator only honours the keys it implements."""
+    stored = site.get("features")
+    if isinstance(stored, str):
+        stored = json.loads(stored or "{}")
+    if not isinstance(stored, dict):
+        stored = {}
+    rows = _rows("SELECT key, default_on FROM site_feature_defs")
+    defaults = {r["key"]: bool(r["default_on"]) for r in rows} if rows else dict(FEATURE_DEFAULTS)
+    return {k: bool(stored.get(k, v)) for k, v in defaults.items()}
 
 CUSTOMIZER_JS = """
 (function () {
@@ -86,6 +130,21 @@ CUSTOMIZER_JS = """
 })();
 """
 
+SEARCH_JS = """
+(function () {
+  var box = document.querySelector('.mari-search');
+  if (!box) return;
+  var scope = box.closest('aside') || box.closest('.mari-pages');
+  var links = scope ? Array.prototype.slice.call(scope.querySelectorAll('a')) : [];
+  box.addEventListener('input', function () {
+    var qs = box.value.trim().toLowerCase();
+    links.forEach(function (a) {
+      a.style.display = !qs || a.textContent.toLowerCase().indexOf(qs) !== -1 ? '' : 'none';
+    });
+  });
+})();
+"""
+
 CUSTOMIZER_CSS = """
 #mari-customize-btn { position: fixed; right: 18px; bottom: 18px; z-index: 999;
   background: var(--accent); color: #fff; border: none; border-radius: 999px;
@@ -110,12 +169,16 @@ CUSTOMIZER_CSS = """
 
 
 def _site_css(theme: dict) -> str:
-    preset = THEME_PRESETS.get(theme.get("theme", "Mari Editorial"), THEME_PRESETS["Mari Editorial"])
-    accent = theme.get("accent", "#b04e2c")
+    presets = theme_presets()
+    fallback = presets.get("Mari Editorial") or next(iter(presets.values()))
+    preset = presets.get(theme.get("theme", "Mari Editorial"), fallback)
+    # A site that has not picked an accent ships its preset's own — which is
+    # the swatch the Publish page shows for that preset.
+    accent = theme.get("accent") or preset.get("accent") or "#b04e2c"
     radius = int(theme.get("radius", 10))
     density = theme.get("density", "comfortable")
     pad = {"comfortable": 28, "compact": 20, "dense": 14}.get(density, 28)
-    dark = THEME_PRESETS["Starlight"]
+    dark = presets.get("Starlight", THEME_PRESETS["Starlight"])
     return f"""
 :root {{ --accent: {accent}; --radius: {radius}px; --bg: {preset['bg']}; --card: {preset['card']};
   --ink: {preset['ink']}; --line: {preset['line']}; --display: {preset['display']}; --serif: {preset['serif']}; }}
@@ -150,6 +213,13 @@ main th, main td {{ border: 1px solid var(--line); padding: 8px 12px; text-align
 main th {{ font-family: 'Source Sans 3', sans-serif; background: color-mix(in srgb, var(--ink) 4%, transparent); }}
 footer {{ grid-column: 1 / -1; padding: 18px {pad}px; border-top: 1.5px solid var(--line);
   font: 12px 'Source Sans 3', sans-serif; opacity: 0.65; }}
+/* feature switches (site_feature_defs) */
+body.no-sidebar .wrap {{ grid-template-columns: 1fr; }}
+.mari-search {{ width: 100%; margin-bottom: 10px; padding: 6px 10px; border-radius: var(--radius);
+  border: 1.5px solid var(--line); background: var(--bg); color: inherit;
+  font: 13.5px 'Source Sans 3', sans-serif; }}
+.mari-search-block {{ margin-bottom: 18px; max-width: 320px; }}
+.mari-source {{ margin: -6px 0 18px; font: 12px 'Source Sans 3', sans-serif; opacity: 0.6; }}
 {CUSTOMIZER_CSS}
 """
 
@@ -200,13 +270,23 @@ def build_mari_site(site: dict, docs: list[dict]) -> str:
     shutil.rmtree(out, ignore_errors=True)
     out.mkdir(parents=True)
 
-    pages = [{"slug": _slug(d["title"]), "title": d["title"], "body": d["body"] or d["snippet"]} for d in docs]
+    pages = [{"slug": _slug(d["title"]), "title": d["title"], "body": d["body"] or d["snippet"],
+              "source_path": d.get("source_path") or ""} for d in docs]
+
+    # Which switches this site has on. Every one of them changes the output
+    # below — nothing here is decorative.
+    feat = site_features(site)
 
     (out / "style.css").write_text(_site_css(theme))
-    (out / "customize.js").write_text(CUSTOMIZER_JS)
+    if feat["customizer"]:
+        (out / "customize.js").write_text(CUSTOMIZER_JS)
+    if feat["search"]:
+        (out / "search.js").write_text(SEARCH_JS)
 
     mode = theme.get("mode", "light")
     density = theme.get("density", "comfortable")
+    search_html = ('<div class="mari-search-block"><input class="mari-search" type="search" '
+                   'placeholder="Filter pages…" aria-label="Filter pages"></div>') if feat["search"] else ""
 
     def render(page: dict, active: str) -> str:
         body_html = _sanitize_html(markdown.markdown(page["body"], extensions=["tables", "fenced_code"]))
@@ -214,19 +294,32 @@ def build_mari_site(site: dict, docs: list[dict]) -> str:
             f'<a href="{p["slug"]}.html" class="{"active" if p["slug"] == active else ""}">{html_mod.escape(p["title"])}</a>'
             for p in pages)
         title_esc = html_mod.escape(page["title"])
+        body_class = " ".join(c for c in (("dark" if mode == "dark" else ""),
+                                          ("" if feat["sidebar"] else "no-sidebar")) if c)
+        # The sidebar carries the page list, so the filter box goes with it;
+        # with the sidebar off it filters the page list rendered in main.
+        aside = f"<aside>{search_html}{nav}</aside>" if feat["sidebar"] else ""
+        main_nav = "" if feat["sidebar"] else f'<div class="mari-pages">{search_html}{nav}</div>'
+        source = (f'<p class="mari-source">Source: {html_mod.escape(page["source_path"])}</p>'
+                  if feat["source_path"] and page.get("source_path") else "")
+        footer = (f"<footer>Published with Mari Cloud · {html_mod.escape(site['domain'])} · "
+                  "every fact on this page traces to a verified source</footer>") if feat["provenance"] else ""
+        scripts = ('<script src="search.js"></script>' if feat["search"] else "") + \
+                  ('<script src="customize.js"></script>' if feat["customizer"] else "")
+        site_id_js = f"<script>window.__MARI_SITE_ID__ = {site['id']};</script>" if feat["customizer"] else ""
         return f"""<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{title_esc} · {site['name']}</title>
 <link rel="stylesheet" href="{FONTS}"><link rel="stylesheet" href="style.css">
-<script>window.__MARI_SITE_ID__ = {site['id']};</script></head>
-<body class="{'dark' if mode == 'dark' else ''}" data-density="{density}">
+{site_id_js}</head>
+<body class="{body_class}" data-density="{density}">
 <div class="wrap">
 <header><span class="logo">✳ {html_mod.escape(site['name'].upper())}</span>
 <nav><a href="index.html">Guides</a><a href="{pages[0]['slug'] if pages else 'index'}.html">API reference</a><a href="#">Changelog</a></nav></header>
-<aside>{nav}</aside>
-<main><h1>{title_esc}</h1>{body_html}</main>
-<footer>Published with Mari Cloud · {site['domain']} · every fact on this page traces to a verified source</footer>
-</div><script src="customize.js"></script></body></html>"""
+{aside}
+<main>{main_nav}<h1>{title_esc}</h1>{source}{body_html}</main>
+{footer}
+</div>{scripts}</body></html>"""
 
     for p in pages:
         # strip the duplicate leading h1 (we render the title ourselves)
@@ -316,7 +409,11 @@ def _mdx_sanitize(text: str) -> str:
 
 def _write_docusaurus_project(work: pathlib.Path, site: dict, docs: list[dict]) -> None:
     theme = site["theme"] if isinstance(site["theme"], dict) else {}
-    accent = theme.get("accent", "#b04e2c")
+    # Same accent resolution as the mari generator: the site's own, else the
+    # preset's, so switching generators does not silently change the colour.
+    presets = theme_presets()
+    preset = presets.get(theme.get("theme", "Mari Editorial")) or {}
+    accent = theme.get("accent") or preset.get("accent") or "#b04e2c"
     mode = theme.get("mode", "light")
     base_url = f"/sites/site_{site['id']}/"
 

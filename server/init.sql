@@ -435,6 +435,11 @@ ALTER TABLE workflows ADD COLUMN IF NOT EXISTS trigger jsonb NOT NULL DEFAULT '{
 -- Provenance for auto-started runs, e.g. 'Triggered by: docs/setup.md updated'.
 ALTER TABLE workflow_runs ADD COLUMN IF NOT EXISTS triggered_by text NOT NULL DEFAULT '';
 
+-- Real start timestamp. started_label is a pre-formatted display string with
+-- no year ('Jul 20, 02:57 PM'), which the console cannot format or sort on.
+-- Every writer relies on the DEFAULT, so no INSERT had to change.
+ALTER TABLE workflow_runs ADD COLUMN IF NOT EXISTS started_at timestamptz NOT NULL DEFAULT now();
+
 -- ═══════════════════════════════════════════════════════════════════════
 -- ▼ edge uniqueness for link extraction
 -- ═══════════════════════════════════════════════════════════════════════
@@ -468,3 +473,203 @@ CREATE INDEX IF NOT EXISTS usage_log_kind_at_idx ON usage_log (kind, at);
 -- workflow_runs.started_at: a real timestamp so the flow scheduler can derive
 -- "last started" per workflow (started_label is a display string with no year).
 ALTER TABLE workflow_runs ADD COLUMN IF NOT EXISTS started_at timestamptz NOT NULL DEFAULT now();
+
+-- ═══════════════════════════════════════════════════════════════════════
+-- ▼ workspace identity, member provisioning, task deadlines, event detail
+-- ═══════════════════════════════════════════════════════════════════════
+
+-- events.detail — the label/value rows the access log shows when a row is
+-- expanded. A jsonb ARRAY of {"label","value"}, not an object: jsonb does not
+-- preserve object key order, and the panel renders these in the order the
+-- writer chose. Rows written before this column existed keep '[]' and expand
+-- to nothing, which is the truth about them.
+ALTER TABLE events ADD COLUMN IF NOT EXISTS detail jsonb NOT NULL DEFAULT '[]';
+
+-- tasks.due_date — a real deadline, NULL when the task has none. Most tasks
+-- have none: nothing in the product assigns an SLA, so the console renders
+-- them without a due date rather than with an invented one. Overdue is
+-- derived (due_date < current_date AND NOT done), never stored.
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS due_date date;
+CREATE INDEX IF NOT EXISTS tasks_due_date_idx ON tasks (due_date) WHERE NOT done;
+
+-- facts.verified_at — the verification date as a DATE. facts.verified is a
+-- pre-formatted display string ('Jul 08, 2026', or '—' for never), which the
+-- console can neither re-format nor sort on; verified_at is what the API
+-- serves. Backfilled below from any parseable legacy value; the text column
+-- stays for older readers but nothing new writes it.
+ALTER TABLE facts ADD COLUMN IF NOT EXISTS verified_at date;
+UPDATE facts SET verified_at = to_date(verified, 'Mon DD, YYYY')
+  WHERE verified_at IS NULL AND verified ~ '^[A-Z][a-z]{2} [0-9]{2}, [0-9]{4}$';
+
+-- provisioning — how people get into this workspace. Manual invites are the
+-- only mechanism the server implements; github_team is empty until an admin
+-- configures one (setGithubTeam), and SCIM has no endpoint at all, so its
+-- flag is false and stays false until one exists.
+INSERT INTO settings (key, value) VALUES
+  ('provisioning', '{"manual_invites":true,"github_team":"","scim_enabled":false}')
+ON CONFLICT (key) DO NOTHING;
+
+-- ═══════════════════════════════════════════════════════════════════════
+-- ▼ editorial system: style guides + rule registry, document templates,
+--   glossary provenance; doc-site theme presets + generator feature switches
+-- ═══════════════════════════════════════════════════════════════════════
+
+-- ————— style guides and the deterministic rule registry —————
+-- A style guide is a pack of prose rules a workspace can adopt as its default;
+-- the voice layer (settings.voice, below) stacks on top of whichever one it
+-- picks. Both tables are seeded with the packs Mari ships and are writable:
+-- upsertStyleGuide / upsertStyleRule add a team's own.
+
+CREATE TABLE IF NOT EXISTS style_guides (
+  key         text PRIMARY KEY,
+  name        text NOT NULL,
+  description text NOT NULL DEFAULT '',
+  tone        text NOT NULL DEFAULT 'ink',      -- ink|ok|attention|blocked|info (a color, not a claim)
+  builtin     boolean NOT NULL DEFAULT false,   -- shipped with the product vs. written by this team
+  sort        int NOT NULL DEFAULT 100
+);
+
+CREATE TABLE IF NOT EXISTS style_rules (
+  id          text PRIMARY KEY,                 -- stable dotted id, e.g. 'clarity.passive'
+  guide_key   text NOT NULL REFERENCES style_guides(key) ON DELETE CASCADE,
+  family      text NOT NULL DEFAULT '',
+  severity    text NOT NULL DEFAULT 'advisory', -- error|warn|advisory
+  description text NOT NULL DEFAULT '',
+  pack        text NOT NULL DEFAULT '',         -- per-rule code cited in findings, e.g. 'slop-01'
+  suggestion  text NOT NULL DEFAULT '',
+  sort        int NOT NULL DEFAULT 100
+);
+CREATE INDEX IF NOT EXISTS style_rules_guide_idx ON style_rules (guide_key);
+
+-- The four packs Mari ships, and the rules in them. This is the registry the
+-- Library's rules tab counts and the guides tab previews: ids, families,
+-- severities and pack codes are the same ones the checker cites, so the count
+-- on the tab strip and the rules a document is checked against are one list.
+-- Rule detection itself (the pattern) stays with the checker — storing a second
+-- copy of every regex here would be a second implementation free to drift.
+INSERT INTO style_guides (key, name, description, tone, builtin, sort) VALUES
+  ('ai-slop',   'AI slop',            'Strips the tells of machine-written prose: hedges, filler intensifiers, marketing adjectives.', 'attention', true, 10),
+  ('clarity',   'Clarity',            'Plain sentences with a named actor. No passive voice hiding who acts, no sentence too long to scan.', 'info', true, 20),
+  ('house',     'House style',        'Sentence-case headings, serial commas, and the product wording this workspace has standardised on.', 'ink', true, 30),
+  ('inclusive', 'Inclusive language', 'Neutral forms of address and technical terms that carry no loaded history.', 'ok', true, 40)
+ON CONFLICT (key) DO NOTHING;
+
+INSERT INTO style_rules (id, guide_key, family, severity, description, pack, suggestion, sort) VALUES
+  ('ai-slop.hedging',      'ai-slop',   'AI slop',     'warn',     'Hedging filler like “it’s worth noting” adds no information.',        'slop-01', 'Delete the hedge and state the point.',        10),
+  ('ai-slop.delve',        'ai-slop',   'AI slop',     'warn',     '“Delve into” is an AI tell; prefer a plain verb.',                     'slop-04', 'Use “look at” or “examine”.',                  20),
+  ('ai-slop.seamless',     'ai-slop',   'AI slop',     'advisory', 'Marketing adjective with no measurable meaning.',                      'slop-09', 'Describe what actually happens.',              30),
+  ('ai-slop.leverage',     'ai-slop',   'AI slop',     'advisory', '“Leverage” as a verb; prefer “use”.',                                  'slop-12', 'Use “use”.',                                   40),
+  ('clarity.passive',      'clarity',   'Clarity',     'advisory', 'Passive construction hides the actor.',                                'clarity-02', 'Name who does the action.',                 10),
+  ('clarity.long-sentence','clarity',   'Clarity',     'warn',     'Sentences over 24 words are hard to scan.',                            'clarity-05', 'Split into two sentences.',                 20),
+  ('clarity.very',         'clarity',   'Clarity',     'advisory', 'Intensifiers like “very” weaken the claim.',                           'clarity-08', 'Pick a stronger word.',                     30),
+  ('clarity.in-order-to',  'clarity',   'Clarity',     'advisory', '“In order to” is wordy.',                                              'clarity-11', 'Use “to”.',                                 40),
+  ('style.sentence-case',  'house',     'Style guide', 'warn',     'Headings should be sentence case, not Title Case.',                    'style-03', 'Lowercase all but the first word.',            10),
+  ('style.oxford',         'house',     'Style guide', 'advisory', 'Missing serial comma before “and”.',                                   'style-06', 'Add the serial comma.',                        20),
+  ('style.login',          'house',     'Style guide', 'warn',     'Prefer “sign in” (verb) over “login”.',                                'style-09', 'Use “sign in”.',                               30),
+  ('inclusive.guys',       'inclusive', 'Inclusive',   'error',    '“You guys” excludes; use a neutral address.',                          'incl-01', 'Use “everyone” or “you all”.',                 10),
+  ('inclusive.whitelist',  'inclusive', 'Inclusive',   'error',    '“Whitelist/blacklist” carry bias; prefer allow/deny.',                 'incl-03', 'Use “allowlist” / “denylist”.',                20),
+  ('inclusive.sanity',     'inclusive', 'Inclusive',   'warn',     '“Sanity check” is ableist; prefer a neutral term.',                    'incl-06', 'Use “quick check” or “confidence check”.',     30)
+ON CONFLICT (id) DO NOTHING;
+
+-- settings.style_guide.default_pack — which pack this workspace adopted.
+-- Empty on a fresh install: nobody has chosen yet, and the guides tab shows
+-- four packs with none active rather than a preference invented for them.
+-- settings.voice — the workspace's own voice layer, stacked on the pack. All
+-- blank/off until someone writes one down; that is what an unwritten voice is.
+INSERT INTO settings (key, value) VALUES
+  ('style_guide', '{"default_pack":""}'),
+  ('voice',       '{"voice":"","terms":"","banned":"","inclusive":false,"jargon":false,"sentence_case":false}')
+ON CONFLICT (key) DO NOTHING;
+
+-- ————— document templates —————
+-- Scaffolds a new document can start from: a name, a category and the section
+-- headings the draft opens with. Shipped set below; upsertDocumentTemplate adds
+-- the team's own (standard = false).
+CREATE TABLE IF NOT EXISTS document_templates (
+  key         text PRIMARY KEY,
+  name        text NOT NULL,
+  category    text NOT NULL DEFAULT '',
+  description text NOT NULL DEFAULT '',
+  sections    jsonb NOT NULL DEFAULT '[]',      -- ordered array of heading strings
+  icon        text NOT NULL DEFAULT 'file-text',-- clipboard|git-fork|shield-check|file-text|sprout|book-open|megaphone
+  standard    boolean NOT NULL DEFAULT false,
+  sort        int NOT NULL DEFAULT 100
+);
+
+INSERT INTO document_templates (key, name, category, description, sections, icon, standard, sort) VALUES
+  ('runbook', 'Runbook', 'Operations', 'Step-by-step recovery procedure for one failure mode, with a rollback.',
+   '["Overview","When to use this","Prerequisites","Steps","Verification","Rollback","Escalation"]', 'clipboard', true, 10),
+  ('adr', 'Architecture decision record', 'Decisions', 'One decision, the context that forced it, and what it costs.',
+   '["Status","Context","Decision","Consequences","Alternatives considered"]', 'git-fork', true, 20),
+  ('postmortem', 'Postmortem', 'Incidents', 'Blameless write-up of an incident: what broke, for whom, and what changes.',
+   '["Summary","Impact","Timeline","Root cause","Resolution","Action items","What we learned"]', 'shield-check', true, 30),
+  ('rfc', 'RFC', 'Design', 'A proposal circulated for comment before the work starts.',
+   '["Summary","Motivation","Proposal","Alternatives","Open questions","Rollout"]', 'file-text', true, 40),
+  ('onboarding', 'Onboarding guide', 'Guides', 'What a new teammate needs in their first week, in the order they need it.',
+   '["Welcome","Access and accounts","Environment setup","Your first task","Who to ask"]', 'sprout', true, 50),
+  ('how-to', 'How-to guide', 'Guides', 'One reader goal, achieved in numbered steps that can be verified.',
+   '["Goal","Before you start","Steps","Verify it worked","Troubleshooting"]', 'book-open', true, 60),
+  ('release-notes', 'Release notes', 'Announcements', 'What shipped, what changed for the reader, and what breaks.',
+   '["Highlights","Changes","Fixes","Breaking changes","Upgrade notes"]', 'megaphone', true, 70)
+ON CONFLICT (key) DO NOTHING;
+
+-- ————— glossary provenance —————
+-- Where a harvested term was actually found. The glossary already recorded the
+-- spelling variants it saw; evidence records the document it saw them in, so a
+-- candidate can be judged against its source instead of on the model's word.
+-- '' / NULL for terms someone typed in by hand — those have no source document.
+ALTER TABLE glossary ADD COLUMN IF NOT EXISTS evidence text NOT NULL DEFAULT '';
+ALTER TABLE glossary ADD COLUMN IF NOT EXISTS evidence_doc_id int REFERENCES documents(id) ON DELETE SET NULL;
+
+-- ————— doc-site theme presets —————
+-- The presets the site generator can actually render (sitebuilder.THEME_PRESETS
+-- reads this table, falling back to its own copy when the row is missing). The
+-- accent is each preset's default link/heading colour, used when a site has not
+-- overridden it — so the swatch the Publish page shows is the colour the build
+-- would ship.
+CREATE TABLE IF NOT EXISTS site_theme_presets (
+  key          text PRIMARY KEY,   -- also the value stored in sites.theme->>'theme'
+  name         text NOT NULL,
+  accent       text NOT NULL,
+  bg           text NOT NULL,
+  card         text NOT NULL,
+  ink          text NOT NULL,
+  line         text NOT NULL,
+  display_font text NOT NULL,
+  serif_font   text NOT NULL,
+  sort         int NOT NULL DEFAULT 100
+);
+
+INSERT INTO site_theme_presets (key, name, accent, bg, card, ink, line, display_font, serif_font, sort) VALUES
+  ('Mari Editorial', 'Mari Editorial', '#b04e2c', '#f6f0e3', '#fcf9f1', '#2d2a22', '#e2d8c2',
+   '''Playfair Display'', Georgia, serif', '''Lora'', Georgia, serif', 10),
+  ('Minimal', 'Minimal', '#1f6feb', '#ffffff', '#fafafa', '#1a1a1a', '#e5e5e5',
+   '''Source Sans 3'', system-ui, sans-serif', '''Source Sans 3'', system-ui, sans-serif', 20),
+  ('Material', 'Material', '#1a73e8', '#f5f5f6', '#ffffff', '#202124', '#dadce0',
+   '''Source Sans 3'', Roboto, sans-serif', '''Source Sans 3'', Roboto, sans-serif', 30),
+  ('Starlight', 'Starlight', '#7c9cff', '#17181c', '#1f2127', '#e7e9ee', '#33363f',
+   '''Source Sans 3'', system-ui, sans-serif', '''Source Sans 3'', system-ui, sans-serif', 40)
+ON CONFLICT (key) DO NOTHING;
+
+-- ————— site generator feature switches —————
+-- One row per switch the generator actually honours; sites.features holds the
+-- per-site overrides ({"search": false}). A switch is only listed here once
+-- sitebuilder reads it — the Publish page must not offer a toggle that changes
+-- nothing about the built site.
+CREATE TABLE IF NOT EXISTS site_feature_defs (
+  key        text PRIMARY KEY,
+  label      text NOT NULL,
+  hint       text NOT NULL DEFAULT '',
+  default_on boolean NOT NULL DEFAULT true,
+  sort       int NOT NULL DEFAULT 100
+);
+
+ALTER TABLE sites ADD COLUMN IF NOT EXISTS features jsonb NOT NULL DEFAULT '{}';
+
+INSERT INTO site_feature_defs (key, label, hint, default_on, sort) VALUES
+  ('sidebar',    'Sidebar navigation',  'Lists every published page down the left of each page.',              true, 10),
+  ('search',     'In-page search',      'Ships a title index with the site so readers can filter pages in the browser.', true, 20),
+  ('customizer', 'Live customizer',     'Shows the Customize button that writes theme changes back to Mari.',  true, 30),
+  ('provenance', 'Provenance footer',   'Footer line naming the site and the domain each page was published from.', true, 40),
+  ('source_path','Source paths',        'Prints the path of the document each page was built from.',           false, 50)
+ON CONFLICT (key) DO NOTHING;

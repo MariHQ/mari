@@ -74,11 +74,15 @@ init scripts are re-run on every deploy.
 ## What we look for in a change
 
 - **One concern per pull request.** Small, reviewable diffs land faster.
-- **Follow the design system.** UI components live in `web/src/components/ui/` and
-  are exhibited at `/lookbook`. Pages compose primitives — no bespoke cards, menus,
-  or chips — and all colors come from the brandable tokens in `web/src/styles.css`.
-  If a page needs something new, add it to the component library first. (The repo
-  ships a `design-system-first` skill that holds agents to the same rule.)
+- **UI changes go to the component library, not here.** Every screen comes from
+  [mari-design](https://github.com/MariHQ/mari-design), pinned as the
+  `vendor/mari-design` submodule; `web/` holds no page code and nothing to
+  restyle. What lives here is `web/src/data/<page>.ts` — a GraphQL query plus a
+  mapper onto the page's exported data type. See `src/data/overview.ts`.
+- **Never invent data in a mapper.** Library pages are pure presenters with no
+  fallback content, deliberately: a page cannot show a real user an invented
+  number. If a page needs something the API has no source for, add the field to
+  the backend returning a real (possibly empty) result.
 - **Honest by construction.** No canned data in the UI, no placeholder integrations,
   metrics count real events, and failures surface verbatim rather than being
   swallowed.

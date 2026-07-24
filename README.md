@@ -104,7 +104,8 @@ Connecting is self-serve: pick a provider, fill its credential fields, **Test co
 ### Docker (recommended)
 
 ```sh
-git clone <this repo> && cd mari-cloud
+# --recurse-submodules is required: the console's component library is a submodule.
+git clone --recurse-submodules <this repo> && cd mari-cloud
 cp .env.example .env          # every value optional — defaults just work
 docker compose up --build
 ```
@@ -185,6 +186,7 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 .venv/bin/uvicorn app:app --reload --port 8000
 
 # 3. Web — http://localhost:5173 (proxies API routes to :8000)
+git submodule update --init   # once: pulls the @mari-design/components library
 cd web
 npm install
 npm run dev
@@ -193,12 +195,44 @@ npm run dev
 Useful commands in `web/`:
 
 ```sh
-npm run check     # tsc + eslint + stylelint + knip + jscpd
-npm run lint      # eslint only
-npm run build     # production build
+npm run typecheck # tsc over src/
+npm run smoke     # server-render the adapted pages from mock API responses
+npm run check     # typecheck + smoke
+npm run build     # typecheck + production build
 ```
 
-Contributing UI? Read the design-system rules first: components live in `web/src/components/ui/`, exhibited at **/lookbook**. Pages compose primitives — zero bespoke cards, menus, or chips — and all colors come from the brandable tokens in `web/src/styles.css`. (The repo ships a `design-system-first` skill that holds agents to the same rule.)
+### The console is a thin app over a shared component library
+
+`web/` holds no page code. Every screen — layout, states, copy — comes from
+**[mari-design](https://github.com/MariHQ/mari-design)**, pinned here as the
+`vendor/mari-design` submodule and imported as `@mari-design/components`:
+
+```sh
+git clone --recurse-submodules …     # or: git submodule update --init
+```
+
+The library's pages are pure presenters: each takes
+`{ data, loading, error, mobile }` and renders exactly what it is handed,
+with no demo content of its own. So the app is three things:
+
+| | |
+|---|---|
+| `src/App.tsx` | routes over the library's `PAGES` registry |
+| `src/lib/` | GraphQL client (`api.ts`) and session context (`auth.tsx`) |
+| `src/data/<page>.ts` | **the actual work** — one GraphQL query plus a mapper onto that page's exported `XxxData` type |
+
+Adding a screen means adding it to the library, then writing its adapter.
+Read `src/data/overview.ts` first; it is the worked reference.
+
+Two rules follow from the pages being pure presenters:
+
+- **Visual changes belong in mari-design, not here.** There is nothing in
+  `web/` to restyle.
+- **Never invent data in a mapper.** If a page needs a field the API has no
+  source for, add the field to the backend returning a real — possibly
+  empty — result. A mapper that fabricates a value makes "the query failed"
+  indistinguishable from "there is nothing", and ships a number no one can
+  trace.
 
 Want to contribute? Read [CONTRIBUTING.md](CONTRIBUTING.md) — commits must be signed off under the [Developer Certificate of Origin](DCO) (`git commit -s`).
 

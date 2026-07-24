@@ -56,8 +56,16 @@ def exec_(sql: str, args: tuple = ()) -> None:
         conn.execute(sql, args)
 
 
-def audit(verb: str, target: str, actor: str = ME) -> None:
-    exec_("INSERT INTO events (actor, verb, target) VALUES (%s, %s, %s)", (actor, verb, target))
+def audit(verb: str, target: str, actor: str = ME,
+          detail: t.Sequence[tuple[str, t.Any]] | None = None) -> None:
+    """Record an access-log event. `detail` is the ordered label/value rows the
+    console shows when the row is expanded — pass only facts the caller
+    actually knows (the previous value of a field, the scope of a key). Order
+    is preserved because it is stored as a jsonb array, not an object."""
+    rows = [{"label": str(lbl), "value": "" if val is None else str(val)}
+            for lbl, val in (detail or []) if str(lbl)]
+    exec_("INSERT INTO events (actor, verb, target, detail) VALUES (%s, %s, %s, %s)",
+          (actor, verb, target, json.dumps(rows)))
 
 
 def log_usage(kind: str, detail: str = "") -> None:

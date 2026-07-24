@@ -96,11 +96,13 @@ class MutPublish:
             return {"ok": False, "error": f"site {id} not found"}
         site["theme"] = jload(site["theme"]) or {}
         gen = (generator or site["theme"].get("generator") or "mari").lower()
-        docs = q("""SELECT DISTINCT d.id, d.title, d.snippet, d.body FROM documents d
+        # source_path rides along for the 'source_path' feature switch: the page
+        # prints the document path it was built from when the site asks for it.
+        docs = q("""SELECT DISTINCT d.id, d.title, d.snippet, d.body, d.source_path FROM documents d
                     JOIN tags t ON t.document_id = d.id
                     WHERE t.tag = 'customer-facing' AND d.body <> '' ORDER BY d.id""")
         if not docs:
-            docs = q("SELECT id, title, snippet, body FROM documents WHERE body <> '' ORDER BY id LIMIT 8")
+            docs = q("SELECT id, title, snippet, body, source_path FROM documents WHERE body <> '' ORDER BY id LIMIT 8")
         t0 = time.time()
         try:
             sitebuilder.build_site(site, docs, generator=gen)
@@ -141,7 +143,7 @@ class MutPublish:
         theme = jload(site["theme"])
         prompt = (
             f"Current doc-site theme config: {json.dumps(theme)}\n"
-            f"Available theme presets: {list(sitebuilder.THEME_PRESETS)}\n"
+            f"Available theme presets: {list(sitebuilder.theme_presets())}\n"
             f'User request: "{instruction}"\n\n'
             'Return the updated config as JSON with only these keys: theme (preset name), '
             'accent (hex color), radius (0-18 int), density (comfortable|compact|dense), mode (light|dark). '
@@ -169,6 +171,25 @@ class MutPublish:
     @strawberry.mutation
     def update_site_theme(self, id: int, theme: JSON) -> bool:
         exec_("UPDATE sites SET theme = theme || %s::jsonb WHERE id = %s", (json.dumps(theme), id))
+        return True
+
+    @strawberry.mutation
+    def set_site_feature(self, id: int, key: str, on: bool) -> bool:
+        """Turn one generator switch on or off for a site. Only keys the
+        generator actually reads (`site_feature_defs`) are accepted — storing
+        an unknown key would put a toggle on the page that changes nothing
+        about the built site. Takes effect on the next build."""
+        feature = q1("SELECT label, default_on FROM site_feature_defs WHERE key = %s", (key,))
+        if not feature:
+            raise ValueError(f"No site feature '{key}'")
+        site = q1("SELECT name FROM sites WHERE id = %s", (id,))
+        if not site:
+            return False
+        exec_("UPDATE sites SET features = features || %s::jsonb WHERE id = %s",
+              (json.dumps({key: bool(on)}), id))
+        audit("enabled site feature" if on else "disabled site feature", site["name"],
+              detail=[("Feature", feature["label"]), ("Key", key),
+                      ("Shipped default", "on" if feature["default_on"] else "off")])
         return True
 
     @strawberry.mutation

@@ -1,0 +1,3 @@
+[submodule "vendor/mari-design"]
+	path = vendor/mari-design
+	url = https://github.com/MariHQ/mari-design.git

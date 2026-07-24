@@ -9,23 +9,27 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
+import re
 
 import strawberry
 from strawberry.scalars import JSON
 
+import config
 import github
 import ingest
 import llm
 from db import ME, jload, log_usage, q, q1
 from gqltypes import (
     ActivityBucket, ActivityItem, ApiKey, ApprovedAnswer, AskMari, AskSource,
-    AuditEvent, AuditFinding, AuditRun, Change, ChatMessage, ChatSession,
-    Checkpoint, Decision, DigestImpact, DigestTopic, DigestWhere, DocHistory,
-    Document, Fact, Finding, FreshnessRow, GithubRepo, GlossaryCandidate,
-    GlossaryTerm, GraphStats, GraphView, InsightStats, LineageEdge, LineageNode,
-    McpServer, Member, Notification, ReadabilityRow, Release, Setting, Site,
-    SourcePulse, SyncEvent, SyncStatus, TagDef, Task, TopCited, Workflow,
-    WorkflowRun,
+    AuditDetail, AuditEvent, AuditFinding, AuditRun, Change, ChatMessage,
+    ChatSession, Checkpoint, Decision, DigestImpact, DigestTopic, DigestWhere,
+    DocHistory, Document, DocumentTemplate, Fact, FactContradiction, Finding,
+    FreshnessRow, GithubRepo, GithubTeamSync, GlossaryCandidate, GlossaryTerm,
+    GraphStats, GraphView, InsightStats, LineageEdge, LineageNode, McpServer,
+    Member, Notification, Provisioning, ReadabilityRow, Release, Setting, Site,
+    SiteFeature, SiteThemePreset, SourcePulse, StyleGuide, StyleRule, SyncEvent,
+    SyncStatus, TagDef, Task, TaskSummary, TopCited, UploadFile, UploadManifest,
+    VoiceLayer, Workflow, WorkflowRun, Workspace,
 )
 
 # ————————————————— lineage layout (LINEAGE-DESIGN.md §3.3) —————————————————
@@ -100,7 +104,11 @@ def _doc(row: dict, watched: bool = False) -> Document:
     return Document(
         id=row["id"], source=row["source"], title=row["title"], snippet=row["snippet"],
         body=row.get("body", ""), kind=row.get("kind", "page"), author=row["author"], author_initials=row["author_initials"],
-        date=row["updated_src"].strftime("%b %-d, %Y") if row["updated_src"] else "",
+        # ISO 8601, NOT a display string. The console formats dates itself
+        # (components/tokens/format.ts fmtDate) and sorts columns on the raw
+        # value, so "Jul 8, 2026" would both double-format and sort
+        # alphabetically. The API returns data; the client renders it.
+        date=row["updated_src"].isoformat() if row["updated_src"] else "",
         tags=row.get("tags") or [], watched=watched,
     )
 
@@ -152,6 +160,66 @@ def hybrid_search(query: str, k: int = 10) -> list[dict]:
     })
 
 
+# ————————————————— fact contradiction detection —————————————————
+# Deterministic, no model call. Two stored claims contradict when they are
+# about the same thing — their non-numeric, non-negating words overlap almost
+# completely — but they disagree on either the numbers they state or on
+# polarity (one negates, the other does not). Both sides of every pair are
+# real `facts` rows: the detector pairs claims, it never writes one, and a
+# ledger with no such pair yields an empty list rather than a warning.
+#
+# The overlap bar is deliberately high. A missed contradiction shows up again
+# the next time someone reads the two claims; a false one trains the team to
+# dismiss the banner.
+
+_NEGATIONS = {"not", "no", "never", "cannot", "can't", "cant", "won't", "wont",
+              "doesn't", "doesnt", "don't", "dont", "isn't", "isnt", "aren't",
+              "arent", "without", "disabled", "unsupported", "unavailable"}
+_STOP = {"the", "a", "an", "is", "are", "was", "were", "be", "been", "to", "of",
+         "in", "on", "for", "and", "or", "it", "its", "this", "that", "these",
+         "we", "our", "us", "by", "at", "as", "with", "from", "has", "have"}
+_NUM_RE = re.compile(r"\d+(?:[.,]\d+)*")
+_WORD_RE = re.compile(r"[a-z0-9][a-z0-9'’\-]*")
+
+# A pair must share at least this many topic words, and this fraction of their
+# combined vocabulary, before a numeric or polarity difference counts.
+_MIN_SHARED = 3
+_MIN_OVERLAP = 0.8
+
+
+def _claim_shape(claim: str) -> tuple[frozenset[str], tuple[str, ...], bool]:
+    """(topic words, the numbers stated, whether the claim negates)."""
+    text = claim.lower().replace("’", "'")
+    numbers = tuple(sorted(n.replace(",", "") for n in _NUM_RE.findall(text)))
+    words = _WORD_RE.findall(_NUM_RE.sub(" ", text))
+    negated = any(w in _NEGATIONS for w in words)
+    topic = frozenset(w for w in words if w not in _STOP and w not in _NEGATIONS)
+    return topic, numbers, negated
+
+
+def detect_contradictions(rows: list[dict]) -> list[tuple[dict, dict, str, str]]:
+    """(fact, other fact, reason, detail) for every contradicting pair."""
+    shaped = [(r, *_claim_shape(r["claim"])) for r in rows]
+    out: list[tuple[dict, dict, str, str]] = []
+    for i, (a, topic_a, nums_a, neg_a) in enumerate(shaped):
+        for b, topic_b, nums_b, neg_b in shaped[i + 1:]:
+            shared, union = topic_a & topic_b, topic_a | topic_b
+            if len(shared) < _MIN_SHARED or not union:
+                continue
+            if len(shared) / len(union) < _MIN_OVERLAP:
+                continue
+            if nums_a != nums_b:
+                reason = "numeric"
+                detail = f"{' / '.join(nums_a) or 'no figure'} vs {' / '.join(nums_b) or 'no figure'}"
+            elif neg_a != neg_b:
+                reason = "polarity"
+                detail = "one claim negates what the other asserts"
+            else:
+                continue
+            out.append((a, b, reason, detail))
+    return out
+
+
 # ————————————————— secret masking —————————————————
 # Settings rows and MCP tokens carry credentials; the GraphQL read path never
 # returns them verbatim. Masked shape: "••••…last4" plus a *_set boolean so the
@@ -169,9 +237,26 @@ def _mask_secret(v) -> str:
     return "••••…" + v[-4:] if len(v) > 8 else "••••"
 
 
+def _details(row: dict) -> list[AuditDetail]:
+    """events.detail (a jsonb array of {label,value}) as GraphQL rows. Rows
+    written before the column existed decode to [], which is honest: nothing
+    beyond actor/verb/target/at was recorded for them."""
+    out = []
+    for d in jload(row.get("detail")) or []:
+        if isinstance(d, dict) and d.get("label"):
+            out.append(AuditDetail(label=str(d["label"]), value=str(d.get("value", ""))))
+    return out
+
+
 def _mask_setting(key: str, value):
     if key == "setup_token":
         return _mask_secret(value if isinstance(value, str) else json.dumps(value))
+    if key == "llm" and isinstance(value, dict) and isinstance(value.get("keys"), dict):
+        # Provider API keys live one level down and were coming back verbatim.
+        # The console only ever shows whether a key is set and its last four,
+        # so that is all this returns.
+        value = dict(value)
+        value["keys"] = {k: _mask_secret(v) for k, v in value["keys"].items()}
     fields = _SECRET_SETTING_FIELDS.get(key)
     if not fields or not isinstance(value, dict):
         return value
@@ -229,7 +314,9 @@ class Query:
         return [
             SourcePulse(id=r["id"], provider=r["provider"], name=r["display_name"], status=r["status"],
                         stat=r["stat_num"], unit=r["stat_unit"], bars=bars(r["id"]),
-                        docs_count=r["docs_count"], health=r["health"], config=safe_config(r))
+                        docs_count=r["docs_count"], health=r["health"], config=safe_config(r),
+                        kind=r.get("kind") or "",
+                        last_sync_at=r["last_sync_at"].isoformat() if r.get("last_sync_at") else "")
             for r in q("SELECT * FROM sources ORDER BY id")
         ]
 
@@ -294,7 +381,7 @@ class Query:
     @strawberry.field
     def revisions(self, document_id: int) -> list[AuditEvent]:
         return [AuditEvent(id=r["id"], actor=r["actor"], verb=r["verb"], target=r["target"],
-                           at=r["occurred_at"].strftime("%b %-d, %-I:%M %p"))
+                           at=r["occurred_at"].isoformat(), detail=_details(r))
                 for r in q("""SELECT e.* FROM events e JOIN documents d ON e.target = d.title
                               WHERE d.id = %s ORDER BY e.occurred_at DESC LIMIT 20""", (document_id,))]
 
@@ -390,7 +477,7 @@ class Query:
     def doc_history(self, document_id: int) -> list[DocHistory]:
         return [DocHistory(at=r["at"], actor=r["actor"], verb=r["verb"], detail=r["target"])
                 for r in q("""SELECT e.actor, e.verb, e.target,
-                                     to_char(e.occurred_at, 'YYYY-MM-DD HH24:MI') AS at
+                                     to_char(e.occurred_at, 'YYYY-MM-DD"T"HH24:MI:SS') AS at
                               FROM events e JOIN documents d ON e.target = d.title
                               WHERE d.id = %s ORDER BY e.occurred_at DESC LIMIT 30""", (document_id,))]
 
@@ -401,15 +488,70 @@ class Query:
 
     @strawberry.field
     def facts(self) -> list[Fact]:
+        # verified is facts.verified_at (a DATE) as ISO — not the legacy
+        # facts.verified display string, which the console cannot re-format
+        # and whose '—' placeholder parses as an invalid date.
         return [Fact(id=r["id"], claim=r["claim"], source=r["source"], owner=r["owner_name"],
-                     owner_tint=r["owner_tint"], status=r["status"], verified=r["verified"])
+                     owner_tint=r["owner_tint"], status=r["status"],
+                     verified=r["verified_at"].isoformat() if r["verified_at"] else "")
                 for r in q("SELECT * FROM facts ORDER BY id")]
 
     @strawberry.field
+    def fact_contradictions(self) -> list[FactContradiction]:
+        """Claims in the ledger that disagree with each other. Deterministic
+        (see detect_contradictions) — no model call, and [] on a ledger whose
+        claims are consistent, which is the common case."""
+        rows = q("SELECT id, claim, status FROM facts ORDER BY id")
+        return [FactContradiction(
+            fact_id=a["id"], claim=a["claim"], status=a["status"],
+            other_fact_id=b["id"], other_claim=b["claim"], other_status=b["status"],
+            reason=reason, detail=detail)
+            for a, b, reason, detail in detect_contradictions(rows)]
+
+    @strawberry.field
     def tasks(self) -> list[Task]:
+        # overdue is derived in SQL against the database's own current_date, so
+        # it cannot drift from the due date the same row reports.
+        rows = q("""SELECT *, (due_date IS NOT NULL AND NOT done AND due_date < current_date) AS overdue
+                    FROM tasks ORDER BY id""")
         return [Task(id=r["id"], title=r["title"], assignee_initials=r["assignee_initials"],
-                     assignee_tint=r["assignee_tint"], kind=r["kind"], kind_label=r["kind_label"], done=r["done"])
-                for r in q("SELECT * FROM tasks ORDER BY id")]
+                     assignee_tint=r["assignee_tint"], kind=r["kind"], kind_label=r["kind_label"],
+                     done=r["done"], due=r["due_date"].isoformat() if r["due_date"] else "",
+                     overdue=bool(r["overdue"]))
+                for r in rows]
+
+    @strawberry.field
+    def tasks_summary(self) -> TaskSummary | None:
+        """The strip above the board: counts and rosters rolled up off the same
+        rows `tasks` returns. None on an empty inbox — there is nothing to
+        summarise, and the board renders without a headline."""
+        s = q1("""SELECT count(*) AS total,
+                         count(*) FILTER (WHERE NOT done) AS open,
+                         count(*) FILTER (WHERE done) AS done,
+                         count(*) FILTER (WHERE NOT done AND due_date < current_date) AS overdue,
+                         count(*) FILTER (WHERE NOT done AND due_date >= current_date
+                                          AND due_date <= current_date + 7) AS due_soon
+                  FROM tasks""")
+        if not s or not s["total"]:
+            return None
+        tags = [r["kind_label"] for r in q(
+            "SELECT DISTINCT kind_label FROM tasks WHERE kind_label <> '' ORDER BY kind_label")]
+        people = [r["assignee_initials"] for r in q(
+            """SELECT DISTINCT assignee_initials FROM tasks
+               WHERE NOT done AND assignee_initials <> '' ORDER BY assignee_initials""")]
+        # The headline is whichever number needs acting on: a missed deadline
+        # outranks the open count, and "all caught up" is itself the news.
+        if s["overdue"]:
+            value, label = str(s["overdue"]), "overdue"
+        elif s["open"]:
+            value, label = str(s["open"]), "open"
+        else:
+            value, label = str(s["done"]), "done"
+        return TaskSummary(
+            title="Review queue", tags=tags, people=people,
+            stat_value=value, stat_label=label,
+            open_count=int(s["open"]), done_count=int(s["done"]),
+            overdue_count=int(s["overdue"]), due_soon_count=int(s["due_soon"]))
 
     @strawberry.field
     def ask_mari(self) -> AskMari:
@@ -428,25 +570,142 @@ class Query:
     def members(self) -> list[Member]:
         return [Member(id=r["id"], name=r["name"], initials=r["initials"], tint=r["tint"],
                        email=r["email"], role=r["role"], provider=r["provider"], status=r["status"],
-                       joined=r["joined"].strftime("%b %-d, %Y"))
+                       joined=r["joined"].isoformat())
                 for r in q("SELECT * FROM users ORDER BY id")]
 
     @strawberry.field
     def glossary(self) -> list[GlossaryTerm]:
         return [GlossaryTerm(id=r["id"], term=r["term"], definition=r["definition"],
-                             owner=r["owner_name"], updated=r["updated"].strftime("%b %-d, %Y"))
+                             owner=r["owner_name"], updated=r["updated"].isoformat())
                 for r in q("SELECT * FROM glossary ORDER BY term")]
 
     @strawberry.field
     def tag_defs(self) -> list[TagDef]:
+        # usage is a real count off the tags table — the Library's tag panel
+        # reads "used on N of M documents", so a definition nobody has applied
+        # must come back as 0 rather than as a blank the UI can round up.
         return [TagDef(tag=r["tag"], label=r["label"], kind=r["kind"], search_weight=r["search_weight"],
-                       is_default=r["is_default"], behaviors=r["behaviors"])
-                for r in q("SELECT * FROM tag_definitions ORDER BY search_weight DESC")]
+                       is_default=r["is_default"], behaviors=r["behaviors"], usage=int(r["usage"]))
+                for r in q("""SELECT d.*, (SELECT count(*) FROM tags t WHERE t.tag = d.tag) AS usage
+                              FROM tag_definitions d ORDER BY d.search_weight DESC""")]
+
+    # ——— editorial system: style guides, rule registry, templates, voice ———
+
+    @strawberry.field
+    def style_guides(self) -> list[StyleGuide]:
+        """The style packs this workspace can adopt. `rules` and `preview` are
+        read off `style_rules` in one pass, so a pack's advertised rule count
+        is literally the rules it has. A workspace that deleted every shipped
+        pack gets [] and the guides tab renders its own empty state."""
+        rules: dict[str, list[str]] = {}
+        for r in q("SELECT guide_key, description FROM style_rules ORDER BY guide_key, sort, id"):
+            rules.setdefault(r["guide_key"], []).append(r["description"])
+        return [StyleGuide(key=g["key"], name=g["name"], description=g["description"],
+                           tone=g["tone"], builtin=g["builtin"],
+                           rules=len(rules.get(g["key"], [])), preview=rules.get(g["key"], []))
+                for g in q("SELECT * FROM style_guides ORDER BY sort, key")]
+
+    @strawberry.field
+    def style_rules(self, guide_key: str | None = None) -> list[StyleRule]:
+        """The deterministic rule registry, optionally one pack's. The Library's
+        rules tab counts this list, so the number on the tab strip is the number
+        of rules a document is actually checked against."""
+        where = "WHERE guide_key = %s" if guide_key else ""
+        return [StyleRule(id=r["id"], guide_key=r["guide_key"], family=r["family"],
+                          severity=r["severity"], description=r["description"],
+                          pack=r["pack"], suggestion=r["suggestion"])
+                for r in q(f"SELECT * FROM style_rules {where} ORDER BY guide_key, sort, id",
+                           (guide_key,) if guide_key else ())]
+
+    @strawberry.field
+    def default_style_pack(self) -> str:
+        """The pack this workspace adopted (`style_guide.default_pack`), or ''
+        when nobody has chosen one — a real state on a fresh install."""
+        row = q1("SELECT value FROM settings WHERE key = 'style_guide'")
+        v = jload(row["value"]) if row else {}
+        return str(v.get("default_pack") or "") if isinstance(v, dict) else ""
+
+    @strawberry.field
+    def voice_layer(self) -> VoiceLayer:
+        """The workspace's voice layer (`settings.voice`). Blank and all-off on
+        a workspace that has not written one down, which the panel renders as
+        empty fields rather than as someone else's voice."""
+        row = q1("SELECT value FROM settings WHERE key = 'voice'")
+        v = jload(row["value"]) if row else {}
+        if not isinstance(v, dict):
+            v = {}
+        return VoiceLayer(voice=str(v.get("voice") or ""), terms=str(v.get("terms") or ""),
+                          banned=str(v.get("banned") or ""), inclusive=bool(v.get("inclusive")),
+                          jargon=bool(v.get("jargon")), sentence_case=bool(v.get("sentence_case")))
+
+    @strawberry.field
+    def document_templates(self) -> list[DocumentTemplate]:
+        """Scaffolds a new document can start from. `standard` separates the
+        shipped set from templates this workspace wrote."""
+        return [DocumentTemplate(key=r["key"], name=r["name"], category=r["category"],
+                                 description=r["description"],
+                                 sections=[str(s) for s in (jload(r["sections"]) or [])],
+                                 icon=r["icon"], standard=r["standard"])
+                for r in q("SELECT * FROM document_templates ORDER BY sort, key")]
+
+    @strawberry.field
+    def upload_manifest(self) -> UploadManifest:
+        """What the Upload connector ingested, per file: chunks written and how
+        many carry a vector. Counted off `chunks` at read time. A workspace that
+        has uploaded nothing gets an empty manifest and a '' summary — never a
+        sample receipt."""
+        rows = q("""SELECT d.id, d.source_path, d.external_id, d.updated_src,
+                           count(c.id) AS chunks,
+                           count(c.embedding) AS embedded
+                    FROM documents d
+                    JOIN sources s ON s.id = d.source_id AND s.provider = 'upload'
+                    LEFT JOIN chunks c ON c.document_id = d.id
+                    GROUP BY d.id ORDER BY d.id""")
+        files = []
+        for r in rows:
+            # source_path is 'upload/<file>' and external_id 'upload:<file>';
+            # the row shows the file name the person actually dropped in.
+            name = (r["source_path"] or "").split("/", 1)[-1] or r["external_id"].split(":", 1)[-1]
+            chunks, embedded = int(r["chunks"]), int(r["embedded"])
+            files.append(UploadFile(
+                name=name, doc_id=r["id"], chunks=chunks, embedded=embedded,
+                detail=f"{chunks} chunk{'' if chunks == 1 else 's'} · {embedded} embedded",
+                ingested_at=r["updated_src"].isoformat() if r["updated_src"] else ""))
+        total_chunks = sum(f.chunks for f in files)
+        total_embedded = sum(f.embedded for f in files)
+        summary = (f"{len(files)} file{'' if len(files) == 1 else 's'} · "
+                   f"{total_chunks} chunks · {total_embedded} embedded") if files else ""
+        return UploadManifest(files=files, file_count=len(files), chunk_count=total_chunks,
+                              embedded_count=total_embedded, summary=summary)
+
+    # ——— doc-site presentation: theme presets, generator switches ———
+
+    @strawberry.field
+    def site_theme_presets(self) -> list[SiteThemePreset]:
+        """Themes the generator can render, with the accent each one ships when
+        a site has not overridden it. sitebuilder reads the same rows."""
+        return [SiteThemePreset(key=r["key"], name=r["name"], accent=r["accent"], bg=r["bg"])
+                for r in q("SELECT * FROM site_theme_presets ORDER BY sort, key")]
+
+    @strawberry.field
+    def site_features(self, site_id: int | None = None) -> list[SiteFeature]:
+        """The generator's switches. Without a site id, `on` is the shipped
+        default; with one, the site's stored override wins. Every key here is
+        read by sitebuilder — the page never offers a toggle that changes
+        nothing about the built site."""
+        overrides: dict = {}
+        if site_id:
+            row = q1("SELECT features FROM sites WHERE id = %s", (site_id,))
+            if row:
+                overrides = jload(row["features"]) or {}
+        return [SiteFeature(key=r["key"], label=r["label"], hint=r["hint"],
+                            on=bool(overrides.get(r["key"], r["default_on"])))
+                for r in q("SELECT * FROM site_feature_defs ORDER BY sort, key")]
 
     @strawberry.field
     def api_keys(self) -> list[ApiKey]:
         return [ApiKey(id=r["id"], name=r["name"], prefix=r["prefix"], scopes=r["scopes"],
-                       created=r["created_at"].strftime("%b %-d, %Y"), last_used=r["last_used"], revoked=r["revoked"])
+                       created=r["created_at"].isoformat(), last_used=r["last_used"], revoked=r["revoked"])
                 for r in q("SELECT * FROM api_keys ORDER BY id")]
 
     @strawberry.field
@@ -472,8 +731,14 @@ class Query:
     @strawberry.field
     def audit_log(self, limit: int = 40) -> list[AuditEvent]:
         return [AuditEvent(id=r["id"], actor=r["actor"], verb=r["verb"], target=r["target"],
-                           at=r["occurred_at"].strftime("%b %-d, %-I:%M %p"))
+                           at=r["occurred_at"].isoformat(), detail=_details(r))
                 for r in q("SELECT * FROM events ORDER BY occurred_at DESC, id DESC LIMIT %s", (limit,))]
+
+    @strawberry.field
+    def audit_log_total(self) -> int:
+        """Rows in the whole log, so the console can say what its window is a
+        window onto instead of comparing a filtered view against the window."""
+        return int(q1("SELECT count(*) AS n FROM events")["n"])
 
     @strawberry.field
     def activity_feed(self, limit: int = 12) -> list[ActivityItem]:
@@ -481,6 +746,11 @@ class Query:
         rows = q("""
           SELECT id, actor, verb, target,
                  to_char(occurred_at, 'HH24:MI') AS at,
+                 -- Age in seconds. The console's live feed counts up from this
+                 -- between polls ("42s ago" → "1m ago"), which a wall-clock
+                 -- "HH:MI" cannot support: it has no date, so an event from
+                 -- yesterday renders as if it just happened.
+                 greatest(0, extract(epoch FROM now() - occurred_at))::int AS seconds_ago,
                  CASE
                    WHEN verb LIKE '%%run%%' OR verb LIKE 'started%%' THEN 'run'
                    WHEN verb LIKE 'deploy%%' OR verb LIKE 'rolled%%' THEN 'deploy'
@@ -493,7 +763,8 @@ class Query:
           FROM events ORDER BY occurred_at DESC, id DESC LIMIT %s
         """, (limit,))
         return [ActivityItem(id=r["id"], kind=r["kind"], actor=r["actor"],
-                             text=r["verb"], target=r["target"], at=r["at"]) for r in rows]
+                             text=r["verb"], target=r["target"], at=r["at"],
+                             seconds_ago=int(r["seconds_ago"])) for r in rows]
 
     @strawberry.field
     def workflows(self) -> list[Workflow]:
@@ -510,7 +781,10 @@ class Query:
                      ORDER BY r.number DESC LIMIT 10""",
                  (workflow_id,) if workflow_id else ())
         return [WorkflowRun(id=r["id"], workflow_id=r["workflow_id"], workflow_name=r["wf_name"],
-                            number=r["number"], status=r["status"], started=r["started_label"],
+                            number=r["number"], status=r["status"],
+                            # ISO, not started_label: the console formats and
+                            # sorts on this (see _doc's date for the same rule).
+                            started=r["started_at"].isoformat() if r.get("started_at") else "",
                             duration=r["duration"], progress=r["progress"],
                             stats=jload(r["stats"]), rows=jload(r["rows_data"]),
                             triggered_by=r.get("triggered_by") or "") for r in rows]
@@ -523,16 +797,59 @@ class Query:
                 for r in q("SELECT * FROM sites ORDER BY id")]
 
     @strawberry.field
-    def releases(self, site_id: int) -> list[Release]:
+    def releases(self, site_id: int | None = None) -> list[Release]:
+        """Release history. Omit site_id for every site's, so the Publish page
+        can fetch sites and their releases in one document instead of chaining
+        a second round trip on the first site's id."""
+        where = "WHERE site_id = %s" if site_id else ""
         return [Release(id=r["id"], site_id=r["site_id"], version=r["version"], status=r["status"],
                         deployed=r["deployed"], docs=r["docs"], notes=r["notes"])
-                for r in q("SELECT * FROM releases WHERE site_id = %s ORDER BY id DESC", (site_id,))]
+                for r in q(f"SELECT * FROM releases {where} ORDER BY site_id, id DESC",
+                           (site_id,) if site_id else ())]
 
     @strawberry.field
     def notifications(self) -> list[Notification]:
         return [Notification(id=r["id"], kind=r["kind"], text=r["text"], detail=r["detail"],
                              at=r["at_label"], read=r["read"])
                 for r in q("SELECT * FROM notifications WHERE user_name = %s ORDER BY id", (ME,))]
+
+    @strawberry.field
+    def workspace(self) -> Workspace:
+        """The `workspace` settings row, which first-run setup writes and
+        Settings → Members edits. Fields nobody has filled in come back "" —
+        an unnamed workspace is a real state, not a missing fetch."""
+        row = q1("SELECT value FROM settings WHERE key = 'workspace'")
+        v = jload(row["value"]) if row else {}
+        if not isinstance(v, dict):
+            v = {}
+        return Workspace(name=str(v.get("name") or ""), slug=str(v.get("slug") or ""),
+                         plan=str(v.get("plan") or ""), timezone=str(v.get("timezone") or ""),
+                         language=str(v.get("language") or ""))
+
+    @strawberry.field
+    def provisioning(self) -> Provisioning:
+        """Member provisioning as it is actually configured. Manual invites are
+        always on (inviteMember is the only path the server implements); the
+        GitHub team is whatever an admin saved, and counts as connected only
+        when the server also holds a credential to read it with; SCIM has no
+        endpoint, so it reports unavailable rather than "Enterprise"."""
+        row = q1("SELECT value FROM settings WHERE key = 'provisioning'")
+        v = jload(row["value"]) if row else {}
+        if not isinstance(v, dict):
+            v = {}
+        team = str(v.get("github_team") or "")
+        has_token = bool(github.token())
+        synced = int(q1("SELECT count(*) AS n FROM users WHERE provider = 'github'")["n"])
+        providers = [name for name, key in (("github", "github_client_id"),
+                                            ("google", "google_client_id"))
+                     if config.get("auth", key)]
+        return Provisioning(
+            manual_invites=bool(v.get("manual_invites", True)),
+            github_team=GithubTeamSync(team=team, connected=bool(team and has_token),
+                                       credential=has_token, synced_members=synced),
+            sso_providers=providers, sso_enabled=bool(providers),
+            scim_enabled=bool(v.get("scim_enabled", False)),
+            scim_status="unavailable")
 
     @strawberry.field
     def settings(self) -> list[Setting]:
@@ -544,8 +861,54 @@ class Query:
         return [ApprovedAnswer(id=r["id"], question=r["question"], answer=r["answer"], status=r["status"],
                                owner=r["owner_name"], channels=r["channels"], sources=jload(r["sources"]),
                                served=r["served"], spark=r["spark"],
-                               updated=r["updated"].strftime("%b %-d, %Y"))
+                               updated=r["updated"].isoformat())
                 for r in q("SELECT * FROM approved_answers ORDER BY (status = 'approved') DESC, served DESC")]
+
+    @strawberry.field
+    def answer_coverage_gaps(self, limit: int = 8) -> list[str]:
+        """Questions people actually asked that no approved answer covers.
+
+        Real demand only: search queries logged in usage_log plus questions put
+        to the assistant. A question already served by an approved answer is
+        not a gap, so anything matching one verbatim is filtered out. Returns
+        [] on a workspace nobody has asked anything in — never a sample list."""
+        rows = q("""
+          WITH asked AS (
+            SELECT lower(trim(detail)) AS question, max(at) AS last_at FROM usage_log
+             WHERE kind = 'search' AND length(trim(detail)) >= 8 GROUP BY 1
+            UNION ALL
+            SELECT lower(trim(content)), max(created_at) FROM chat_messages
+             WHERE role = 'user' AND length(trim(content)) BETWEEN 8 AND 200 GROUP BY 1)
+          SELECT a.question, max(a.last_at) AS last_at FROM asked a
+           WHERE NOT EXISTS (SELECT 1 FROM approved_answers ans
+                              WHERE ans.status = 'approved' AND lower(ans.question) = a.question)
+           GROUP BY a.question ORDER BY max(a.last_at) DESC LIMIT %s""", (limit,))
+        return [r["question"] for r in rows]
+
+    @strawberry.field
+    def index_stats(self) -> JSON:
+        """Corpus size as the embedding config page states it: documents, the
+        chunks they were split into, and how many of those carry a vector."""
+        s = q1("""SELECT (SELECT count(*) FROM documents) AS docs,
+                         count(*) AS chunks,
+                         count(*) FILTER (WHERE embedding IS NOT NULL) AS embedded
+                  FROM chunks""") or {"docs": 0, "chunks": 0, "embedded": 0}
+        return {"docs": int(s["docs"]), "chunks": int(s["chunks"]), "embedded": int(s["embedded"])}
+
+    @strawberry.field
+    def bots_status(self) -> JSON:
+        """Slack + GitHub bot wiring, as GET /bots/status reports it. Same
+        function, so the console's Sources page and the REST surface can never
+        disagree about whether a bot is configured."""
+        import bots
+        return bots.bots_status()
+
+    @strawberry.field
+    def connector_catalog(self) -> JSON:
+        """The connector catalog, as GET /connectors/catalog reports it: field
+        SPECS only, never stored values (CONNECTORS-CONTRACT.md)."""
+        import connectors_api
+        return connectors_api.catalog()
 
     @strawberry.field
     def decisions(self) -> list[Decision]:
@@ -553,7 +916,7 @@ class Query:
                     LEFT JOIN decisions s ON s.id = d.superseded_by ORDER BY d.id DESC""")
         return [Decision(id=r["id"], statement=r["statement"], context=r["context"], status=r["status"],
                          source_label=r["source_label"], owners=r["owners"],
-                         decided_on=r["decided_on"].strftime("%b %-d, %Y") if r["decided_on"] else "",
+                         decided_on=r["decided_on"].isoformat() if r["decided_on"] else "",
                          superseded_by=r["superseded_by"], superseded_by_statement=r["sup_stmt"] or "",
                          impact_summary=r["impact_summary"], impact_count=r["impact_count"]) for r in rows]
 
@@ -603,13 +966,18 @@ class Query:
 
     @strawberry.field
     def glossary_candidates(self) -> list[GlossaryCandidate]:
-        return [GlossaryCandidate(id=r["id"], term=r["term"], variants=r["variants"], definition=r["definition"])
+        # evidence is the document the harvester found the term in — the
+        # provenance the review step needs to judge a candidate. '' / 0 for a
+        # term typed in by hand, which was never mined from a document.
+        return [GlossaryCandidate(id=r["id"], term=r["term"], variants=r["variants"],
+                                  definition=r["definition"], evidence=r["evidence"] or "",
+                                  evidence_doc_id=r["evidence_doc_id"] or 0)
                 for r in q("SELECT * FROM glossary WHERE candidate ORDER BY id")]
 
     @strawberry.field
     def audit_runs(self) -> list[AuditRun]:
         return [AuditRun(id=r["id"], provider=r["provider"], repo=r["repo"], findings=r["findings"],
-                         fixed=r["fixed"], ran_at=r["ran_at"].strftime("%b %-d, %-I:%M %p"))
+                         fixed=r["fixed"], ran_at=r["ran_at"].isoformat())
                 for r in q("SELECT * FROM audit_runs ORDER BY id DESC LIMIT 10")]
 
     @strawberry.field

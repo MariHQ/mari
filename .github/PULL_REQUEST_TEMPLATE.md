@@ -9,7 +9,8 @@
 ## Checklist
 
 - [ ] All commits are signed off (`git commit -s`) per the [DCO](../DCO)
-- [ ] `npm run check` and `npm run build` pass in `web/` (if UI changed)
+- [ ] `npm run check` and `npm run build` pass in `web/` (if the console changed)
 - [ ] Schema changes are idempotent and live in a `server/init*.sql` file
-- [ ] New UI composes existing primitives from `web/src/components/ui/`
+- [ ] Visual changes went to the [mari-design](https://github.com/MariHQ/mari-design) library, not `web/`
+- [ ] Page adapters map API responses only — no values invented in `web/src/data/`
 - [ ] No credentials, tokens, or canned/placeholder data added

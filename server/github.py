@@ -88,6 +88,13 @@ def default_branch(repo: str) -> str:
     return data.get("default_branch") or "main"
 
 
+def team(org: str, slug: str) -> dict:
+    """An org team by slug. Raises GithubError(404) when it does not exist or
+    the token cannot see it — used to validate a team before saving it."""
+    data, _ = _request(f"/orgs/{urllib.parse.quote(org)}/teams/{urllib.parse.quote(slug)}")
+    return data
+
+
 def get_tree(repo: str, ref: str) -> list[dict]:
     """Recursive tree at ref: [{path, sha, type, size}, …] (blobs only)."""
     data, _ = _request(f"/repos/{repo}/git/trees/{urllib.parse.quote(ref)}", {"recursive": "1"})

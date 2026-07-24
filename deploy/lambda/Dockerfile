@@ -4,6 +4,10 @@ FROM node:20-bookworm-slim AS web-build
 WORKDIR /src/web
 COPY web/package.json web/package-lock.json ./
 RUN npm ci
+# The console is a thin app over the @mari-design/components library, which
+# lives in the vendor/mari-design submodule. web/lib-path.mjs looks for it one
+# level above the app directory, so it has to land at /src/vendor/...
+COPY vendor/mari-design/components/ /src/vendor/mari-design/components/
 COPY web/ ./
 RUN npm run build
 

@@ -39,7 +39,8 @@ class MutAdmin:
         exec_("""INSERT INTO sync_events (provider, event, detail, at_label)
                  VALUES (%s, %s, '', to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))""",
               (provider, f"connected: {display_name}"))
-        audit("connected source", display_name)
+        audit("connected source", display_name, detail=[("Provider", provider),
+              ("Settings", ", ".join(sorted(config)) if isinstance(config, dict) else "")])
         return True
 
     @strawberry.mutation
@@ -60,23 +61,30 @@ class MutAdmin:
         exec_("""INSERT INTO users (name, initials, tint, email, role, provider, joined)
                  VALUES (%s, %s, %s, %s, %s, 'manual', now()) ON CONFLICT (name) DO NOTHING""",
               (name, initials, (hash(name) % 4) + 1, email, role))
-        audit("invited member", f"{name} ({role})", actor["name"])
+        audit("invited member", f"{name} ({role})", actor["name"],
+              [("Email", email), ("Role", role), ("Provider", "manual invite")])
         return True
 
     @strawberry.mutation
     def set_member_role(self, info: strawberry.Info, id: int, role: str) -> bool:
         actor = _require_admin(info)
+        before = q1("SELECT name, role, email FROM users WHERE id = %s", (id,))
+        if not before:
+            return False
         exec_("UPDATE users SET role = %s WHERE id = %s", (role, id))
-        exec_("INSERT INTO events (actor, verb, target) SELECT %s, 'changed role to ' || %s, name FROM users WHERE id = %s",
-              (actor["name"], role, id))
+        audit(f"changed role to {role}", before["name"], actor["name"],
+              [("Email", before["email"]), ("Previous role", before["role"]), ("New role", role)])
         return True
 
     @strawberry.mutation
     def remove_member(self, info: strawberry.Info, id: int) -> bool:
         actor = _require_admin(info)
-        exec_("INSERT INTO events (actor, verb, target) SELECT %s, 'removed member', name FROM users WHERE id = %s",
-              (actor["name"], id))
+        before = q1("SELECT name, role, email, provider FROM users WHERE id = %s", (id,))
+        if not before:
+            return False
         exec_("DELETE FROM users WHERE id = %s", (id,))
+        audit("removed member", before["name"], actor["name"],
+              [("Email", before["email"]), ("Role", before["role"]), ("Account source", before["provider"])])
         return True
 
     # ——— api keys ———
@@ -88,13 +96,18 @@ class MutAdmin:
         exec_("""INSERT INTO api_keys (name, prefix, scopes, created_at, last_used)
                  VALUES (%s, %s, %s, now(), 'never') ON CONFLICT (name) DO NOTHING""",
               (name, token[:12] + "…", scopes))
-        audit("created API key", name, actor["name"])
+        audit("created API key", name, actor["name"],
+              [("Scopes", scopes), ("Prefix", token[:12] + "…")])
         return token
 
     @strawberry.mutation
     def revoke_api_key(self, id: int) -> bool:
+        key = q1("SELECT name, prefix, scopes FROM api_keys WHERE id = %s", (id,))
+        if not key:
+            return False
         exec_("UPDATE api_keys SET revoked = true WHERE id = %s", (id,))
-        exec_("INSERT INTO events (actor, verb, target) SELECT %s, 'revoked API key', name FROM api_keys WHERE id = %s", (ME, id))
+        audit("revoked API key", key["name"], ME,
+              [("Prefix", key["prefix"]), ("Scopes", key["scopes"])])
         return True
 
     # ——— settings ———
@@ -103,7 +116,53 @@ class MutAdmin:
         actor = _require_admin(info)
         exec_("""INSERT INTO settings (key, value) VALUES (%s, %s)
                  ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value""", (key, json.dumps(value)))
-        audit("updated setting", key, actor["name"])
+        audit("updated setting", key, actor["name"],
+              [("Setting", key), ("Fields", ", ".join(sorted(value)) if isinstance(value, dict) else "value")])
+        return True
+
+    # ——— workspace identity & member provisioning ———
+    @strawberry.mutation
+    def set_workspace_name(self, info: strawberry.Info, name: str) -> bool:
+        """Rename the workspace. Merges into the `workspace` settings row so a
+        rename never drops the timezone/language beside it."""
+        actor = _require_admin(info)
+        new = name.strip()
+        if not new:
+            raise ValueError("Workspace name cannot be empty")
+        before = q1("SELECT value->>'name' AS name FROM settings WHERE key = 'workspace'")
+        exec_("""INSERT INTO settings (key, value) VALUES ('workspace', %s)
+                 ON CONFLICT (key) DO UPDATE SET value = settings.value || EXCLUDED.value""",
+              (json.dumps({"name": new}),))
+        audit("renamed workspace", new, actor["name"],
+              [("Previous name", (before or {}).get("name") or "(unnamed)"), ("New name", new)])
+        return True
+
+    @strawberry.mutation
+    def set_github_team(self, info: strawberry.Info, team: str) -> bool:
+        """Configure (or, with an empty string, clear) the GitHub team whose
+        members are provisioned into this workspace. When the server holds a
+        token, the team is verified before it is saved — a slug that GitHub
+        says does not exist is a typo, not a configuration."""
+        actor = _require_admin(info)
+        slug = team.strip().strip("/")
+        if slug:
+            if slug.count("/") != 1 or not all(p.strip() for p in slug.split("/")):
+                raise ValueError("Team must be in org/team form, e.g. acme/docs")
+            if github.token():
+                org, name = slug.split("/")
+                try:
+                    github.team(org, name)
+                except github.GithubError as e:
+                    # 404 is a verdict; anything else (no org scope, rate limit,
+                    # network) means we could not check, and the admin's word stands.
+                    if e.status == 404:
+                        raise ValueError(f"GitHub team {slug} not found, or this token cannot see it") from None
+        exec_("""INSERT INTO settings (key, value) VALUES ('provisioning', %s)
+                 ON CONFLICT (key) DO UPDATE SET value = settings.value || EXCLUDED.value""",
+              (json.dumps({"github_team": slug}),))
+        audit("configured GitHub team sync" if slug else "disabled GitHub team sync",
+              slug or "GitHub team", actor["name"],
+              [("Team", slug or "(none)"), ("Verified against GitHub", "yes" if slug and github.token() else "no")])
         return True
 
     # ——— GitHub ingestion (real — GITHUB-SYNC-CONTRACT.md) ———
@@ -122,7 +181,8 @@ class MutAdmin:
                  VALUES (%s, %s, 'github', 'active', '0', 'docs', '{}', %s, 0, 'Syncing')""",
               (f"github:{repo}", repo, json.dumps(cfg)))
         source_id = q1("SELECT id FROM sources WHERE provider = %s", (f"github:{repo}",))["id"]
-        audit("connected GitHub repo", repo)
+        audit("connected GitHub repo", repo,
+              detail=[("Branch", branch), ("Paths", paths or "(whole repository)")])
         # every github source gets a scheduled sync flow (Flows UI owns cadence)
         flowengine.ensure_sync_flow(source_id, repo)
         ingest.start_sync(source_id)

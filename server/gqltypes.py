@@ -1,4 +1,14 @@
-"""Mari Cloud — GraphQL type definitions (existing shapes kept stable for the frontend)."""
+"""Mari Cloud — GraphQL type definitions.
+
+Dates and timestamps are **ISO 8601 strings**, never pre-formatted for display.
+The console renders every date through the component library's own `fmtDate` /
+`fmtDateTime` / `fmtAgo`, and its sortable tables sort on the raw field value —
+so a server-formatted "Jul 8, 2026" both double-formats and sorts
+alphabetically (Apr before Jan). The API returns data; the client renders it.
+
+Empty string means "no date", which is distinct from a date the client failed
+to fetch.
+"""
 
 from __future__ import annotations
 
@@ -18,6 +28,12 @@ class SourcePulse:
     docs_count: int
     health: str
     config: JSON
+    # '' for rows the onboarding seeded but no connector owns; 'github',
+    # 'upload' or 'connector' once one does. The console reads it to tell a
+    # source it can report live sync state for from one it can only show the
+    # seeded document count for.
+    kind: str
+    last_sync_at: str  # ISO 8601, '' when the source has never synced
 
 
 @strawberry.type
@@ -119,7 +135,21 @@ class Fact:
     owner: str
     owner_tint: int
     status: str
-    verified: str
+    verified: str  # ISO date of the last verification, "" when never verified
+
+
+@strawberry.type
+class FactContradiction:
+    """Two stored claims that disagree. Both sides are real `facts` rows —
+    the detector never writes a claim, it only pairs the ones already there."""
+    fact_id: int
+    claim: str
+    status: str
+    other_fact_id: int
+    other_claim: str
+    other_status: str
+    reason: str   # numeric|polarity
+    detail: str   # the values that disagree, e.g. "100 vs 250"
 
 
 @strawberry.type
@@ -131,6 +161,23 @@ class Task:
     kind: str
     kind_label: str
     done: bool
+    due: str       # ISO date, "" when the task has no deadline
+    overdue: bool  # due date is in the past and the task is still open
+
+
+@strawberry.type
+class TaskSummary:
+    """The rollup strip above the board. Every field is counted off the same
+    `tasks` rows the board renders, so the strip can never disagree with it."""
+    title: str
+    tags: list[str]     # the kind labels present on the board
+    people: list[str]   # initials of everyone holding an open task
+    stat_value: str
+    stat_label: str
+    open_count: int
+    done_count: int
+    overdue_count: int
+    due_soon_count: int  # open, due within 7 days, not yet overdue
 
 
 @strawberry.type
@@ -195,6 +242,100 @@ class GlossaryTerm:
 
 
 @strawberry.type
+class StyleRule:
+    """One rule in the deterministic prose registry (`style_rules`). `pack` is
+    the code a finding cites; the pattern that detects the rule lives with the
+    checker, not here, so there is only ever one implementation of it."""
+    id: str
+    guide_key: str
+    family: str
+    severity: str  # error|warn|advisory
+    description: str
+    pack: str
+    suggestion: str
+
+
+@strawberry.type
+class StyleGuide:
+    """A pack of style rules a workspace can adopt as its default. `rules` and
+    `preview` are counted and read off `style_rules`, never stored beside the
+    guide, so a pack can never advertise a rule it does not contain."""
+    key: str
+    name: str
+    description: str
+    tone: str      # ink|ok|attention|blocked|info — a colour, not a claim
+    builtin: bool  # shipped with the product vs. written by this workspace
+    rules: int
+    preview: list[str]  # every rule's description, in registry order
+
+
+@strawberry.type
+class VoiceLayer:
+    """The workspace's own voice, stacked on whichever pack it adopted. Blank
+    and all-off until someone writes one down (settings.voice)."""
+    voice: str
+    terms: str
+    banned: str
+    inclusive: bool
+    jargon: bool
+    sentence_case: bool
+
+
+@strawberry.type
+class DocumentTemplate:
+    key: str
+    name: str
+    category: str
+    description: str
+    sections: list[str]  # the headings a draft opens with, in order
+    icon: str            # clipboard|git-fork|shield-check|file-text|sprout|book-open|megaphone
+    standard: bool       # shipped with the product vs. created by this workspace
+
+
+@strawberry.type
+class UploadFile:
+    """One file the Upload connector ingested, with what the pipeline did to
+    it. Counted off `chunks` at read time, so the manifest cannot drift from
+    the index — a re-upload of unchanged content re-embeds nothing and the
+    embedded count stays where it was."""
+    name: str
+    doc_id: int
+    chunks: int
+    embedded: int
+    detail: str        # "12 chunks · 12 embedded", the line the file row shows
+    ingested_at: str   # ISO 8601 date the document was last ingested
+
+
+@strawberry.type
+class UploadManifest:
+    files: list[UploadFile]
+    file_count: int
+    chunk_count: int
+    embedded_count: int
+    summary: str  # "3 files · 41 chunks · 41 embedded"; '' when nothing is uploaded
+
+
+@strawberry.type
+class SiteThemePreset:
+    """A theme the site generator can actually render. `accent` is the colour a
+    build ships when the site has not overridden it."""
+    key: str
+    name: str
+    accent: str
+    bg: str
+
+
+@strawberry.type
+class SiteFeature:
+    """A generator switch, resolved for one site: the shipped default overlaid
+    with whatever that site stored. Every key here is read by sitebuilder."""
+    key: str
+    label: str
+    hint: str
+    on: bool
+
+
+@strawberry.type
 class TagDef:
     tag: str
     label: str
@@ -202,6 +343,7 @@ class TagDef:
     search_weight: float
     is_default: bool
     behaviors: str
+    usage: int  # documents currently carrying the tag
 
 
 @strawberry.type
@@ -274,12 +416,22 @@ class SyncStatus:
 
 
 @strawberry.type
+class AuditDetail:
+    label: str
+    value: str
+
+
+@strawberry.type
 class AuditEvent:
     id: int
     actor: str
     verb: str
     target: str
     at: str
+    # What the expanded row shows beyond actor/verb/target/at. Recorded at
+    # write time by whoever logged the event (db.audit), so it is [] for
+    # events logged before the writer had anything more to say.
+    detail: list[AuditDetail]
 
 
 @strawberry.type
@@ -289,7 +441,8 @@ class ActivityItem:
     actor: str
     text: str
     target: str
-    at: str
+    at: str            # wall-clock "HH:MM", for dense timestamped lists
+    seconds_ago: int   # age at query time, for relative "5m ago" rendering
 
 
 @strawberry.type
@@ -381,6 +534,38 @@ class Setting:
 
 
 @strawberry.type
+class Workspace:
+    """Workspace identity, from the `workspace` settings row. A fresh install
+    has no name until first-run setup or an admin supplies one — "" then, and
+    the console renders its own unnamed-workspace treatment."""
+    name: str
+    slug: str
+    plan: str
+    timezone: str
+    language: str
+
+
+@strawberry.type
+class GithubTeamSync:
+    team: str          # "org/team", "" until an admin configures one
+    connected: bool    # a team is configured AND a GitHub credential exists
+    credential: bool   # the server has a GitHub token at all
+    synced_members: int  # users whose account came from GitHub
+
+
+@strawberry.type
+class Provisioning:
+    """How members get into this workspace. Every flag reflects a mechanism
+    the server actually implements — nothing here is aspirational."""
+    manual_invites: bool
+    github_team: GithubTeamSync
+    sso_providers: list[str]  # OAuth providers with credentials configured
+    sso_enabled: bool
+    scim_enabled: bool
+    scim_status: str  # 'unavailable' — no SCIM endpoint exists to enable
+
+
+@strawberry.type
 class ChatMessage:
     id: int
     role: str
@@ -456,6 +641,12 @@ class GlossaryCandidate:
     term: str
     variants: str
     definition: str
+    # Where the term was actually found. The harvester only keeps a candidate
+    # whose text appears in a real document, and records that document's title
+    # here; '' (with evidence_doc_id 0) for a term someone typed in by hand,
+    # which has no source document to cite.
+    evidence: str
+    evidence_doc_id: int
 
 
 @strawberry.type

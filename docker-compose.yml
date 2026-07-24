@@ -66,7 +66,11 @@ services:
       - host.docker.internal:host-gateway
 
   web:
-    build: web
+    # Context is the repo root, not web/: the app compiles against the
+    # component library in the vendor/mari-design submodule.
+    build:
+      context: .
+      dockerfile: web/Dockerfile
     ports:
       - "8080:80"
     depends_on:

@@ -1,20 +1,40 @@
 {
   "compilerOptions": {
-    "target": "ES2022",
-    "useDefineForClassFields": true,
-    "lib": ["ES2022", "DOM", "DOM.Iterable"],
-    "module": "ESNext",
-    "skipLibCheck": true,
-    "moduleResolution": "bundler",
-    "allowImportingTsExtensions": true,
-    "isolatedModules": true,
-    "moduleDetection": "force",
-    "noEmit": true,
+    "target": "ES2020",
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
     "jsx": "react-jsx",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
     "strict": true,
-    "noUnusedLocals": false,
-    "noUnusedParameters": false,
-    "noFallthroughCasesInSwitch": true
+    "noEmit": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "allowImportingTsExtensions": true,
+    "baseUrl": ".",
+    // The component library, in the pinned submodule (see web/lib-path.mjs,
+    // which vite/tailwind/smoke read so nothing can disagree about the path).
+    //
+    // The submodule is source only, with no node_modules of its own, and it
+    // sits outside this package's directory — so Node's ancestor lookup never
+    // reaches web/node_modules and the library's own `react`/`lucide-react`
+    // imports resolve to nothing. Mapping the shared runtime deps here is what
+    // makes the library compile as part of this program, and it is also what
+    // guarantees ONE copy of React: two would break hooks at runtime.
+    "paths": {
+      "@mari-design/components": [
+        "../vendor/mari-design/components/index.ts"
+      ],
+      "@mari-design/components/*": [
+        "../vendor/mari-design/components/*"
+      ],
+      "react": ["./node_modules/@types/react"],
+      "react/*": ["./node_modules/@types/react/*"],
+      "react-dom": ["./node_modules/@types/react-dom"],
+      "react-dom/*": ["./node_modules/@types/react-dom/*"],
+      "lucide-react": ["./node_modules/lucide-react"],
+      "@radix-ui/*": ["./node_modules/@radix-ui/*"]
+    }
   },
-  "include": ["src"]
+  "include": ["src", "scripts", "vite.config.ts"]
 }

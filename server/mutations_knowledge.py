@@ -3,7 +3,9 @@ tags, tasks, lineage, digest, insights, watches."""
 
 from __future__ import annotations
 
+import datetime as dt
 import json
+import re
 
 import strawberry
 
@@ -11,6 +13,35 @@ import llm
 from db import ME, audit, exec_, jload, q, q1
 from gqltypes import AnswerCandidate, ImpactDoc, ImpactResult
 from queries import hybrid_search
+
+def _iso_date(value: str | None) -> str | None:
+    """Accept an ISO date (or an ISO timestamp) and return YYYY-MM-DD; None for
+    empty. Anything else is rejected loudly rather than stored as a string the
+    console would later fail to sort."""
+    if value is None or not str(value).strip():
+        return None
+    text = str(value).strip()
+    try:
+        return dt.date.fromisoformat(text[:10]).isoformat()
+    except ValueError:
+        raise ValueError(f"Due date must be an ISO date (YYYY-MM-DD), got {text!r}") from None
+
+
+# Vocabularies the editorial surfaces are allowed to store. Each mirrors a
+# union the component library renders: a value outside one draws an unlabelled
+# chip or a missing glyph, so it is rejected at write time rather than filtered
+# out at read time.
+_TONES = {"ink", "ok", "attention", "blocked", "info"}
+_SEVERITIES = {"error", "warn", "advisory"}
+_TEMPLATE_ICONS = {"clipboard", "git-fork", "shield-check", "file-text",
+                   "sprout", "book-open", "megaphone"}
+
+
+def _slug(value: str) -> str:
+    """A stable url-safe key. Keys are addressed by mutations and stored on
+    settings rows, so they must not carry whitespace or punctuation."""
+    return re.sub(r"[^a-z0-9]+", "-", value.strip().lower()).strip("-")[:64]
+
 
 # ————————————————— LLM helpers for mutations —————————————————
 
@@ -65,18 +96,38 @@ class MutKnowledge:
 
     @strawberry.mutation
     def verify_fact(self, id: int) -> bool:
-        exec_("UPDATE facts SET status = 'Verified', verified = to_char(now(), 'Mon DD, YYYY') WHERE id = %s", (id,))
+        # verified_at is a DATE; the legacy `verified` text column held a
+        # display string the console could neither re-format nor sort on.
+        exec_("UPDATE facts SET status = 'Verified', verified_at = current_date WHERE id = %s", (id,))
         exec_("INSERT INTO events (actor, verb, target) SELECT %s, 'verified fact', claim FROM facts WHERE id = %s", (ME, id))
         return True
 
     @strawberry.mutation
     def create_task(self, title: str, kind: str = "factcheck", kind_label: str = "Fact check",
-                    assignee: str = "Daniel H.") -> bool:
+                    assignee: str = "Daniel H.", due: str | None = None) -> bool:
+        """`due` is an ISO date (YYYY-MM-DD) or null. Null is the default:
+        nothing in the product assigns a deadline on its own, so a task only
+        has one when whoever created it said so."""
         initials = "".join(w[0].upper() for w in assignee.split()[:2]) or "DH"
-        exec_("""INSERT INTO tasks (title, assignee, assignee_initials, assignee_tint, kind, kind_label)
-                 VALUES (%s, %s, %s, 1, %s, %s) ON CONFLICT (title) DO NOTHING""",
-              (title, assignee, initials, kind, kind_label))
-        audit("created task", title)
+        exec_("""INSERT INTO tasks (title, assignee, assignee_initials, assignee_tint, kind, kind_label, due_date)
+                 VALUES (%s, %s, %s, 1, %s, %s, %s) ON CONFLICT (title) DO NOTHING""",
+              (title, assignee, initials, kind, kind_label, _iso_date(due)))
+        audit("created task", title, detail=[("Assignee", assignee), ("Kind", kind_label),
+                                             ("Due", _iso_date(due) or "(no deadline)")])
+        return True
+
+    @strawberry.mutation
+    def set_task_due(self, id: int, due: str | None = None) -> bool:
+        """Set or (with null/empty) clear a task's deadline. ISO date in, ISO
+        date out — the console formats and sorts on the raw value."""
+        value = _iso_date(due)
+        before = q1("SELECT title, due_date FROM tasks WHERE id = %s", (id,))
+        if not before:
+            return False
+        exec_("UPDATE tasks SET due_date = %s WHERE id = %s", (value, id))
+        audit("set task due date" if value else "cleared task due date", before["title"],
+              detail=[("Previous due", before["due_date"].isoformat() if before["due_date"] else "(none)"),
+                      ("New due", value or "(none)")])
         return True
 
     @strawberry.mutation
@@ -89,21 +140,165 @@ class MutKnowledge:
 
     # ——— glossary CRUD ———
     @strawberry.mutation
-    def upsert_glossary(self, term: str, definition: str, id: int | None = None) -> bool:
+    def upsert_glossary(self, term: str, definition: str, id: int | None = None,
+                        evidence: str = "", evidence_doc_id: int | None = None) -> bool:
+        """`evidence` is the document a term was mined from — pass it only when
+        there is one. A term typed in by hand keeps '' and cites nothing, which
+        is the truth about it; an existing citation is never overwritten with
+        a blank."""
+        doc_id = evidence_doc_id or None
+        if doc_id and not q1("SELECT 1 FROM documents WHERE id = %s", (doc_id,)):
+            raise ValueError(f"No document {doc_id} to cite as evidence")
         if id:
-            exec_("UPDATE glossary SET term = %s, definition = %s, updated = now() WHERE id = %s", (term, definition, id))
+            exec_("""UPDATE glossary SET term = %s, definition = %s, updated = now(),
+                     evidence = CASE WHEN %s <> '' THEN %s ELSE evidence END,
+                     evidence_doc_id = coalesce(%s, evidence_doc_id) WHERE id = %s""",
+                  (term, definition, evidence, evidence, doc_id, id))
             audit("updated glossary term", term)
         else:
-            exec_("""INSERT INTO glossary (term, definition, owner_name, updated) VALUES (%s, %s, %s, now())
-                     ON CONFLICT (term) DO UPDATE SET definition = EXCLUDED.definition, updated = now()""",
-                  (term, definition, ME))
-            audit("added glossary term", term)
+            exec_("""INSERT INTO glossary (term, definition, owner_name, updated, evidence, evidence_doc_id)
+                     VALUES (%s, %s, %s, now(), %s, %s)
+                     ON CONFLICT (term) DO UPDATE SET definition = EXCLUDED.definition, updated = now(),
+                       evidence = CASE WHEN EXCLUDED.evidence <> '' THEN EXCLUDED.evidence ELSE glossary.evidence END,
+                       evidence_doc_id = coalesce(EXCLUDED.evidence_doc_id, glossary.evidence_doc_id)""",
+                  (term, definition, ME, evidence, doc_id))
+            audit("added glossary term", term, detail=[("Evidence", evidence or "(none)")])
         return True
 
     @strawberry.mutation
     def delete_glossary(self, id: int) -> bool:
         exec_("DELETE FROM glossary WHERE id = %s", (id,))
         audit("deleted glossary term", f"#{id}")
+        return True
+
+    # ——— style guides, rule registry, voice layer ———
+    @strawberry.mutation
+    def upsert_style_guide(self, key: str, name: str, description: str = "",
+                           tone: str = "ink") -> bool:
+        """Create or edit a style pack. Packs written here are `builtin = false`
+        — the guides tab distinguishes what the workspace wrote from what the
+        product ships, and an edit to a shipped pack does not launder it."""
+        slug = _slug(key)
+        if not slug or not name.strip():
+            raise ValueError("A style guide needs a key and a name")
+        if tone not in _TONES:
+            raise ValueError(f"tone must be one of {', '.join(sorted(_TONES))}")
+        exec_("""INSERT INTO style_guides (key, name, description, tone, builtin, sort)
+                 VALUES (%s, %s, %s, %s, false, 200)
+                 ON CONFLICT (key) DO UPDATE SET name = EXCLUDED.name,
+                   description = EXCLUDED.description, tone = EXCLUDED.tone""",
+              (slug, name.strip(), description.strip(), tone))
+        audit("saved style guide", name.strip(), detail=[("Key", slug), ("Tone", tone)])
+        return True
+
+    @strawberry.mutation
+    def delete_style_guide(self, key: str) -> bool:
+        """Delete a pack and its rules. Clears the workspace default if it was
+        the one adopted, so nothing points at a pack that no longer exists."""
+        guide = q1("SELECT name FROM style_guides WHERE key = %s", (key,))
+        if not guide:
+            return False
+        n = int((q1("SELECT count(*) AS n FROM style_rules WHERE guide_key = %s", (key,)) or {"n": 0})["n"])
+        exec_("DELETE FROM style_guides WHERE key = %s", (key,))  # rules cascade
+        exec_("""UPDATE settings SET value = value || '{"default_pack":""}'
+                 WHERE key = 'style_guide' AND value->>'default_pack' = %s""", (key,))
+        audit("deleted style guide", guide["name"], detail=[("Key", key), ("Rules removed", n)])
+        return True
+
+    @strawberry.mutation
+    def upsert_style_rule(self, id: str, guide_key: str, description: str,
+                          family: str = "", severity: str = "advisory",
+                          pack: str = "", suggestion: str = "") -> bool:
+        """Add or edit one rule in the registry. The rule must belong to a pack
+        that exists — the count on the Library's tab strip is this table's row
+        count, and an orphan rule would inflate it."""
+        if not q1("SELECT 1 FROM style_guides WHERE key = %s", (guide_key,)):
+            raise ValueError(f"No style guide '{guide_key}' to add this rule to")
+        if severity not in _SEVERITIES:
+            raise ValueError(f"severity must be one of {', '.join(sorted(_SEVERITIES))}")
+        if not id.strip() or not description.strip():
+            raise ValueError("A rule needs an id and a description")
+        exec_("""INSERT INTO style_rules (id, guide_key, family, severity, description, pack, suggestion, sort)
+                 VALUES (%s, %s, %s, %s, %s, %s, %s, 200)
+                 ON CONFLICT (id) DO UPDATE SET guide_key = EXCLUDED.guide_key,
+                   family = EXCLUDED.family, severity = EXCLUDED.severity,
+                   description = EXCLUDED.description, pack = EXCLUDED.pack,
+                   suggestion = EXCLUDED.suggestion""",
+              (id.strip(), guide_key, family.strip(), severity, description.strip(),
+               pack.strip(), suggestion.strip()))
+        audit("saved style rule", id.strip(), detail=[("Guide", guide_key), ("Severity", severity)])
+        return True
+
+    @strawberry.mutation
+    def delete_style_rule(self, id: str) -> bool:
+        if not q1("SELECT 1 FROM style_rules WHERE id = %s", (id,)):
+            return False
+        exec_("DELETE FROM style_rules WHERE id = %s", (id,))
+        audit("deleted style rule", id)
+        return True
+
+    @strawberry.mutation
+    def set_default_style_pack(self, key: str) -> bool:
+        """Adopt a pack as the project default, or clear the choice with ''.
+        A key with no pack behind it is rejected rather than stored."""
+        pack = key.strip()
+        if pack and not q1("SELECT 1 FROM style_guides WHERE key = %s", (pack,)):
+            raise ValueError(f"No style guide '{pack}' to adopt")
+        before = q1("SELECT value->>'default_pack' AS pack FROM settings WHERE key = 'style_guide'")
+        exec_("""INSERT INTO settings (key, value) VALUES ('style_guide', %s)
+                 ON CONFLICT (key) DO UPDATE SET value = settings.value || EXCLUDED.value""",
+              (json.dumps({"default_pack": pack}),))
+        audit("adopted style pack" if pack else "cleared style pack", pack or "(none)",
+              detail=[("Previous", (before or {}).get("pack") or "(none)"), ("New", pack or "(none)")])
+        return True
+
+    @strawberry.mutation
+    def set_voice_layer(self, voice: str = "", terms: str = "", banned: str = "",
+                        inclusive: bool = False, jargon: bool = False,
+                        sentence_case: bool = False) -> bool:
+        """Write the workspace's voice layer. The whole layer is replaced, not
+        merged: the panel posts every field it renders, and merging would leave
+        a cleared field looking like it was never edited."""
+        layer = {"voice": voice.strip(), "terms": terms.strip(), "banned": banned.strip(),
+                 "inclusive": bool(inclusive), "jargon": bool(jargon),
+                 "sentence_case": bool(sentence_case)}
+        exec_("""INSERT INTO settings (key, value) VALUES ('voice', %s)
+                 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value""", (json.dumps(layer),))
+        audit("saved voice layer", "Style guides",
+              detail=[("Enforcement", ", ".join(k for k in ("inclusive", "jargon", "sentence_case")
+                                                if layer[k]) or "(none)")])
+        return True
+
+    # ——— document templates ———
+    @strawberry.mutation
+    def upsert_document_template(self, key: str, name: str, category: str = "",
+                                 description: str = "", sections: list[str] | None = None,
+                                 icon: str = "file-text") -> bool:
+        """Create or edit a document scaffold. Templates saved here are
+        `standard = false`; the shipped set stays labelled as shipped."""
+        slug = _slug(key)
+        if not slug or not name.strip():
+            raise ValueError("A template needs a key and a name")
+        if icon not in _TEMPLATE_ICONS:
+            raise ValueError(f"icon must be one of {', '.join(sorted(_TEMPLATE_ICONS))}")
+        rows = [s.strip() for s in (sections or []) if s.strip()]
+        exec_("""INSERT INTO document_templates (key, name, category, description, sections, icon, standard, sort)
+                 VALUES (%s, %s, %s, %s, %s, %s, false, 200)
+                 ON CONFLICT (key) DO UPDATE SET name = EXCLUDED.name, category = EXCLUDED.category,
+                   description = EXCLUDED.description, sections = EXCLUDED.sections, icon = EXCLUDED.icon""",
+              (slug, name.strip(), category.strip(), description.strip(), json.dumps(rows), icon))
+        audit("saved document template", name.strip(),
+              detail=[("Key", slug), ("Category", category.strip() or "(none)"), ("Sections", len(rows))])
+        return True
+
+    @strawberry.mutation
+    def delete_document_template(self, key: str) -> bool:
+        row = q1("SELECT name, standard FROM document_templates WHERE key = %s", (key,))
+        if not row:
+            return False
+        exec_("DELETE FROM document_templates WHERE key = %s", (key,))
+        audit("deleted document template", row["name"],
+              detail=[("Key", key), ("Shipped with the product", "yes" if row["standard"] else "no")])
         return True
 
     # ——— tags ———
@@ -412,11 +607,25 @@ class MutKnowledge:
         added = 0
         if isinstance(out, list):
             for t in out[:3]:
-                if isinstance(t, dict) and t.get("term"):
-                    exec_("""INSERT INTO glossary (term, definition, owner_name, updated, candidate, variants)
-                             VALUES (%s, %s, 'Mari (harvest)', now(), true, %s) ON CONFLICT (term) DO NOTHING""",
-                          (str(t["term"])[:80], str(t.get("definition", ""))[:300], str(t.get("variants", ""))[:200]))
-                    added += 1
+                if not (isinstance(t, dict) and t.get("term")):
+                    continue
+                term = str(t["term"])[:80]
+                # Provenance, established here rather than asked of the model:
+                # the document that actually contains the term. A term no
+                # document contains was invented, so it is dropped — the review
+                # step must be able to open the source it came from.
+                doc = q1("""SELECT id, title FROM documents
+                            WHERE title ILIKE %s OR body ILIKE %s ORDER BY id LIMIT 1""",
+                         (f"%{term}%", f"%{term}%"))
+                if not doc:
+                    continue
+                exec_("""INSERT INTO glossary (term, definition, owner_name, updated, candidate,
+                                               variants, evidence, evidence_doc_id)
+                         VALUES (%s, %s, 'Mari (harvest)', now(), true, %s, %s, %s)
+                         ON CONFLICT (term) DO NOTHING""",
+                      (term, str(t.get("definition", ""))[:300], str(t.get("variants", ""))[:200],
+                       doc["title"], doc["id"]))
+                added += 1
         audit("harvested glossary terms", f"{added} candidates")
         return added
 

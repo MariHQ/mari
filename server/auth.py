@@ -101,10 +101,27 @@ def _set_session_cookie(response: Response, token: str, request: Request | None)
                         max_age=int(config.get("auth", "session_days", 14)) * 86400)
 
 
+def _client_detail(request: Request | None) -> list[dict]:
+    """The access log's per-event detail for a session: where the request came
+    from and what made it. Only what the request actually carried — a missing
+    header is recorded as unknown, never guessed."""
+    if request is None:
+        return []
+    forwarded = (request.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
+    ip = forwarded or (request.client.host if request.client else "")
+    return [{"label": "IP address", "value": ip or "unknown"},
+            {"label": "User agent", "value": (request.headers.get("User-Agent") or "unknown")[:200]}]
+
+
 def _create_session(user_id: int, response: Response, request: Request | None = None) -> str:
     token = secrets.token_urlsafe(32)
     with _conn() as conn:
         conn.execute("INSERT INTO sessions (token, user_id) VALUES (%s, %s)", (token, user_id))
+        # Every sign-in path funnels through here, so the access log records
+        # them all — with the client detail the expanded row shows.
+        conn.execute("""INSERT INTO events (actor, verb, target, detail)
+                        SELECT name, 'signed in', 'Mari Cloud', %s FROM users WHERE id = %s""",
+                     (json.dumps(_client_detail(request)), user_id))
     _set_session_cookie(response, token, request)
     return token
 
@@ -155,9 +172,17 @@ def me(request: Request):
     u = current_user(request)
     with _conn() as conn:
         needs_setup = not conn.execute("SELECT 1 FROM settings WHERE key = 'setup_complete'").fetchone()
+        ws = conn.execute("SELECT value FROM settings WHERE key = 'workspace'").fetchone()
     oauth = {"github": bool(config.get("auth", "github_client_id")),
              "google": bool(config.get("auth", "google_client_id"))}
+    # The sign-in screen names the workspace before anyone is authenticated, so
+    # the name (and only the name) rides along here. "" until setup or an admin
+    # supplies one — the screen then renders unbranded rather than guessing.
+    value = ws["value"] if ws else {}
+    if not isinstance(value, dict):
+        value = json.loads(value or "{}")
     return {"user": _user_out(u) if u else None, "needsSetup": needs_setup, "oauth": oauth,
+            "workspace": {"name": str(value.get("name") or "")},
             "bypassEnabled": bool(config.get("auth", "bypass_enabled", False))}
 
 
@@ -172,8 +197,9 @@ def bypass(request: Request, response: Response):
                                LIMIT 1""").fetchone()
         if not user:
             raise HTTPException(503, "No workspace user is available for login bypass.")
-        conn.execute("INSERT INTO events (actor, verb, target) VALUES (%s, 'used login bypass', 'Mari Cloud')",
-                     (user["name"],))
+        conn.execute("""INSERT INTO events (actor, verb, target, detail)
+                        VALUES (%s, 'used login bypass', 'Mari Cloud', %s)""",
+                     (user["name"], json.dumps(_client_detail(request))))
     _set_session_cookie(response, BYPASS_TOKEN, request)
     return {"user": _user_out(user)}
 
