@@ -15,6 +15,9 @@
  *
  * Clone with --recurse-submodules, or run:
  *   git submodule update --init --recursive
+ *
+ * Developing the library and the app together:
+ *   MARI_LIB=~/mari-design/components npm run dev
  */
 
 import { existsSync } from "node:fs";
@@ -23,8 +26,14 @@ import { fileURLToPath } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
-/** Absolute path to the component library. */
-export const LIB = resolve(HERE, "../vendor/mari-design/components");
+/* MARI_LIB points the build at a working checkout of the library instead, for
+   the case where you are changing the library and the app together. Explicit
+   and opt-in: the old behaviour was to silently prefer a sibling directory if
+   one happened to exist, which meant the build passed here and failed in CI.
+   Nothing sets this in Docker or CI, so those always use the pinned commit. */
+export const LIB = process.env.MARI_LIB
+  ? resolve(process.env.MARI_LIB)
+  : resolve(HERE, "../vendor/mari-design/components");
 
 if (!existsSync(LIB)) {
   throw new Error(

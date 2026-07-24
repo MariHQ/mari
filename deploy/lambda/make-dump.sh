@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# Build the Postgres snapshot that ships inside the Lambda image.
+#
+#   ./deploy/lambda/make-dump.sh
+#
+# The image carries a pg_dump archive; start.sh restores it into /tmp the first
+# time a cold container boots, so a fresh Lambda comes up with the workspace
+# already populated instead of an empty schema.
+#
+# The snapshot is taken from the LOCAL development database — the one `dev.sh`
+# runs — because that is where the corpus actually is: ingested documents,
+# their embeddings, the flows, the digest. The dump is deliberately gitignored
+# (18MB of binary that changes on every ingest), which is exactly why this
+# script exists: the sanitising below must not be a thing somebody remembered
+# to do by hand once.
+#
+# WHAT IS REMOVED, AND WHY
+#
+# The resulting image is deployed to a public address, so anything in it is
+# public. Three things therefore do not travel:
+#
+#   sessions      A session token is a bearer credential — whoever holds one
+#                 IS that user. Shipping live ones hands out accounts.
+#   magic_links   Same, with a shorter fuse.
+#   password_hash Protects a real person's account, and people reuse
+#                 passwords. The demo is entered through the sign-in bypass
+#                 (MARI_AUTH_BYPASS), so the account keeps its identity and
+#                 loses only the credential.
+#
+# Provider API keys are cleared too. They are normally empty in development,
+# and "normally" is not a good enough reason to publish one.
+#
+# Everything else — documents, chunks, embeddings, answers, facts, flows,
+# tags, the digest — is the point of the snapshot and is kept as-is.
+set -euo pipefail
+cd "$(dirname "$0")/../.."
+
+OUT=deploy/lambda/mari_cloud.dump
+SRC=mari_cloud
+WORK=mari_pub   # scratch copy; the scrub must never touch the real database
+
+psql_() { docker compose exec -T db psql -U mari -X -q "$@"; }
+
+echo "==> snapshot $SRC"
+docker compose exec -T db pg_dump -U mari -d "$SRC" -Fc --no-owner --no-privileges > /tmp/mari-src.dump
+
+echo "==> restore into scratch database $WORK"
+psql_ -d postgres -c "DROP DATABASE IF EXISTS $WORK;" -c "CREATE DATABASE $WORK;"
+docker compose exec -T db pg_restore -U mari -d "$WORK" --no-owner --no-privileges < /tmp/mari-src.dump
+
+echo "==> remove credential material"
+psql_ -d "$WORK" -v ON_ERROR_STOP=1 <<'SQL'
+TRUNCATE sessions;
+DELETE FROM magic_links;
+UPDATE users SET password_hash = '';
+UPDATE settings
+   SET value = jsonb_set(value, '{keys}', '{"openai": "", "anthropic": ""}'::jsonb)
+ WHERE key = 'llm' AND value ? 'keys';
+-- Per-account preferences are somebody's settings, not default data.
+DELETE FROM settings WHERE key LIKE 'user_prefs:%';
+SQL
+
+echo "==> verify the scrub actually happened"
+psql_ -d "$WORK" -v ON_ERROR_STOP=1 <<'SQL'
+DO $$
+DECLARE bad int;
+BEGIN
+  SELECT (SELECT count(*) FROM sessions)
+       + (SELECT count(*) FROM magic_links)
+       + (SELECT count(*) FROM users WHERE password_hash <> '')
+    INTO bad;
+  IF bad <> 0 THEN
+    RAISE EXCEPTION 'Refusing to ship: % row(s) of credential material remain', bad;
+  END IF;
+END $$;
+SQL
+
+echo "==> write $OUT"
+docker compose exec -T db pg_dump -U mari -d "$WORK" -Fc --no-owner --no-privileges > "$OUT"
+psql_ -d postgres -c "DROP DATABASE $WORK;"
+rm -f /tmp/mari-src.dump
+
+echo
+ls -lh "$OUT"
+echo "Now build and push the image, then point the stack at the new tag (see deploy/lambda/README.md)."

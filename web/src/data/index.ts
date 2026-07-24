@@ -14,6 +14,7 @@ import { useKnowledge } from "./knowledge";
 import { useLibrary } from "./library";
 import { useLineage } from "./lineage";
 import { useOverview } from "./overview";
+import { usePreferences } from "./preferences";
 import { usePublish } from "./publish";
 import { useSettingsApiKeys, useSettingsMembers } from "./settings";
 import { useSettingsGeneral } from "./settings-general";
@@ -37,6 +38,7 @@ const ADAPTERS: Record<string, Adapter<any>> = {
   lineage: useLineage,
   login: useLogin,
   overview: useOverview,
+  preferences: usePreferences,
   publish: usePublish,
   setup: useSetup,
   "settings-api-keys": useSettingsApiKeys,

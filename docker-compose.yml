@@ -4,6 +4,12 @@
 services:
   db:
     image: pgvector/pgvector:pg16
+    # Published so the API and web can run natively while Postgres stays in a
+    # container — pgvector is the one dependency that is awkward to install
+    # locally. Running the API on the host is how you reach an Ollama that is
+    # also on the host: from inside a container, "localhost" is the container.
+    ports:
+      - "5432:5432"
     environment:
       POSTGRES_USER: mari
       POSTGRES_PASSWORD: mari

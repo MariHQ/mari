@@ -167,8 +167,17 @@ CREATE TABLE IF NOT EXISTS mcp_servers (
   url     text NOT NULL,
   scope   text NOT NULL DEFAULT 'project',
   status  text NOT NULL DEFAULT 'connected',
-  tools   int NOT NULL DEFAULT 0
+  tools   int NOT NULL DEFAULT 0,
+  -- createMcpServer has always written these two; the table never had them,
+  -- so creating an MCP server failed with "column config does not exist" on
+  -- every install. Nothing called the mutation until the console was wired,
+  -- which is why it went unnoticed.
+  config  jsonb NOT NULL DEFAULT '{}'::jsonb,
+  token   text
 );
+-- Existing databases predate the two columns above.
+ALTER TABLE mcp_servers ADD COLUMN IF NOT EXISTS config jsonb NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE mcp_servers ADD COLUMN IF NOT EXISTS token  text;
 
 -- ————— ingestion —————
 CREATE TABLE IF NOT EXISTS ingest_checkpoints (

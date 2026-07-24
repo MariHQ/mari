@@ -22,11 +22,17 @@
     // makes the library compile as part of this program, and it is also what
     // guarantees ONE copy of React: two would break hooks at runtime.
     "paths": {
+      // Both locations, submodule first. TypeScript has no env-var escape
+      // hatch, so when MARI_LIB points Vite at a working checkout this array
+      // keeps the editor and tsc resolving too. The submodule entry is first,
+      // so a normal checkout is always what typechecks.
       "@mari-design/components": [
-        "../vendor/mari-design/components/index.ts"
+        "../vendor/mari-design/components/index.ts",
+        "../../mari-design/components/index.ts"
       ],
       "@mari-design/components/*": [
-        "../vendor/mari-design/components/*"
+        "../vendor/mari-design/components/*",
+        "../../mari-design/components/*"
       ],
       "react": ["./node_modules/@types/react"],
       "react/*": ["./node_modules/@types/react/*"],

@@ -1,0 +1,114 @@
+/* Publish actions — the doc site and the workspace's MCP servers.
+ *
+ * The page edits ONE site and does not carry its id (the adapter maps a row
+ * onto a presentational shape), so the site handlers resolve it here, by the
+ * same rule the adapter picks it with: the live one, else the first. That
+ * keeps the two halves talking about the same site without the page having to
+ * carry a database key it never renders. */
+
+import type { PublishActions } from "@mari-design/components/pages/PublishPage";
+import { gql } from "../../lib/api";
+import { mutate, type ActionContext } from "./index";
+
+const SITES = `{ sites { id status theme } }`;
+const RELEASES = `{ releases { id siteId version } }`;
+const SERVERS = `{ mcpServers { id name url } }`;
+const SETTINGS = `{ settings { key value } }`;
+
+const DEPLOY = `mutation($id: Int!) { deploySite(id: $id) }`;
+const BUILD = `mutation($id: Int!) { buildSite(id: $id) }`;
+const ROLLBACK = `mutation($id: Int!) { rollbackRelease(id: $id) }`;
+const SET_FEATURE = `mutation($id: Int!, $key: String!, $on: Boolean!) { setSiteFeature(id: $id, key: $key, on: $on) }`;
+const SET_THEME = `mutation($id: Int!, $theme: JSON!) { updateSiteTheme(id: $id, theme: $theme) }`;
+const UPDATE_SETTING = `mutation($key: String!, $value: JSON!) { updateSetting(key: $key, value: $value) }`;
+const CREATE_SERVER = `mutation($name: String!, $scope: String!, $capabilities: JSON!) {
+  createMcpServer(name: $name, scope: $scope, capabilities: $capabilities)
+}`;
+const UPDATE_SERVER = `mutation($id: Int!, $scope: String, $capabilities: JSON!) {
+  updateMcpServer(id: $id, scope: $scope, capabilities: $capabilities)
+}`;
+const DELETE_SERVER = `mutation($id: Int!) { deleteMcpServer(id: $id) }`;
+const TEST_SERVER = `mutation($id: Int!) { testMcpServer(id: $id) }`;
+
+type SiteRow = { id: number; status: string; theme: Record<string, unknown> | null };
+
+/** The site this page is editing. Throws rather than guessing when there is
+ *  none: the page shows the message, which beats a silent no-op. */
+async function currentSite(): Promise<SiteRow> {
+  const res = await gql<{ sites: SiteRow[] }>(SITES);
+  const sites = res?.sites ?? [];
+  const site = sites.find((s) => s.status === "live") ?? sites[0];
+  if (!site) throw new Error("This workspace has no doc site to publish yet.");
+  return site;
+}
+
+export function publishActions({ navigate }: ActionContext): PublishActions {
+  return {
+    // "All sites" is the Publish page with no site selected.
+    openSites: () => navigate("/publish"),
+    /* ── the doc site ─────────────────────────────────────────────────────*/
+    deploySite: async () => {
+      const site = await currentSite();
+      await mutate(DEPLOY, { id: site.id });
+    },
+    // "Preview build" builds without releasing, which is what buildSite does.
+    buildSite: async () => {
+      const site = await currentSite();
+      await mutate(BUILD, { id: site.id });
+    },
+    rollbackRelease: async (version) => {
+      const site = await currentSite();
+      const res = await gql<{ releases: { id: number; siteId: number; version: string }[] }>(RELEASES);
+      const rel = (res?.releases ?? []).find((r) => r.siteId === site.id && r.version === version);
+      if (!rel) throw new Error(`Release ${version} is no longer in this site's history.`);
+      await mutate(ROLLBACK, { id: rel.id });
+    },
+    setSiteFeature: async (key, on) => {
+      const site = await currentSite();
+      await mutate(SET_FEATURE, { id: site.id, key, on });
+    },
+    setSiteTheme: async ({ preset, accent }) => {
+      const site = await currentSite();
+      // The theme row also holds fields this tab does not edit (fonts,
+      // density), and updateSiteTheme replaces it whole, so it is merged.
+      const theme = { ...(site.theme ?? {}) } as Record<string, unknown>;
+      if (preset !== undefined) theme.preset = preset;
+      if (accent !== undefined) theme.accent = accent;
+      await mutate(SET_THEME, { id: site.id, theme });
+    },
+    saveDeployConfig: async ({ bucket, region }) => {
+      const res = await gql<{ settings: { key: string; value: unknown }[] }>(SETTINGS);
+      const cur = (res?.settings ?? []).find((s) => s.key === "deploy")?.value;
+      const row = cur && typeof cur === "object" ? { ...(cur as Record<string, unknown>) } : {};
+      await mutate(UPDATE_SETTING, { key: "deploy", value: { ...row, bucket, region } });
+    },
+
+    /* ── MCP servers ──────────────────────────────────────────────────────*/
+    createServer: async ({ name, scope, capabilities }) => {
+      // The token exists only in this response, and only once. It goes
+      // straight to the page's TokenReveal; nothing here keeps or logs it.
+      const d = await mutate(CREATE_SERVER, { name, scope, capabilities });
+      const token = d?.createMcpServer;
+      if (typeof token !== "string" || !token) {
+        throw new Error("The server was created but returned no bearer token to show.");
+      }
+      // The id and the URL are the server's to mint, so they are read back
+      // rather than invented: the card's Copy button must hand out the real
+      // endpoint, not a plausible-looking one.
+      const res = await gql<{ mcpServers: { id: number; name: string; url: string }[] }>(SERVERS);
+      const row = (res?.mcpServers ?? []).find((s) => s.name === name);
+      if (!row) throw new Error("The server was created but is not in the list yet.");
+      return { id: row.id, url: row.url, token };
+    },
+    updateServer: async (id, { scope, capabilities }) => {
+      await mutate(UPDATE_SERVER, { id, scope, capabilities });
+    },
+    deleteServer: async (id) => {
+      await mutate(DELETE_SERVER, { id });
+    },
+    testServer: async (id) => {
+      const d = await mutate(TEST_SERVER, { id });
+      return (d?.testMcpServer ?? {}) as { ok?: boolean; latency_ms?: number; checks?: Record<string, number> };
+    },
+  };
+}

@@ -31,6 +31,9 @@ DB_URL_REF: dict = {"url": config.get("database", "url")}
 COOKIE = "mari_session"
 BYPASS_TOKEN = "mari-bypass"
 
+# How long a magic sign-in link stays valid.
+MAGIC_LINK_TTL_MIN = 15
+
 
 def _conn():
     return psycopg.connect(DB_URL_REF["url"], row_factory=dict_row)
@@ -398,3 +401,183 @@ def oauth_callback(provider: str, code: str, request: Request, state: str = ""):
     _set_session_cookie(resp, token, request)
     resp.delete_cookie(STATE_COOKIE)
     return resp
+
+# ————— magic link —————
+# The console has always offered "Email me a magic link instead"; there was no
+# endpoint behind it, so the control did nothing. This follows the same shape
+# as first-run setup: mint a single-use token, store only its hash, and print
+# the link to the server log. Sending it by email needs SMTP the deployment
+# does not configure yet, and printing it is honest about that — it is exactly
+# how the admin setup token already reaches you.
+
+
+class MagicLinkIn(BaseModel):
+    email: str
+
+
+@router.post("/magic-link")
+def magic_link(body: MagicLinkIn):
+    """Mint a one-time sign-in link. Always reports success: telling a caller
+    whether an address exists is an account-enumeration oracle."""
+    email = (body.email or "").strip().lower()
+    with _conn() as conn:
+        conn.execute("""CREATE TABLE IF NOT EXISTS magic_links (
+                          token_hash text PRIMARY KEY,
+                          user_id    int NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                          created_at timestamptz NOT NULL DEFAULT now(),
+                          used_at    timestamptz)""")
+        user = conn.execute("SELECT id FROM users WHERE lower(email) = %s", (email,)).fetchone()
+        if user:
+            token = secrets.token_urlsafe(32)
+            conn.execute("DELETE FROM magic_links WHERE user_id = %s AND used_at IS NULL", (user["id"],))
+            conn.execute("INSERT INTO magic_links (token_hash, user_id) VALUES (%s, %s)",
+                         (hashlib.sha256(token.encode()).hexdigest(), user["id"]))
+            base = config.get("auth", "oauth_redirect_base") or "http://localhost:5173"
+            print("\n" + "=" * 68, flush=True)
+            print(f"  Magic sign-in link for {email} (valid once, {MAGIC_LINK_TTL_MIN} minutes):", flush=True)
+            print(f"\n      {base}/auth/magic/{token}\n", flush=True)
+            print("=" * 68 + "\n", flush=True)
+    return {"ok": True, "sent": True}
+
+
+@router.get("/magic/{token}")
+def magic_consume(token: str, request: Request):
+    """Spend the token, start a session, and land on the console."""
+    from fastapi.responses import RedirectResponse
+    digest = hashlib.sha256(token.encode()).hexdigest()
+    with _conn() as conn:
+        row = conn.execute(
+            """SELECT user_id FROM magic_links
+                WHERE token_hash = %s AND used_at IS NULL
+                  AND created_at > now() - (%s || ' minutes')::interval""",
+            (digest, MAGIC_LINK_TTL_MIN)).fetchone()
+        if not row:
+            # Expired, already spent, or never real: one message for all three.
+            return RedirectResponse("/login?error=magic-link-invalid", status_code=303)
+        conn.execute("UPDATE magic_links SET used_at = now() WHERE token_hash = %s", (digest,))
+    resp = RedirectResponse("/", status_code=303)
+    _create_session(row["user_id"], resp, request)
+    return resp
+
+
+# ── Preferences: the signed-in person's own account ─────────────────────────
+#
+# Distinct from Settings → Workspace, which is admin-owned and edits the
+# workspace record. These three endpoints all act on `current_user` and never
+# take a user id, so one account can never edit another's profile by guessing
+# an id — the session IS the authorization.
+
+
+class ProfileIn(BaseModel):
+    name: str
+    timezone: str = "UTC"
+
+
+class PasswordIn(BaseModel):
+    current: str
+    next: str
+
+
+class NotificationIn(BaseModel):
+    key: str
+    on: bool
+
+
+# Per-user preferences that have no column on `users`. Kept in `settings`
+# under a per-user key rather than widening the table: they are a JSON blob the
+# server only ever reads back whole, and adding a column per switch would mean
+# a migration every time the notification list changes.
+def _prefs_key(user_id: int) -> str:
+    return f"user_prefs:{user_id}"
+
+
+NOTIFICATION_KEYS = {"mentions", "digest", "flowFailures"}
+DEFAULT_NOTIFICATIONS = {"mentions": True, "digest": True, "flowFailures": True}
+
+
+def _load_prefs(conn, user_id: int) -> dict:
+    row = conn.execute("SELECT value FROM settings WHERE key = %s", (_prefs_key(user_id),)).fetchone()
+    value = row["value"] if row else {}
+    if not isinstance(value, dict):
+        value = json.loads(value or "{}")
+    notifications = {**DEFAULT_NOTIFICATIONS, **(value.get("notifications") or {})}
+    return {"timezone": str(value.get("timezone") or "UTC"), "notifications": notifications}
+
+
+def _save_prefs(conn, user_id: int, prefs: dict) -> None:
+    conn.execute(
+        """INSERT INTO settings (key, value) VALUES (%s, %s)
+           ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value""",
+        (_prefs_key(user_id), json.dumps(prefs)))
+
+
+@router.get("/preferences")
+def get_preferences(request: Request):
+    u = require_user(request)
+    with _conn() as conn:
+        prefs = _load_prefs(conn, u["id"])
+    return {
+        "name": u["name"],
+        "email": u["email"],
+        "initials": u["initials"],
+        "role": u["role"],
+        "joined": u["joined"].isoformat() if u["joined"] else "",
+        # `provider` decides whether the page offers a password form at all.
+        # A GitHub account has no password here to change, and rendering the
+        # form would be rendering something that cannot work.
+        "provider": "password" if u["password_hash"] else (u["provider"] or "password"),
+        "timezone": prefs["timezone"],
+        "notifications": prefs["notifications"],
+    }
+
+
+@router.post("/preferences/profile")
+def save_profile(body: ProfileIn, request: Request):
+    u = require_user(request)
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(400, "Display name cannot be empty.")
+    with _conn() as conn:
+        # `users.name` is UNIQUE, so a collision is a 400 with a real reason
+        # rather than a 500 from the constraint.
+        clash = conn.execute("SELECT 1 FROM users WHERE name = %s AND id <> %s", (name, u["id"])).fetchone()
+        if clash:
+            raise HTTPException(400, "Another member already uses that display name.")
+        initials = "".join(p[0] for p in name.split()[:2]).upper() or name[:2].upper()
+        conn.execute("UPDATE users SET name = %s, initials = %s WHERE id = %s", (name, initials, u["id"]))
+        prefs = _load_prefs(conn, u["id"])
+        prefs["timezone"] = body.timezone or "UTC"
+        _save_prefs(conn, u["id"], prefs)
+    return {"ok": True}
+
+
+@router.post("/preferences/password")
+def change_password(body: PasswordIn, request: Request):
+    u = require_user(request)
+    if not u["password_hash"]:
+        raise HTTPException(400, "This account signs in with a provider and has no password here.")
+    if not _verify(body.current, u["password_hash"]):
+        raise HTTPException(400, "That is not your current password.")
+    if len(body.next) < 8:
+        raise HTTPException(400, "The new password must be at least 8 characters.")
+    with _conn() as conn:
+        conn.execute("UPDATE users SET password_hash = %s WHERE id = %s", (_hash(body.next), u["id"]))
+        # Every other session was authenticated with the old credential. A
+        # password change is what you do when you think someone else has it,
+        # so those sessions end here; this one is kept so the page does not
+        # log you out for succeeding.
+        conn.execute("DELETE FROM sessions WHERE user_id = %s AND token <> %s",
+                     (u["id"], request.cookies.get(COOKIE, "")))
+    return {"ok": True}
+
+
+@router.post("/preferences/notification")
+def set_notification(body: NotificationIn, request: Request):
+    u = require_user(request)
+    if body.key not in NOTIFICATION_KEYS:
+        raise HTTPException(400, f"Unknown notification setting: {body.key}")
+    with _conn() as conn:
+        prefs = _load_prefs(conn, u["id"])
+        prefs["notifications"][body.key] = bool(body.on)
+        _save_prefs(conn, u["id"], prefs)
+    return {"ok": True}

@@ -24,7 +24,15 @@ type Res = {
    one-click fixes. A finding whose kind or action this build does not know
    would render an unlabelled row with a dead button, so it is dropped —
    `repoaudit.py` and the library ship separately. */
-const KINDS = new Set(["Localization", "Tags", "Authorship", "Coverage", "Hygiene"]);
+/* The API stores these lowercase ("localization"); the library's `kind` union
+   is Capitalised because it is also the section heading. Matching on the
+   capitalised form silently dropped EVERY finding, so the checklist rendered
+   empty against a repo audit that had found five things. Compare case-folded,
+   and map to the display form once. */
+const KIND_OF: Record<string, AuditFinding["kind"]> = {
+  localization: "Localization", tags: "Tags", authorship: "Authorship",
+  coverage: "Coverage", hygiene: "Hygiene",
+};
 const ACTIONS = new Set(["apply_tag", "invite_member", "translation_task", "link_translation", "ingest", "hygiene_task"]);
 const STATUSES = new Set(["open", "fixed", "dismissed"]);
 
@@ -40,10 +48,10 @@ const SCANS = [
 export function mapFindings(res: Res, runId: number | null): AuditFinding[] {
   return (res.auditFindings ?? [])
     .filter((f) => (runId === null || f.runId === runId)
-      && KINDS.has(f.kind) && ACTIONS.has(f.fixAction) && STATUSES.has(f.status))
+      && KIND_OF[String(f.kind).toLowerCase()] && ACTIONS.has(f.fixAction) && STATUSES.has(f.status))
     .map<AuditFinding>((f) => ({
       id: f.id,
-      kind: f.kind as AuditFinding["kind"],
+      kind: KIND_OF[String(f.kind).toLowerCase()],
       title: f.title,
       detail: f.detail,
       fixAction: f.fixAction as AuditFinding["fixAction"],

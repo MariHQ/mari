@@ -58,7 +58,7 @@ function check(label: string, cond: boolean) {
   if (!cond) { failures++; console.error(`  FAIL ${label}`); }
 }
 
-const render = (p: PageModule<any>, props: object) =>
+const render = (p: PageModule<any, any>, props: object) =>
   renderToStaticMarkup(createElement(p.component as any, props));
 
 /** Every page must survive its universal states. `loading` and `error` are
@@ -70,7 +70,7 @@ const render = (p: PageModule<any>, props: object) =>
     the string: some pages surface the message verbatim (Overview), others
     render catalogued copy instead (Insights, CONVENTIONS §8). Both are the
     library's call. What this app owes either of them is a real message. */
-function states(p: PageModule<any>, empty: any, opts: { errorIgnored?: boolean } = {}) {
+function states(p: PageModule<any, any>, empty: any, opts: { errorIgnored?: boolean } = {}) {
   const blank = render(p, { data: empty, loading: false, error: null });
   check(`${p.id}: loading renders`, render(p, { data: empty, loading: true, error: null }).length > 500);
   const errored = render(p, { data: empty, loading: false, error: "API offline" });
