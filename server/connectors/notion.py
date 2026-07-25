@@ -12,8 +12,8 @@ from __future__ import annotations
 
 import json
 import time
-import urllib.error
-import urllib.request
+
+from . import _net
 
 PROVIDER = {
     "key": "notion",
@@ -46,33 +46,39 @@ class NotionError(Exception):
 def _api(method: str, path: str, token: str, body: dict | None = None) -> dict:
     """One Notion API call. Retries once on 429 (Retry-After)."""
     data = json.dumps(body).encode() if body is not None else None
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Notion-Version": NOTION_VERSION,
+        "Content-Type": "application/json",
+        "User-Agent": UA,
+    }
     for attempt in (0, 1):
-        req = urllib.request.Request(f"{API}{path}", data=data, method=method, headers={
-            "Authorization": f"Bearer {token}",
-            "Notion-Version": NOTION_VERSION,
-            "Content-Type": "application/json",
-            "User-Agent": UA,
-        })
+        # Through the shared SSRF guard (AUTH-11), like every connector.
         try:
-            with urllib.request.urlopen(req, timeout=30.0) as resp:
-                return json.loads(resp.read())
-        except urllib.error.HTTPError as e:
-            if e.code == 429 and attempt == 0:
-                try:
-                    wait = min(float(e.headers.get("Retry-After") or 1), 30.0)
-                except ValueError:
-                    wait = 1.0
-                time.sleep(wait)
-                continue
+            resp = _net.fetch(f"{API}{path}", method=method, data=data,
+                              headers=headers, timeout=30.0)
+        except _net.Blocked as e:
+            raise NotionError(f"Notion: refused to fetch {API}{path} — {e}", 0) from None
+        except _net.NetworkError as e:
+            raise NotionError(f"Notion unreachable: {e}", 0) from None
+        if resp.status == 429 and attempt == 0:
             try:
-                payload = json.loads(e.read())
-                msg = payload.get("message") or payload.get("code") or f"HTTP {e.code}"
-            except (json.JSONDecodeError, ValueError, OSError):
-                msg = f"HTTP {e.code}"
-            raise NotionError(f"Notion API error on {path}: {msg}", e.code) from None
-        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as e:
-            raise NotionError(
-                f"Notion unreachable: {getattr(e, 'reason', e).__class__.__name__}", 0) from None
+                wait = min(float(_net.header(resp.headers, "Retry-After") or 1), 30.0)
+            except ValueError:
+                wait = 1.0
+            time.sleep(wait)
+            continue
+        if resp.status >= 400:
+            try:
+                payload = json.loads(resp.body)
+                msg = payload.get("message") or payload.get("code") or f"HTTP {resp.status}"
+            except (json.JSONDecodeError, ValueError, AttributeError):
+                msg = f"HTTP {resp.status}"
+            raise NotionError(f"Notion API error on {path}: {msg}", resp.status)
+        try:
+            return json.loads(resp.body)
+        except json.JSONDecodeError:
+            raise NotionError(f"Notion: non-JSON response on {path}", resp.status) from None
     raise NotionError(f"Notion rate limited on {path} (retried once)", 429)
 
 

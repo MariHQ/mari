@@ -3,9 +3,12 @@ tags, tasks, lineage, digest, insights, watches."""
 
 from __future__ import annotations
 
+import concurrent.futures as cf
 import datetime as dt
 import json
 import re
+import time
+import typing as t
 
 import strawberry
 
@@ -64,6 +67,103 @@ def _slug(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", value.strip().lower()).strip("-")[:64]
 
 
+# ————————————————— the corpus scanners —————————————————
+#
+# Both scanners read recent documents through a model and file what they find.
+# Four things about how they do it were wrong, and all four are the same shape
+# of mistake — treating "call the model once per document" as free:
+#
+# FACT-1  Eight documents × one 120-second call each, sequentially, on the
+#         thread serving a GraphQL mutation: up to sixteen minutes of a request
+#         that any proxy in front of it would have given up on. The calls are
+#         independent, so they run concurrently now, on a small bounded pool,
+#         under a wall-clock deadline that ends the scan honestly rather than
+#         letting it run until something else times out.
+#
+# FACT-2  A single per-scan claim budget, consumed in document order, meant the
+#         first documents ate it and the rest were read for nothing — and since
+#         documents were picked newest-first, "the rest" was the same set every
+#         time. The ceiling is now per document, so no document's claims are
+#         dropped because another document went first, and selection rotates on
+#         documents.facts_scanned_at / .decisions_scanned_at (init.sql) so a
+#         document that is never the newest is still eventually read.
+#
+# FACT-3  `f.get(...)` on whatever the model returned. A model that answers
+#         with ["claim one", "claim two"] — a list of strings, which is a
+#         perfectly ordinary thing for a model to do — raised AttributeError
+#         and took the whole mutation down. Guarded now, the way the two
+#         sibling scanners in this file already guarded.
+#
+# FACT-4  The flow's "Read recent documents" step computed a document list that
+#         the scan then ignored in favour of re-running its own query. Both
+#         scanners now take the list they are given, so the step means what its
+#         label says and changing `k` in the flow editor changes the scan.
+
+SCAN_DOCS = 8            # documents read per scan when the caller names none
+CLAIMS_PER_DOC = 2       # ceiling per document — never a shared, racing budget
+SCAN_WORKERS = 4         # concurrent model calls; the pool is bounded on purpose
+SCAN_CALL_TIMEOUT = 60.0  # per model call
+SCAN_DEADLINE = 180.0    # wall clock for the whole scan, however many documents
+
+
+def _scan_batch(column: str, doc_ids: list[int] | None, limit: int) -> list[dict]:
+    """The documents this scan should read.
+
+    With `doc_ids` (a flow step's fetch_docs output) those documents, in the
+    order given. Without, the least-recently-scanned documents first, newest
+    breaking the tie — so every document is reached in turn instead of the two
+    newest being re-read on every scan forever."""
+    if doc_ids:
+        rows = q(f"""SELECT id, title, snippet, body, source, updated_src FROM documents
+                     WHERE id = ANY(%s) ORDER BY {column} NULLS FIRST,
+                                                updated_src DESC NULLS LAST, id""",
+                 (list(doc_ids),))
+        return rows[:limit] if limit else rows
+    return q(f"""SELECT id, title, snippet, body, source, updated_src FROM documents
+                 ORDER BY {column} NULLS FIRST, updated_src DESC NULLS LAST, id
+                 LIMIT %s""", (limit,))
+
+
+def _mark_scanned(column: str, doc_ids: list[int]) -> None:
+    """Record that the scanner read these documents. This is what makes the
+    next scan pick different ones; without it the rotation above is a no-op."""
+    if doc_ids:
+        exec_(f"UPDATE documents SET {column} = now() WHERE id = ANY(%s)", (list(doc_ids),))
+
+
+def _scan_concurrently(docs: list[dict], build_prompt, system: str) -> tuple[list[tuple[dict, t.Any]], int]:
+    """Run one model call per document, at most SCAN_WORKERS at a time, and
+    stop accepting new work once SCAN_DEADLINE has passed.
+
+    Returns (results, unread) — `unread` is how many documents the deadline cut
+    off. The caller reports it. A scan that ran out of time and said so is a
+    scan someone can re-run; a scan that ran out of time and returned a smaller
+    number is indistinguishable from a corpus with less in it."""
+    if not docs:
+        return [], 0
+    results: list[tuple[dict, t.Any]] = []
+    deadline = time.monotonic() + SCAN_DEADLINE
+    with cf.ThreadPoolExecutor(max_workers=min(SCAN_WORKERS, len(docs)),
+                               thread_name_prefix="mari-scan") as pool:
+        futures = {pool.submit(llm.generate_json, build_prompt(d), system,
+                               SCAN_CALL_TIMEOUT): d for d in docs}
+        for future in cf.as_completed(futures):
+            doc = futures[future]
+            try:
+                results.append((doc, future.result()))
+            except Exception:  # noqa: BLE001 — one bad document must not end the scan
+                results.append((doc, None))
+            if time.monotonic() >= deadline:
+                # Stop waiting. Calls already in flight finish into a result
+                # nobody reads, which costs the model's time but not the
+                # caller's; the count below is what the run reports.
+                for pending in futures:
+                    if not pending.done():
+                        pending.cancel()
+                break
+    return results, len(docs) - len(results)
+
+
 # ————————————————— LLM helpers for mutations —————————————————
 
 SKILL_PROMPTS = {
@@ -96,6 +196,128 @@ def llm_refine(doc: dict, skill: str) -> list[tuple[str, str, str]]:
             if isinstance(e, dict) and e.get("original") and e.get("replacement"):
                 edits.append((str(e["original"])[:300], str(e["replacement"])[:300], str(e.get("reason", skill))[:120]))
     return edits or FALLBACK_CHANGES.get(skill, FALLBACK_CHANGES["tighten"])
+
+
+# ——— LLM scanners: mine the doc graph for candidates ———
+#
+# The `*_for` functions are the scan; the mutations are thin wrappers that
+# supply the default document list. The flow steps call the functions with
+# ctx["doc_ids"], which is what makes the flow's fetch_docs step real
+# (FACT-4) — before, the step computed a list and the scan ignored it.
+
+def scan_decisions_for(doc_ids: list[int] | None = None,
+                       limit: int = SCAN_DOCS) -> tuple[int, int, str]:
+    """Mine `doc_ids` (or the least-recently-scanned documents) for
+    decisions. Returns (added, documents read, note) — the note is '' when
+    the scan finished, and says what was left unread when it did not."""
+    docs = _scan_batch("decisions_scanned_at", doc_ids, limit)
+    if not docs:
+        return 0, 0, ""
+    existing = {r["statement"].lower() for r in q("SELECT statement FROM decisions")}
+
+    def prompt_for(d: dict) -> str:
+        text = (d["body"] or d["snippet"] or "").strip()
+        return (
+            f"Team document [{d['source']} · {d['updated_src']}] {d['title']}:\n{text[:1500]}\n\n"
+            "Extract DECISIONS this document records the team making — things chosen, "
+            "changed, or committed to. "
+            'JSON: [{"statement": "declarative one-liner", "context": "1 sentence of why"}]. '
+            f"At most {CLAIMS_PER_DOC}; skip anything that is already obvious policy. "
+            "An empty list is the right answer for a document that records none."
+        )
+
+    results, unread = _scan_concurrently(
+        docs, prompt_for, "You mine team knowledge for decisions worth ratifying.")
+
+    added = 0
+    for doc, out in results:
+        if not isinstance(out, list):
+            continue
+        for item in out[:CLAIMS_PER_DOC]:
+            # FACT-3: a model that answers with a list of strings is not a
+            # crash, it is a model answering in a shape we did not ask for.
+            if not isinstance(item, dict):
+                continue
+            stmt = str(item.get("statement", "")).strip()[:200]
+            if not stmt or stmt.lower() in existing:
+                continue
+            exec_("""INSERT INTO decisions (statement, context, status, source_label, owners)
+                     VALUES (%s, %s, 'proposed', %s, %s) ON CONFLICT (statement) DO NOTHING""",
+                  (stmt, str(item.get("context", ""))[:400],
+                   ("Mari scan · " + doc["title"])[:120], [actor_name()]))
+            existing.add(stmt.lower())
+            added += 1
+
+    _mark_scanned("decisions_scanned_at", [doc["id"] for doc, _ in results])
+    note = (f"{unread} document{'' if unread == 1 else 's'} not read — the scan hit its "
+            f"{int(SCAN_DEADLINE)}s budget; run it again to continue") if unread else ""
+    audit("scanned for decisions", f"{added} candidates from {len(results)} documents"
+                                   + (f" ({note})" if note else ""))
+    return added, len(results), note
+
+def scan_facts_for(doc_ids: list[int] | None = None,
+                   limit: int = SCAN_DOCS) -> tuple[int, int, str]:
+    """Mine `doc_ids` (or the least-recently-scanned documents) for atomic,
+    checkable claims; they land as 'Needs review' facts.
+
+    One document per model call, not one call over a pasted-together
+    corpus. The old shape asked the model which document each claim came
+    from and stored the answer as a text label, which meant the provenance
+    was the model's recollection of a title — good enough to print, not
+    good enough to key on, so Doc Review could never list a document's own
+    claims. Reading one document at a time makes `document_id` a fact about
+    the call rather than a guess about the output.
+
+    Returns (added, documents read, note)."""
+    docs = [d for d in _scan_batch("facts_scanned_at", doc_ids, limit)
+            if (d["body"] or d["snippet"] or "").strip()]
+    if not docs:
+        return 0, 0, ""
+    existing = {r["claim"].lower() for r in q("SELECT claim FROM facts")}
+
+    def prompt_for(d: dict) -> str:
+        text = (d["body"] or d["snippet"] or "").strip()
+        return (
+            f"Team document [{d['source']}] {d['title']}:\n{text[:1500]}\n\n"
+            "Extract atomic, checkable FACTS (numbers, limits, defaults, policies) "
+            "stated by THIS document. "
+            "Write each claim as a plain English sentence a person could agree or disagree with; "
+            "never copy a document's metadata line (PR/issue headers, authors, timestamps, status). "
+            f'JSON: [{{"claim": "one factual sentence"}}]. At most {CLAIMS_PER_DOC}; no opinions. '
+            "An empty list is the right answer for a document that states none."
+        )
+
+    results, unread = _scan_concurrently(
+        docs, prompt_for, "You extract verifiable facts from documentation.")
+
+    # The ceiling is per document (FACT-2). A shared budget meant the first
+    # document's claims displaced the fifth document's, and the fifth
+    # document was read for nothing — silently, since the count it returned
+    # looked exactly like a document that had no claims in it.
+    added = 0
+    for doc, out in results:
+        if not isinstance(out, list):
+            continue
+        for item in out[:CLAIMS_PER_DOC]:
+            if not isinstance(item, dict):  # FACT-3
+                continue
+            claim = str(item.get("claim", "")).strip()[:200]
+            if not is_claim(claim) or claim.lower() in existing:
+                continue
+            # `source` stays the human label it always was; `document_id`
+            # is the key, and it is the document this call actually read.
+            exec_("""INSERT INTO facts (claim, source, owner_name, owner_tint, status, verified, document_id)
+                     VALUES (%s, %s, %s, 1, 'Needs review', '—', %s) ON CONFLICT (claim) DO NOTHING""",
+                  (claim, ("Mari scan · " + doc["title"])[:80], actor_name(), doc["id"]))
+            existing.add(claim.lower())
+            added += 1
+
+    _mark_scanned("facts_scanned_at", [doc["id"] for doc, _ in results])
+    note = (f"{unread} document{'' if unread == 1 else 's'} not read — the scan hit its "
+            f"{int(SCAN_DEADLINE)}s budget; run it again to continue") if unread else ""
+    audit("scanned for facts", f"{added} candidates from {len(results)} documents"
+                               + (f" ({note})" if note else ""))
+    return added, len(results), note
 
 
 @strawberry.type
@@ -678,86 +900,22 @@ class MutKnowledge:
             exec_("DELETE FROM glossary WHERE id = %s AND candidate", (id,))
         return True
 
-    # ——— LLM scanners: mine the doc graph (recency-ordered) for candidates ———
     @strawberry.mutation
     def scan_decisions(self) -> int:
-        """LLM reads recent documents (+ their graph neighbors) and proposes
-        decision candidates, inserted as 'proposed' for human ratification."""
-        docs = q("""SELECT d.title, d.snippet, d.body, d.source, d.updated_src FROM documents d
-                    ORDER BY d.updated_src DESC NULLS LAST LIMIT 8""")
-        existing = {r["statement"] for r in q("SELECT statement FROM decisions")}
-        corpus = "\n".join(f"[{d['source']} · {d['updated_src']}] {d['title']}: {(d['body'] or d['snippet'])[:300]}"
-                            for d in docs)
-        prompt = (
-            f"Recent team documents (newest first):\n{corpus}\n\n"
-            "Extract DECISIONS the team appears to have made (things chosen, changed, or committed to). "
-            'JSON: [{"statement": "declarative one-liner", "context": "1 sentence of why", '
-            '"source_label": "which doc it came from"}]. At most 3; skip anything already obvious policy.'
-        )
-        out = llm.generate_json(prompt, system="You mine team knowledge for decisions worth ratifying.")
-        added = 0
-        if isinstance(out, list):
-            for d in out[:3]:
-                stmt = str(d.get("statement", ""))[:200]
-                if stmt and stmt not in existing:
-                    exec_("""INSERT INTO decisions (statement, context, status, source_label, owners)
-                             VALUES (%s, %s, 'proposed', %s, %s) ON CONFLICT (statement) DO NOTHING""",
-                          (stmt, str(d.get("context", ""))[:400],
-                           ("Mari scan · " + str(d.get("source_label", "doc graph")))[:120], [actor_name()]))
-                    added += 1
-        audit("scanned for decisions", f"{added} candidates")
-        return added
+        """Mine recent documents for decisions, inserted as 'proposed' for human
+        ratification. Answers with how many were added.
+
+        Prefer `startDecisionScan`, which runs the same scan as a background run
+        with a progress reading and a history. This one is bounded — concurrent
+        calls under a wall-clock deadline — but it is still model work on a
+        request thread, and a slow model still makes it a slow request."""
+        return scan_decisions_for()[0]
 
     @strawberry.mutation
     def scan_facts(self) -> int:
-        """LLM extracts atomic, checkable claims from recent documents; lands
-        as 'Needs review' facts for verification.
-
-        One document per model call, not one call over a pasted-together
-        corpus. The old shape asked the model which document each claim came
-        from and stored the answer as a text label, which meant the provenance
-        was the model's recollection of a title — good enough to print, not
-        good enough to key on, so Doc Review could never list a document's own
-        claims. Reading one document at a time makes `document_id` a fact about
-        the call rather than a guess about the output.
-        """
-        docs = q("""SELECT id, title, snippet, body, source FROM documents
-                    ORDER BY updated_src DESC NULLS LAST LIMIT 8""")
-        existing = {r["claim"].lower() for r in q("SELECT claim FROM facts")}
-        added = 0
-        for d in docs:
-            if added >= 4:  # the same per-scan ceiling the single-call version had
-                break
-            text = (d["body"] or d["snippet"] or "").strip()
-            if not text:
-                continue
-            prompt = (
-                f"Team document [{d['source']}] {d['title']}:\n{text[:1500]}\n\n"
-                "Extract atomic, checkable FACTS (numbers, limits, defaults, policies) "
-                "stated by THIS document. "
-                "Write each claim as a plain English sentence a person could agree or disagree with; "
-                "never copy a document's metadata line (PR/issue headers, authors, timestamps, status). "
-                'JSON: [{"claim": "one factual sentence"}]. At most 2; no opinions. '
-                "An empty list is the right answer for a document that states none."
-            )
-            out = llm.generate_json(prompt, system="You extract verifiable facts from documentation.")
-            if not isinstance(out, list):
-                continue
-            for f in out[:2]:
-                claim = str(f.get("claim", ""))[:200]
-                if not is_claim(claim) or claim.lower() in existing:
-                    continue
-                # `source` stays the human label it always was; `document_id`
-                # is the key, and it is the document this call actually read.
-                exec_("""INSERT INTO facts (claim, source, owner_name, owner_tint, status, verified, document_id)
-                         VALUES (%s, %s, %s, 1, 'Needs review', '—', %s) ON CONFLICT (claim) DO NOTHING""",
-                      (claim, ("Mari scan · " + d["title"])[:80], actor_name(), d["id"]))
-                existing.add(claim.lower())
-                added += 1
-                if added >= 4:
-                    break
-        audit("scanned for facts", f"{added} candidates")
-        return added
+        """Mine recent documents for checkable claims. Answers with how many
+        were added. Prefer `startFactScan` — see scan_decisions."""
+        return scan_facts_for()[0]
 
     @strawberry.mutation
     def start_fact_scan(self) -> int:

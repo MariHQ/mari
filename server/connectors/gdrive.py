@@ -11,9 +11,9 @@ Standalone-importable; all raw HTTP goes through _http() (patchable in tests).
 """
 
 import json
-import urllib.error
 import urllib.parse
-import urllib.request
+
+from . import _net
 
 API = "https://www.googleapis.com/drive/v3"
 
@@ -54,19 +54,34 @@ _PAGE_SIZE = 100
 
 
 def _http(method, url, headers=None, body=None, timeout=30):
-    """All raw HTTP for this connector. Returns (status, bytes)."""
-    req = urllib.request.Request(url, data=body, headers=headers or {}, method=method)
+    """All raw HTTP for this connector. Returns (status, bytes).
+
+    Routed through the shared SSRF guard (AUTH-11): http/https only, no
+    private/loopback/link-local target, every redirect hop re-checked, and the
+    Authorization header dropped if a redirect crosses to another origin."""
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.getcode(), resp.read()
-    except urllib.error.HTTPError as e:
-        return e.code, e.read()
-    except urllib.error.URLError as e:
-        raise ConnectionError(f"Google Drive: network error: {e.reason}")
+        resp = _net.fetch(url, method=method, headers=headers or {}, data=body,
+                          timeout=timeout)
+        return resp.status, resp.body
+    except _net.Blocked as e:
+        raise ConnectionError(f"Google Drive: refused to fetch {url} — {e}") from None
+    except _net.NetworkError as e:
+        raise ConnectionError(f"Google Drive: network error: {e}") from None
 
 
 def _headers(config):
     return {"Authorization": f"Bearer {config.get('access_token', '')}"}
+
+
+def _q_literal(value):
+    """Escape a value for a Drive `q=` string literal (SQL-2).
+
+    Drive's search grammar quotes literals with ' and escapes with a backslash.
+    Unescaped, a folder_id containing ' closes the literal and the rest of the
+    field becomes query syntax — dropping `trashed = false` and the MIME filter,
+    so the sync pulls files the user never scoped it to. Backslash first, then
+    the quote, or the escape itself gets escaped twice."""
+    return str(value).replace("\\", "\\\\").replace("'", "\\'")
 
 
 def _vendor_error(status, raw):
@@ -87,7 +102,7 @@ def validate(config):
 
 
 def _fetch_body(config, f):
-    fid, mime = f["id"], f.get("mimeType", "")
+    fid, mime = urllib.parse.quote(str(f["id"]), safe=""), f.get("mimeType", "")
     if mime == _DOC_MIME:
         url = f"{API}/files/{fid}/export?mimeType=text%2Fplain"
     else:
@@ -106,9 +121,9 @@ def list_items(config, cursor):
     ]
     folder = (config.get("folder_id") or "").strip()
     if folder:
-        q_parts.append(f"'{folder}' in parents")
+        q_parts.append(f"'{_q_literal(folder)}' in parents")
     if cursor:
-        q_parts.append(f"modifiedTime > '{cursor}'")
+        q_parts.append(f"modifiedTime > '{_q_literal(cursor)}'")
     q = " and ".join(q_parts)
 
     files, page_token = [], None

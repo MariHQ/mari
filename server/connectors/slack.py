@@ -17,9 +17,9 @@ import datetime
 import json
 import re
 import time
-import urllib.error
 import urllib.parse
-import urllib.request
+
+from . import _net
 
 PROVIDER = {
     "key": "slack",
@@ -54,27 +54,33 @@ class SlackError(Exception):
 def _api(method: str, token: str, params: dict | None = None) -> dict:
     """POST a Slack Web API method (form-encoded). One retry on 429."""
     data = urllib.parse.urlencode(params or {}).encode()
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/x-www-form-urlencoded",
+        "User-Agent": UA,
+    }
     for attempt in (0, 1):
-        req = urllib.request.Request(f"{API}/{method}", data=data, headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/x-www-form-urlencoded",
-            "User-Agent": UA,
-        })
+        # Through the shared SSRF guard (AUTH-11), like every connector.
         try:
-            with urllib.request.urlopen(req, timeout=30.0) as resp:
-                return json.loads(resp.read())
-        except urllib.error.HTTPError as e:
-            if e.code == 429 and attempt == 0:
-                try:
-                    wait = min(float(e.headers.get("Retry-After") or 1), 30.0)
-                except ValueError:
-                    wait = 1.0
-                time.sleep(wait)
-                continue
-            raise SlackError(f"Slack API HTTP {e.code} on {method}", e.code) from None
-        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as e:
-            raise SlackError(
-                f"Slack unreachable: {getattr(e, 'reason', e).__class__.__name__}", 0) from None
+            resp = _net.fetch(f"{API}/{method}", method="POST", data=data,
+                              headers=headers, timeout=30.0)
+        except _net.Blocked as e:
+            raise SlackError(f"Slack: refused to fetch {API}/{method} — {e}", 0) from None
+        except _net.NetworkError as e:
+            raise SlackError(f"Slack unreachable: {e}", 0) from None
+        if resp.status == 429 and attempt == 0:
+            try:
+                wait = min(float(_net.header(resp.headers, "Retry-After") or 1), 30.0)
+            except ValueError:
+                wait = 1.0
+            time.sleep(wait)
+            continue
+        if resp.status >= 400:
+            raise SlackError(f"Slack API HTTP {resp.status} on {method}", resp.status)
+        try:
+            return json.loads(resp.body)
+        except json.JSONDecodeError:
+            raise SlackError(f"Slack: non-JSON response on {method}", resp.status) from None
     raise SlackError(f"Slack rate limited on {method} (retried once)", 429)
 
 

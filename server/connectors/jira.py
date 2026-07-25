@@ -10,9 +10,9 @@ from __future__ import annotations
 import base64
 import json
 import re
-import urllib.error
 import urllib.parse
-import urllib.request
+
+from . import _net
 
 PROVIDER = {
     "key": "jira",
@@ -59,15 +59,18 @@ def _auth_header(config: dict) -> str:
 
 
 def _http(url: str, headers: dict) -> tuple[int, bytes]:
-    """The one raw HTTP call — tests monkeypatch this. Returns (status, body)."""
-    req = urllib.request.Request(url, headers=headers)
+    """The one raw HTTP call — tests monkeypatch this. Returns (status, body).
+
+    Goes through the shared SSRF guard: the site URL is user-supplied, so the
+    scheme allowlist, the private-address check and the per-redirect re-check
+    all apply (AUTH-11)."""
     try:
-        with urllib.request.urlopen(req, timeout=30.0) as resp:
-            return resp.status, resp.read()
-    except urllib.error.HTTPError as e:
-        return e.code, e.read()
-    except (urllib.error.URLError, TimeoutError) as e:
-        raise JiraError(f"Jira unreachable: {getattr(e, 'reason', e)}", 0) from None
+        resp = _net.fetch(url, headers=headers, timeout=30.0)
+        return resp.status, resp.body
+    except _net.Blocked as e:
+        raise JiraError(f"Jira: refused to fetch {url} — {e}", 0) from None
+    except _net.NetworkError as e:
+        raise JiraError(f"Jira unreachable: {e}", 0) from None
 
 
 def _get(config: dict, path: str, params: dict | None = None) -> dict:

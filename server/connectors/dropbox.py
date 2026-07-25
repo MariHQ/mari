@@ -8,8 +8,8 @@ Standalone-importable; all raw HTTP goes through _http() (patchable in tests).
 """
 
 import json
-import urllib.error
-import urllib.request
+
+from . import _net
 
 API = "https://api.dropboxapi.com/2"
 CONTENT_API = "https://content.dropboxapi.com/2"
@@ -42,15 +42,19 @@ _MAX_BYTES = 1024 * 1024
 
 
 def _http(method, url, headers=None, body=None, timeout=60):
-    """All raw HTTP for this connector. Returns (status, bytes)."""
-    req = urllib.request.Request(url, data=body, headers=headers or {}, method=method)
+    """All raw HTTP for this connector. Returns (status, bytes).
+
+    Routed through the shared SSRF guard (AUTH-11): http/https only, no
+    private/loopback/link-local target, every redirect hop re-checked, and the
+    Authorization header dropped if a redirect crosses to another origin."""
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.getcode(), resp.read()
-    except urllib.error.HTTPError as e:
-        return e.code, e.read()
-    except urllib.error.URLError as e:
-        raise ConnectionError(f"Dropbox: network error: {e.reason}")
+        resp = _net.fetch(url, method=method, headers=headers or {}, data=body,
+                          timeout=timeout)
+        return resp.status, resp.body
+    except _net.Blocked as e:
+        raise ConnectionError(f"Dropbox: refused to fetch {url} — {e}") from None
+    except _net.NetworkError as e:
+        raise ConnectionError(f"Dropbox: network error: {e}") from None
 
 
 def _vendor_error(status, raw):

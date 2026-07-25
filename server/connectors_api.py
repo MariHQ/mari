@@ -13,6 +13,8 @@ Secrets live in sources.config jsonb and are never returned by any endpoint.
 from __future__ import annotations
 
 import json
+import logging
+import re
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
@@ -103,6 +105,57 @@ def catalog() -> list[dict]:
     return head + tail
 
 
+# ——— what a failed validate is allowed to say ———
+#
+# The user needs the real reason ("Bad credentials", "Repository not found",
+# "Help Center is not enabled") — the console shows this string verbatim, and
+# flattening it to a house apology would make the connect flow unusable. But
+# connector modules quote the vendor's own response body into that message
+# (`_vendor_error` in dropbox/gdrive/airtable/trello, jira's `errorMessages`),
+# and the vendor is whatever host the caller named. So the message is passed
+# through, scrubbed, never echoed raw (AUTH-11):
+#
+#   * control characters and newlines collapse to single spaces — no terminal
+#     escapes, no log forging, no multi-line payload;
+#   * anything that looks like markup is replaced wholesale, so an arbitrary
+#     host's HTML/JS/XML never lands in a console string;
+#   * 300-character cap — enough for a real vendor message, not a data channel.
+#
+# The SSRF guard is what stops the port scanner; this stops the reflection.
+
+_ERR_CAP = 300
+_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]+")
+_MARKUP_RE = re.compile(r"<\s*(?:!|/|\?|%|[a-zA-Z][\w:-]*(?:\s|/?>))")
+
+log = logging.getLogger(__name__)
+
+
+def _clean_error(text: str) -> str:
+    """A vendor/connector message, safe to hand back to the caller."""
+    text = _CONTROL_RE.sub(" ", str(text))
+    text = re.sub(r"\s+", " ", text).strip()
+    if _MARKUP_RE.search(text):
+        return ("The host answered with a web page, not an API response — check "
+                "the URL points at the API and not at a login or proxy page.")
+    return text[:_ERR_CAP] + "…" if len(text) > _ERR_CAP else text
+
+
+def _error_for(provider: str, e: Exception) -> str:
+    """Turn a raised exception into the string the user sees.
+
+    A connector's own exception type carries a message we wrote and the vendor
+    detail the user needs, so it is scrubbed and shown. Anything else is a bug
+    in the connector, not something the user can fix: the type is named (so the
+    report is actionable) and the full traceback goes to the server log."""
+    authored = (type(e).__module__ or "").startswith("connectors") or isinstance(
+        e, (ValueError, RuntimeError, ConnectionError, TimeoutError))
+    if authored:
+        return _clean_error(e) or f"{type(e).__name__} from the {provider} connector"
+    log.exception("connector '%s' validate() crashed", provider)
+    return (f"The {provider} connector crashed while checking the connection "
+            f"({type(e).__name__}) — this is a bug; the details are in the server log.")
+
+
 @router.post("/validate", dependencies=_admin)
 def validate(body: ProviderIn) -> dict:
     entry = connectors.REGISTRY.get(body.provider)
@@ -114,8 +167,8 @@ def validate(body: ProviderIn) -> dict:
     try:
         err = entry["validate"](body.config or {})
     except Exception as e:  # noqa: BLE001 — an honest error beats a 500
-        err = f"{type(e).__name__}: {e}"
-    return {"ok": err is None, "error": str(err) if err else ""}
+        err = _error_for(body.provider, e)
+    return {"ok": err is None, "error": _clean_error(err) if err else ""}
 
 
 def _qualifier(provider: dict, config: dict) -> str:

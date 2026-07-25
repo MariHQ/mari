@@ -8,6 +8,7 @@
 import type { SettingsDesignData } from "@mari-design/components/pages/SettingsDesignPage";
 import type { Branding, BrandHarvest, BrandPreviewStat } from "@mari-design/components/features/BrandingEditor";
 import type { PropertyItem } from "@mari-design/components/data-display/PropertyList";
+import { useMemo } from "react";
 import { useQuery } from "../lib/api";
 import type { PageData } from "./types";
 
@@ -66,8 +67,15 @@ function safeParse(s: string): unknown {
 
 export function useSettingsDesign(): PageData<SettingsDesignData> {
   const q = useQuery<Res>(QUERY);
+  /* Memoised on the raw answer, which `useQuery` holds in state and so keeps
+     referentially stable. Without this, `buildSettingsDesign` minted a fresh
+     `branding` object on every render — and `BrandingEditor`'s resync sentinel
+     compares identity, so it would have adopted "new" branding on every
+     keystroke and thrown away the brand the reader was in the middle of
+     editing (C1). */
+  const data = useMemo(() => buildSettingsDesign(q.data), [q.data]);
   return {
-    data: buildSettingsDesign(q.data),
+    data,
     loading: q.loading,
     // `q.error` is a boolean; the page wants the message, with a floor for a
     // failure that carried none.

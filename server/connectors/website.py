@@ -2,12 +2,12 @@
 
 Crawls a public site from a start URL: sitemap.xml when present, otherwise a
 same-origin BFS over links. HTML is reduced to markdown-ish text (headings
-kept as #). Standalone: stdlib only, no framework imports.
+kept as #). Stdlib plus the shared SSRF guard.
 
-SSRF guard (copied in the style of brandimport.py, kept local so the module is
-standalone): only http(s); the hostname is resolved and EVERY address checked
-against private/loopback/link-local/reserved ranges; every redirect hop is
-re-validated; the ACTUAL connected peer IP is re-checked after connect (no
+SSRF guard: server/nethttp.py — the single implementation this module used to
+carry its own copy of. Only http(s); the hostname is resolved and EVERY address
+checked against private/loopback/link-local/reserved ranges; every redirect hop
+is re-validated; the ACTUAL connected peer IP is re-checked after connect (no
 DNS-rebinding TOCTOU). Dev override: MARI_CRAWL_ALLOW_LOOPBACK=1 permits loopback only
 (so a local dev site can be crawled) — link-local (cloud metadata, e.g.
 169.254.169.254) and private ranges are ALWAYS refused.
@@ -26,14 +26,11 @@ import datetime
 import email.utils
 import hashlib
 import html as html_mod
-import http.client
-import ipaddress
 import os
 import re
-import socket
-import urllib.error
 import urllib.parse
-import urllib.request
+
+from . import _net
 
 PROVIDER = {
     "key": "website",
@@ -51,7 +48,6 @@ UA = "Mozilla/5.0 (compatible; MariCloud-WebsiteConnector/1.0)"
 MAX_PAGES = 200
 PAGE_CAP = 1024 * 1024          # 1MB/page
 PAGE_TIMEOUT = 8.0              # 8s/page
-MAX_REDIRECTS = 5
 
 _SKIP_EXT = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".ico", ".css", ".js",
              ".mjs", ".json", ".xml", ".pdf", ".zip", ".gz", ".tar", ".mp4", ".mp3",
@@ -63,80 +59,20 @@ class WebsiteError(Exception):
 
 
 # ————— SSRF-guarded fetching —————
+#
+# The guard itself lives in server/nethttp.py — one implementation, shared with
+# every connector and with brand import. This module only decides the policy it
+# runs under: MARI_CRAWL_ALLOW_LOOPBACK=1 permits loopback ONLY (so a local dev
+# site can be crawled). Link-local (cloud metadata, e.g. 169.254.169.254),
+# private and reserved ranges are refused with or without the override.
 
-def _ip_error(ip_str: str) -> str | None:
-    """Error string if this IP must not be contacted, else None. Honors the
-    MARI_CRAWL_ALLOW_LOOPBACK dev override (loopback ONLY — link-local,
-    private, and reserved ranges are ALWAYS refused)."""
-    ip = ipaddress.ip_address(ip_str.split("%")[0])  # strip IPv6 scope id
-    if ip.is_loopback and os.environ.get("MARI_CRAWL_ALLOW_LOOPBACK") == "1":
-        return None  # dev override — loopback ONLY; everything below still applies
-    if (ip.is_private or ip.is_loopback or ip.is_link_local
-            or ip.is_reserved or ip.is_multicast or ip.is_unspecified):
-        return "private/loopback address — refused"
-    return None
+def _allow_loopback() -> bool:
+    return os.environ.get("MARI_CRAWL_ALLOW_LOOPBACK") == "1"
 
 
 def _check_url(url: str) -> str | None:
     """Return an error string if the URL must not be fetched, else None."""
-    try:
-        p = urllib.parse.urlparse(url)
-    except ValueError:
-        return "unparseable URL"
-    if p.scheme not in ("http", "https"):
-        return f"scheme '{p.scheme}' not allowed (http/https only)"
-    host = p.hostname
-    if not host:
-        return "no hostname"
-    try:
-        infos = socket.getaddrinfo(host, p.port or (443 if p.scheme == "https" else 80),
-                                   proto=socket.IPPROTO_TCP)
-    except socket.gaierror:
-        return f"cannot resolve host '{host}'"
-    for info in infos:
-        if _ip_error(info[4][0]):
-            return f"host '{host}' resolves to a private/loopback address — refused"
-    return None
-
-
-# DNS-rebinding guard: _check_url validates one resolution, but the connection
-# re-resolves — so re-check the ACTUAL connected peer (getpeername) before any
-# request bytes are sent. Certificate validation is untouched (the standard
-# connect path does resolution + TLS with server_hostname as usual).
-
-def _verify_peer(sock: socket.socket) -> None:
-    peer = sock.getpeername()[0]
-    err = _ip_error(peer)
-    if err:
-        sock.close()
-        raise OSError(f"connected peer {peer} is a {err}")
-
-
-class _PinnedHTTPConnection(http.client.HTTPConnection):
-    def connect(self):  # noqa: D102
-        super().connect()
-        _verify_peer(self.sock)
-
-
-class _PinnedHTTPSConnection(http.client.HTTPSConnection):
-    def connect(self):  # noqa: D102
-        super().connect()
-        _verify_peer(self.sock)
-
-
-class _PinnedHTTPHandler(urllib.request.HTTPHandler):
-    def http_open(self, req):  # noqa: D102
-        return self.do_open(_PinnedHTTPConnection, req)
-
-
-class _PinnedHTTPSHandler(urllib.request.HTTPSHandler):
-    def https_open(self, req):  # noqa: D102
-        return self.do_open(_PinnedHTTPSConnection, req, context=self._context)
-
-
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D102
-        return None
+    return _net.check_url(url, allow_loopback=_allow_loopback())
 
 
 def _fetch(url: str, extra_headers: dict | None = None,
@@ -146,42 +82,19 @@ def _fetch(url: str, extra_headers: dict | None = None,
     Returns (status, body_bytes, headers_dict, final_url) — status 200 or 304 —
     or an error string. Kept as ONE function so tests can monkeypatch it.
     """
-    for _ in range(MAX_REDIRECTS + 1):
-        err = _check_url(url)
-        if err:
-            return err
-        headers = {"User-Agent": UA, "Accept": "text/html,application/xhtml+xml,*/*"}
-        if extra_headers:
-            headers.update(extra_headers)
-        req = urllib.request.Request(url, headers=headers)
-        opener = urllib.request.build_opener(_NoRedirect(), _PinnedHTTPHandler(),
-                                             _PinnedHTTPSHandler())
-        try:
-            with opener.open(req, timeout=timeout) as resp:
-                if resp.status in (301, 302, 303, 307, 308):
-                    loc = resp.headers.get("Location")
-                    if not loc:
-                        return "redirect without Location"
-                    url = urllib.parse.urljoin(url, loc)
-                    continue
-                if resp.status == 304:
-                    return 304, b"", dict(resp.headers), url
-                if resp.status != 200:
-                    return f"HTTP {resp.status}"
-                body = resp.read(cap + 1)
-                if len(body) > cap:
-                    body = body[:cap]
-                return 200, body, dict(resp.headers), url
-        except urllib.error.HTTPError as e:
-            if e.code in (301, 302, 303, 307, 308) and e.headers.get("Location"):
-                url = urllib.parse.urljoin(url, e.headers["Location"])
-                continue
-            if e.code == 304:
-                return 304, b"", dict(e.headers), url
-            return f"HTTP {e.code}"
-        except (urllib.error.URLError, TimeoutError, socket.timeout, OSError, ValueError) as e:
-            return f"fetch failed: {getattr(e, 'reason', e)}"
-    return "too many redirects"
+    headers = {"Accept": "text/html,application/xhtml+xml,*/*"}
+    if extra_headers:
+        headers.update(extra_headers)
+    try:
+        resp = _net.fetch(url, headers=headers, timeout=timeout, cap=cap,
+                          allow_loopback=_allow_loopback(), user_agent=UA)
+    except _net.Blocked as e:
+        return str(e)
+    except _net.NetworkError as e:
+        return f"fetch failed: {e}"
+    if resp.status in (200, 304):
+        return resp.status, resp.body, resp.headers, resp.url
+    return f"HTTP {resp.status}"
 
 
 # ————— html → text —————

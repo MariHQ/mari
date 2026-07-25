@@ -279,6 +279,22 @@ def _sync_worker(source_id: int, full: bool) -> dict:
                     checkpoint("embedded", done, total, head[:7], "running")
             stats["skipped"] += len(wanted) - len(changed)
 
+            # Every item's stored content hash, in one round trip (SQL-4).
+            # The loops below used to issue a SELECT per issue, per PR and per
+            # commit to ask "did this change?" — roughly 5,000 round trips on a
+            # busy repo, to answer a question one query answers. The file loop
+            # above never had this problem because it already keeps the same
+            # map in the source config (`cfg['shas']`); the item loops just
+            # never got the same treatment.
+            item_hashes = {
+                r["external_id"]: r["content_hash"]
+                for r in conn.execute(
+                    """SELECT external_id, content_hash FROM documents
+                       WHERE source_id = %s
+                         AND (source_path LIKE 'issues/%%' OR source_path LIKE 'pulls/%%'
+                              OR source_path LIKE 'commits/%%')""",
+                    (source_id,)).fetchall()}
+
             # —— items: issues / PRs (+ comments) ——
             for issue in issues:
                 _set(source_id, phase="fetching", done=done)
@@ -300,10 +316,8 @@ def _sync_worker(source_id: int, full: bool) -> dict:
                 body = "\n\n".join(p for p in parts if p)
                 h = _sha(body)
                 path = f"{'pulls' if kind == 'pr' else 'issues'}/{number}"
-                prev = conn.execute("SELECT content_hash FROM documents WHERE source = 'github' AND external_id = %s",
-                                    (f"gh:{repo}:{path}",)).fetchone()
                 done += 1
-                if prev and prev["content_hash"] == h:
+                if item_hashes.get(f"gh:{repo}:{path}") == h:
                     stats["skipped"] += 1
                     _set(source_id, done=done)
                     continue
@@ -326,10 +340,8 @@ def _sync_worker(source_id: int, full: bool) -> dict:
                 body = f"# {title}\n\ncommit {sha[:12]} · {author} · {c['commit']['author'].get('date', '')}\n\n{msg}"
                 h = _sha(body)
                 path = f"commits/{sha[:12]}"
-                prev = conn.execute("SELECT content_hash FROM documents WHERE source = 'github' AND external_id = %s",
-                                    (f"gh:{repo}:{path}",)).fetchone()
                 done += 1
-                if prev and prev["content_hash"] == h:
+                if item_hashes.get(f"gh:{repo}:{path}") == h:
                     stats["skipped"] += 1
                     _set(source_id, done=done)
                     continue

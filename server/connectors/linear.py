@@ -8,8 +8,8 @@ The single raw HTTP call lives in `_http` so tests can monkeypatch it.
 from __future__ import annotations
 
 import json
-import urllib.error
-import urllib.request
+
+from . import _net
 
 PROVIDER = {
     "key": "linear",
@@ -54,15 +54,17 @@ class LinearError(Exception):
 
 
 def _http(url: str, payload: bytes, headers: dict) -> tuple[int, bytes]:
-    """The one raw HTTP call — tests monkeypatch this. Returns (status, body)."""
-    req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
+    """The one raw HTTP call — tests monkeypatch this. Returns (status, body).
+
+    Through the shared SSRF guard (AUTH-11) like every other connector: the
+    endpoint is fixed here, but the guard is what keeps it that way."""
     try:
-        with urllib.request.urlopen(req, timeout=30.0) as resp:
-            return resp.status, resp.read()
-    except urllib.error.HTTPError as e:
-        return e.code, e.read()
-    except (urllib.error.URLError, TimeoutError) as e:
-        raise LinearError(f"Linear unreachable: {getattr(e, 'reason', e)}", 0) from None
+        resp = _net.fetch(url, method="POST", data=payload, headers=headers, timeout=30.0)
+        return resp.status, resp.body
+    except _net.Blocked as e:
+        raise LinearError(f"Linear: refused to fetch {url} — {e}", 0) from None
+    except _net.NetworkError as e:
+        raise LinearError(f"Linear unreachable: {e}", 0) from None
 
 
 def _graphql(config: dict, query: str, variables: dict | None = None) -> dict:

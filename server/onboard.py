@@ -12,8 +12,10 @@ POST /onboard/glossary-harvest  LLM (ollama JSON mode) proposes glossary candida
 
 from __future__ import annotations
 
+import concurrent.futures as cf
 import json
 import re
+import time
 
 import psycopg
 from fastapi import APIRouter, File, HTTPException, UploadFile
@@ -142,9 +144,30 @@ HARVEST_SYSTEM = (
 _BATCH = 4          # docs per LLM call
 _EXCERPT = 1500     # chars of body per doc
 
+# FLOW-8: `limit` defaults to 15 and accepts up to 50, so at 4 documents per
+# call this made up to 13 model calls — sequentially, at the 120-second default
+# timeout, inside one HTTP request. Twenty-six minutes, on a POST the browser
+# gave up on long before.
+#
+# The calls are independent (each reads its own batch of documents), so they run
+# concurrently on a small bounded pool, each with its own shorter timeout, under
+# a wall-clock deadline for the whole endpoint. The response says which batches
+# were read, so a harvest that hit the deadline is a harvest someone can re-run
+# knowing that — not a shorter list of candidates that looks like a thin corpus.
+_HARVEST_WORKERS = 4
+_HARVEST_CALL_TIMEOUT = 45.0
+_HARVEST_DEADLINE = 90.0
+
 
 def _harvest_docs(source_id: int | None, limit: int) -> list[dict]:
-    """Most-connected, then most-recent, page documents (optionally one source)."""
+    """Most-connected, then most-recent, page documents (optionally one source).
+
+    The degree used to be a correlated `count(*)` over `edges` evaluated once
+    per document, and because the ORDER BY sorts on it, the LIMIT could not push
+    down: every page document paid a full edge scan before the first row was
+    discarded (SQL-4). `degree` aggregates the edge table once, in a single pass
+    over both endpoints, and joins in. A document nothing links to is absent
+    from it and coalesces to 0 — the same answer count(*) gave it."""
     where = "d.kind = 'page' AND d.body <> ''"
     args: list = []
     if source_id is not None:
@@ -153,9 +176,16 @@ def _harvest_docs(source_id: int | None, limit: int) -> list[dict]:
     args.append(limit)
     with _conn() as conn:
         return conn.execute(f"""
-            SELECT d.id, d.title, d.body,
-                   (SELECT count(*) FROM edges e WHERE e.from_doc = d.id OR e.to_doc = d.id) AS degree
+            WITH degree AS (
+              SELECT doc, count(*) AS n FROM (
+                SELECT from_doc AS doc FROM edges
+                UNION ALL
+                SELECT to_doc AS doc FROM edges
+              ) x GROUP BY doc
+            )
+            SELECT d.id, d.title, d.body, coalesce(g.n, 0) AS degree
             FROM documents d
+            LEFT JOIN degree g ON g.doc = d.id
             WHERE {where}
             ORDER BY degree DESC, d.updated_src DESC NULLS LAST, d.id DESC
             LIMIT %s""", tuple(args)).fetchall()
@@ -187,7 +217,7 @@ def _llm_batch(docs: list[dict]) -> list[dict] | None:
         f'  "evidence": the exact title of the document it came from (one of {json.dumps(titles)}).\n'
         "Skip generic words. Return a JSON array."
     )
-    out = llm.generate_json(prompt, HARVEST_SYSTEM)
+    out = llm.generate_json(prompt, HARVEST_SYSTEM, _HARVEST_CALL_TIMEOUT)
     return out if isinstance(out, list) else None
 
 
@@ -264,19 +294,39 @@ def glossary_harvest(body: HarvestIn):
         seen.add(key)
         candidates.append(c)
 
-    for i in range(0, len(docs), _BATCH):
-        batch = docs[i:i + _BATCH]
-        raw = _llm_batch(batch)
-        if raw is None:
-            continue
-        llm_ok = True
-        for cand in raw[:12]:
-            v = _validate(cand, batch)
-            if v:
-                keep(v)
+    batches = [docs[i:i + _BATCH] for i in range(0, len(docs), _BATCH)]
+    read = 0
+    deadline = time.monotonic() + _HARVEST_DEADLINE
+    with cf.ThreadPoolExecutor(max_workers=min(_HARVEST_WORKERS, len(batches)),
+                               thread_name_prefix="mari-harvest") as pool:
+        futures = {pool.submit(_llm_batch, batch): batch for batch in batches}
+        for future in cf.as_completed(futures):
+            batch = futures[future]
+            read += 1
+            try:
+                raw = future.result()
+            except Exception:  # noqa: BLE001 — one bad batch is not a failed harvest
+                raw = None
+            if raw is None:
+                continue
+            llm_ok = True
+            for cand in raw[:12]:
+                v = _validate(cand, batch)
+                if v:
+                    keep(v)
+            if time.monotonic() >= deadline:
+                for pending in futures:
+                    if not pending.done():
+                        pending.cancel()
+                break
 
     if not llm_ok:  # ollama down → deterministic fallback, honestly flagged
         for c in _fallback(docs):
             keep(c)
-        return {"candidates": candidates[:25], "llm": False}
-    return {"candidates": candidates[:25], "llm": True}
+        return {"candidates": candidates[:25], "llm": False,
+                "documentsRead": 0, "documentsTotal": len(docs)}
+    # documentsRead vs documentsTotal is how the caller can tell a corpus with
+    # few terms in it from a harvest the deadline cut short.
+    return {"candidates": candidates[:25], "llm": True,
+            "documentsRead": sum(len(b) for b in batches[:read]),
+            "documentsTotal": len(docs)}

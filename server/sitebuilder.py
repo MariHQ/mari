@@ -47,6 +47,59 @@ FEATURE_DEFAULTS = {"sidebar": True, "search": True, "customizer": True,
                     "provenance": True, "source_path": False}
 
 
+# ——— theme values are attacker-reachable; nothing here reaches a template raw ———
+#
+# sites.theme is written by updateSiteTheme (a user-supplied JSON blob) and by
+# aiCustomizeSite (LLM output). Built sites are served from /sites on the same
+# origin as /graphql, so a value that escapes a CSS declaration or an HTML
+# attribute here reaches the console session cookie (AUTH-12). mutations_publish
+# validates on the way in; these validate on the way out, because the row may
+# predate that check, may come from a preset row an operator edited, and because
+# a generator should not depend on its callers to be safe.
+
+DENSITIES = {"comfortable", "compact", "dense"}
+MODES = {"light", "dark"}
+DEFAULT_ACCENT = "#b04e2c"
+
+# #rgb / #rgba / #rrggbb / #rrggbbaa, the functional forms with numeric-only
+# arguments, and bare CSS colour keywords. No url(), no var(), no ; or }.
+_COLOR_RE = re.compile(
+    r"^(?:#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})"
+    r"|(?:rgb|rgba|hsl|hsla)\(\s*[0-9.,%\s/deg-]+\)"
+    r"|[a-zA-Z]{3,20})$")
+
+# A font stack: names, quotes, commas, spaces. Nothing that can end a
+# declaration or open a url().
+_FONT_RE = re.compile(r"^[-\w \t,'\"]{1,120}$")
+
+
+def css_color(value, fallback: str = DEFAULT_ACCENT) -> str:
+    """A colour safe to interpolate into a CSS declaration, or the fallback."""
+    text = str(value or "").strip()
+    return text if _COLOR_RE.match(text) else fallback
+
+
+def css_font(value, fallback: str) -> str:
+    """A font-family stack safe to interpolate, or the fallback."""
+    text = str(value or "").strip()
+    return text if _FONT_RE.match(text) else fallback
+
+
+def _token(value, allowed: set[str], fallback: str) -> str:
+    text = str(value or "").strip()
+    return text if text in allowed else fallback
+
+
+def _safe_preset(preset: dict) -> dict:
+    """A preset with every interpolated value validated. Preset rows live in
+    site_theme_presets, which an operator edits — same treatment."""
+    base = THEME_PRESETS["Mari Editorial"]
+    out = {k: css_color(preset.get(k), base[k]) for k in ("accent", "bg", "card", "ink", "line")}
+    out["display"] = css_font(preset.get("display"), base["display"])
+    out["serif"] = css_font(preset.get("serif"), base["serif"])
+    return out
+
+
 def _rows(sql: str) -> list[dict]:
     """Read config rows, tolerating a build that has no database at all."""
     try:
@@ -171,14 +224,17 @@ CUSTOMIZER_CSS = """
 def _site_css(theme: dict) -> str:
     presets = theme_presets()
     fallback = presets.get("Mari Editorial") or next(iter(presets.values()))
-    preset = presets.get(theme.get("theme", "Mari Editorial"), fallback)
+    preset = _safe_preset(presets.get(theme.get("theme", "Mari Editorial"), fallback))
     # A site that has not picked an accent ships its preset's own — which is
     # the swatch the Publish page shows for that preset.
-    accent = theme.get("accent") or preset.get("accent") or "#b04e2c"
-    radius = int(theme.get("radius", 10))
-    density = theme.get("density", "comfortable")
-    pad = {"comfortable": 28, "compact": 20, "dense": 14}.get(density, 28)
-    dark = presets.get("Starlight", THEME_PRESETS["Starlight"])
+    accent = css_color(theme.get("accent") or preset["accent"], preset["accent"])
+    try:
+        radius = min(max(int(theme.get("radius", 10)), 0), 64)
+    except (TypeError, ValueError):
+        radius = 10
+    density = _token(theme.get("density"), DENSITIES, "comfortable")
+    pad = {"comfortable": 28, "compact": 20, "dense": 14}[density]
+    dark = _safe_preset(presets.get("Starlight", THEME_PRESETS["Starlight"]))
     return f"""
 :root {{ --accent: {accent}; --radius: {radius}px; --bg: {preset['bg']}; --card: {preset['card']};
   --ink: {preset['ink']}; --line: {preset['line']}; --display: {preset['display']}; --serif: {preset['serif']}; }}
@@ -283,8 +339,11 @@ def build_mari_site(site: dict, docs: list[dict]) -> str:
     if feat["search"]:
         (out / "search.js").write_text(SEARCH_JS)
 
-    mode = theme.get("mode", "light")
-    density = theme.get("density", "comfortable")
+    # Theme values reach an HTML attribute; a token allowlist is the check, and
+    # escaping on interpolation below is the belt (AUTH-12).
+    mode = _token(theme.get("mode"), MODES, "light")
+    density = _token(theme.get("density"), DENSITIES, "comfortable")
+    name_esc = html_mod.escape(str(site["name"]))
     search_html = ('<div class="mari-search-block"><input class="mari-search" type="search" '
                    'placeholder="Filter pages…" aria-label="Filter pages"></div>') if feat["search"] else ""
 
@@ -306,13 +365,14 @@ def build_mari_site(site: dict, docs: list[dict]) -> str:
                   "every fact on this page traces to a verified source</footer>") if feat["provenance"] else ""
         scripts = ('<script src="search.js"></script>' if feat["search"] else "") + \
                   ('<script src="customize.js"></script>' if feat["customizer"] else "")
-        site_id_js = f"<script>window.__MARI_SITE_ID__ = {site['id']};</script>" if feat["customizer"] else ""
+        site_id_js = (f"<script>window.__MARI_SITE_ID__ = {int(site['id'])};</script>"
+                      if feat["customizer"] else "")
         return f"""<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{title_esc} · {site['name']}</title>
+<title>{title_esc} · {name_esc}</title>
 <link rel="stylesheet" href="{FONTS}"><link rel="stylesheet" href="style.css">
 {site_id_js}</head>
-<body class="{body_class}" data-density="{density}">
+<body class="{html_mod.escape(body_class, quote=True)}" data-density="{html_mod.escape(density, quote=True)}">
 <div class="wrap">
 <header><span class="logo">✳ {html_mod.escape(site['name'].upper())}</span>
 <nav><a href="index.html">Guides</a><a href="{pages[0]['slug'] if pages else 'index'}.html">API reference</a><a href="#">Changelog</a></nav></header>
@@ -413,8 +473,10 @@ def _write_docusaurus_project(work: pathlib.Path, site: dict, docs: list[dict]) 
     # preset's, so switching generators does not silently change the colour.
     presets = theme_presets()
     preset = presets.get(theme.get("theme", "Mari Editorial")) or {}
-    accent = theme.get("accent") or preset.get("accent") or "#b04e2c"
-    mode = theme.get("mode", "light")
+    # Same validation as the mari generator: this accent lands in a CSS
+    # declaration, and sites.theme is user- and LLM-written (AUTH-12).
+    accent = css_color(theme.get("accent") or preset.get("accent"), DEFAULT_ACCENT)
+    mode = _token(theme.get("mode"), MODES, "light")
     base_url = f"/sites/site_{site['id']}/"
 
     shutil.copy2(TEMPLATE_DIR / "package.json", work / "package.json")
@@ -527,6 +589,17 @@ def deploy_to_s3(build_dir: str, deploy_cfg: dict) -> tuple[bool, str]:
                 n += 1
         return True, f"uploaded {n} files to s3://{bucket}"
     except Exception as e:  # credentials missing, bucket denied, etc. — stay honest
-        return False, f"local build (S3 upload failed: {type(e).__name__})"
+        # The class name alone made NoSuchBucket, AccessDenied and an expired
+        # token indistinguishable, and every one of those is fixed differently
+        # (ERR-2). botocore carries the actionable part in response['Error'];
+        # anything else gets its message.
+        detail = ""
+        response = getattr(e, "response", None)
+        if isinstance(response, dict):
+            err = response.get("Error") or {}
+            code, msg = err.get("Code", ""), err.get("Message", "")
+            detail = " — ".join(p for p in (code, msg) if p)
+        detail = detail or str(e) or e.__class__.__name__
+        return False, f"S3 upload to s3://{bucket} failed: {type(e).__name__}: {detail}"
 
 

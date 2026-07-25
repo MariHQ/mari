@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 
 import strawberry
 from strawberry.scalars import JSON
@@ -13,6 +14,77 @@ import llm
 import sitebuilder
 from db import actor_name, audit, exec_, jload, q, q1
 from mutations_admin import _require_admin
+
+# ——— sites.theme: validated on the way in ———
+#
+# Built sites are served from /sites, the same origin as /graphql, so a theme
+# value that escapes a CSS declaration or an HTML attribute in the generator
+# reaches the console session cookie (AUTH-12). The generator escapes on
+# interpolation; this stops the value being storable at all. It matters most for
+# aiCustomizeSite, which writes LLM output straight into a template variable —
+# a prompt-injected document could otherwise choose the accent colour.
+
+THEME_KEYS = ("theme", "accent", "radius", "density", "mode")
+
+
+def _next_version(site_id: int) -> str:
+    """Next release version for a site: minor bump on the newest stored one.
+
+    The stored string is whatever a previous deploy (or a seed row, or a hand
+    edit) wrote. An unguarded three-way unpack raised ValueError on any two- or
+    four-part version, mid-deploy and after the upload (ERR-3). Anything
+    unparseable restarts the numbering rather than failing a deploy that has
+    already happened."""
+    last = q1("SELECT version FROM releases WHERE site_id = %s ORDER BY id DESC LIMIT 1",
+              (site_id,))
+    parts = (last["version"] or "").lstrip("v").split(".") if last else ["1", "7", "2"]
+    try:
+        major, minor = int(parts[0]), int(parts[1])
+    except (IndexError, ValueError):
+        major, minor = 1, 0
+    return f"v{major}.{minor + 1}.0"
+
+
+def _clean_theme(theme) -> tuple[dict, list[str]]:
+    """Return (storable theme, rejected reasons). Unknown keys are rejected —
+    the generator reads exactly these five and nothing else."""
+    if not isinstance(theme, dict):
+        return {}, ["theme must be a JSON object"]
+    out: dict = {}
+    bad: list[str] = []
+    presets = sitebuilder.theme_presets()
+    for key, value in theme.items():
+        if key not in THEME_KEYS:
+            bad.append(f"unknown key '{key}'")
+        elif key == "theme":
+            if value in presets:
+                out[key] = value
+            else:
+                bad.append(f"no theme preset named '{value}' "
+                           f"(have: {', '.join(sorted(presets))})")
+        elif key == "accent":
+            if sitebuilder.css_color(value, ""):
+                out[key] = str(value).strip()
+            else:
+                bad.append(f"accent '{value}' is not a colour "
+                           "(expected #rrggbb, rgb(), hsl(), or a colour keyword)")
+        elif key == "radius":
+            try:
+                out[key] = min(max(int(value), 0), 18)
+            except (TypeError, ValueError):
+                bad.append(f"radius '{value}' is not a number 0-18")
+        elif key == "density":
+            if value in sitebuilder.DENSITIES:
+                out[key] = value
+            else:
+                bad.append(f"density '{value}' is not one of "
+                           f"{', '.join(sorted(sitebuilder.DENSITIES))}")
+        elif key == "mode":
+            if value in sitebuilder.MODES:
+                out[key] = value
+            else:
+                bad.append(f"mode '{value}' is not light or dark")
+    return out, bad
 
 
 @strawberry.type
@@ -162,13 +234,21 @@ class MutPublish:
             "Change only what the request implies."
         )
         out = llm.generate_json(prompt, system="You edit doc-site theme configs. Config JSON only — never code.")
-        if isinstance(out, dict):
-            allowed = {k: out[k] for k in ("theme", "accent", "radius", "density", "mode") if k in out}
-            if allowed:
-                exec_("UPDATE sites SET theme = theme || %s::jsonb WHERE id = %s", (json.dumps(allowed), id))
-                audit("AI-customized site", f"{site['name']}: {instruction[:80]}")
-                return allowed
-        return {}
+        if not isinstance(out, dict):
+            return {"error": "The model did not return a theme config. Try rewording the request."}
+        # The model's output is untrusted input — it goes straight into a
+        # template variable on a page served from the console's own origin, and
+        # the documents that shape the prompt are synced from other systems
+        # (AUTH-12). Anything that is not a colour or a known token is dropped,
+        # and the caller is told which, so a request the model mangled does not
+        # silently look like it worked.
+        allowed, bad = _clean_theme({k: v for k, v in out.items() if k in THEME_KEYS})
+        if not allowed:
+            return {"error": "No usable theme change — " + ("; ".join(bad) if bad
+                                                            else "the model changed nothing.")}
+        exec_("UPDATE sites SET theme = theme || %s::jsonb WHERE id = %s", (json.dumps(allowed), id))
+        audit("AI-customized site", f"{site['name']}: {instruction[:80]}")
+        return dict(allowed, **({"skipped": bad} if bad else {}))
 
     @strawberry.mutation
     def create_site(self, name: str, domain: str, sources: JSON) -> int:
@@ -191,7 +271,16 @@ class MutPublish:
 
     @strawberry.mutation
     def update_site_theme(self, id: int, theme: JSON) -> bool:
-        exec_("UPDATE sites SET theme = theme || %s::jsonb WHERE id = %s", (json.dumps(theme), id))
+        """Store theme values the generator can actually render. A rejected
+        value is an error naming the value and what was expected — silently
+        dropping it would leave the Publish page showing a colour the built
+        site does not use."""
+        clean, bad = _clean_theme(theme)
+        if bad:
+            raise ValueError("Theme not saved — " + "; ".join(bad))
+        if not clean:
+            return False
+        exec_("UPDATE sites SET theme = theme || %s::jsonb WHERE id = %s", (json.dumps(clean), id))
         return True
 
     @strawberry.mutation
@@ -225,9 +314,15 @@ class MutPublish:
         dep_row = q1("SELECT value FROM settings WHERE key = 'deploy'")
         deploy_cfg = jload(dep_row["value"]) if dep_row else {}
         uploaded, detail = sitebuilder.deploy_to_s3(str(sitebuilder.BUILDS / f"site_{id}"), deploy_cfg or {})
-        last = q1("SELECT version FROM releases WHERE site_id = %s ORDER BY id DESC LIMIT 1", (id,))
-        major, minor, patch = (last["version"].lstrip("v").split(".") if last else ["1", "7", "2"])
-        version = f"v{major}.{int(minor) + 1}.0"
+        bucket_configured = bool((deploy_cfg or {}).get("bucket") or os.environ.get("MARI_S3_BUCKET"))
+        if bucket_configured and not uploaded:
+            # A site whose upload failed is not live anywhere. Recording the
+            # release and flipping status='live' regardless was the whole of
+            # ERR-2: nothing downstream could tell a deployed site from a
+            # failed one. No release row, no status change, real reason.
+            raise ValueError(f"Deploy failed — {detail}. The build is intact; "
+                             "fix the bucket or credentials and deploy again.")
+        version = _next_version(id)
         exec_("UPDATE releases SET status = 'previous' WHERE site_id = %s AND status = 'live'", (id,))
         exec_("""INSERT INTO releases (site_id, version, status, deployed, docs, notes)
                  VALUES (%s, %s, 'live', to_char(now(), 'Mon DD, HH12:MI AM'), %s, %s)

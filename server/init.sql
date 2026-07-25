@@ -763,3 +763,128 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS invited_by text NOT NULL DEFAULT '';
 -- it could only raise on an empty table. The live question-and-answer surface
 -- is `approved_answers`. Drop the vestigial table where it still exists.
 DROP TABLE IF EXISTS ask_answers;
+
+
+-- ═══════════════════════════════════════════════════════════════════════
+-- ▼ foreign keys that ADD COLUMN IF NOT EXISTS silently skipped (MIG-1)
+-- ═══════════════════════════════════════════════════════════════════════
+
+-- `ALTER TABLE … ADD COLUMN IF NOT EXISTS … REFERENCES …` adds the constraint
+-- ONLY when it adds the column. On a database that already had the column —
+-- every install that ran an earlier version of this file — the whole statement
+-- is skipped, column and constraint alike, and the two diverge permanently:
+-- the column exists, the foreign key does not, and nothing ever notices because
+-- re-running init.sql keeps skipping it.
+--
+-- The shape below is the fix and the pattern to copy: add the column WITHOUT
+-- the reference, then add the constraint separately, guarded on its own
+-- existence rather than the column's. Both halves are then independently
+-- idempotent, so a database missing either one converges.
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'facts_document_id_fkey') THEN
+    ALTER TABLE facts ADD CONSTRAINT facts_document_id_fkey
+      FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE SET NULL;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'glossary_evidence_doc_id_fkey') THEN
+    ALTER TABLE glossary ADD CONSTRAINT glossary_evidence_doc_id_fkey
+      FOREIGN KEY (evidence_doc_id) REFERENCES documents(id) ON DELETE SET NULL;
+  END IF;
+END $$;
+
+
+-- ═══════════════════════════════════════════════════════════════════════
+-- ▼ scanner rotation (FACT-2)
+-- ═══════════════════════════════════════════════════════════════════════
+
+-- When the fact scan picked documents with `ORDER BY updated_src DESC LIMIT 8`,
+-- the two newest documents consumed the whole per-scan budget every time, so a
+-- document that was never the newest was never mined — no matter how many times
+-- someone ran the scan. These columns record when each scanner last READ a
+-- document, and the scanners order by them (nulls first), so every document is
+-- reached in turn instead of the same two forever.
+--
+-- Separate columns per scanner on purpose: one shared "scanned_at" would let
+-- the fact scan starve the decision scan and vice versa. NULL means "no scanner
+-- has read this document yet", which is the honest state of every row that
+-- predates the column and every document ingested since the last scan.
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS facts_scanned_at timestamptz;
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS decisions_scanned_at timestamptz;
+CREATE INDEX IF NOT EXISTS documents_facts_scanned_idx
+  ON documents (facts_scanned_at NULLS FIRST, updated_src DESC NULLS LAST);
+CREATE INDEX IF NOT EXISTS documents_decisions_scanned_idx
+  ON documents (decisions_scanned_at NULLS FIRST, updated_src DESC NULLS LAST);
+
+
+-- ═══════════════════════════════════════════════════════════════════════
+-- ▼ the indexes the query plans were missing
+-- ═══════════════════════════════════════════════════════════════════════
+
+-- ————— SRCH-5: approximate-nearest-neighbour indexes on both vectors —————
+--
+-- Neither `documents.embedding` nor `chunks.embedding` had an index, so hybrid
+-- search computed a cosine distance for every row in both tables on every
+-- keystroke and then threw almost all of them away.
+--
+-- HNSW, not IVFFlat. IVFFlat partitions the vectors it can see at build time
+-- into `lists` centroids; the right `lists` is a function of the row count, and
+-- an IVFFlat index built on an empty table — which is exactly what a fresh
+-- install has, since init.sql runs before a single document is ingested — has
+-- no useful centroids at all and must be REINDEXed once the corpus grows.
+-- init.sql is the only migration surface here and it is run at startup, so an
+-- index that needs a manual rebuild at an unknown future row count is an index
+-- that will silently stay wrong. HNSW builds a navigable graph incrementally as
+-- rows arrive, needs no row-count tuning, and gives good recall from the first
+-- row to the millionth. The costs are real and accepted: slower inserts and a
+-- larger index than IVFFlat. Ingestion here is a background job, not a request.
+--
+-- vector_cosine_ops matches the `<=>` operator the search SQL uses. An index
+-- built with a different opclass is simply never used — silently.
+CREATE INDEX IF NOT EXISTS documents_embedding_hnsw_idx
+  ON documents USING hnsw (embedding vector_cosine_ops);
+CREATE INDEX IF NOT EXISTS chunks_embedding_hnsw_idx
+  ON chunks USING hnsw (embedding vector_cosine_ops);
+
+-- ————— STATS-4: the access log —————
+-- `events` had nothing but its primary key, so every audit-log page sorted the
+-- whole table and `auditLogTotal` counted it. This is the exact sort the
+-- resolver asks for (occurred_at DESC, id DESC), so it can be read straight off
+-- the index instead of sorted.
+CREATE INDEX IF NOT EXISTS events_occurred_at_idx ON events (occurred_at DESC, id DESC);
+
+-- The access log's search is `actor ILIKE %q% OR verb ILIKE %q% OR target
+-- ILIKE %q%` — three unanchored patterns, which only a trigram index can serve.
+-- pg_trgm is created above and `documents_trgm_idx` already depends on it, so
+-- it is a hard dependency of this schema either way; the guard is here so a
+-- database where the extension could not be installed still gets the rest of
+-- this file rather than failing on statement one of the last section.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_trgm') THEN
+    CREATE INDEX IF NOT EXISTS events_actor_trgm_idx  ON events USING gin (actor  gin_trgm_ops);
+    CREATE INDEX IF NOT EXISTS events_verb_trgm_idx   ON events USING gin (verb   gin_trgm_ops);
+    CREATE INDEX IF NOT EXISTS events_target_trgm_idx ON events USING gin (target gin_trgm_ops);
+  ELSE
+    RAISE NOTICE 'pg_trgm is not installed: the access log search will scan events sequentially';
+  END IF;
+END $$;
+
+-- ————— STATS-5: inbound edges —————
+-- `edges_src_dst_rel_uidx` leads with from_doc, so it serves `WHERE from_doc =
+-- %s` and does nothing at all for `WHERE to_doc = %s` — the inbound half of
+-- relatedDocuments, the inbound count in `lineage`, and every "what cites this"
+-- query was a sequential scan of the whole edge table.
+CREATE INDEX IF NOT EXISTS edges_to_doc_idx ON edges (to_doc);
+
+-- ————— STATS-8: documents by source —————
+-- `answerHarvestSources` counts documents by source three times per page load,
+-- and the lineage lanes group by it.
+CREATE INDEX IF NOT EXISTS documents_source_idx ON documents (source);
+
+-- ————— supporting indexes for the joins those pages sit on —————
+-- `tags` is joined by tag (not just by document) in the search boost subquery
+-- and in graph_stats; its primary key leads with document_id and cannot serve
+-- either. `facts.status` is counted on every Overview load.
+CREATE INDEX IF NOT EXISTS tags_tag_idx ON tags (tag);
+CREATE INDEX IF NOT EXISTS facts_status_idx ON facts (status);
+CREATE INDEX IF NOT EXISTS workflow_runs_workflow_number_idx ON workflow_runs (workflow_id, number DESC);

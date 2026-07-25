@@ -48,20 +48,40 @@ def _conn():
     return psycopg.connect(DB_URL, row_factory=dict_row)
 
 
+# How many edges go in one INSERT. Large enough that a full extraction is a
+# handful of statements, small enough that one statement's parameter list stays
+# a reasonable size (4 parameters per row).
+_INSERT_BATCH = 500
+
+
 def _insert_edges(conn, triples: list[tuple[int, int, str, dict]]) -> int:
-    """Insert (from, to, rel, meta) edges; returns how many were actually new."""
-    created = 0
+    """Insert (from, to, rel, meta) edges; returns how many were actually new.
+
+    Batched (SQL-4). This issued one INSERT … RETURNING per edge, so a source
+    hitting the 1000-edge similarity cap made 1000 round trips to write 1000
+    rows — the round trips, not the writes, were the cost. Same rows, same
+    ON CONFLICT DO NOTHING, same count of genuinely-new edges; two orders of
+    magnitude fewer statements.
+
+    Duplicates within one call are collapsed first. ON CONFLICT DO NOTHING
+    tolerates them, but the same pair arriving twice from two extractors would
+    otherwise be counted once and inserted once, which reads as a lost edge."""
+    seen: dict[tuple[int, int, str], dict] = {}
     for src, dst, rel, meta in triples:
-        if src == dst:
-            continue
-        row = conn.execute(
-            """INSERT INTO edges (from_doc, to_doc, rel, day, curve, meta, created_at)
-               VALUES (%s, %s, %s, 0, 0, %s, CURRENT_DATE)
-               ON CONFLICT (from_doc, to_doc, rel) DO NOTHING
-               RETURNING id""",
-            (src, dst, rel, psycopg.types.json.Json(meta))).fetchone()
-        if row:
-            created += 1
+        if src != dst:
+            seen.setdefault((src, dst, rel), meta)
+    rows = [(src, dst, rel, psycopg.types.json.Json(meta))
+            for (src, dst, rel), meta in seen.items()]
+    created = 0
+    for i in range(0, len(rows), _INSERT_BATCH):
+        batch = rows[i:i + _INSERT_BATCH]
+        values = ", ".join(["(%s, %s, %s, 0, 0, %s, CURRENT_DATE)"] * len(batch))
+        args = [field for row in batch for field in row]
+        created += len(conn.execute(
+            f"""INSERT INTO edges (from_doc, to_doc, rel, day, curve, meta, created_at)
+                VALUES {values}
+                ON CONFLICT (from_doc, to_doc, rel) DO NOTHING
+                RETURNING id""", args).fetchall())
     return created
 
 
@@ -151,7 +171,25 @@ def _extract_links_to(conn, source_id: int, doc_ids: list[int] | None) -> int:
 def _extract_similar(conn, source_id: int, doc_ids: list[int] | None) -> int:
     """Top-K cosine neighbors ≥ threshold; page↔page and page↔(pr|issue) only.
     Incremental runs restrict the LEFT side to changed docs but always compare
-    against all docs of the source. Deduped both directions; capped per source."""
+    against all docs of the source. Deduped both directions; capped per source.
+
+    On the cost of this (SQL-4): the SQL is unchanged, because it was already
+    written in the one shape a vector index can serve — `JOIN LATERAL … ORDER BY
+    a.embedding <=> b.embedding LIMIT k`. What it lacked was the index.
+    `documents_embedding_hnsw_idx` (init.sql) now gives the planner the option,
+    and it takes it once ranking the source's documents by distance costs more
+    than the alternative — which is the case this finding is about, a source
+    large enough for the inner sort to dominate. On a workspace whose documents
+    are spread thinly across many sources the planner will still narrow by
+    `source_id` and sort, and that is the cheaper plan there; the point is that
+    the O(n²) sort is no longer the only plan available.
+
+    `ef_search` is raised for this statement because when the HNSW path IS
+    chosen, the inner query's kind/source filters are applied to rows the index
+    streams out in distance order — too small a search list and a qualifying
+    neighbour a few places down the ranking is never reached. 100 leaves ample
+    room above the top 3 this asks for."""
+    conn.execute("SET LOCAL hnsw.ef_search = 100")
     where, args = ("a.source_id = %(sid)s AND a.embedding IS NOT NULL "
                    "AND a.kind IN ('page','pr','issue')"), {"sid": source_id, "k": SIM_TOP_K}
     if doc_ids is not None:

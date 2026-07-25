@@ -11,6 +11,7 @@ import flowengine
 import github
 import ingest
 import links
+import llm
 import repoaudit
 from db import audit, exec_, q, q1
 
@@ -179,6 +180,11 @@ class MutAdmin:
                  ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value""", (key, json.dumps(value)))
         audit("updated setting", key, actor["name"],
               [("Setting", key), ("Fields", ", ".join(sorted(value)) if isinstance(value, dict) else "value")])
+        # `llm` caches the model/provider rows for 30s. Without this, Settings →
+        # Models looked like it had saved and the next answer still came from
+        # the old provider — the page was decorative for half a minute.
+        if key in ("llm", "embedding"):
+            llm.reload_settings()
         return True
 
     # ——— workspace identity & member provisioning ———

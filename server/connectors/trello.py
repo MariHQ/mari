@@ -8,9 +8,9 @@ Standalone-importable; all raw HTTP goes through _http() (patchable in tests).
 """
 
 import json
-import urllib.error
 import urllib.parse
-import urllib.request
+
+from . import _net
 
 API = "https://api.trello.com/1"
 
@@ -39,15 +39,19 @@ PROVIDER = {
 
 
 def _http(method, url, headers=None, body=None, timeout=30):
-    """All raw HTTP for this connector. Returns (status, bytes)."""
-    req = urllib.request.Request(url, data=body, headers=headers or {}, method=method)
+    """All raw HTTP for this connector. Returns (status, bytes).
+
+    Routed through the shared SSRF guard (AUTH-11): http/https only, no
+    private/loopback/link-local target, every redirect hop re-checked, and the
+    Authorization header dropped if a redirect crosses to another origin."""
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.getcode(), resp.read()
-    except urllib.error.HTTPError as e:
-        return e.code, e.read()
-    except urllib.error.URLError as e:
-        raise ConnectionError(f"Trello: network error: {e.reason}")
+        resp = _net.fetch(url, method=method, headers=headers or {}, data=body,
+                          timeout=timeout)
+        return resp.status, resp.body
+    except _net.Blocked as e:
+        raise ConnectionError(f"Trello: refused to fetch {url} — {e}") from None
+    except _net.NetworkError as e:
+        raise ConnectionError(f"Trello: network error: {e}") from None
 
 
 def _url(config, path, **params):

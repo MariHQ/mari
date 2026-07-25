@@ -9,8 +9,10 @@ can poll live. Approval steps pause the run ('waiting'); approveRun resumes it.
 
 from __future__ import annotations
 
+import concurrent.futures as cf
 import fnmatch
 import json
+import os
 import threading
 import time
 import typing as t
@@ -39,8 +41,21 @@ def _elapsed(start: float) -> str:
 # ————— step implementations — each returns (status, detail, ctx_updates) —————
 
 
+# `fetch_docs` may rotate instead of always taking the newest. A scan flow that
+# takes the newest k every time reads the same k documents forever (FACT-2) —
+# the fix has to reach the step that picks them, not only the scan that reads
+# them. The value names the scanner whose bookkeeping column to order by; the
+# column names are fixed here rather than taken from config, because this
+# interpolates into SQL.
+_ROTATE_COLUMNS = {"facts": "facts_scanned_at", "decisions": "decisions_scanned_at"}
+
+
 def _step_fetch(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
-    query, tag, k = cfg.get("query", ""), cfg.get("tag", ""), int(cfg.get("k", 3))
+    query, tag, k = cfg.get("query", ""), cfg.get("tag", ""), max(1, int(cfg.get("k", 3)))
+    rotate = _ROTATE_COLUMNS.get(str(cfg.get("rotate") or ""))
+    # Least-recently-scanned first when rotating, newest first otherwise.
+    order = (f"{rotate} NULLS FIRST, d.updated_src DESC NULLS LAST, d.id"
+             if rotate else "d.updated_src DESC NULLS LAST, d.id DESC")
     # A triggered run operates on the documents that fired it.
     trigger_ids = ctx.get("trigger_doc_ids") or []
     with _conn() as conn:
@@ -49,19 +64,19 @@ def _step_fetch(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
                                 (trigger_ids,)).fetchall()
         elif tag:
             rows = conn.execute(
-                """SELECT d.id, d.title FROM documents d JOIN tags t ON t.document_id = d.id
-                   WHERE t.tag = %s ORDER BY d.updated_src DESC NULLS LAST LIMIT %s""", (tag, k)).fetchall()
+                f"""SELECT d.id, d.title FROM documents d JOIN tags t ON t.document_id = d.id
+                    WHERE t.tag = %s ORDER BY {order} LIMIT %s""", (tag, k)).fetchall()
         elif query:
             rows = conn.execute(
-                """SELECT id, title FROM documents
-                   WHERE search_vec @@ plainto_tsquery('english', %s) OR title ILIKE %s
-                   ORDER BY updated_src DESC NULLS LAST LIMIT %s""", (query, f"%{query}%", k)).fetchall()
+                f"""SELECT d.id, d.title FROM documents d
+                    WHERE d.search_vec @@ plainto_tsquery('english', %s) OR d.title ILIKE %s
+                    ORDER BY {order} LIMIT %s""", (query, f"%{query}%", k)).fetchall()
         else:
             rows = conn.execute(
-                "SELECT id, title FROM documents ORDER BY updated_src DESC NULLS LAST LIMIT %s", (k,)).fetchall()
+                f"SELECT d.id, d.title FROM documents d ORDER BY {order} LIMIT %s", (k,)).fetchall()
     ids = [r["id"] for r in rows]
     names = ", ".join(r["title"][:40] for r in rows[:3])
-    src = " (from trigger)" if trigger_ids else ""
+    src = " (from trigger)" if trigger_ids else (" (least recently scanned)" if rotate else "")
     return "passed", f"{len(ids)} documents{src} · {names}", {"doc_ids": ids}
 
 
@@ -106,7 +121,13 @@ def _step_tag(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
     tag = cfg.get("tag", "needs-review")
     if ctx.get("dry_run"):
         return "passed", f"would tag {len(ctx.get('doc_ids', []))} docs '{tag}' (dry run)", {}
-    with _conn() as conn:
+    # One transaction for the whole loop (FLOW-3), stated rather than inherited:
+    # this used to rely on psycopg's connection-level implicit transaction, which
+    # is correct but invisible — a reader checking whether a mid-loop failure
+    # leaves half the documents tagged had to know that rule to answer. The
+    # explicit block says it, and it keeps saying it if the loop later grows a
+    # second statement or an early return.
+    with _conn() as conn, conn.transaction():
         n = 0
         for doc_id in ctx.get("doc_ids", []):
             conn.execute("INSERT INTO tags (document_id, tag) VALUES (%s, %s) ON CONFLICT DO NOTHING", (doc_id, tag))
@@ -126,7 +147,7 @@ def _step_create_task(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
         return "skipped", "branch not taken", {}
     if ctx.get("dry_run"):
         return "passed", f"would create task: {title[:60]} (dry run)", {}
-    with _conn() as conn:
+    with _conn() as conn, conn.transaction():
         conn.execute("""INSERT INTO tasks (title, assignee, assignee_initials, assignee_tint, kind, kind_label)
                         VALUES (%s, %s, %s, 2, %s, %s) ON CONFLICT (title) DO NOTHING""",
                      (title[:120], cfg.get("assignee", "Aki K."),
@@ -200,27 +221,38 @@ def _step_sync_source(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
                               "items_changed": stats["items_changed"], "embedded": stats["embedded"]}
 
 
+def _scan_detail(added: int, scanned: int, note: str, noun: str) -> str:
+    detail = (f"{added} new {noun}{'' if added == 1 else 's'} captured "
+              f"from {scanned} document{'' if scanned == 1 else 's'}")
+    return f"{detail} · {note}" if note else detail
+
+
 def _step_scan_facts(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
-    """Mine recent documents for checkable claims — the same scan the Facts page
-    used to fire inline, run as a step so it has a run, a progress reading and a
-    history like every other long job in the product."""
+    """Mine the documents this run selected for checkable claims.
+
+    `ctx["doc_ids"]` is the output of the flow's fetch_docs step, and passing it
+    through is the whole point of FACT-4: this step used to call a mutation that
+    re-ran its own `SELECT … LIMIT 8`, so the step labelled "Read recent
+    documents" changed nothing and editing `k` in the flow editor changed
+    nothing. A flow whose pipeline has no fetch_docs step still works — the scan
+    picks its own batch, as it does from the Facts page."""
     if ctx.get("dry_run"):
         return "passed", "would mine recent documents for claims (dry run)", {}
-    from app import Mutation  # late import to reuse the app's mutation
-    added = Mutation.scan_facts(None)  # type: ignore[arg-type]
-    return "passed", f"{added} new claim{'' if added == 1 else 's'} captured", {"facts": added}
+    from mutations_knowledge import scan_facts_for  # late import — app/db load after this module
+    doc_ids = ctx.get("doc_ids") or None
+    added, scanned, note = scan_facts_for(doc_ids)
+    return "passed", _scan_detail(added, scanned, note, "claim"), {"facts": added}
 
 
 def _step_scan_decisions(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
-    """Mine recent documents for decisions the team made, for the same reason
-    the fact scan is a step: it is a multi-minute model pass that writes to the
-    ledger, so it needs a run, a progress reading and a history rather than a
-    link that fires and forgets."""
+    """Mine the documents this run selected for decisions the team made — same
+    shape as the fact scan, including reading ctx["doc_ids"] (FACT-4)."""
     if ctx.get("dry_run"):
         return "passed", "would mine recent documents for decisions (dry run)", {}
-    from app import Mutation  # late import to reuse the app's mutation
-    added = Mutation.scan_decisions(None)  # type: ignore[arg-type]
-    return "passed", f"{added} new decision{'' if added == 1 else 's'} captured", {"decisions": added}
+    from mutations_knowledge import scan_decisions_for
+    doc_ids = ctx.get("doc_ids") or None
+    added, scanned, note = scan_decisions_for(doc_ids)
+    return "passed", _scan_detail(added, scanned, note, "decision"), {"decisions": added}
 
 
 def _step_refresh_digest(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
@@ -258,6 +290,48 @@ STEP_IMPLS: dict[str, t.Callable] = {
 # steps that call the local LLM (shown as slow in the UI)
 LLM_STEPS = {"refine", "fact_check", "derive_links", "summarize", "refresh_digest", "scan_facts", "scan_decisions"}
 
+# Steps that are safe to run a second time after a transient failure (FLOW-3).
+# A failed step used to end the run outright, with no retry and no way to tell a
+# dropped connection from a real error — so a flow that had already tagged and
+# notified would abandon its remaining work because one query timed out.
+#
+# Membership is a claim about the step, not a preference: every step here either
+# reads only, or writes through ON CONFLICT DO NOTHING / an idempotent upsert, so
+# running it twice lands the database where running it once would have.
+#
+# Deliberately absent: `deploy_site` (mints a release and uploads), `approval`
+# (pauses rather than fails), and `condition` (cannot fail transiently). Retrying
+# a deploy would publish twice, and a second site is not a recovered site.
+RETRYABLE_STEPS = {"fetch_docs", "tag", "create_task", "notify", "summarize",
+                   "derive_links", "sync_source", "scan_facts", "scan_decisions",
+                   "fact_check", "refine", "refresh_digest"}
+STEP_RETRIES = 1        # one extra attempt, not a loop
+STEP_RETRY_BACKOFF = 2.0  # seconds
+
+
+def _run_step(kind: str, impl: t.Callable | None, cfg: dict, ctx: dict) -> tuple[str, str, dict]:
+    """Run one step, retrying an idempotent one once on an exception.
+
+    The retry is recorded in the step's own detail rather than hidden: a run
+    that needed two attempts and a run that needed one are different facts about
+    the system, and the history is the only place anyone can see the difference."""
+    if impl is None:
+        return "failed", f"unknown step: {kind}", {}
+    attempts = 1 + (STEP_RETRIES if kind in RETRYABLE_STEPS else 0)
+    last: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            status, detail, updates = impl(cfg, ctx)
+            if attempt:
+                detail = f"{detail} (succeeded on retry after: {type(last).__name__}: {last})"[:200]
+            return status, detail, updates
+        except Exception as e:  # noqa: BLE001 — the run reports it; it must not escape
+            last = e
+            if attempt + 1 < attempts:
+                time.sleep(STEP_RETRY_BACKOFF)
+    return "failed", f"{type(last).__name__}: {last}"[:140] + (
+        f" (after {attempts} attempts)" if attempts > 1 else ""), {}
+
 
 def _persist(run_id: int, rows: list[dict], status: str, progress: int, stats: dict, start: float) -> None:
     with _conn() as conn:
@@ -284,12 +358,8 @@ def execute_run(run_id: int, resume_from: int = 0) -> None:
         kind = step.get("kind", "trigger")
         rows[i]["status"] = "running"
         _persist(run_id, rows, "running", int(i / max(len(steps), 1) * 100), {"ctx": ctx}, start)
-        impl = STEP_IMPLS.get(kind)
         t0 = time.time()
-        try:
-            status, detail, updates = impl(step.get("config", {}), ctx) if impl else ("failed", f"unknown step: {kind}", {})
-        except Exception as e:
-            status, detail, updates = "failed", f"{type(e).__name__}: {e}"[:140], {}
+        status, detail, updates = _run_step(kind, STEP_IMPLS.get(kind), step.get("config", {}), ctx)
         ctx.update({k: v for k, v in updates.items() if k != "pause"})
         rows[i].update({"status": status, "detail": detail, "duration": _elapsed(t0)})
         if status == "waiting":
@@ -316,8 +386,48 @@ def _public_stats(ctx: dict) -> dict:
     return stats
 
 
+# ————— the run worker pool (FLOW-4) —————
+#
+# `start_run` used to spawn a bare, uncapped thread per run, each opening its own
+# Postgres connection outside db.py's pool. Nothing bounded that: a schedule that
+# fires faster than its runs finish, or a document-trigger batch that matches
+# many workflows, opened as many connections as there were runs — while the
+# request path shared a pool of ten. Postgres refuses connections long before
+# Python refuses threads, so the failure landed on whoever was using the console.
+#
+# A bounded pool makes the ceiling explicit and moves the queue into this process
+# where it is visible, instead of into the database's connection limit. Runs past
+# the ceiling wait their turn rather than being dropped; an approval step frees
+# its worker immediately, because a waiting run returns from execute_run and is
+# resumed later by approveRun.
+FLOW_WORKERS = max(1, int(os.environ.get("MARI_FLOW_WORKERS", "4")))
+_run_pool = cf.ThreadPoolExecutor(max_workers=FLOW_WORKERS, thread_name_prefix="mari-flow")
+
+
+def _guarded_run(run_id: int, resume_from: int) -> None:
+    """execute_run, with a last-resort failure record. A run whose execution
+    raised before it could persist anything would otherwise sit at 'running'
+    until the next restart reconciled it — a run that says it is still going
+    when nothing is going is the worst of the three possible states."""
+    try:
+        execute_run(run_id, resume_from)
+    except Exception as e:  # noqa: BLE001
+        try:
+            with _conn() as conn:
+                conn.execute(
+                    """UPDATE workflow_runs SET status = 'failed', progress = 100,
+                         stats = coalesce(stats, '{}'::jsonb) || jsonb_build_object('note', %s)
+                       WHERE id = %s AND status = 'running'""",
+                    (f"run failed to start: {type(e).__name__}: {e}"[:200], run_id))
+                conn.commit()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def start_run(run_id: int, resume_from: int = 0) -> None:
-    threading.Thread(target=execute_run, args=(run_id, resume_from), daemon=True).start()
+    """Queue a run on the worker pool. Returns immediately; the caller gets the
+    run id and follows it through workflowRun."""
+    _run_pool.submit(_guarded_run, run_id, resume_from)
 
 
 # ————— document triggers (init.sql: workflows.trigger jsonb) —————
@@ -405,16 +515,24 @@ PROCESS_START_TS = time.time()  # for startup reconciliation — never touch new
 
 
 def reconcile_stale_runs() -> int:
-    """Startup reconciliation: a run left 'running'/'waiting' by an unclean
-    shutdown blocks run_due_schedules forever (it sees the latest run as still
-    in progress). Mark runs started BEFORE this process as failed; runs this
-    process started are never touched. Returns how many were flipped."""
+    """Startup reconciliation: a run left 'running' by an unclean shutdown has
+    no process behind it and blocks run_due_schedules forever (it sees the
+    latest run as still in progress). Mark those failed; runs this process
+    started are never touched. Returns how many were flipped.
+
+    'waiting' is NOT reconciled (FLOW-1). A waiting run is paused at an approval
+    step, by design, indefinitely — that is what an approval is. Sweeping it up
+    with the crashed runs meant every restart destroyed every pending approval
+    and told the person waiting on it that their sign-off had been "interrupted
+    by restart", which was not true: nothing was interrupted, the server was
+    simply started again. A waiting run needs no process to be alive; approveRun
+    resumes it from `paused_at` whenever someone gets to it."""
     with _conn() as conn:
         rows = conn.execute(
             """UPDATE workflow_runs
                SET status = 'failed',
                    stats = coalesce(stats, '{}'::jsonb) || '{"note": "interrupted by restart"}'::jsonb
-               WHERE status IN ('running', 'waiting') AND started_at < to_timestamp(%s)
+               WHERE status = 'running' AND started_at < to_timestamp(%s)
                RETURNING id""", (PROCESS_START_TS,)).fetchall()
         if rows:
             conn.execute("INSERT INTO events (actor, verb, target) VALUES (%s, %s, %s)",
@@ -558,6 +676,32 @@ FACT_SCAN_FLOW = "Fact scan"
 DECISION_SCAN_FLOW = "Decision scan"
 
 
+def _adopt_rotation(conn, row: dict, scan_kind: str, rotate: str) -> None:
+    """Teach an already-seeded scan flow to rotate its document selection.
+
+    A workspace that ran an earlier version has the flow with `{"k": 8}` and no
+    `rotate`, so its fetch_docs step still hands the scan the newest eight
+    documents every time — the flow half of FACT-2 would stay broken on upgrade
+    while a fresh install got the fix.
+
+    This only touches a pipeline that is still exactly as it shipped: three
+    steps, the expected kinds in the expected order, and a fetch_docs step that
+    has never been given a `rotate`. Anything a person has edited is left alone.
+    A pipeline is the user's; a default is ours."""
+    nodes = _wf_nodes(row)
+    kinds = [s.get("kind") for s in nodes if isinstance(s, dict)]
+    if kinds != ["trigger", "fetch_docs", scan_kind]:
+        return
+    cfg = nodes[1].get("config") or {}
+    if "rotate" in cfg:
+        return
+    nodes[1]["config"] = {**cfg, "rotate": rotate}
+    nodes[1]["label"] = "Read documents (least recently scanned)"
+    conn.execute("UPDATE workflows SET nodes = %s WHERE id = %s",
+                 (json.dumps(nodes), row["id"]))
+    conn.commit()
+
+
 def ensure_fact_scan_flow() -> int:
     """Get-or-create the manual 'Fact scan' flow the Facts page starts. Returns
     its workflow id — the caller needs it to open a run, so unlike the scheduled
@@ -565,10 +709,12 @@ def ensure_fact_scan_flow() -> int:
     with _conn() as conn:
         for r in conn.execute("SELECT id, nodes FROM workflows").fetchall():
             if any(s.get("kind") == "scan_facts" for s in _wf_nodes(r)):
+                _adopt_rotation(conn, r, "scan_facts", "facts")
                 return r["id"]
         nodes = [
             {"kind": "trigger", "label": "Manual", "config": {"label": "Started from Facts"}},
-            {"kind": "fetch_docs", "label": "Read recent documents", "config": {"k": 8}},
+            {"kind": "fetch_docs", "label": "Read documents (least recently scanned)",
+             "config": {"k": 8, "rotate": "facts"}},
             {"kind": "scan_facts", "label": "Extract checkable claims", "config": {}},
         ]
         row = conn.execute(
@@ -589,10 +735,12 @@ def ensure_decision_scan_flow() -> int:
     with _conn() as conn:
         for r in conn.execute("SELECT id, nodes FROM workflows").fetchall():
             if any(s.get("kind") == "scan_decisions" for s in _wf_nodes(r)):
+                _adopt_rotation(conn, r, "scan_decisions", "decisions")
                 return r["id"]
         nodes = [
             {"kind": "trigger", "label": "Manual", "config": {"label": "Started from Decisions"}},
-            {"kind": "fetch_docs", "label": "Read recent documents", "config": {"k": 8}},
+            {"kind": "fetch_docs", "label": "Read documents (least recently scanned)",
+             "config": {"k": 8, "rotate": "decisions"}},
             {"kind": "scan_decisions", "label": "Extract decisions", "config": {}},
         ]
         row = conn.execute(
