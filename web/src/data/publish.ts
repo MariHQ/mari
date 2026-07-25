@@ -6,14 +6,18 @@
  *
  * `/publish` is the list of doc sites — the workspace has as many as it has
  * made, and this is where the next one gets created. `/publish?site=<id>` is
- * that site's editor. */
+ * that site's editor. `/publish?tab=mcp` is the MCP servers half.
+ *
+ * The tab is in the URL because the page reports it (`openSection`) the way
+ * Knowledge reports its query: a Publish tab then survives a reload and can be
+ * linked, instead of being state that dies with the render. */
 
 import { useEffect, useMemo, useRef } from "react";
 import { useSearchParams } from "react-router-dom";
 
 import type {
   DocSite, McpCreated, McpDraft, NavSection, PublishData, PublishGate,
-  SiteFeature, SiteRelease, SiteSummary, SiteTheme,
+  PublishSection, SiteFeature, SiteRelease, SiteSummary, SiteTheme,
 } from "@mari-design/components/pages/PublishPage";
 import type { McpServer } from "@mari-design/components/features/PublishMcpServers";
 import { useQuery } from "../lib/api";
@@ -173,16 +177,22 @@ export const EMPTY: PublishData = {
  *  which renders the switch list as the empty block it is at that moment. */
 export function buildPublish(
   res: Res | null, siteId: number | null = null, creating = false, features: SiteFeature[] = [],
+  section: PublishSection = "sites",
 ): PublishData {
-  if (!res) return creating ? { ...EMPTY, view: "site-new" } : EMPTY;
+  /* `?tab=mcp` is the MCP half whatever else the route says, so the tab the
+     reader clicked is the tab a reload comes back to. */
+  const opening = (site: DocSite | null): PublishData["view"] =>
+    section === "mcp" ? "mcp-list" : site ? "site-editor" : creating ? "site-new" : "site-list";
+  if (!res) return { ...EMPTY, view: opening(null) };
   const servers = mapServers(res);
   const site = mapSite(res, siteId, features);
   const row = pickSiteRow(res, siteId);
   return {
     // `/publish` is the site list, `?new` its create form, `?site=` one site's
-    // editor. The deploy flow and the three MCP screens are routes this app
-    // does not have yet.
-    view: site ? "site-editor" : creating ? "site-new" : "site-list",
+    // editor, `?tab=mcp` the MCP server list. The deploy flow, the add-server
+    // form and the token screen are routes this app does not have yet — the
+    // MCP panel opens its own create form and shows its own token.
+    view: opening(site),
     editorTab: "content",
     // A deploy is in flight only while a mutation is running; a page load is
     // looking at what is already there.
@@ -206,6 +216,9 @@ export function usePublish(): PageData<PublishData> {
   const asked = Number(params.get("site"));
   const askedId = Number.isInteger(asked) && asked > 0 ? asked : null;
   const creating = params.get("new") !== null;
+  // Which top-level tab the reader is on. Anything but the MCP half is the
+  // doc sites half, which is also what a URL with no `tab` at all means.
+  const section: PublishSection = params.get("tab") === "mcp" ? "mcp" : "sites";
   const q = useQuery<Res>(QUERY, { map: (d: Res) => d });
 
 /* The route names the subject; the query behind it takes no variables, so
@@ -239,8 +252,8 @@ export function usePublish(): PageData<PublishData> {
      render. `f.data ?? []` is also a new empty array per render, which is the
      same trap on a site whose feature list is genuinely empty. */
   const data = useMemo(
-    () => buildPublish(q.data, askedId, creating, f.data ?? []),
-    [q.data, askedId, creating, f.data],
+    () => buildPublish(q.data, askedId, creating, f.data ?? [], section),
+    [q.data, askedId, creating, f.data, section],
   );
   return {
     data,

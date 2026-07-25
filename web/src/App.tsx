@@ -18,8 +18,15 @@ import { useIsMobile } from "./lib/mobile";
  * the component; `src/data/` supplies the data. Adding a page to the library
  * adds it here — the only local step is writing its adapter. */
 
-/** Ids that must stay reachable without a session. */
-const PUBLIC = new Set(["login", "setup", "welcome"]);
+/** Ids that must stay reachable without a session.
+ *
+ *  Welcome was here and is not: onboarding is for a signed-in user (see
+ *  AUTH_ONLY below, which already said so), and its adapter reads the
+ *  connector catalog, the workspace's repos and its sync rows. Reachable
+ *  without a session, that query could only come back 401, and the page
+ *  rendered the read-error card at a visitor whose actual problem was that
+ *  they were not signed in. */
+const PUBLIC = new Set(["login", "setup"]);
 
 /** Pages the library ships for itself, not for a workspace. The Lookbook is
  *  the design system exhibiting itself — its content is a set of deliberately

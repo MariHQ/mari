@@ -54,7 +54,7 @@ export function buildLogin(
 }
 
 export function useLogin(): PageData<LoginData> {
-  const { oauth, loading, bypassEnabled } = useAuth();
+  const { oauth, loading, bypassEnabled, error } = useAuth();
   const [register] = useState(false);
 
   /* Which auth step is on screen is ROUTE state, not component state. It was
@@ -68,7 +68,11 @@ export function useLogin(): PageData<LoginData> {
   const sentTo = params.get("sent") ?? "";
   const screen: LoginData["screen"] = sentTo ? "magic-link" : "credentials";
 
-  return { data: buildLogin(oauth, screen, register, sentTo, bypassEnabled), loading, error: null };
+  /* The only failure this screen owns before anyone types: a demo deployment
+     that offers the sign-in bypass and then refuses it. Landing here silently
+     would show a password form for a workspace whose password the visitor was
+     never given. The server's own words, verbatim. */
+  return { data: buildLogin(oauth, screen, register, sentTo, bypassEnabled), loading, error };
 }
 
 /** Pure: whether first-run claiming has happened → everything Setup renders. */

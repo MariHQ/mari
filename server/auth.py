@@ -221,6 +221,17 @@ def _set_session_cookie(response: Response, token: str, request: Request | None,
                         else int(config.get("auth", "session_days", 14)) * 86400)
 
 
+def _clear_session_cookie(response: Response, request: Request | None) -> None:
+    """Delete the session cookie, with the same attributes it was set with —
+    a browser only drops a cookie when path/secure/samesite line up.
+
+    This exists because a rejected credential used to live forever: the
+    hardening pass stopped honouring the static "mari-bypass" token, and every
+    returning visitor kept presenting it on every request because nothing ever
+    told the browser to throw it away."""
+    response.delete_cookie(COOKIE, httponly=True, samesite="lax", secure=_is_https(request))
+
+
 def _client_detail(request: Request | None) -> list[dict]:
     """The access log's per-event detail for a session: where the request came
     from and what made it. Only what the request actually carried — a missing
@@ -347,8 +358,16 @@ def _bypass_target(conn) -> dict | None:
 
 
 @router.get("/me")
-def me(request: Request):
+def me(request: Request, response: Response):
     u = current_user(request)
+    # A session cookie that resolves to nothing is a credential this server
+    # will never accept again, and the browser will keep sending it on every
+    # request until something clears it. /auth/me is where the app asks "who
+    # am I", so it is where the answer "nobody, and that cookie is dead" gets
+    # acted on. Only when a cookie was actually presented: a visitor with no
+    # cookie gets no Set-Cookie header at all.
+    if u is None and request.cookies.get(COOKIE):
+        _clear_session_cookie(response, request)
     with _conn() as conn:
         needs_setup = not conn.execute("SELECT 1 FROM settings WHERE key = 'setup_complete'").fetchone()
         ws = conn.execute("SELECT value FROM settings WHERE key = 'workspace'").fetchone()
@@ -540,7 +559,7 @@ def logout(request: Request, response: Response):
         with _conn() as conn:
             conn.execute("DELETE FROM sessions WHERE token = %s", (token,))
     set_caller(None)
-    response.delete_cookie(COOKIE)
+    _clear_session_cookie(response, request)
     return {"ok": True}
 
 

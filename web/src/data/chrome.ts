@@ -18,11 +18,6 @@ const QUERY = `{
   recentSearches(limit: 6)
 }`;
 
-/* Signed out there is nobody to have notifications, and the sign-in screen
-   should not be firing a workspace query that can only fail. Hooks cannot be
-   skipped, so the signed-out state asks the cheapest legal question instead. */
-const NONE = `{ __typename }`;
-
 type Res = {
   notifications: {
     id: number; kind: string; text: string; detail: string; at: string; read: boolean;
@@ -60,7 +55,11 @@ export function mapChrome(res: Res): Chrome {
 
 export function useChrome(): Chrome {
   const { user } = useAuth();
-  const q = useQuery<Chrome>(user ? QUERY : NONE, { map: (d: Res) => (user ? mapChrome(d) : EMPTY) });
+  /* Signed out there is nobody to have notifications, so nothing is asked.
+     This used to send `{ __typename }` instead — a query with no answer to
+     collect, which still POSTed to /graphql and still needed a session, so
+     every signed-out visitor's first act was a 401 on the sign-in screen. */
+  const q = useQuery<Chrome>(user ? QUERY : null, { map: mapChrome });
   // No loading or error surface: the frame has nowhere to put either, and a
   // failed bell must never take a working page down with it.
   return q.data ?? EMPTY;

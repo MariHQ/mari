@@ -252,7 +252,7 @@ Deeper docs: [DESIGN.md](DESIGN.md) (product design), [LINEAGE-DESIGN.md](LINEAG
 
 - **docker compose** (above) — Postgres + API + nginx-served web.
 - **Managed Postgres** — set `MARI_DB`, run `server/init*.sql` once, drop the bundled `db` service.
-- **AWS Lambda** — the API container can also serve the compiled web app (`MARI_STATIC_DIR`); see `deploy/lambda/`.
+- **AWS Lambda** — the API container can also serve the compiled web app (`MARI_STATIC_DIR`); see `deploy/lambda/`. `cloud.mari.guru` runs from the single `mari-cloud-prod` CloudFormation stack (Lambda + HTTP API + ACM certificate + custom domain + DNS), where the image tag is a stack **parameter**. Release with `./deploy/lambda/deploy.sh`, which builds, pushes and then updates the *stack*. Do not release with `aws lambda update-function-code`: the site picks the image up, but the stack parameter still names the old tag, so the next stack update reverts production.
 
 ---
 

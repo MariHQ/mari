@@ -59,6 +59,11 @@ async function currentSite(): Promise<SiteRow> {
 
 export function publishActions({ navigate }: ActionContext): PublishActions {
   return {
+    /* The top-level tab goes in the URL, so a Publish tab survives a reload
+       and can be linked — `web/src/data/publish.ts` reads `?tab` straight back
+       out. Switching to MCP leaves whichever site was open, because the MCP
+       half is not about a site. */
+    openSection: (section) => navigate(section === "mcp" ? "/publish?tab=mcp" : "/publish"),
     // "All sites" is the Publish page with no site selected.
     openSites: () => navigate("/publish"),
     openSite: (id: number) => navigate(`/publish?site=${id}`),
