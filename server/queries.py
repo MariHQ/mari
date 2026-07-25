@@ -26,7 +26,7 @@ from gqltypes import (
     DocHistory, Document, DocumentTemplate, Fact, FactContradiction, Finding,
     FreshnessRow, GithubRepo, GithubTeamSync, GlossaryCandidate, GlossaryTerm,
     GraphStats, GraphView, InsightStats, LineageEdge, LineageNode, McpServer,
-    Member, Notification, Provisioning, ReadabilityRow, Release, Setting, Site,
+    Member, Notification, Provisioning, ReadabilityRow, RelatedDoc, Release, Setting, Site,
     SiteFeature, SiteThemePreset, SourcePulse, StyleGuide, StyleRule, SyncEvent,
     SyncStatus, TagDef, Task, TaskSummary, TopCited, UploadFile, UploadManifest,
     VoiceLayer, Workflow, WorkflowRun, Workspace,
@@ -38,6 +38,19 @@ LANES = {"github": (0.14, 0.30), "slack": (0.32, 0.46), "docs": (0.48, 0.66),
          "notion": (0.68, 0.80)}
 LANE_OTHER = (0.82, 0.90)
 SOURCE_ICONS = {"github": "github", "slack": "slack", "docs": "doc", "notion": "notion"}
+
+
+def _iso_date_arg(value: str | None) -> str | None:
+    """An ISO date (YYYY-MM-DD) argument, or None. Anything that is not a date
+    is rejected rather than silently ignored: a range control whose bound the
+    server quietly dropped would relabel numbers it did not change."""
+    v = (value or "").strip()
+    if not v:
+        return None
+    try:
+        return dt.date.fromisoformat(v[:10]).isoformat()
+    except ValueError as e:
+        raise ValueError(f"{value!r} is not an ISO date (YYYY-MM-DD)") from e
 
 
 def _hash01(s: str) -> float:
@@ -121,7 +134,9 @@ DOC_SQL = """
   GROUP BY d.id ORDER BY d.updated_src DESC NULLS LAST
 """
 
-HYBRID_SQL = """
+# The scoring CTE, shared by the page query and the count query so a total can
+# never describe a different match set from the rows it is counting.
+SCORED_CTE = """
   WITH scored AS (
     SELECT d.id,
            ts_rank(d.search_vec, plainto_tsquery('english', %(q)s)) AS kw,
@@ -139,25 +154,48 @@ HYBRID_SQL = """
                      WHERE tg.document_id = d.id), 1.0) AS boost
     FROM documents d
   )
+"""
+
+MATCHES = "WHERE s.kw > 0 OR s.sim > 0.45 OR d.title ILIKE %(like)s"
+
+HYBRID_SQL = SCORED_CTE + """
   SELECT d.id, d.source, d.title, d.snippet, d.body, d.author, d.author_initials,
          d.updated_src, d.kind, array_remove(array_agg(t.tag), NULL) AS tags,
          (s.kw * 2.0 + greatest(s.sim - 0.35, 0) * 3.0) * s.boost AS score
   FROM scored s
   JOIN documents d ON d.id = s.id
   LEFT JOIN tags t ON t.document_id = d.id
-  WHERE s.kw > 0 OR s.sim > 0.45 OR d.title ILIKE %(like)s
+""" + MATCHES + """
   GROUP BY d.id, s.kw, s.sim, s.boost
   ORDER BY score DESC, d.updated_src DESC NULLS LAST
-  LIMIT %(k)s
+  LIMIT %(k)s OFFSET %(offset)s
 """
 
+HYBRID_COUNT_SQL = SCORED_CTE + """
+  SELECT count(*) AS n
+  FROM scored s
+  JOIN documents d ON d.id = s.id
+""" + MATCHES
 
-def hybrid_search(query: str, k: int = 10) -> list[dict]:
+
+def _hybrid_args(query: str, k: int = 10, offset: int = 0) -> dict:
     vec = llm.embed(query)
-    return q(HYBRID_SQL, {
+    return {
         "q": query, "vec": str(vec) if vec else "[" + ",".join(["0"] * 768) + "]",
-        "has_vec": vec is not None, "like": f"%{query}%", "k": k,
-    })
+        "has_vec": vec is not None, "like": f"%{query}%", "k": k, "offset": offset,
+    }
+
+
+def hybrid_search(query: str, k: int = 10, offset: int = 0) -> list[dict]:
+    return q(HYBRID_SQL, _hybrid_args(query, k, offset))
+
+
+def hybrid_count(query: str) -> int:
+    """How many documents this query matches, corpus-wide — not how many were
+    returned. The console says "showing N of M" and M has to be the corpus's
+    answer, or the sentence is a claim nobody can trace."""
+    row = q1(HYBRID_COUNT_SQL, _hybrid_args(query))
+    return int(row["n"]) if row else 0
 
 
 # ————————————————— fact contradiction detection —————————————————
@@ -248,6 +286,26 @@ def _details(row: dict) -> list[AuditDetail]:
     return out
 
 
+def _audit_where(query: str, date_from: str | None, date_to: str | None) -> tuple[str, tuple]:
+    """The access log's filter, as one predicate. Shared by `audit_log` and
+    `audit_log_total` so the count and the rows can never describe different
+    filters."""
+    clauses, args = [], []
+    text = (query or "").strip()
+    if text:
+        clauses.append("(actor ILIKE %s OR verb ILIKE %s OR target ILIKE %s)")
+        args += [f"%{text}%"] * 3
+    floor, ceil = _iso_date_arg(date_from), _iso_date_arg(date_to)
+    if floor:
+        clauses.append("occurred_at >= %s")
+        args.append(floor)
+    if ceil:
+        # Inclusive of the whole end day: the filter names dates, not instants.
+        clauses.append("occurred_at < (%s::date + 1)")
+        args.append(ceil)
+    return (" AND ".join(clauses) if clauses else "true"), tuple(args)
+
+
 def _mask_setting(key: str, value):
     if key == "setup_token":
         return _mask_secret(value if isinstance(value, str) else json.dumps(value))
@@ -275,8 +333,16 @@ def _mask_setting(key: str, value):
 @strawberry.type
 class Query:
     @strawberry.field
-    def overview_stats(self) -> JSON:
-        changes = q1("SELECT count(*) AS n FROM events WHERE occurred_at > now() - interval '7 days'")["n"]
+    def overview_stats(self, since: str | None = None) -> JSON:
+        """`since` is an ISO date: the lower bound of the window the dashboard's
+        range picker is on. It bounds `changes`, which counts events. The other
+        three are gauges of the workspace right now (facts awaiting review,
+        runs in flight, active flows) and have no window to be counted over."""
+        floor = _iso_date_arg(since)
+        if floor:
+            changes = q1("SELECT count(*) AS n FROM events WHERE occurred_at >= %s", (floor,))["n"]
+        else:
+            changes = q1("SELECT count(*) AS n FROM events WHERE occurred_at > now() - interval '7 days'")["n"]
         facts_review = q1("SELECT count(*) AS n FROM facts WHERE status <> 'Verified'")["n"]
         running = q1("SELECT count(*) AS n FROM workflow_runs WHERE status IN ('running','waiting')")["n"]
         flows = q1("SELECT count(*) AS n FROM workflows WHERE status = 'active'")["n"]
@@ -311,12 +377,32 @@ class Query:
                 return connect_sync.masked_config(r["provider"], cfg)
             return {k: v for k, v in cfg.items() if k != "shas"}
 
+        # A source's automatic cadence is not a column on `sources`: it is the
+        # trigger of the "Sync <name>" flow flowengine.ensure_sync_flow creates
+        # for it, keyed by the sync_source step's source_id. Read it back the
+        # same way, so the Sources card and the Flows editor can only ever show
+        # one cadence for one source.
+        schedules: dict[int, tuple[int, int | None]] = {}
+        for w in q("SELECT id, status, nodes, trigger FROM workflows"):
+            trig = jload(w["trigger"]) or {}
+            every = trig.get("every_minutes") if trig.get("on") == "schedule" else None
+            for step in jload(w["nodes"]) or []:
+                if not isinstance(step, dict) or step.get("kind") != "sync_source":
+                    continue
+                sid = int((step.get("config") or {}).get("source_id") or 0)
+                if sid:
+                    # Paused flow = no automatic sync, which is what None says.
+                    active = w["status"] == "active" and isinstance(every, int)
+                    schedules[sid] = (w["id"], int(every) if active else None)
+
         return [
             SourcePulse(id=r["id"], provider=r["provider"], name=r["display_name"], status=r["status"],
                         stat=r["stat_num"], unit=r["stat_unit"], bars=bars(r["id"]),
                         docs_count=r["docs_count"], health=r["health"], config=safe_config(r),
                         kind=r.get("kind") or "",
-                        last_sync_at=r["last_sync_at"].isoformat() if r.get("last_sync_at") else "")
+                        last_sync_at=r["last_sync_at"].isoformat() if r.get("last_sync_at") else "",
+                        sync_flow_id=schedules.get(r["id"], (None, None))[0],
+                        sync_interval_minutes=schedules.get(r["id"], (None, None))[1])
             for r in q("SELECT * FROM sources ORDER BY id")
         ]
 
@@ -362,13 +448,51 @@ class Query:
             embedded_count=int(counts["embedded"]))
 
     @strawberry.field
-    def search(self, query: str = "", k: int = 10) -> list[Document]:
+    def search(self, query: str = "", k: int = 10, offset: int = 0) -> list[Document]:
+        """One page of results. `offset` is a real SQL offset, so a browser can
+        walk a corpus larger than one page instead of the caller pretending the
+        first k rows are all there is (see search_total)."""
+        offset = max(0, offset)
         if query.strip():
             log_usage("search", query.strip())
-            rows = hybrid_search(query, k)
+            rows = hybrid_search(query, k, offset)
         else:
-            rows = q(DOC_SQL.format(where=""))
-        return [_doc(r) for r in rows[:k]]
+            # No query: most-recently-updated, paged the same way.
+            rows = q(DOC_SQL.format(where="") + " LIMIT %s OFFSET %s", (k, offset))
+        return [_doc(r) for r in rows]
+
+    @strawberry.field
+    def search_total(self, query: str = "") -> int:
+        """How many documents `search` would return for this query with no
+        limit. The count the results feed puts above the list."""
+        if query.strip():
+            return hybrid_count(query)
+        return int(q1("SELECT count(*) AS n FROM documents")["n"])
+
+    @strawberry.field
+    def recent_searches(self, limit: int = 6) -> list[str]:
+        """The queries this workspace has actually run, newest distinct first.
+        Read from usage_log, which the search resolver already writes — nothing
+        is recorded here that a person did not type."""
+        return [r["detail"] for r in q(
+            """SELECT detail, max(at) AS last FROM usage_log
+               WHERE kind = 'search' AND detail <> ''
+               GROUP BY detail ORDER BY last DESC LIMIT %s""", (max(1, limit),))]
+
+    @strawberry.field
+    def related_documents(self, document_id: int) -> list[RelatedDoc]:
+        """Documents one lineage edge away, in both directions. Real `edges`
+        rows only: a document nothing links to answers [], which is the truth
+        about it rather than an empty section with no explanation."""
+        rows = q("""
+          SELECT d.id, d.source, d.title, e.rel, 'out' AS direction
+          FROM edges e JOIN documents d ON d.id = e.to_doc WHERE e.from_doc = %s
+          UNION ALL
+          SELECT d.id, d.source, d.title, e.rel, 'in' AS direction
+          FROM edges e JOIN documents d ON d.id = e.from_doc WHERE e.to_doc = %s
+          ORDER BY title""", (document_id, document_id))
+        return [RelatedDoc(id=r["id"], source=r["source"], title=r["title"],
+                           rel=r["rel"], direction=r["direction"]) for r in rows]
 
     @strawberry.field
     def document(self, id: int) -> Document | None:
@@ -495,6 +619,19 @@ class Query:
                      owner_tint=r["owner_tint"], status=r["status"],
                      verified=r["verified_at"].isoformat() if r["verified_at"] else "")
                 for r in q("SELECT * FROM facts ORDER BY id")]
+
+    @strawberry.field
+    def claims(self, document_id: int) -> list[Fact]:
+        """The claims mined from ONE document, by key. `facts.document_id` is
+        written by the extractor at the moment it reads a document, so this is
+        provenance the server recorded, never provenance inferred from the
+        free-text `facts.source` label. Facts landed before the column existed
+        (and hand-written ones with no citation) carry NULL and belong to no
+        document — they are absent here rather than attributed to a guess."""
+        return [Fact(id=r["id"], claim=r["claim"], source=r["source"], owner=r["owner_name"],
+                     owner_tint=r["owner_tint"], status=r["status"],
+                     verified=r["verified_at"].isoformat() if r["verified_at"] else "")
+                for r in q("SELECT * FROM facts WHERE document_id = %s ORDER BY id", (document_id,))]
 
     @strawberry.field
     def fact_contradictions(self) -> list[FactContradiction]:
@@ -729,16 +866,26 @@ class Query:
                 for r in q("SELECT * FROM sync_events ORDER BY id DESC LIMIT 12")]
 
     @strawberry.field
-    def audit_log(self, limit: int = 40) -> list[AuditEvent]:
+    def audit_log(self, limit: int = 40, query: str = "",
+                  date_from: str | None = None, date_to: str | None = None) -> list[AuditEvent]:
+        """`query` matches actor, verb or target; `dateFrom`/`dateTo` are ISO
+        dates bounding `occurred_at` inclusively. The access log is deeper than
+        any window the console can hold, so the filter has to reach the whole
+        table rather than narrowing the page already fetched."""
+        where, args = _audit_where(query, date_from, date_to)
         return [AuditEvent(id=r["id"], actor=r["actor"], verb=r["verb"], target=r["target"],
                            at=r["occurred_at"].isoformat(), detail=_details(r))
-                for r in q("SELECT * FROM events ORDER BY occurred_at DESC, id DESC LIMIT %s", (limit,))]
+                for r in q(f"SELECT * FROM events WHERE {where} ORDER BY occurred_at DESC, id DESC LIMIT %s",
+                           args + (limit,))]
 
     @strawberry.field
-    def audit_log_total(self) -> int:
-        """Rows in the whole log, so the console can say what its window is a
-        window onto instead of comparing a filtered view against the window."""
-        return int(q1("SELECT count(*) AS n FROM events")["n"])
+    def audit_log_total(self, query: str = "",
+                        date_from: str | None = None, date_to: str | None = None) -> int:
+        """Rows matching the same filter, so the console can say what its window
+        is a window onto instead of comparing a filtered view against the
+        window's own size. No filter = the whole log."""
+        where, args = _audit_where(query, date_from, date_to)
+        return int(q1(f"SELECT count(*) AS n FROM events WHERE {where}", args)["n"])
 
     @strawberry.field
     def activity_feed(self, limit: int = 12) -> list[ActivityItem]:
@@ -902,6 +1049,18 @@ class Query:
         return [r["question"] for r in rows]
 
     @strawberry.field
+    def answer_harvest_sources(self) -> JSON:
+        """What `scanAnswerCandidates` would actually have to read, per source
+        key it accepts. The wizard used to offer a hardcoded three, so a
+        workspace with no Slack was invited to scan Slack and got nothing back.
+        Counts, not booleans: the console decides what to offer, and it can
+        only offer what there is something to mine."""
+        slack = q1("SELECT count(*) AS n FROM documents WHERE source = 'slack'")["n"]
+        docs = q1("SELECT count(*) AS n FROM documents WHERE source <> 'slack'")["n"]
+        chat = q1("SELECT count(*) AS n FROM chat_messages WHERE role = 'user'")["n"]
+        return {"slack": int(slack), "docs": int(docs), "chat": int(chat)}
+
+    @strawberry.field
     def index_stats(self) -> JSON:
         """Corpus size as the embedding config page states it: documents, the
         chunks they were split into, and how many of those carry a vector."""
@@ -937,18 +1096,42 @@ class Query:
                          impact_summary=r["impact_summary"], impact_count=r["impact_count"]) for r in rows]
 
     @strawberry.field
-    def insight_stats(self) -> InsightStats:
-        """Every number is a real count (BOTS-CONTRACT.md §A) — never a constant."""
-        counts = q1("""
+    def insight_stats(self, since: str | None = None, until: str | None = None) -> InsightStats:
+        """Every number is a real count (BOTS-CONTRACT.md §A) — never a constant.
+
+        `since`/`until` are ISO dates bounding the window the dashboard's range
+        picker is on. ALL FOUR counts move with the window, so the sentence the
+        page writes ("over the last 30 days, from …") describes every tile
+        above it and not just the two that happen to have a timestamp."""
+        floor, ceil = _iso_date_arg(since), _iso_date_arg(until)
+        # One predicate, applied to each table's own timestamp column.
+        def window(col: str) -> tuple[str, tuple]:
+            clauses, args = [], []
+            if floor:
+                clauses.append(f"{col} >= %s")
+                args.append(floor)
+            if ceil:
+                clauses.append(f"{col} < (%s::date + 1)")
+                args.append(ceil)
+            return (" AND ".join(clauses) if clauses else "true"), tuple(args)
+
+        w_usage, a_usage = window("at")
+        counts = q1(f"""
           SELECT count(*) FILTER (WHERE kind = 'search') AS searches,
                  count(*) FILTER (WHERE kind = 'chat_answer') AS served,
                  min(at) AS since
-          FROM usage_log""") or {"searches": 0, "served": 0, "since": None}
-        drift = q1("SELECT count(*) AS n FROM findings WHERE kind IN ('fact','freshness')")["n"]
-        fixed = q1("SELECT count(*) AS n FROM changes WHERE status = 'accepted'")["n"]
+          FROM usage_log WHERE {w_usage}""", a_usage) or {"searches": 0, "served": 0, "since": None}
+        w_found, a_found = window("created_at")
+        drift = q1(f"SELECT count(*) AS n FROM findings WHERE kind IN ('fact','freshness') AND {w_found}",
+                   a_found)["n"]
+        w_chg, a_chg = window("created_at")
+        fixed = q1(f"SELECT count(*) AS n FROM changes WHERE status = 'accepted' AND {w_chg}", a_chg)["n"]
+        # The window's own floor when the caller named one; otherwise the first
+        # thing this workspace ever did, which is what "since" meant before
+        # there was a picker. "" when it has done nothing at all.
+        start = floor or (counts["since"].isoformat() if counts["since"] else "")
         return InsightStats(searches=int(counts["searches"]), answers_served=int(counts["served"]),
-                            drift_caught=int(drift), docs_fixed=int(fixed),
-                            since=counts["since"].isoformat() if counts["since"] else "")
+                            drift_caught=int(drift), docs_fixed=int(fixed), since=start)
 
     @strawberry.field
     def freshness(self) -> list[FreshnessRow]:
@@ -963,13 +1146,14 @@ class Query:
                         WHEN d.updated_src < current_date - 7 THEN 'aging'
                         ELSE 'fresh' END AS bucket
             FROM documents d WHERE d.source_id IS NOT NULL)
-          SELECT s.display_name AS source,
+          SELECT s.display_name AS source, s.provider AS provider,
                  count(*) FILTER (WHERE b.bucket = 'fresh') AS fresh,
                  count(*) FILTER (WHERE b.bucket = 'aging') AS aging,
                  count(*) FILTER (WHERE b.bucket = 'stale') AS stale
           FROM sources s LEFT JOIN bucketed b ON b.source_id = s.id
-          GROUP BY s.id, s.display_name ORDER BY count(b.source_id) DESC, s.id""")
-        return [FreshnessRow(source=r["source"], fresh=r["fresh"], aging=r["aging"], stale=r["stale"]) for r in rows]
+          GROUP BY s.id, s.display_name, s.provider ORDER BY count(b.source_id) DESC, s.id""")
+        return [FreshnessRow(source=r["source"], provider=r["provider"], fresh=r["fresh"],
+                             aging=r["aging"], stale=r["stale"]) for r in rows]
 
     @strawberry.field
     def readability(self) -> list[ReadabilityRow]:

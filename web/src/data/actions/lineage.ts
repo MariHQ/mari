@@ -5,7 +5,8 @@
  * comes back through the handler instead of being read from a second query. */
 
 import type { LineageActions } from "@mari-design/components/pages/LineagePage";
-import type { ImpactResult } from "@mari-design/components/features/LineageDataModel";
+import type { DocHistoryRow, ImpactResult } from "@mari-design/components/features/LineageDataModel";
+import { gqlResult } from "../../lib/api";
 import { mutate, type ActionContext } from "../actions";
 
 /** Severities the drawer buckets by. Anything else is a "mentions" row rather
@@ -28,6 +29,20 @@ export function lineageActions({ navigate }: ActionContext): LineageActions {
     },
     watchDocument: async (docId: number) => {
       await mutate("mutation($docId: Int!) { toggleWatch(documentId: $docId) }", { docId });
+    },
+    /* The node drawer's History tab, fetched for the node the drawer is
+       actually showing. It is a read rather than a write, but it belongs here
+       for the same reason `select` does: the library names what it needs and
+       the app decides where that comes from. A failure throws with the
+       server's own message — the drawer says history could not be loaded,
+       which is not the same claim as "this document has no history". */
+    loadDocHistory: async (docId: number): Promise<DocHistoryRow[]> => {
+      const r = await gqlResult<{ docHistory: DocHistoryRow[] }>(
+        "query($docId: Int!) { docHistory(documentId: $docId) { at actor verb detail } }",
+        { docId },
+      );
+      if (!r.ok) throw new Error(r.error);
+      return r.data.docHistory ?? [];
     },
     createReviewTask: async ({ title, assignee }) => {
       await mutate(

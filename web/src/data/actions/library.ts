@@ -1,8 +1,10 @@
 /* Library actions — the workspace's editorial system.
  *
  * Four of the five tabs have a backing store and a mutation each. The Rules
- * tab has neither: its registry is compiled into LibraryRulesPanel as live
- * RegExps and the checker runs in the browser, so there is nothing to write. */
+ * tab's registry is compiled into LibraryRulesPanel as live RegExps and the
+ * checker runs in the browser — but which pack the project writes to, whether
+ * the grammar pass is on, and which rules it has turned down are the project's
+ * settings, not the registry's, and those DO persist. */
 
 import type { LibraryActions } from "@mari-design/components/pages/LibraryPage";
 import { mutate } from "./index";
@@ -24,6 +26,7 @@ const UPSERT_TEMPLATE = `mutation($key: String!, $name: String!, $category: Stri
   upsertDocumentTemplate(key: $key, name: $name, category: $category, description: $description, sections: $sections, icon: $icon)
 }`;
 const DELETE_TEMPLATE = `mutation($key: String!) { deleteDocumentTemplate(key: $key) }`;
+const UPDATE_SETTING = `mutation($key: String!, $value: JSON!) { updateSetting(key: $key, value: $value) }`;
 
 /* The panel colours a tag from the library's five-tone scale; the store keeps
    a `kind` from the ingest side of the product. `src/data/library.ts` maps
@@ -102,6 +105,15 @@ export function libraryActions(): LibraryActions {
     },
     deleteTemplate: async (id) => {
       await mutate(DELETE_TEMPLATE, { key: id });
+    },
+
+    /* ── rules ────────────────────────────────────────────────────────────*/
+    /* One settings row, `rule_config`, replaced whole — it holds nothing this
+       panel does not edit, so there is nothing to carry across. `statuses` is
+       only the rules the workspace moved off Active, which is why an untouched
+       registry stores an empty object rather than a copy of every default. */
+    saveRuleConfig: async ({ pack, grammar, statuses }) => {
+      await mutate(UPDATE_SETTING, { key: "rule_config", value: { pack, grammar, statuses } });
     },
   };
 }

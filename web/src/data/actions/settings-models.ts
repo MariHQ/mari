@@ -40,12 +40,20 @@ const isMasked = (v: string) => v.includes("•");
 
 export function settingsModelsActions(): SettingsModelsActions {
   return {
+    /* `dims` is null when the model itself changed: vector width is a property
+       of the model, and the panel has no way to know the new one's. Null must
+       therefore CLEAR the stored width rather than leave the old model's
+       number standing over the new model — the row is re-embedded and the
+       server writes the real width when it takes the change. A number only
+       ever arrives for a model that was not changed, which is the width the
+       corpus is already indexed at. */
     saveEmbedding: async ({ model, dims }) => {
       const row = await settingRow("embedding");
       const { provider, model: name } = splitQualified(model, row.provider);
+      const { dims: _stale, ...rest } = row;
       await mutate(UPDATE_SETTING, {
         key: "embedding",
-        value: { ...row, provider, model: name, ...(dims ? { dims } : {}) },
+        value: { ...rest, provider, model: name, ...(dims === null ? {} : { dims }) },
       });
     },
     saveLlm: async ({ model, openai, anthropic }) => {

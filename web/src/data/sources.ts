@@ -18,7 +18,10 @@ import type { PageData } from "./types";
 /* ── query ──────────────────────────────────────────────────────────────── */
 
 const QUERY = `{
-  sourcePulse { id provider name status docsCount health kind lastSyncAt bars }
+  sourcePulse {
+    id provider name status docsCount health kind lastSyncAt bars
+    syncIntervalMinutes syncFlowId
+  }
   connectorCatalog
   botsStatus
 }`;
@@ -27,6 +30,7 @@ type Res = {
   sourcePulse: {
     id: number; provider: string; name: string; status: string; docsCount: number;
     health: string; kind: string; lastSyncAt: string; bars: number[];
+    syncIntervalMinutes: number | null; syncFlowId: number | null;
   }[];
   connectorCatalog: {
     key: string; name: string; blurb: string; docsUrl?: string; connected?: boolean;
@@ -75,6 +79,17 @@ export function mapSources(res: Res): Source[] {
       lastSyncAt: s.lastSyncAt || null,
       // [] when a source has had no recent document changes — never a curve.
       bars: s.bars ?? [],
+      /* A source's cadence is the trigger of the "Sync <name>" flow the engine
+         creates alongside it, which is why it can be absent in two different
+         ways and the card treats them differently:
+
+           no flow  → `undefined`, and no schedule control is drawn at all;
+           a paused or manual-only flow → `null`, "manual only", which is what
+           that flow actually does.
+
+         Collapsing the two would put a select reading "Manual" over a source
+         whose schedule nobody has ever been able to state. */
+      syncIntervalMinutes: s.syncFlowId == null ? undefined : s.syncIntervalMinutes,
     };
   });
 }

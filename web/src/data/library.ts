@@ -152,8 +152,10 @@ export const EMPTY: LibraryData = {
   tab: "tags",
   tags: [], totalDocs: 0, checkerDocs: [], workspace: "",
   terms: [], guides: [], defaultPack: "", voice: NO_VOICE, templates: [],
-  // The rules tab always badges the same number: the panel's registry is
-  // compiled in, so it is as true of an empty workspace as of a full one.
+  // Deprecated and no longer read: the tab strip counts the very collections
+  // it is about to render, so a badge can no longer say 40 over a panel
+  // drawing 12. Still built only because `LibraryData.counts` is still a
+  // REQUIRED field of the library's type; it goes when that field does.
   counts: { tags: 0, rules: RULE_COUNT, glossary: 0, guides: 0, templates: 0 },
 };
 
@@ -177,6 +179,8 @@ export function buildLibrary(res: Res | null, tab: LibraryTab): LibraryData {
     defaultPack: res.defaultStylePack ?? "",
     voice: res.voiceLayer ?? NO_VOICE,
     templates,
+    // Deprecated and unread — see EMPTY. Derived from the same collections the
+    // page counts for itself, so while the field survives it cannot disagree.
     counts: {
       tags: tags.length,
       // The rule registry holds live RegExps, so it stays inside

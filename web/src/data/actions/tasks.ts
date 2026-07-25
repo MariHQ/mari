@@ -1,8 +1,9 @@
 /* Tasks inbox writes.
  *
- * Three controls, three mutations. `setTaskDue` also exists server-side but the
- * board draws no due-date control, so no handler claims it: an action nothing
- * can reach is as dishonest as a button that reaches nothing.
+ * The composer now carries the owner and the deadline the server has always
+ * been able to store (`createTask` takes both), so a task filed from the board
+ * lands with the person and the date whoever filed it chose instead of always
+ * defaulting to the signed-in account.
  */
 
 import type { TasksActions } from "@mari-design/components/pages/TasksPage";
@@ -12,8 +13,16 @@ const SET_DONE = `mutation SetTaskDone($id: Int!, $done: Boolean!) {
   setTaskDone(id: $id, done: $done)
 }`;
 
-const CREATE = `mutation CreateTask($title: String!, $kind: String!, $kindLabel: String!) {
-  createTask(title: $title, kind: $kind, kindLabel: $kindLabel)
+/* Two documents rather than one with a nullable `assignee`: the mutation's
+   assignee argument is non-null with a server-side default (the signed-in
+   person), so "leave it to the server" has to be expressed by not naming the
+   argument at all — passing null would be rejected outright. */
+const CREATE = `mutation CreateTask($title: String!, $kind: String!, $kindLabel: String!, $due: String) {
+  createTask(title: $title, kind: $kind, kindLabel: $kindLabel, due: $due)
+}`;
+
+const CREATE_ASSIGNED = `mutation CreateTask($title: String!, $kind: String!, $kindLabel: String!, $assignee: String!, $due: String) {
+  createTask(title: $title, kind: $kind, kindLabel: $kindLabel, assignee: $assignee, due: $due)
 }`;
 
 const CLEAR_DONE = `mutation ClearDoneTasks { clearDoneTasks }`;
@@ -21,10 +30,28 @@ const CLEAR_DONE = `mutation ClearDoneTasks { clearDoneTasks }`;
 export function tasksActions(): TasksActions {
   return {
     setDone: async ({ id, done }) => { await mutate(SET_DONE, { id, done }); },
-    // No `assignee`: the mutation defaults it to the signed-in person, which is
-    // who is standing at the composer. Passing a guess would file the task to
-    // someone the console never asked about.
-    create: async ({ title, kind, kindLabel }) => { await mutate(CREATE, { title, kind, kindLabel }); },
+
+    /* `assignee` and `due` are only sent when the composer collected them.
+       Omitted, the mutation files the task to the signed-in person with no
+       deadline, which is what it has always done.
+
+       `priority` is never sent: `tasks` has no column for one, so the board
+       carries no priority vocabulary and the composer draws no such control.
+
+       Nothing is returned. `createTask` answers with a boolean rather than the
+       row it wrote, so there is no server-issued id to hand back — and making
+       one up is exactly what the return value exists to prevent. The board
+       falls back to re-reading, which shows the real row. */
+    create: async ({ title, kind, kindLabel, assignee, due }) => {
+      const vars = { title, kind, kindLabel, due: due || null };
+      await (assignee
+        ? mutate(CREATE_ASSIGNED, { ...vars, assignee })
+        : mutate(CREATE, vars));
+    },
+
     clearDone: async () => { await mutate(CLEAR_DONE); },
+
+    // No `openDoc`: no task row records a document, so none carries one to
+    // open. The link is not drawn rather than drawn over nothing.
   };
 }

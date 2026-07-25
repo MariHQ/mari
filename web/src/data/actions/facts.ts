@@ -2,7 +2,13 @@
  *
  * One handler per intent the page offers. Each throws on failure and the
  * control that called it shows the server's own message, so a rejected write
- * is exactly as visible as a failed read. */
+ * is exactly as visible as a failed read.
+ *
+ * Two intents stay unwired, and so undrawn: `editFact` and `retireFact`. The
+ * fact ledger has `addFact` and `verifyFact` and nothing else — no mutation
+ * rewrites a claim in place, and none retires one — so a row offers no Edit
+ * and no Retire rather than a control that would report success and change
+ * nothing. */
 
 import type { FactScan, FactsActions } from "@mari-design/components/pages/FactsPage";
 import type { RunStatus } from "@mari-design/components/workflow/RunHistory";

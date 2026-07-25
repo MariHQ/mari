@@ -494,6 +494,18 @@ ALTER TABLE workflow_runs ADD COLUMN IF NOT EXISTS started_at timestamptz NOT NU
 -- to nothing, which is the truth about them.
 ALTER TABLE events ADD COLUMN IF NOT EXISTS detail jsonb NOT NULL DEFAULT '[]';
 
+-- findings.created_at / changes.created_at — when the detector wrote the row.
+-- Insights counts "drift caught" and "docs fixed" over a window the reader
+-- picks, and neither table recorded a time, so the whole dashboard could only
+-- ever be all-time. Rows that predate this column take the migration's own
+-- clock: that is the earliest moment this database can honestly vouch for
+-- them, and it is why a range narrower than the deployment shows only rows
+-- written since.
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT now();
+ALTER TABLE changes  ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT now();
+CREATE INDEX IF NOT EXISTS findings_created_at_idx ON findings (created_at);
+CREATE INDEX IF NOT EXISTS changes_created_at_idx ON changes (created_at);
+
 -- tasks.due_date — a real deadline, NULL when the task has none. Most tasks
 -- have none: nothing in the product assigns an SLA, so the console renders
 -- them without a due date rather than with an invented one. Overdue is
@@ -682,3 +694,19 @@ INSERT INTO site_feature_defs (key, label, hint, default_on, sort) VALUES
   ('provenance', 'Provenance footer',   'Footer line naming the site and the domain each page was published from.', true, 40),
   ('source_path','Source paths',        'Prints the path of the document each page was built from.',           false, 50)
 ON CONFLICT (key) DO NOTHING;
+
+-- ═══════════════════════════════════════════════════════════════════════
+-- ▼ per-document claim provenance
+-- ═══════════════════════════════════════════════════════════════════════
+
+-- facts.document_id — which document a claim was mined from, as a key.
+-- facts.source is a free-text label the extractor writes ('Mari scan · <title>')
+-- and a label is not a key: a title can be edited, duplicated or shared between
+-- documents, so matching on it would attribute one document's claims to
+-- another. Doc Review's claims list stayed empty for exactly this reason.
+-- NULL means "nobody recorded where this came from" — every row written before
+-- this column existed, and every fact typed in by hand without a citation. It
+-- is deliberately NOT backfilled from `source`: a guessed provenance reads the
+-- same as a recorded one and there is no way to tell them apart afterwards.
+ALTER TABLE facts ADD COLUMN IF NOT EXISTS document_id int REFERENCES documents(id) ON DELETE SET NULL;
+CREATE INDEX IF NOT EXISTS facts_document_id_idx ON facts (document_id) WHERE document_id IS NOT NULL;

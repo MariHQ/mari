@@ -27,7 +27,7 @@ import { page as welcome } from "@mari-design/components/pages/WelcomePage";
 import { page as login } from "@mari-design/components/pages/LoginPage";
 import { page as setup } from "@mari-design/components/pages/SetupPage";
 import { buildLogin, buildSetup } from "../src/data/auth-pages";
-import { buildAnswers, EMPTY as ANSWERS_EMPTY, mapAnswers } from "../src/data/answers";
+import { buildAnswers, EMPTY as ANSWERS_EMPTY, mapAnswers, mapHarvestSources } from "../src/data/answers";
 import { buildFlows, EMPTY as FLOWS_EMPTY } from "../src/data/flows";
 import { buildLibrary, EMPTY as LIBRARY_EMPTY } from "../src/data/library";
 import { buildLineage, EMPTY as LINEAGE_EMPTY } from "../src/data/lineage";
@@ -42,11 +42,11 @@ import { buildAudit, EMPTY as AUDIT_EMPTY } from "../src/data/audit";
 import { buildAuditLog, mapAuditLog, mapDetails } from "../src/data/audit-log";
 import { buildDecisions, mapDecisions } from "../src/data/decisions";
 import { buildFacts, mapBanner, mapFacts } from "../src/data/facts";
-import { mapKnowledge } from "../src/data/knowledge";
-import { mapWidgets } from "../src/data/insights";
+import { mapSearch } from "../src/data/knowledge";
+import { mapFreshness, mapWidgets } from "../src/data/insights";
 import { EMPTY, mapOverview } from "../src/data/overview";
 import { buildApiKeys, buildMembers, mapApiKeys, mapGithubTeam, mapMembers } from "../src/data/settings";
-import { buildTasks, mapStrip, mapTasks } from "../src/data/tasks";
+import { buildTasks, mapAssignees, mapStrip, mapTasks } from "../src/data/tasks";
 
 /* This file used to install a DOM shim so `DocReviewOutlinePanel` could be
    server-rendered: it derived its outline through `document.createElement`
@@ -103,7 +103,10 @@ const OVERVIEW_RES: any = {
 };
 
 console.log("overview");
-const data = mapOverview(OVERVIEW_RES, "Dana");
+/* The greeting reads the reader's own clock in the zone Preferences stores,
+   and the dashboard counts over a window the app can change. Both are data
+   the adapter passes through. */
+const data = mapOverview(OVERVIEW_RES, "Dana", "America/Los_Angeles", { preset: "30d" });
 
 check("drops step kinds the library cannot draw", data.flow?.nodes.length === 2);
 check("carries per-step outcomes from the last run",
@@ -112,8 +115,15 @@ check("leaves un-run steps without an outcome",
   data.flow?.nodes.find((n) => n.label === "When docs change")?.state === undefined);
 check("passes dates through unformatted", data.docs[0]?.date === "2026-07-20");
 
+check("the greeting's zone is the account's, not this machine's",
+  data.timeZone === "America/Los_Angeles");
+check("the counting window reaches the page", data.range?.preset === "30d");
 const def = render(overview, { data, loading: false, error: null });
-check("greets by given name", def.includes("Good morning, Dana"));
+/* The greeting is derived from the clock now, so asserting "Good morning"
+   would pin this suite to the hour it was written in. What must hold is that
+   the reader is greeted BY NAME, with one of the three real greetings. */
+check("greets by given name",
+  ["Good morning", "Good afternoon", "Good evening"].some((g) => def.includes(`${g}, Dana`)));
 check("renders digest content", def.includes("Pricing FAQ"));
 check("formats the ISO date for display", def.includes("Jul 20, 2026"));
 check("empty state derives from the data",
@@ -131,6 +141,12 @@ const TASKS_RES: any = {
     { id: 2, title: "Approve the SSO guide", assigneeInitials: "MG", kind: "approval", kindLabel: "Approval", done: true, due: "", overdue: false },
   ],
   tasksSummary: { title: "Review queue", tags: ["Fact check", "Approval"], people: ["DR"], statValue: "1", statLabel: "overdue" },
+  /* Who a task can be filed to. Without this the composer draws no owner
+     picker and every task silently files to whoever is signed in. */
+  members: [
+    { id: 1, name: "Dana Rodriguez", initials: "DR", status: "active" },
+    { id: 2, name: "Priya Kapoor", initials: "PK", status: "invited" },
+  ],
 };
 const taskRows = mapTasks(TASKS_RES);
 check("tasks: a due date arrives as an ISO date, not a formatted one", taskRows[0].due === "2026-07-18");
@@ -141,12 +157,21 @@ check("tasks: the strip is the server's rollup of the same rows",
   taskStrip.statValue === "1" && taskStrip.statLabel === "overdue" && taskStrip.people.join() === "DR");
 check("tasks: an empty inbox has nothing to summarise",
   mapStrip({ tasks: [], tasksSummary: null } as any) === null);
-const tasksData = buildTasks(taskRows, taskStrip, "");
+const taskAssignees = mapAssignees(TASKS_RES);
+check("tasks: a task cannot be filed to someone who has never signed in",
+  taskAssignees.length === 1 && taskAssignees[0].name === "Dana Rodriguez");
+const tasksData = buildTasks(taskRows, taskStrip, "", taskAssignees);
 check("tasks: the strip reaches the page", tasksData.strip !== null);
+check("tasks: no priority vocabulary means no priority control",
+  tasksData.priorities === undefined);
 const tasksHtml = render(tasks, { data: tasksData, loading: false, error: null });
 check("tasks: renders both columns", tasksHtml.includes("Verify the proration rule") && tasksHtml.includes("Approve the SSO guide"));
 check("tasks: renders the strip headline", tasksHtml.includes("Review queue"));
-check("tasks: renders the due date on the open task", tasksHtml.includes("2026-07-18"));
+/* The row formats the ISO date itself now (§5, P-TA-4), so the raw value must
+   NOT reach the screen: an assertion on "2026-07-18" would pass only while the
+   page was echoing an unformatted string. */
+check("tasks: formats the due date rather than echoing the ISO value",
+  tasksHtml.includes("Jul 18, 2026") && !tasksHtml.includes("2026-07-18"));
 states(tasks, buildTasks([], null, ""));
 
 /* ── Facts ──────────────────────────────────────────────────────────────── */
@@ -187,23 +212,43 @@ const decisionRows = mapDecisions({ decisions: [
 check("decisions: unknown status falls back to proposed", decisionRows[1].status === "proposed");
 check("decisions: provider comes off the source label", decisionRows[0].provider === "slack");
 const decisionsData = buildDecisions(decisionRows, "all");
-check("decisions: rail lists what awaits sign-off", decisionsData.awaiting.length === 2);
-check("decisions: renders statements",
-  render(decisions, { data: decisionsData, loading: false, error: null }).includes("Adopt the Growth tier rename"));
+const decisionsHtml = render(decisions, { data: decisionsData, loading: false, error: null });
+check("decisions: renders statements", decisionsHtml.includes("Adopt the Growth tier rename"));
+/* The rail derives what awaits sign-off from the RECORDS (`data.awaiting` is
+   deprecated and unread), so what has to hold is that an unsigned proposal
+   reaches the rail with a control that can sign it — the id-less version could
+   only ever chip itself "Ratified" locally (P-DE-3). */
+check("decisions: the rail offers sign-off on an unsigned proposal",
+  decisionsHtml.includes("Awaiting sign-off") && decisionsHtml.includes("Ratify"));
+/* A ledger whose every record is already signed still draws the rail, and the
+   rail says what it means rather than rendering an empty box (P-DE-4). */
+const signedRows = decisionRows.map((d) => ({ ...d, status: "ratified" as const }));
+check("decisions: a fully signed ledger says so instead of drawing a blank rail",
+  render(decisions, { data: buildDecisions(signedRows, "all"), loading: false, error: null })
+    .includes("Nothing awaiting sign-off"));
 states(decisions, buildDecisions([], "all"));
 
 /* ── Knowledge ──────────────────────────────────────────────────────────── */
 
 console.log("knowledge");
-const results = mapKnowledge({ search: [
+const KNOWLEDGE_RES: any = { search: [
   { id: 101, source: "notion", title: "Pricing FAQ", snippet: "Growth tier proration…", kind: "page", author: "Dana R.", authorInitials: "DR", date: "2026-07-20", tags: ["canonical"] },
   { id: 102, source: "github", title: "Add SAML walkthrough", snippet: "Okta setup", kind: "pr", author: "Priya K.", authorInitials: "PK", date: "2026-07-19", tags: [] },
   { id: 103, source: "github", title: "Bump deps", snippet: "", kind: "commit", author: "Sam L.", authorInitials: "SL", date: "2026-07-18", tags: [] },
-] });
+], searchTotal: 248 };
+const { results, total: knowledgeTotal } = mapSearch(KNOWLEDGE_RES);
 check("knowledge: maps known kinds", results[1].kind === "pr");
 check("knowledge: unknown kinds read as pages", results[2].kind === "page");
-check("knowledge: renders hits",
-  render(knowledge, { data: { results, doc: null }, loading: false, error: null }).includes("Pricing FAQ"));
+/* `total` is the corpus-wide count behind one page of hits. Without it the
+   footer would state the page size as the answer. */
+check("knowledge: the total is the whole match, not the page", knowledgeTotal === 248);
+const knowledgeHtml = render(
+  knowledge,
+  { data: { results, doc: null, total: knowledgeTotal }, loading: false, error: null },
+);
+check("knowledge: renders hits", knowledgeHtml.includes("Pricing FAQ"));
+check("knowledge: the footer counts the whole match, not the page",
+  knowledgeHtml.includes("248"));
 states(knowledge, { results: [], doc: null });
 
 /* ── Insights ───────────────────────────────────────────────────────────── */
@@ -216,7 +261,13 @@ const INSIGHTS_RES: any = {
     { id: 2, title: "Never scored", source: "github", grade: "", note: "" },
   ],
   glossaryCandidates: [{ id: 1, term: "Proration", variants: "pro-rate, prorated", definition: "Charging for partial periods." }],
-  freshness: [{ source: "GitHub", fresh: 40, aging: 12, stale: 3 }],
+  /* `source` is the workspace's own name for the connector, `provider` the key
+     the chart draws a mark from. The chart no longer holds a table turning
+     "github" into a repository name, so both have to arrive. */
+  freshness: [
+    { source: "GitHub · acme/handbook", provider: "github", fresh: 40, aging: 12, stale: 3 },
+    { source: "slack", provider: "slack", fresh: 18, aging: 2, stale: 0 },
+  ],
   auditLog: [{ id: 1, actor: "Mari", verb: "scored", target: "Pricing FAQ", at: "2026-07-20T14:57:00" }],
 };
 const widgets = mapWidgets(INSIGHTS_RES)!;
@@ -224,8 +275,18 @@ check("insights: drops documents with no readability pass", widgets.readability.
 check("insights: splits glossary variants into chips", widgets.glossary[0].variants.length === 2);
 check("insights: tiles carry real counts", widgets.stats.find((s) => s.key === "searches")?.value === 412);
 check("insights: no stats means no widget block", mapWidgets({ ...INSIGHTS_RES, insightStats: null }) === null);
-check("insights: renders",
-  render(insights, { data: { widgets, freshness: INSIGHTS_RES.freshness, extras: null }, loading: false, error: null }).length > 500);
+const freshness = mapFreshness(INSIGHTS_RES);
+check("insights: a source names itself when it says more than its provider key",
+  freshness[0].label === "GitHub · acme/handbook" && freshness[0].source === "github");
+check("insights: a source that only repeats its provider key gets no label",
+  freshness[1].label === undefined);
+const insightsHtml = render(
+  insights,
+  { data: { widgets, freshness, extras: null }, loading: false, error: null },
+);
+check("insights: renders", insightsHtml.length > 500);
+check("insights: the chart names the source the workspace named",
+  insightsHtml.includes("GitHub · acme/handbook"));
 states(insights, { widgets: null, freshness: null, extras: null });
 
 /* ── Audit ──────────────────────────────────────────────────────────────── */
@@ -247,7 +308,13 @@ const auditData = buildAudit(AUDIT_RES);
 check("audit: shows only the latest run's findings", auditData.findings.length === 1);
 check("audit: marks the current run in the history", auditData.history[0].current === true);
 check("audit: summarizes the run", auditData.summary === "4 findings, 1 fixed.");
-check("audit: renders", render(audit, { data: auditData, loading: false, error: null }).includes("Untagged pages"));
+const auditHtml = render(audit, { data: auditData, loading: false, error: null });
+check("audit: renders", auditHtml.includes("Untagged pages"));
+/* `ranAt` is an ISO timestamp on the run and on every history row (P-AU-3);
+   the page formats both. The raw value must not reach the screen. */
+check("audit: formats the run timestamps rather than echoing them",
+  auditHtml.includes("Jul 20, 2026") && auditHtml.includes("Jul 13, 2026")
+  && !auditHtml.includes("2026-07-20T14:57:00"));
 check("audit: no runs means no repo, which is the connect state", buildAudit({ auditRuns: [], auditFindings: [], members: [] } as any).repo === "");
 states(audit, AUDIT_EMPTY);
 
@@ -316,14 +383,32 @@ check("audit log: counts distinct actors",
 check("audit log: the rail says how deep the log goes",
   logData.summary.find((s) => s.label === "Events in log")?.value === "4,211");
 check("audit log: oldest shown is the last row", logData.summary.find((s) => s.label === "Oldest shown")?.value === "2026-07-19T16:40:00");
-check("audit log: nothing expanded means nothing to show", logData.detail.length === 0);
-const expandedLog = buildAuditLog(logEvents, LOG_RES.auditLogTotal, logDetails, 3);
-check("audit log: an expanded row resolves its own detail", expandedLog.detail[0].value === "v14");
-check("audit log: the expanded row renders its detail",
-  render(auditLog, { data: expandedLog, loading: false, error: null }).includes("Release"));
 const logHtml = render(auditLog, { data: logData, loading: false, error: null });
 check("audit log: renders rows", logHtml.includes("help.mari.guru"));
 check("audit log: formats the ISO timestamp", logHtml.includes("Jul 20, 2026"));
+/* Detail is a property of the ROW now (`AuditEvent.detail`), and the page
+   folds `data.detail` onto whichever row is expanded. So these assert the
+   screen rather than the intermediate list: nothing expanded, nothing on
+   screen; expand a row and that row's own values are there. */
+/* Anchored on the <dt> the detail panel renders, not on a bare substring: an
+   icon's SVG path data contains "v14" ("M12 7v14"), so a loose search reported
+   a detail row that is not on screen. */
+const hasDetail = (html: string, label: string) => html.includes(`>${label}</dt>`);
+check("audit log: nothing expanded, no detail on screen",
+  !hasDetail(logHtml, "Release") && !hasDetail(logHtml, "Docs"));
+const expandedLog = buildAuditLog(logEvents, LOG_RES.auditLogTotal, logDetails, 3);
+const expandedHtml = render(auditLog, { data: expandedLog, loading: false, error: null });
+check("audit log: the expanded row renders its own detail",
+  hasDetail(expandedHtml, "Release") && expandedHtml.includes("v14"));
+/* Event 2 was logged before the writer recorded any detail. Expanding it must
+   draw nothing — and in particular must not borrow another row's detail. */
+const emptyDetailHtml = render(
+  auditLog,
+  { data: buildAuditLog(logEvents, LOG_RES.auditLogTotal, logDetails, 2), loading: false, error: null },
+);
+check("audit log: a row with no detail expands to nothing, not to another row's",
+  emptyDetailHtml.includes("Proration rule")
+  && !hasDetail(emptyDetailHtml, "Release") && !hasDetail(emptyDetailHtml, "Docs"));
 states(auditLog, buildAuditLog([], 0, new Map(), null));
 
 /* ── Doc review ─────────────────────────────────────────────────────────── */
@@ -332,7 +417,12 @@ console.log("doc-review");
 const DOC_RES: any = {
   document: {
     id: 12, title: "Billing proration", author: "Dana Rodriguez", date: "2026-07-20",
-    body: "## Overview\n\nGrowth tier prorates monthly.\n\n### Edge cases\n\nDowngrades settle next cycle.",
+    // The document's own tags and this reader's watch row. The header used to
+    // draw "canonical"/"verified" on everything and a Watch button that knew
+    // nothing; both are data now, so the response has to carry them.
+    tags: ["canonical", "customer-facing"], watched: true,
+    body: "## Overview\n\nGrowth tier prorates monthly.\n\n### Edge cases\n\nDowngrades settle next cycle."
+      + "\n\n| Tier | Prorates |\n| --- | --- |\n| Growth | monthly |\n\n> Downgrades never refund.",
   },
   revisions: [{ id: 5, actor: "Dana Rodriguez", verb: "edited", at: "2026-07-20T14:57:00" }],
   findings: [
@@ -354,8 +444,21 @@ check("doc review: an unknown change status reads as undecided",
   docData.doc.changes[1].state === "pending");
 check("doc review: no document means the empty page, not a blank title",
   mapDocReview({ ...DOC_RES, document: null }).title === "");
-check("doc review: renders the document",
-  render(docReview, { data: docData, loading: false, error: null }).includes("Billing proration"));
+check("doc review: the tags are the document's own, not two invented chips",
+  docData.tags?.join() === "canonical,customer-facing");
+const docHtml = render(docReview, { data: docData, loading: false, error: null });
+check("doc review: renders the document", docHtml.includes("Billing proration"));
+check("doc review: renders the document's tags", docHtml.includes("Canonical"));
+/* `watched` seeds the Watch button; where a deployment does not know, the
+   button is not drawn at all rather than claiming "Watch" at a watcher. */
+check("doc review: a known watch state draws the control", docHtml.includes("Watching"));
+check("doc review: an unknown watch state draws no control",
+  !render(docReview, { data: { ...docData, watched: undefined }, loading: false, error: null })
+    .includes("Watching"));
+/* A table and a blockquote survive to the screen: the parser used to flatten
+   both, which meant Save wrote back a document missing them. */
+check("doc review: opaque markdown blocks survive to the page",
+  docHtml.includes("Downgrades never refund"));
 states(docReview, DOC_REVIEW_EMPTY);
 
 /* ── Answers ────────────────────────────────────────────────────────────── */
@@ -372,16 +475,27 @@ const ANSWERS_RES: any = {
       owner: "", channels: [], sources: [], served: 0, spark: [], updated: "2026-07-01" },
   ],
   answerCoverageGaps: ["how do i rotate my api key?"],
+  // Nothing indexed from chat, so that source has nothing to scan.
+  answerHarvestSources: { slack: 412, docs: 1284, chat: 0 },
 };
 const answerRows = mapAnswers(ANSWERS_RES);
 check("answers: a status this build cannot draw is dropped", answerRows.length === 2);
 check("answers: an unknown channel has no toggle, so it is dropped",
   answerRows[0].channels.length === 1);
-const answersData = buildAnswers(answerRows, ANSWERS_RES.answerCoverageGaps, "all");
+/* The harvest source list is data now: the page draws no "Harvest questions"
+   button without it, and offers only the sources this workspace can scan. */
+const harvestSources = mapHarvestSources(ANSWERS_RES);
+check("answers: a source with nothing in it is not offered",
+  harvestSources.length === 2 && harvestSources.every((s) => s.key !== "history"));
+const answersData = buildAnswers(answerRows, ANSWERS_RES.answerCoverageGaps, "all", harvestSources);
 check("answers: the stat strip counts the answers under it",
   answersData.stats[0].value === "1" && answersData.stats[2].value === "1,284");
-check("answers: renders the questions",
-  render(answers, { data: answersData, loading: false, error: null }).includes("How long do sessions last?"));
+const answersHtml = render(answers, { data: answersData, loading: false, error: null });
+check("answers: renders the questions", answersHtml.includes("How long do sessions last?"));
+check("answers: offers the harvest it has sources for", answersHtml.includes("Harvest questions"));
+check("answers: a workspace with nothing to scan is offered no harvest",
+  !render(answers, { data: buildAnswers(answerRows, [], "all"), loading: false, error: null })
+    .includes("Harvest questions"));
 states(answers, ANSWERS_EMPTY);
 
 /* ── Lineage ────────────────────────────────────────────────────────────── */
@@ -408,6 +522,9 @@ const LINEAGE_RES: any = {
     { id: 4, fromId: "doc:pricing", toId: "gh:c1", kind: "from_a_newer_linker", date: "2026-07-19", meta: null },
   ],
   graphStats: { activity: [{ date: "2026-07-19", count: 3 }, { date: "2026-07-20", count: 5 }] },
+  // Saved views: what `saveView` wrote, read back into the Views menu. Without
+  // them the menu offers only the built-in presets and the write is unread.
+  graphViews: [{ id: 4, name: "Canonical only", state: '{"status":"verified","lens":"source"}' }],
 };
 const lineageData = buildLineage(LINEAGE_RES);
 check("lineage: a node kind the graph has no glyph for is dropped", lineageData.nodes.length === 2);
@@ -419,6 +536,11 @@ check("lineage: an edge to a node that is not there is dropped",
 check("lineage: machine-proposed edges are flagged", lineageData.edges[0].llm === true);
 check("lineage: the scrubber snaps to the dates things happened on",
   lineageData.dates.join() === "2026-07-19,2026-07-20");
+check("lineage: a saved view is read back, not just written",
+  lineageData.views?.length === 1 && lineageData.views?.[0].name === "Canonical only");
+/* The Views menu itself is a closed dropdown at render time (its content is
+   unmounted until it is opened), so the assertion that it can list the view is
+   that the view reached the page at all. */
 check("lineage: renders the graph",
   render(lineage, { data: lineageData, loading: false, error: null }).includes("Pricing FAQ"));
 states(lineage, LINEAGE_EMPTY);
@@ -501,12 +623,26 @@ check("library: the voice layer is the workspace's own", libraryData.voice.voice
 check("library: templates carry their sections", libraryData.templates[0].sections.join() === "Problem,Proposal");
 check("library: a template icon this build has no glyph for reads as a document",
   libraryData.templates[1].icon === "file-text");
-check("library: counts are counted, not stated",
-  libraryData.counts.tags === 2 && libraryData.counts.glossary === 1
-  && libraryData.counts.guides === 2 && libraryData.counts.templates === 2);
-check("library: the rules tab badges the checker's own registry",
-  libraryData.counts.rules === RULE_COUNT && RULE_COUNT > 0);
 const libraryHtml = render(library, { data: libraryData, loading: false, error: null });
+/* The tab badges are what the reader believes, and the page counts the very
+   collections it is about to draw (`data.counts` is deprecated and unread).
+   So the assertion reads the badge off the rendered strip rather than off a
+   number nothing renders: a badge that says 40 over a panel drawing 12 is the
+   exact bug the derivation fixed. */
+const tabBadge = (html: string, label: string): number | null => {
+  const m = new RegExp(`${label}<span[^>]*>(\\d+)</span>`).exec(html);
+  return m ? Number(m[1]) : null;
+};
+check("library: the tab strip badges what the panels will draw",
+  tabBadge(libraryHtml, "Tags") === libraryData.tags.length
+  && tabBadge(libraryHtml, "Glossary") === libraryData.terms.length
+  && tabBadge(libraryHtml, "Style guides") === libraryData.guides.length
+  && tabBadge(libraryHtml, "Templates") === libraryData.templates.length);
+check("library: those counts are the fixture's own collections",
+  libraryData.tags.length === 2 && libraryData.terms.length === 1
+  && libraryData.guides.length === 2 && libraryData.templates.length === 2);
+check("library: the rules tab badges the checker's own registry",
+  tabBadge(libraryHtml, "Rules") === RULE_COUNT && RULE_COUNT > 0);
 check("library: renders the tag vocabulary", libraryHtml.includes("Canonical"));
 check("library: renders the guides tab count", render(library, { data: { ...libraryData, tab: "guides" }, loading: false, error: null }).includes("Plain language"));
 check("library: renders the templates gallery", render(library, { data: { ...libraryData, tab: "templates" }, loading: false, error: null }).includes("RFC"));
@@ -579,12 +715,18 @@ states(publish, PUBLISH_EMPTY);
 console.log("sources");
 const SOURCES_RES: any = {
   sourcePulse: [
+    /* `syncIntervalMinutes` is only meaningful where a sync flow owns the
+       source: without one there is no schedule to report, and the page then
+       draws no schedule control for that row rather than a guessed value. */
     { id: 1, provider: "github", name: "acme/handbook", status: "active", docsCount: 1284,
-      health: "Healthy", kind: "github", lastSyncAt: "2026-07-21T14:12:00", bars: [3, 5, 4] },
+      health: "Healthy", kind: "github", lastSyncAt: "2026-07-21T14:12:00", bars: [3, 5, 4],
+      syncFlowId: 21, syncIntervalMinutes: 60 },
     { id: 2, provider: "confluence", name: "Confluence · Ops", status: "active", docsCount: 512,
-      health: "Error", kind: "connector", lastSyncAt: "", bars: [] },
+      health: "Error", kind: "connector", lastSyncAt: "", bars: [],
+      syncFlowId: 22, syncIntervalMinutes: null },
     { id: 3, provider: "docs", name: "Seeded docs", status: "active", docsCount: 12,
-      health: "From a newer ingester", kind: "", lastSyncAt: "", bars: [] },
+      health: "From a newer ingester", kind: "", lastSyncAt: "", bars: [],
+      syncFlowId: null, syncIntervalMinutes: 15 },
   ],
   connectorCatalog: [
     { key: "github", name: "GitHub", blurb: "Markdown docs from repos.", docsUrl: "", connected: true, fields: [] },
@@ -604,6 +746,10 @@ check("sources: a health word this build does not know is not a failure",
   sourcesData.sources[2].state === "healthy");
 check("sources: a source that never synced has no last-sync date",
   sourcesData.sources[1].lastSyncAt === null);
+check("sources: a schedule is reported only where a sync flow owns the source",
+  sourcesData.sources[0].syncIntervalMinutes === 60
+  && sourcesData.sources[1].syncIntervalMinutes === null
+  && sourcesData.sources[2].syncIntervalMinutes === undefined);
 check("sources: the catalog carries specs, never values",
   sourcesData.catalog[1].fields[0].secret === true);
 check("sources: the bots tab reads the repos the webhook covers",

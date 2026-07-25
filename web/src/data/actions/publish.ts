@@ -4,7 +4,18 @@
  * onto a presentational shape), so the site handlers resolve it here from the
  * route — `?site=<id>` — which is the same thing the adapter reads. That keeps
  * the two halves talking about the same site without the page having to carry
- * a database key it never renders. */
+ * a database key it never renders.
+ *
+ * Two intents stay unwired, and so undrawn:
+ *
+ *   • `deleteSite`. There is no mutation that removes a site — `createSite`,
+ *     `updateSiteTheme`, `setSiteFeature`, `buildSite`, `deploySite` and
+ *     `rollbackRelease` are the whole surface — so the list row offers no
+ *     Delete rather than a confirm dialog that takes nothing away.
+ *   • `setSiteNav`. `sites.nav` is written by the builder from the documents a
+ *     build actually matched; nothing accepts a nav tree from the console, and
+ *     a Save that reordered sections only on screen would be undone by the
+ *     next build. */
 
 import type { PublishActions } from "@mari-design/components/pages/PublishPage";
 import { gql } from "../../lib/api";

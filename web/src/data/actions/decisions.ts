@@ -31,6 +31,10 @@ type ImpactRes = {
 
 const START_SCAN = `mutation { startDecisionScan }`;
 
+const CREATE_TASK = `mutation CreateTask($title: String!, $kind: String!, $kindLabel: String!) {
+  createTask(title: $title, kind: $kind, kindLabel: $kindLabel)
+}`;
+
 const RUN_QUERY = `query($id: Int!) {
   workflowRun(id: $id) { id number workflowName status progress stats rows }
 }`;
@@ -91,5 +95,32 @@ export function decisionsActions(): DecisionsActions {
       return readRun(String(d.startDecisionScan));
     },
     scanProgress: (id: string) => readRun(id),
+
+    /* One task per affected document, filed against the same ledger the Tasks
+       page reads. There is no bulk mutation, so they are written one at a time
+       and a partial failure throws with the server's own words: the tasks that
+       DID land stay landed, and the ledger shows them on the next read.
+
+       `approval` is not a guess — a ratified decision's impact is a document
+       someone has to sign off on, which is the kind the board already has a
+       pill for. The document's severity rides in the title, because a task
+       carries no other field to put it in. */
+    createImpactTasks: async ({ id, docs }) => {
+      const decision = (await gqlResult<{ decisions: { id: number; statement: string }[] }>(
+        `{ decisions { id statement } }`,
+      ));
+      if (!decision.ok) throw new Error(decision.error);
+      const statement = (decision.data?.decisions ?? []).find((d) => d.id === id)?.statement;
+      if (!statement) throw new Error("That decision is no longer in the ledger.");
+      for (const doc of docs) {
+        await mutate(CREATE_TASK, {
+          title: `${doc.title}: ${doc.reason || `affected by "${statement}"`}`,
+          kind: "approval",
+          kindLabel: "Approval",
+        });
+      }
+      // The board and the ledger both moved.
+      decisionsChanged();
+    },
   };
 }

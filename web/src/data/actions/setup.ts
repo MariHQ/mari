@@ -15,6 +15,13 @@ import type { ActionContext } from "./index";
 /** `onDone` re-reads /auth/me: the setup POST creates the session cookie, so
  *  the gate has to re-evaluate or the claimed workspace stays behind the
  *  first-run screen it just left. */
+/* `checkToken` stays unwired, so step 1 has no pre-flight check and the token
+   is validated where it always was: on the finish button. `POST /auth/setup`
+   is the only endpoint that knows whether a setup token is good, and it claims
+   the workspace in the same call — there is no way to ask without also
+   spending it. A check that always answered "looks fine" would be worse than
+   none, because the one thing it exists to catch is a token that is not. */
+
 export function setupActions({ refresh, navigate }: ActionContext): SetupActions {
   return {
     finish: (target) => navigate(target === "sources" ? "/sources" : "/"),

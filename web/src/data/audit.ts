@@ -1,13 +1,22 @@
-/* Repo-audit adapter: the latest run plus its findings. */
+/* Repo-audit adapter: one run plus its findings.
+ *
+ * Which run is a route — `/audit` is the latest, `/audit?run=<id>` is the one
+ * the history rail was clicked on — so a past run is a place, shareable and
+ * reload-proof, rather than a click the page forgets. */
 
+import { useSearchParams } from "react-router-dom";
 import type { AuditData, AuditRun } from "@mari-design/components/pages/AuditPage";
 import type { AuditFinding } from "@mari-design/components/features/AuditFindingsChecklist";
 import { useQuery } from "../lib/api";
 import type { PageData } from "./types";
 
-const QUERY = `{
+/* `run` names which run's findings to fetch: null asks the server for the
+   latest, which is exactly what `/audit` with no run in the route means. The
+   history rail is fetched whole regardless, so opening an older run does not
+   shorten the list it was opened from. */
+const QUERY = `query Audit($run: Int) {
   auditRuns { id provider repo findings fixed ranAt }
-  auditFindings { id runId kind title detail fixAction fixPayload status }
+  auditFindings(runId: $run) { id runId kind title detail fixAction fixPayload status }
   members { id name }
 }`;
 
@@ -65,11 +74,14 @@ export const EMPTY: AuditData = {
   banner: null, history: [], scans: SCANS, extras: null,
 };
 
-/** Pure: the whole response → everything the page renders. */
-export function buildAudit(res: Res | null): AuditData {
+/** Pure: the whole response → everything the page renders. `askedId` is the
+ *  run the route names; absent (or gone from the window the query fetched) it
+ *  falls back to the latest, which is what `/audit` on its own means. */
+export function buildAudit(res: Res | null, askedId: number | null = null): AuditData {
   if (!res) return EMPTY;
   // auditRuns comes back newest first.
-  const latest = res.auditRuns?.[0] ?? null;
+  const runs = res.auditRuns ?? [];
+  const latest = (askedId !== null ? runs.find((r) => r.id === askedId) : null) ?? runs[0] ?? null;
   return {
     // Empty repo is what makes the page's "connect a repository" state true,
     // so a workspace that has never run an audit must land here honestly.
@@ -82,9 +94,14 @@ export function buildAudit(res: Res | null): AuditData {
     findings: mapFindings(res, latest?.id ?? null),
     members: res.members ?? [],
     banner: null,
-    history: (res.auditRuns ?? []).map<AuditRun>((r) => ({
+    history: runs.map<AuditRun>((r) => ({
+      // The run's own handle, which is what makes the rail row a button that
+      // opens it rather than a hover state over nothing.
+      id: String(r.id),
       label: r.repo,
       detail: `${r.findings} found · ${r.fixed} fixed`,
+      // ISO, as the server stored it. The rail formats and orders on it.
+      ranAt: r.ranAt || undefined,
       current: r.id === latest?.id,
     })),
     scans: SCANS,
@@ -93,9 +110,12 @@ export function buildAudit(res: Res | null): AuditData {
 }
 
 export function useAudit(): PageData<AuditData> {
-  const q = useQuery<Res>(QUERY, { map: (d: Res) => d });
+  const [params] = useSearchParams();
+  const asked = Number(params.get("run"));
+  const askedId = Number.isInteger(asked) && asked > 0 ? asked : null;
+  const q = useQuery<Res>(QUERY, { variables: { run: askedId }, map: (d: Res) => d });
   return {
-    data: buildAudit(q.data),
+    data: buildAudit(q.data, askedId),
     loading: q.loading,
     error: q.error ? (q.errorText ?? "The audit is temporarily unavailable.") : null,
   };

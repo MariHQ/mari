@@ -5,7 +5,6 @@
  * mutation, so a freshly loaded form is clean and valid. */
 
 import type { SettingsGeneralData } from "@mari-design/components/pages/SettingsGeneralPage";
-import type { Branding, BrandHarvest, BrandPreviewStat } from "@mari-design/components/features/BrandingEditor";
 import type { PropertyItem } from "@mari-design/components";
 import { useQuery } from "../lib/api";
 import type { PageData } from "./types";
@@ -40,13 +39,10 @@ function workspaceRow(res: Res): WorkspaceRow {
   return res.workspace ?? {};
 }
 
-/** Brand identity has no settings row: `importBrand` harvests a candidate for
- *  the editor, and nothing persists it yet. Every field is absent, so the
- *  editor falls back to its own defaults instead of showing someone's colors. */
-const NO_BRANDING: Branding = {};
-const NO_HARVEST: BrandHarvest = {
-  title: "", themeColor: "", cssColors: [], fonts: [], logo: null, warnings: [],
-};
+/* Branding is no longer sent from here. The editor moved to Settings →
+   Design & brand, which is the only place it has handlers, and General stopped
+   reading `branding` / `brandHarvest` / `brandPreviewStats` — so this page no
+   longer ships three empty records to a section that does not draw them. */
 
 /* ── mapper ─────────────────────────────────────────────────────────────── */
 
@@ -54,7 +50,6 @@ export const EMPTY: SettingsGeneralData = {
   section: "workspace",
   name: "", slug: "", plan: "", timezone: "", language: "",
   save: "clean", slugError: null, summary: [], danger: false,
-  branding: NO_BRANDING, brandHarvest: NO_HARVEST, brandPreviewStats: [],
 };
 
 /** Pure: the whole response → everything the page renders. */
@@ -93,6 +88,10 @@ export function buildSettingsGeneral(res: Res | null): SettingsGeneralData {
     name: ws.name ?? "",
     slug: ws.slug ?? "",
     plan: ws.plan ?? "",
+    // Passed through as stored. The form's options are IANA zone ids now, and
+    // it reads a legacy "utc"/"pt"/"et" transparently — so a row written before
+    // the change still selects the right option, and the next save replaces it
+    // with the real zone rather than the console rewriting history on read.
     timezone: ws.timezone ?? "",
     language: ws.language ?? "",
     // A form that was just loaded matches the server and has been rejected by
@@ -103,11 +102,6 @@ export function buildSettingsGeneral(res: Res | null): SettingsGeneralData {
     // The destructive controls are owner-only and this app has no ownership
     // check yet, so they stay off rather than being offered to everyone.
     danger: false,
-    branding: NO_BRANDING,
-    brandHarvest: NO_HARVEST,
-    // The branded preview's figures would be a second, unowned copy of the
-    // corpus stats. Empty until Publish and Insights agree on one source.
-    brandPreviewStats: [] as BrandPreviewStat[],
   };
 }
 

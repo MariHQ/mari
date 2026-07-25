@@ -152,10 +152,19 @@ class MutKnowledge:
         return True
 
     @strawberry.mutation
-    def add_fact(self, claim: str, source: str, owner: str = "Daniel H.") -> bool:
-        exec_("""INSERT INTO facts (claim, source, owner_name, owner_tint, status, verified)
-                 VALUES (%s, %s, %s, 1, 'Needs review', '—') ON CONFLICT (claim) DO NOTHING""",
-              (claim, source, owner))
+    def add_fact(self, claim: str, source: str, owner: str = "Daniel H.",
+                 document_id: int | None = None) -> bool:
+        """`document_id` is the document this claim was read out of — pass it
+        only when there is one. A claim typed in by hand cites no document and
+        keeps NULL, which is the truth about it: Doc Review lists a document's
+        claims by this key, so a guessed id would put someone else's claim
+        under this title."""
+        doc_id = document_id or None
+        if doc_id and not q1("SELECT 1 FROM documents WHERE id = %s", (doc_id,)):
+            raise ValueError(f"No document {doc_id} to attribute this claim to")
+        exec_("""INSERT INTO facts (claim, source, owner_name, owner_tint, status, verified, document_id)
+                 VALUES (%s, %s, %s, 1, 'Needs review', '—', %s) ON CONFLICT (claim) DO NOTHING""",
+              (claim, source, owner, doc_id))
         audit("added fact", claim)
         return True
 
@@ -692,28 +701,51 @@ class MutKnowledge:
     @strawberry.mutation
     def scan_facts(self) -> int:
         """LLM extracts atomic, checkable claims from recent documents; lands
-        as 'Needs review' facts for verification."""
-        docs = q("""SELECT title, snippet, body, source FROM documents
+        as 'Needs review' facts for verification.
+
+        One document per model call, not one call over a pasted-together
+        corpus. The old shape asked the model which document each claim came
+        from and stored the answer as a text label, which meant the provenance
+        was the model's recollection of a title — good enough to print, not
+        good enough to key on, so Doc Review could never list a document's own
+        claims. Reading one document at a time makes `document_id` a fact about
+        the call rather than a guess about the output.
+        """
+        docs = q("""SELECT id, title, snippet, body, source FROM documents
                     ORDER BY updated_src DESC NULLS LAST LIMIT 8""")
         existing = {r["claim"].lower() for r in q("SELECT claim FROM facts")}
-        corpus = "\n".join(f"[{d['source']}] {d['title']}: {(d['body'] or d['snippet'])[:300]}" for d in docs)
-        prompt = (
-            f"Recent team documents:\n{corpus}\n\n"
-            "Extract atomic, checkable FACTS (numbers, limits, defaults, policies). "
-            "Write each claim as a plain English sentence a person could agree or disagree with; "
-            "never copy a document's metadata line (PR/issue headers, authors, timestamps, status). "
-            'JSON: [{"claim": "one factual sentence", "source": "doc title"}]. At most 4; no opinions.'
-        )
-        out = llm.generate_json(prompt, system="You extract verifiable facts from documentation.")
         added = 0
-        if isinstance(out, list):
-            for f in out[:4]:
+        for d in docs:
+            if added >= 4:  # the same per-scan ceiling the single-call version had
+                break
+            text = (d["body"] or d["snippet"] or "").strip()
+            if not text:
+                continue
+            prompt = (
+                f"Team document [{d['source']}] {d['title']}:\n{text[:1500]}\n\n"
+                "Extract atomic, checkable FACTS (numbers, limits, defaults, policies) "
+                "stated by THIS document. "
+                "Write each claim as a plain English sentence a person could agree or disagree with; "
+                "never copy a document's metadata line (PR/issue headers, authors, timestamps, status). "
+                'JSON: [{"claim": "one factual sentence"}]. At most 2; no opinions. '
+                "An empty list is the right answer for a document that states none."
+            )
+            out = llm.generate_json(prompt, system="You extract verifiable facts from documentation.")
+            if not isinstance(out, list):
+                continue
+            for f in out[:2]:
                 claim = str(f.get("claim", ""))[:200]
-                if is_claim(claim) and claim.lower() not in existing:
-                    exec_("""INSERT INTO facts (claim, source, owner_name, owner_tint, status, verified)
-                             VALUES (%s, %s, %s, 1, 'Needs review', '—') ON CONFLICT (claim) DO NOTHING""",
-                          (claim, ("Mari scan · " + str(f.get("source", "doc graph")))[:80], ME))
-                    added += 1
+                if not is_claim(claim) or claim.lower() in existing:
+                    continue
+                # `source` stays the human label it always was; `document_id`
+                # is the key, and it is the document this call actually read.
+                exec_("""INSERT INTO facts (claim, source, owner_name, owner_tint, status, verified, document_id)
+                         VALUES (%s, %s, %s, 1, 'Needs review', '—', %s) ON CONFLICT (claim) DO NOTHING""",
+                      (claim, ("Mari scan · " + d["title"])[:80], ME, d["id"]))
+                existing.add(claim.lower())
+                added += 1
+                if added >= 4:
+                    break
         audit("scanned for facts", f"{added} candidates")
         return added
 

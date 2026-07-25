@@ -6,7 +6,7 @@
  * empty coverage rail means nobody has asked anything uncovered, not that the
  * feature is unwired). */
 
-import type { AnswerStat, AnswersData } from "@mari-design/components/pages/AnswersPage";
+import type { AnswerStat, AnswersData, HarvestSource } from "@mari-design/components/pages/AnswersPage";
 import type { Answer } from "@mari-design/components/features/AnswerCard";
 import { useQuery } from "../lib/api";
 import type { PageData } from "./types";
@@ -16,6 +16,7 @@ import type { PageData } from "./types";
 const QUERY = `{
   approvedAnswers { id question answer status owner channels sources served spark updated }
   answerCoverageGaps(limit: 8)
+  answerHarvestSources
 }`;
 
 type Res = {
@@ -25,6 +26,7 @@ type Res = {
     served: number; spark: number[]; updated: string;
   }[];
   answerCoverageGaps: string[];
+  answerHarvestSources: { slack: number; docs: number; chat: number } | null;
 };
 
 /* ── mapping helpers ────────────────────────────────────────────────────── */
@@ -66,12 +68,38 @@ const TILES: { label: string; sub: string; tone: AnswerStat["tone"]; of: (a: Ans
   { label: "Served", sub: "all time", tone: "info", of: (a) => a.reduce((n, x) => n + (x.served ?? 0), 0) },
 ];
 
+/* What the scan can actually read, in the order the wizard offers it. The keys
+   are the three `scanAnswerCandidates` accepts; the labels and descriptions are
+   the console's words for them, and the COUNT decides whether a source is
+   offered at all — a workspace with no Slack was previously invited to harvest
+   Slack and got nothing back. Every offered source starts selected: there is
+   no reason to open the wizard with a source you have switched off. */
+const HARVEST: { key: HarvestSource["key"]; field: "slack" | "docs" | "chat"; label: string; desc: string }[] = [
+  { key: "slack", field: "slack", label: "Slack threads", desc: "Questions asked and answered in channels Mari indexes." },
+  { key: "docs", field: "docs", label: "Documents", desc: "The indexed corpus, mined for questions it already answers." },
+  { key: "history", field: "chat", label: "Chat history", desc: "What people have actually asked the assistant." },
+];
+
+export function mapHarvestSources(res: Res): HarvestSource[] {
+  const counts = res.answerHarvestSources;
+  if (!counts) return [];
+  return HARVEST
+    .filter((h) => (counts[h.field] ?? 0) > 0)
+    .map<HarvestSource>((h) => ({ key: h.key, label: h.label, desc: h.desc, on: true }));
+}
+
 /** Pure: the answers + coverage gaps → everything the page renders.
     `filter` is only which tab opens selected: the page's own tab strip filters
     the list, so handing it a pre-filtered one would leave the other tabs with
     nothing to show. */
-export function buildAnswers(answers: Answer[], coverage: string[], filter: AnswersData["filter"]): AnswersData {
+export function buildAnswers(
+  answers: Answer[], coverage: string[], filter: AnswersData["filter"],
+  harvestSources: HarvestSource[] = [],
+): AnswersData {
   return {
+    // Empty means there is nothing to scan, and no "Harvest questions" button
+    // is drawn — which is the truth about a workspace with no corpus yet.
+    harvestSources,
     stats: TILES.map<AnswerStat>((t) => ({
       value: t.of(answers).toLocaleString("en-US"), label: t.label, tone: t.tone, sub: t.sub,
     })),
@@ -89,11 +117,13 @@ export const EMPTY: AnswersData = buildAnswers([], [], "all");
 /* ── adapter ────────────────────────────────────────────────────────────── */
 
 export function useAnswers(): PageData<AnswersData> {
-  const q = useQuery<{ answers: Answer[]; coverage: string[] }>(QUERY, {
-    map: (d: Res) => ({ answers: mapAnswers(d), coverage: d.answerCoverageGaps ?? [] }),
+  const q = useQuery<{ answers: Answer[]; coverage: string[]; harvest: HarvestSource[] }>(QUERY, {
+    map: (d: Res) => ({
+      answers: mapAnswers(d), coverage: d.answerCoverageGaps ?? [], harvest: mapHarvestSources(d),
+    }),
   });
   return {
-    data: buildAnswers(q.data?.answers ?? [], q.data?.coverage ?? [], "all"),
+    data: buildAnswers(q.data?.answers ?? [], q.data?.coverage ?? [], "all", q.data?.harvest ?? []),
     loading: q.loading,
     error: q.error ? (q.errorText ?? "Answers are temporarily unavailable.") : null,
   };

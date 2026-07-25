@@ -78,8 +78,12 @@ export function buildDecisions(decisions: Decision[], filter: string): Decisions
     decisions,
     filter,
     filters,
-    // The rail lists what still needs a signature — derived from the same
-    // rows the ledger shows, so the two can never disagree.
+    // Deprecated and unread: the rail now derives what awaits a signature from
+    // `decisions` itself, records and ids included, instead of matching these
+    // statements back to rows by string. It is still built only because
+    // `DecisionsData.awaiting` is still a REQUIRED field of the library's type;
+    // it goes the moment that field does. Derived from the same rows either
+    // way, so the two cannot disagree in the meantime.
     awaiting: decisions.filter((d) => d.status === "proposed").map((d) => d.statement),
     howItWorks: HOW_IT_WORKS,
     // Capture composer and the ratify card are opened by the user.

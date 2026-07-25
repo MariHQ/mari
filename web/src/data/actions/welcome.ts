@@ -35,9 +35,38 @@ async function readCandidates(): Promise<Candidate[]> {
   }));
 }
 
+/* Where each provider documents the credentials its step asks for. The URL is
+   the connector catalog's own `docsUrl` — the same one the Sources wizard
+   shows — so "Where do I get these?" opens the provider's page rather than a
+   link this app invented.
+
+   Loaded once when the actions object is built, not on the click: opening a
+   tab from an async continuation is what popup blockers exist to stop, and the
+   wizard is several steps away from the first credential form by then. A
+   provider the catalog gives no URL for opens nothing. */
+const docsUrls = new Map<string, string>();
+
+function loadDocsUrls(): void {
+  void gqlResult<{ connectorCatalog: { key: string; docsUrl?: string }[] }>(`{ connectorCatalog }`)
+    .then((r) => {
+      if (!r.ok) return;
+      for (const p of r.data?.connectorCatalog ?? []) {
+        if (p.docsUrl) docsUrls.set(p.key, p.docsUrl);
+      }
+    });
+}
+
 export function welcomeActions({ navigate }: { navigate: (href: string) => void }): WelcomeActions {
+  loadDocsUrls();
   return {
     navigate,
+
+    // A new tab, not a route: the destination is the provider's own site, and
+    // it must not replace a half-finished onboarding step.
+    openDocs: (provider: string) => {
+      const url = docsUrls.get(provider);
+      if (url) window.open(url, "_blank", "noopener,noreferrer");
+    },
 
     connectGithubRepo: ({ repo, paths }) =>
       mutate(`mutation($repo: String!, $paths: String) { connectGithubRepo(repo: $repo, paths: $paths) }`,

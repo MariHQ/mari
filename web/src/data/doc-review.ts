@@ -6,7 +6,7 @@
  * state instead of five racing panels. */
 
 import { useSearchParams } from "react-router-dom";
-import type { DocReviewData, ReviewDoc } from "@mari-design/components/pages/DocReviewPage";
+import type { DocReviewData, ReviewDoc, ReviewPane } from "@mari-design/components/pages/DocReviewPage";
 import type { DocRevision } from "@mari-design/components/features/DocReviewOutlinePanel";
 import type { EditorFinding } from "@mari-design/components/features/DocReviewEditor";
 import type { DocChange } from "@mari-design/components/features/DocReviewChangeQueue";
@@ -17,20 +17,51 @@ import type { PageData } from "./types";
 /* ── query ──────────────────────────────────────────────────────────────── */
 
 const QUERY = `query DocReview($id: Int!) {
-  document(id: $id) { id title body author date }
+  document(id: $id) { id title body author date tags watched }
   revisions(documentId: $id) { id actor verb at }
   findings(documentId: $id) { id kind severity text note }
   changes(documentId: $id) { id original replacement reason status }
+  claims(documentId: $id) { id claim source status verified }
 }`;
 
 type Res = {
-  document: { id: number; title: string; body: string; author: string; date: string } | null;
+  document: {
+    id: number; title: string; body: string; author: string; date: string;
+    tags: string[]; watched: boolean;
+  } | null;
   revisions: { id: number; actor: string; verb: string; at: string }[];
   findings: { id: number; kind: string; severity: string; text: string; note: string }[];
   changes: { id: number; original: string; replacement: string; reason: string; status: string }[];
+  claims: { id: number; claim: string; source: string; status: string; verified: string }[];
 };
 
 /* ── mapping helpers ────────────────────────────────────────────────────── */
+
+/* The five single-pane views are deep links: `/knowledge/doc?id=7&pane=changes`
+   opens the change queue full-width. They were unreachable because the adapter
+   said "workspace" no matter what the URL held. Anything else in `?pane=` is
+   not a pane, so the route falls back to the whole workspace rather than
+   rendering nothing. */
+const PANES = new Set<ReviewPane>(["workspace", "outline", "editor", "changes", "findings", "refine"]);
+
+function paneOf(raw: string | null): ReviewPane {
+  return raw && PANES.has(raw as ReviewPane) ? (raw as ReviewPane) : "workspace";
+}
+
+/* The bottom tab strip is deep-linkable the same way: `?tab=findings` opens the
+   fact check under the editor instead of the change queue. `BottomTab` is not
+   exported from the page module, so it is read off the prop it belongs to —
+   which also means a new tab in the library cannot silently go unroutable here.
+
+   Anything else in `?tab=` names no tab, and the answer is `undefined` rather
+   than a default: the page already has its own opening tab, and restating it
+   here would be this adapter inventing a preference nobody expressed. */
+type BottomTab = NonNullable<DocReviewData["bottomTab"]>;
+const BOTTOM_TABS = new Set<BottomTab>(["changes", "findings"]);
+
+function bottomTabOf(raw: string | null): BottomTab | undefined {
+  return raw && BOTTOM_TABS.has(raw as BottomTab) ? (raw as BottomTab) : undefined;
+}
 
 /* `changes.status` is a three-value column, but the queue only draws three
    states and a fourth would render an unlabelled row. Anything else reads as
@@ -69,9 +100,9 @@ export const EMPTY: DocReviewData = {
   title: "", subtitle: "", save: "saved", pane: "workspace", doc: EMPTY_DOC,
 };
 
-export function mapDocReview(res: Res | null): DocReviewData {
+export function mapDocReview(res: Res | null, pane: ReviewPane = "workspace"): DocReviewData {
   const d = res?.document;
-  if (!res || !d) return EMPTY;
+  if (!res || !d) return { ...EMPTY, pane };
 
   const findings = (res.findings ?? []).map<DocFinding>((f) => ({
     id: f.id, kind: f.kind, severity: f.severity, text: f.text, note: f.note,
@@ -81,12 +112,21 @@ export function mapDocReview(res: Res | null): DocReviewData {
     title: d.title,
     // Owner and last-update line. Both are document columns; neither is prose.
     subtitle: [d.author, d.date].filter(Boolean).join(" · "),
-    // Save lifecycle belongs to a mutation this page does not run yet: a
-    // freshly loaded document is exactly what the server has.
+    // Where the save lifecycle STARTS, which is the only thing a read can
+    // know: a freshly loaded document is exactly what the server has. The page
+    // owns it from there — the first edit makes it dirty and enables Save,
+    // which runs `updateDocument` (see actions/doc-review.ts).
     save: "saved",
-    // All three panes at once. Deep-linking a single pane is a route this app
-    // does not have, so claiming one would be inventing navigation.
-    pane: "workspace",
+    // Which pane the URL asked for. The whole workspace unless `?pane=` names
+    // one of the five single-pane views.
+    pane,
+    // The document's own tags. Not a guess: the same `tags` rows the Knowledge
+    // library reads. A document nobody has tagged carries none, and the header
+    // then draws no chips.
+    tags: d.tags ?? [],
+    // Whether this reader watches the document — a real `watches` row, which is
+    // also what `toggleWatch` writes. The page owns the state from here.
+    watched: d.watched,
     doc: {
       // One body, rendered three ways: the outline is derived from its
       // headings, the editor renders it, the change queue diffs against it.
@@ -108,11 +148,16 @@ export function mapDocReview(res: Res | null): DocReviewData {
         rule: c.reason,
         state: CHANGE_STATE[c.status?.toLowerCase()] ?? "pending",
       })),
-      // Extracted claims: `facts` is a workspace-wide table with no document
-      // foreign key, so there is no honest way to say which claims came from
-      // THIS document. Left empty until the backend records that link (see
-      // the report) rather than showing another document's claims here.
-      claims: [] as DocClaim[],
+      // Extracted claims, by key: `facts.document_id` records the document the
+      // extractor actually read (see server/mutations_knowledge.py). It is not
+      // matched on `facts.source`, which is a free-text label. Claims landed
+      // before that column existed carry no document and are absent here —
+      // an empty list means nothing has been mined from this document yet,
+      // never that the attribution was too hard to work out.
+      // `verified` is the ISO date the API serves, or "" for never verified.
+      claims: (res.claims ?? []).map<DocClaim>((c) => ({
+        claim: c.claim, source: c.source, status: c.status, verified: c.verified,
+      })),
     },
   };
 }
@@ -126,13 +171,20 @@ export function useDocReview(): PageData<DocReviewData> {
 
   // `skip` is not a thing useQuery has; an id of 0 matches no document and the
   // resolver answers null, which is the same empty page as no id at all.
+  const pane = paneOf(params.get("pane"));
+  const bottomTab = bottomTabOf(params.get("tab"));
+
   const q = useQuery<DocReviewData>(QUERY, {
     variables: { id: valid ? id : 0 },
     map: mapDocReview,
   });
 
   return {
-    data: q.data ?? EMPTY,
+    // The pane and the bottom tab are applied here rather than inside the
+    // mapper: the query cache is keyed on the GraphQL variables, and neither of
+    // these is one of them, so a mapped-in value would be frozen at whatever
+    // the first visit asked for.
+    data: { ...(q.data ?? EMPTY), pane, bottomTab },
     loading: valid ? q.loading : false,
     error: q.error ? (q.errorText ?? "This document is temporarily unavailable.") : null,
   };

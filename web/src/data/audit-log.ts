@@ -3,6 +3,7 @@
  * is given, so the adapter's only job is to fetch that window — and to say
  * how deep the log it is a window onto actually goes. */
 
+import { useSearchParams } from "react-router-dom";
 import type { PropertyItem } from "@mari-design/components";
 import type { AuditDetail, SettingsAuditLogData } from "@mari-design/components/pages/SettingsAuditLogPage";
 import type { AuditEvent } from "@mari-design/components/features/SettingsAuditLog";
@@ -13,9 +14,15 @@ import type { PageData } from "./types";
    a window deep enough to filter within without shipping the whole history. */
 const WINDOW = 200;
 
-const QUERY = `{
-  auditLog(limit: ${WINDOW}) { id actor verb target at detail { label value } }
-  auditLogTotal
+/* The filter reaches the whole table, not just the window already fetched:
+   the log is thousands of rows deep, so narrowing it client-side would search
+   the most recent 200 events and call that the answer. It lives in the route
+   (`?q=`, `?from=`, `?to=`) so a filtered log is a link. */
+const QUERY = `query AuditLog($q: String!, $from: String, $to: String) {
+  auditLog(limit: ${WINDOW}, query: $q, dateFrom: $from, dateTo: $to) {
+    id actor verb target at detail { label value }
+  }
+  auditLogTotal(query: $q, dateFrom: $from, dateTo: $to)
 }`;
 
 type Res = {
@@ -29,6 +36,10 @@ type Res = {
 export function mapAuditLog(res: Res): AuditEvent[] {
   return (res.auditLog ?? []).map<AuditEvent>((e) => ({
     id: e.id, actor: e.actor, verb: e.verb, target: e.target, at: e.at,
+    // Detail rides every row now, because every row can be expanded. [] is
+    // recorded truth for events logged before the writer had more to say, and
+    // the table draws no expand control for them.
+    detail: (e.detail ?? []).map<AuditDetail>((d) => ({ label: d.label, value: d.value })),
   }));
 }
 
@@ -42,6 +53,17 @@ export function mapDetails(res: Res): Map<number, AuditDetail[]> {
   ]));
 }
 
+/** The applied filter, as the page labels it. `null` for the unfiltered log —
+ *  which is not the same as a filter that matched nothing. */
+export function filterLabel(query: string, from: string, to: string): SettingsAuditLogData["filter"] {
+  const parts = [
+    query ? `“${query}”` : "",
+    from && to ? `${from} to ${to}` : from ? `from ${from}` : to ? `until ${to}` : "",
+  ].filter(Boolean);
+  if (!parts.length) return null;
+  return { label: parts.join(" · "), query: query || undefined };
+}
+
 /** Pure: the fetched window, the log's real depth, and which row is expanded
  *  → everything the page renders. */
 export function buildAuditLog(
@@ -49,6 +71,7 @@ export function buildAuditLog(
   total: number,
   details: Map<number, AuditDetail[]>,
   expandedId: number | null,
+  filter: SettingsAuditLogData["filter"] = null,
 ): SettingsAuditLogData {
   const actors = new Set(events.map((e) => e.actor));
   const summary: PropertyItem[] = events.length
@@ -67,30 +90,38 @@ export function buildAuditLog(
     // say what its window is a window onto instead of comparing a filtered
     // view against the window's own size.
     total,
-    filter: null,
+    filter,
     expandedId,
     // The expanded row's detail, resolved out of the same rows the table
     // draws. Nothing expanded, nothing to show.
     detail: expandedId === null ? [] : details.get(expandedId) ?? [],
-    // The feature pages internally, so the page-level pager stays off.
-    pager: null,
+    // No `pager`: the feature pages itself over the window it is given, and
+    // the page-level pager is legacy — nothing reads it.
     summary,
   };
 }
 
 export function useSettingsAuditLog(): PageData<SettingsAuditLogData> {
-  const q = useQuery<Res>(QUERY, { map: (d: Res) => d });
-  // Which row is open is a click this app has no route for yet: the pages are
-  // pure presenters and take no callbacks. The detail is fetched and resolved
-  // alongside the rows regardless, so a click handler would have nothing left
-  // to fetch.
-  const expandedId: number | null = null;
+  const [params] = useSearchParams();
+  const query = params.get("q") ?? "";
+  const from = params.get("from") ?? "";
+  const to = params.get("to") ?? "";
+  // Which row starts expanded is a deep link; every row can be opened by hand,
+  // so an absent `?event=` simply means none of them starts open.
+  const asked = Number(params.get("event"));
+  const expandedId = Number.isInteger(asked) && asked > 0 ? asked : null;
+
+  const q = useQuery<Res>(QUERY, {
+    variables: { q: query, from: from || null, to: to || null },
+    map: (d: Res) => d,
+  });
   return {
     data: buildAuditLog(
       q.data ? mapAuditLog(q.data) : [],
       q.data?.auditLogTotal ?? 0,
       q.data ? mapDetails(q.data) : new Map(),
       expandedId,
+      filterLabel(query, from, to),
     ),
     loading: q.loading,
     error: q.error ? (q.errorText ?? "The access log is temporarily unavailable.") : null,

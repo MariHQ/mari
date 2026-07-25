@@ -48,6 +48,20 @@ export function loginActions({ refresh, navigate }: {
       await authPost("/auth/bypass", {});
       await refresh();
     },
+    /* Three of the screen's newer intents stay unwired, and are therefore not
+       drawn at all:
+
+         • `resetPassword`. `/auth` offers login, register, magic-link, oauth
+           and bypass — there is no reset endpoint, and no mailer behind one.
+           Offering the magic link in its place is what left this product with
+           no password reset: it signs you in and leaves the password still
+           forgotten.
+         • `resendCode` and `verifyCode`. There is no second factor on this
+           server: no enrolment, no code, nothing to verify or re-send. The
+           two-factor screen is a state this app never routes to, and a resend
+           button over an endpoint that does not exist would be worse than
+           its absence. */
+
     oauth: (provider: "github" | "google" | "sso") => {
       // A full navigation, not fetch: the provider has to render its consent
       // screen and redirect back with the callback code.

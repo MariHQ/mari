@@ -26,6 +26,7 @@ import { flowsActions } from "./flows";
 import { insightsActions } from "./insights";
 import { knowledgeActions } from "./knowledge";
 import { lineageActions } from "./lineage";
+import { overviewActions } from "./overview";
 import { libraryActions } from "./library";
 import { loginActions } from "./login";
 import { preferencesActions } from "./preferences";
@@ -60,6 +61,10 @@ export type ActionContext = {
       component doing `window.location.href = "/"` hard-reloads the SPA and
       hardcodes one app's URL scheme into a shared component. */
   navigate: (href: string) => void;
+  /** Same, but replacing the current entry instead of pushing a new one. For
+      state that lives in the URL because it must be shareable, not because
+      every keystroke of it is a place to go back to (a search box). */
+  replace: (href: string) => void;
 };
 
 /** Page id -> factory. Ids match `PAGES[].id` in the library. */
@@ -73,6 +78,7 @@ export const ACTION_FACTORIES: Record<string, (ctx: ActionContext) => unknown> =
   insights: insightsActions,
   knowledge: knowledgeActions,
   lineage: lineageActions,
+  overview: overviewActions,
   library: libraryActions,
   login: loginActions,
   preferences: preferencesActions,

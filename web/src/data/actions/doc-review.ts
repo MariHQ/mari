@@ -12,7 +12,7 @@
  */
 
 import type { DocReviewActions } from "@mari-design/components/pages/DocReviewPage";
-import { mutate } from "../actions";
+import { mutate, type ActionContext } from "../actions";
 
 /** The document under review, or 0 — which matches no row, so a mutation fired
  *  from a route with no `?id=` fails loudly instead of editing something else. */
@@ -63,10 +63,15 @@ async function share(): Promise<void> {
   await navigator.clipboard.writeText(url);
 }
 
-export function docReviewActions(): DocReviewActions {
+export function docReviewActions({ navigate }: ActionContext): DocReviewActions {
   return {
     save: async ({ body }) => { await mutate(SAVE, { id: docId(), body }); },
     share,
+
+    // "Back to the library" is a route, and the route belongs to the app: the
+    // editor used to open /knowledge itself from inside the library, which
+    // reloads the console instead of moving inside it.
+    openLibrary: () => navigate("/knowledge"),
 
     acceptChange: async ({ id }) => { await mutate(SET_CHANGE, { id, status: "accepted" }); },
     rejectChange: async ({ id }) => { await mutate(SET_CHANGE, { id, status: "rejected" }); },

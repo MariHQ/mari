@@ -104,6 +104,27 @@ async function testAny(provider: string, config: Record<string, string>): Promis
   return { ok: r.ok, error: r.error };
 }
 
+/* ── bot credentials ────────────────────────────────────────────────────── */
+
+const UPDATE_SETTING = `mutation($key: String!, $value: JSON!) { updateSetting(key: $key, value: $value) }`;
+
+/** Everything in a bot's settings row EXCEPT its secrets, which the read side
+ *  masks. `updateSetting` replaces a row wholesale, so what the form does not
+ *  touch — the team name, the last event, the last error — has to be carried
+ *  across or saving a token would silently erase the wiring around it. The
+ *  masked read's derived `*_set` / `*_hint` keys are dropped: they describe
+ *  the row rather than belonging to it, and writing them back would leave the
+ *  webhook handler reading fields it does not know. */
+async function botRow(key: "slack_bot" | "github_bot"): Promise<Record<string, unknown>> {
+  const res = await gqlResult<{ settings: { key: string; value: unknown }[] }>(`{ settings { key value } }`);
+  if (!res.ok) throw new Error(res.error);
+  const row = (res.data?.settings ?? []).find((s) => s.key === key)?.value;
+  if (!row || typeof row !== "object") return {};
+  return Object.fromEntries(
+    Object.entries(row as Record<string, unknown>).filter(([k]) => !k.endsWith("_set") && !k.endsWith("_hint")),
+  );
+}
+
 /* ── factory ────────────────────────────────────────────────────────────── */
 
 /** The numeric source id the sync mutations take. The card carries it as a
@@ -138,5 +159,64 @@ export function sourcesActions(): SourcesActions {
     // the source and its running checkpoint rather than deleting documents,
     // which is what "disconnect" has always meant here.
     disconnect: (s) => mutate(`mutation($p: String!) { disconnectSource(provider: $p) }`, { p: s.provider }),
+
+    /* A first sync that failed left a real `sources` row behind — the connect
+       succeeded, the ingest did not — so retrying is starting that row's sync
+       again. The failed panel carries only the provider key, which is what
+       resolves the row. */
+    retryFirstSync: async (provider: string) => {
+      const r = await gqlResult<{ sourcePulse: { id: number; provider: string }[] }>(
+        `{ sourcePulse { id provider } }`);
+      if (!r.ok) throw new Error(r.error);
+      const row = (r.data?.sourcePulse ?? []).find((s) => s.provider === provider);
+      if (!row) throw new Error(`${provider} is not connected to this workspace, so there is no sync to retry.`);
+      const d = await mutate(`mutation($id: Int!) { syncSource(sourceId: $id) }`, { id: row.id });
+      if (d?.syncSource === false) throw new Error("A sync is already running for this source.");
+    },
+
+    /* The cadence is not a column on the source: every connected source gets a
+       schedule-triggered "Sync <name>" flow, and that flow's trigger IS the
+       schedule — the same one the Flows editor shows. So this writes the flow,
+       and `sourcePulse` reads it back, which is why the two can never disagree.
+       `null` means manual only, which is a trigger with no event. */
+    setSyncSchedule: async (s, everyMinutes) => {
+      const r = await gqlResult<{ sourcePulse: { id: number; syncFlowId: number | null }[] }>(
+        `{ sourcePulse { id syncFlowId } }`);
+      if (!r.ok) throw new Error(r.error);
+      const flowId = (r.data?.sourcePulse ?? []).find((x) => x.id === idOf(s))?.syncFlowId;
+      if (flowId == null) throw new Error("This source has no sync flow, so there is no schedule to set.");
+      const trigger = everyMinutes === null
+        ? JSON.stringify({ on: "" })
+        : JSON.stringify({ on: "schedule", every_minutes: everyMinutes });
+      const d = await mutate(
+        `mutation($id: Int!, $trigger: String!) { setWorkflowTrigger(workflowId: $id, trigger: $trigger) }`,
+        { id: flowId, trigger });
+      if (d?.setWorkflowTrigger === false) throw new Error("That sync flow is no longer in this workspace.");
+    },
+
+    /* ── bots ─────────────────────────────────────────────────────────────*/
+
+    /* The bot credentials live in the `slack_bot` / `github_bot` settings rows
+       — the very rows `/bots/status` reports off and the webhook handlers
+       verify against — so writing them there is what makes a saved token one
+       the product will actually use. */
+    saveSlackCredentials: async ({ botToken, signingSecret }) => {
+      await mutate(UPDATE_SETTING, {
+        key: "slack_bot",
+        value: { ...(await botRow("slack_bot")), bot_token: botToken, signing_secret: signingSecret.trim() },
+      });
+    },
+    // Slack's own `auth.test`, run by the server that holds the token. "Not
+    // ok" is a normal outcome of a test, so this answers rather than throwing.
+    testSlackConnection: async () => {
+      const r = await postJson<{ ok: boolean; team?: string; error?: string }>("/bots/slack/test", {});
+      return { ok: r.ok, teamName: r.team || undefined, error: r.error };
+    },
+    saveGithubWebhookSecret: async (secret: string) => {
+      await mutate(UPDATE_SETTING, {
+        key: "github_bot",
+        value: { ...(await botRow("github_bot")), webhook_secret: secret.trim() },
+      });
+    },
   };
 }

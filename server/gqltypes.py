@@ -34,6 +34,13 @@ class SourcePulse:
     # seeded document count for.
     kind: str
     last_sync_at: str  # ISO 8601, '' when the source has never synced
+    # How often this source re-syncs itself, in minutes, and the flow that says
+    # so. Every connected source gets a schedule-triggered "Sync <name>" flow
+    # (flowengine.ensure_sync_flow), so the cadence is that flow's trigger —
+    # NULL when the flow is paused, manual-only, or does not exist, which is
+    # the honest reading of "this source has no automatic schedule".
+    sync_interval_minutes: int | None
+    sync_flow_id: int | None
 
 
 @strawberry.type
@@ -49,6 +56,21 @@ class Document:
     date: str
     tags: list[str]
     watched: bool
+
+
+@strawberry.type
+class RelatedDoc:
+    """A document one lineage edge away from another document.
+
+    The Knowledge inspector's "Related docs" section used to have no source at
+    all: edges were only exposed as the whole graph, so nothing could answer
+    "what links to THIS document". This is that answer — real `edges` rows,
+    both directions, with the relation the edge records."""
+    id: int
+    source: str
+    title: str
+    rel: str          # the raw edges.rel word; the client maps it to its own vocabulary
+    direction: str    # "out" (this doc → other) | "in" (other → this doc)
 
 
 @strawberry.type
@@ -620,7 +642,8 @@ class InsightStats:
 
 @strawberry.type
 class FreshnessRow:
-    source: str
+    source: str        # the source's display name
+    provider: str      # provider key ('github', 'slack'), for the brand mark
     fresh: int
     aging: int
     stale: int

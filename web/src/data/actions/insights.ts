@@ -1,10 +1,28 @@
-/* Insights actions — the two measurement runs and the glossary triage. */
+/* Insights actions — the window, the two measurement runs, and the glossary
+ * triage. */
 
 import type { InsightsActions } from "@mari-design/components/pages/InsightsPage";
-import { mutate } from "../actions";
+import { mutate, type ActionContext } from "../actions";
+import { rangeHref } from "../range";
 
-export function insightsActions(): InsightsActions {
+export function insightsActions({ navigate }: ActionContext): InsightsActions {
   return {
+    /* The window lives in the route, so the adapter re-queries `insightStats`
+       with the new bounds and the dashboard someone narrowed is a link. */
+    setRange: (range) => navigate(rangeHref("/insights", range, new URLSearchParams(window.location.search))),
+
+    /* The readability rows carry the document's own id, so the grade finally
+       leads back to the document it is about. Same route the lineage graph and
+       the knowledge browser open a document on. */
+    openDoc: (id: number) => navigate(`/knowledge/doc?id=${id}`),
+
+    /* No `openFreshness`. The bands are counted in SQL over
+       `documents.updated_src`; nothing in the API lists the documents behind
+       one band of one source, and the Knowledge browser searches text rather
+       than filtering on freshness — so there is no destination to send the
+       click to. The chart draws a plain bar rather than a drill-through that
+       lands somewhere it did not promise. */
+
     scoreReadability: async () => {
       await mutate("mutation { scoreReadability }");
     },

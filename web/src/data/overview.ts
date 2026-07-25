@@ -16,14 +16,22 @@ import type { RecentDoc } from "@mari-design/components/features/OverviewRecentD
 import type { ReviewTask } from "@mari-design/components/features/OverviewTodayReview";
 import type { FeedItem } from "@mari-design/components/features/OverviewLiveActivity";
 import type { DigestTopic } from "@mari-design/components/features/OverviewDigestCard";
+import type { DateRange } from "@mari-design/components/data-display/DateRangePicker";
+import { useEffect, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { useQuery } from "../lib/api";
 import { useAuth } from "../lib/auth";
+import { rangeFromParams, rangeVars } from "./range";
 import type { PageData } from "./types";
 
 /* ── query ──────────────────────────────────────────────────────────────── */
 
-const QUERY = `{
-  overviewStats
+/* `since` bounds the "changes" count, which is the one stat that counts events
+   over a window; the other two are gauges of the workspace right now (facts
+   awaiting review, flows running) and stay as they are whatever window is
+   picked, because that is what they measure. */
+const QUERY = `query Overview($since: String) {
+  overviewStats(since: $since)
   tasks { id title assigneeInitials kind kindLabel done }
   digest { title summary where { source label } impact { name tone } }
   activityFeed(limit: 12) { id kind actor text target secondsAgo }
@@ -125,10 +133,17 @@ export const EMPTY: OverviewData = {
   activityPollMs: ACTIVITY_POLL_MS,
 };
 
-export function mapOverview(res: Res, personName: string): OverviewData {
+export function mapOverview(
+  res: Res, personName: string, timeZone?: string, range?: DateRange,
+): OverviewData {
   const picked = pickFlow(res);
   return {
     personName,
+    // The zone Preferences collects. Omitted when the account has not been
+    // asked yet, and the greeting then reads the browser's own clock — which
+    // is still the reader's real local time, never a fixed hour.
+    timeZone: timeZone || undefined,
+    range,
     stats: {
       changes: res.overviewStats?.changes ?? 0,
       factsReview: res.overviewStats?.factsReview ?? 0,
@@ -163,16 +178,56 @@ export function mapOverview(res: Res, personName: string): OverviewData {
 
 /* ── adapter ────────────────────────────────────────────────────────────── */
 
+/* The signed-in account's own zone, from the same endpoint Preferences reads
+   and writes — it is session state rather than workspace knowledge, so it does
+   not travel with the dashboard query. "" until it answers, and the greeting
+   then uses the browser's zone, which is the same clock the reader is looking
+   at. No invented default: `/auth/me` does not carry a zone, so guessing one
+   here would be guessing what time it is for someone. */
+function useTimeZone(signedIn: boolean): string {
+  const [zone, setZone] = useState("");
+  useEffect(() => {
+    if (!signedIn) return;
+    let live = true;
+    void (async () => {
+      try {
+        const res = await fetch("/auth/preferences");
+        if (!res.ok) return;
+        const body = (await res.json()) as { timezone?: string };
+        if (live) setZone(String(body.timezone ?? ""));
+      } catch {
+        // A zone that cannot be read is not an error the dashboard reports:
+        // the greeting falls back to the browser's clock and says nothing.
+      }
+    })();
+    return () => { live = false; };
+  }, [signedIn]);
+  return zone;
+}
+
 export function useOverview(): PageData<OverviewData> {
   // The greeting name is session identity, not workspace content, so it comes
   // from the auth context rather than the dashboard query. Given name only:
   // "Good morning, Dana Rodriguez" reads like a summons.
   const { user } = useAuth();
   const personName = (user?.name ?? "").trim().split(/\s+/)[0] ?? "";
+  const timeZone = useTimeZone(Boolean(user));
 
-  const q = useQuery<OverviewData>(QUERY, { map: (d: Res) => mapOverview(d, personName) });
+  const [params] = useSearchParams();
+  // Unasked, "changes" counts the last seven days, which is what the tile has
+  // always meant; the picker opens on that.
+  const range = rangeFromParams(params) ?? { preset: "7d" as const };
+
+  /* The response is cached raw and mapped on every render, not once per fetch:
+     the name, the zone and the window all arrive from outside the query (auth,
+     `/auth/preferences`, the route), and a mapper frozen at fetch time would
+     keep showing whichever of them had not landed yet. */
+  const q = useQuery<Res>(QUERY, {
+    variables: { since: rangeVars(range).since },
+    map: (d: Res) => d,
+  });
   return {
-    data: q.data ?? EMPTY,
+    data: q.data ? mapOverview(q.data, personName, timeZone, range) : { ...EMPTY, range },
     loading: q.loading,
     error: q.error ? (q.errorText ?? "The dashboard is temporarily unavailable.") : null,
   };

@@ -4,8 +4,9 @@
  * rename: the server already does the auto-layout, the roll-up classification
  * and the staleness arithmetic. */
 
-import type { LineageData } from "@mari-design/components/pages/LineagePage";
-import type { LEdge, LNode } from "@mari-design/components/features/LineageDataModel";
+import { useSearchParams } from "react-router-dom";
+import type { LineageData, LineageDrawer } from "@mari-design/components/pages/LineagePage";
+import type { LEdge, LNode, Lens, LayoutMode } from "@mari-design/components/features/LineageDataModel";
 import { useQuery } from "../lib/api";
 import type { PageData } from "./types";
 
@@ -18,6 +19,7 @@ const QUERY = `{
   }
   lineageEdges { id fromId toId kind date meta }
   graphStats { activity { date count } }
+  graphViews { id name state }
 }`;
 
 type Res = {
@@ -32,7 +34,92 @@ type Res = {
     meta: { derived?: string; note?: string; evidence?: string; status?: string } | null;
   }[];
   graphStats: { activity: { date: string; count: number }[] } | null;
+  graphViews: { id: number; name: string; state: string }[];
 };
+
+/* ── view state, read from the URL ───────────────────────────────────────── */
+
+/* Lens, layout, focus, tracing, the scrubber position and the open drawer are
+   what a person DID to the instrument, and every one of them used to be pinned
+   to its default here — so impact tracing, focal closure, time travel and
+   deep-linked drawers existed only as canvas states.
+   They live in the query string: `/lineage?lens=owner&focal=doc-12&asOf=2026-05-02`
+   opens the graph the way the person who sent you the link left it.
+   Anything unrecognised falls back to the default rather than being handed to
+   the graph as a state it cannot draw. */
+
+export type LineageView = {
+  lens: Lens;
+  layout: LayoutMode;
+  focalId: string | null;
+  trace: { originId: string; direction: "down" | "up" } | null;
+  asOf: string | null;
+  query: string | null;
+  node: string | null;
+  edge: string | null;
+  group: string | null;
+};
+
+const LENSES = new Set<Lens>(["source", "stale", "owner", "health"]);
+const LAYOUTS = new Set<LayoutMode>(["flow", "timeline"]);
+
+export function readView(params: URLSearchParams): LineageView {
+  const lens = params.get("lens") as Lens | null;
+  const layout = params.get("layout") as LayoutMode | null;
+  const trace = params.get("trace");
+  return {
+    lens: lens && LENSES.has(lens) ? lens : "source",
+    layout: layout && LAYOUTS.has(layout) ? layout : "flow",
+    focalId: params.get("focal") || null,
+    // Direction is part of what a trace IS (upstream provenance vs downstream
+    // impact), so a trace with no readable direction traces downstream rather
+    // than not tracing at all.
+    trace: trace ? { originId: trace, direction: params.get("dir") === "up" ? "up" : "down" } : null,
+    asOf: params.get("asOf") || null,
+    query: params.get("q") || null,
+    node: params.get("node") || null,
+    edge: params.get("edge") || null,
+    group: params.get("group") || null,
+  };
+}
+
+/** The scrubber's position is an index into the dates the graph actually has,
+ *  but a shareable URL cannot carry an index — the same index means a
+ *  different day as soon as one more event lands. The URL carries the ISO
+ *  date; this resolves it to the latest date at or before it, and to `null`
+ *  (live) when the graph has nothing that old. */
+function asOfIndex(dates: string[], asOf: string | null): number | null {
+  if (!asOf) return null;
+  let found: number | null = null;
+  for (let i = 0; i < dates.length; i++) if (dates[i] <= asOf) found = i;
+  return found;
+}
+
+/** Which drawer the URL opens, if the thing it names is on the graph. A link
+ *  to a node that has since been deleted opens no drawer instead of an empty
+ *  one about nothing. */
+function drawerFor(view: LineageView, nodes: LNode[], edges: LEdge[]): LineageDrawer | null {
+  if (view.node) {
+    const node = nodes.find((n) => n.id === view.node);
+    // `history: null` says the page is not carrying this node's revisions —
+    // the drawer asks for them itself (actions.loadDocHistory) rather than
+    // being handed an empty timeline that reads as "nothing ever happened".
+    return node ? { kind: "node", nodeId: node.id, history: null } : null;
+  }
+  if (view.edge) {
+    const edge = edges.find((e) => e.id === view.edge);
+    return edge ? { kind: "edge", edgeId: edge.id } : null;
+  }
+  if (view.group) {
+    const members = nodes.filter((n) => n.group === view.group);
+    return members.length
+      ? { kind: "group", groupId: view.group, totalMembers: members.length, members }
+      : null;
+  }
+  // The assert drawer renders what `analyzeImpact` returned; there is no
+  // result to deep-link to, so it is never opened from a URL.
+  return null;
+}
 
 /* ── mapping helpers ────────────────────────────────────────────────────── */
 
@@ -107,48 +194,72 @@ export function mapEdges(res: Res, nodes: LNode[]): LEdge[] {
 
 /** A workspace with no graph at all. Every drawer closed, the scrubber live. */
 export const EMPTY: LineageData = {
-  nodes: [], edges: [], dates: [], activity: [],
+  nodes: [], edges: [], dates: [], activity: [], views: [],
   lens: "source", layout: "flow",
   focalId: null, trace: null, asOf: null, search: null, drawer: null,
   crumbs: null, extras: null, action: null,
 };
 
-export function buildLineage(res: Res | null): LineageData {
+/** The default view: a freshly opened graph, live, whole, nothing selected. */
+const LIVE: LineageView = {
+  lens: "source", layout: "flow", focalId: null, trace: null,
+  asOf: null, query: null, node: null, edge: null, group: null,
+};
+
+export function buildLineage(res: Res | null, view: LineageView = LIVE): LineageData {
   if (!res) return EMPTY;
   const nodes = mapNodes(res);
+  const edges = mapEdges(res, nodes);
   // The scrubber snaps to the dates something actually happened on, which is
   // the same series that draws its density track.
   const activity = (res.graphStats?.activity ?? []).filter((a) => a.date);
+  const dates = activity.map((a) => a.date);
+  // A focal id that names no node is not a focus; the graph would close over
+  // nothing and render an empty canvas.
+  const focal = view.focalId ? nodes.find((n) => n.id === view.focalId) ?? null : null;
+  const traced = view.trace && nodes.some((n) => n.id === view.trace!.originId) ? view.trace : null;
   return {
     nodes,
-    edges: mapEdges(res, nodes),
-    dates: activity.map((a) => a.date),
+    edges,
+    dates,
     activity,
-    // Lens, layout, focus, trace, as-of and the open drawer are all view state
-    // the instrument owns. A freshly opened graph is the live one, whole,
-    // nothing selected — the app does not have routes for the rest yet.
-    lens: "source",
-    layout: "flow",
-    focalId: null,
-    trace: null,
-    asOf: null,
-    search: null,
-    drawer: null,
+    // Saved views, so the Views menu can list what `saveView` wrote. It used
+    // to write with nothing reading it back.
+    views: (res.graphViews ?? []).map((v) => ({ id: v.id, name: v.name, state: v.state })),
+    lens: view.lens,
+    layout: view.layout,
+    focalId: focal?.id ?? null,
+    trace: traced,
+    asOf: asOfIndex(dates, view.asOf),
+    search: view.query ? { query: view.query } : null,
+    drawer: drawerFor(view, nodes, edges),
+    // Crumbs and the long-text extras card have no source in the graph query;
+    // they are canvas compositions, and inventing a trail nobody navigated
+    // would be worse than no trail.
     crumbs: null,
     extras: null,
-    // The header's "document being traced" needs a document to trace. Nothing
-    // is in focus on a freshly opened graph, and the field carries an id now,
-    // so there is no label to invent.
-    action: null,
+    // The header's "document being traced" names the focal document and
+    // carries its id, so the button has a real destination. Nothing in focus,
+    // no button.
+    // A node with no docId stands for no document, so there would be nothing
+    // for the button to open — no button rather than a dead one.
+    action: focal?.docId ? { label: focal.title, docId: focal.docId } : null,
   };
 }
 
 /* ── adapter ────────────────────────────────────────────────────────────── */
 
 export function useLineage(): PageData<LineageData> {
-  const q = useQuery<LineageData>(QUERY, { map: buildLineage });
+  const [params] = useSearchParams();
+  const view = readView(params);
+
+  /* The response is cached unmapped and the view is applied on every render:
+     the query cache is keyed on GraphQL variables, and none of the view state
+     is a variable — mapping it in would freeze the graph at whatever view the
+     first visit asked for. */
+  const q = useQuery<Res>(QUERY);
   return {
-    data: q.data ?? EMPTY,
+    data: buildLineage(q.data, view),
     loading: q.loading,
     error: q.error ? (q.errorText ?? "The lineage graph is temporarily unavailable.") : null,
   };
