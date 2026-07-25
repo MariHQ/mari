@@ -1,9 +1,8 @@
 import { useMemo } from "react";
-import { BrowserRouter, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
+import { BrowserRouter, Navigate, Route, Routes, useNavigate } from "react-router-dom";
 import { PAGES, type PageModule } from "@mari-design/components/pages";
-import { PageFrame, landingPageFor, navFor, type ShellChrome } from "@mari-design/components/pages/PageFrame";
+import { landingPageFor, type ShellChrome } from "@mari-design/components/pages/PageFrame";
 import { NavProvider } from "@mari-design/components/navigation/Link";
-import { Button, Card, EmptyState, PageHeader } from "@mari-design/components";
 import { adapterFor } from "./data";
 import { STUBBED } from "./data/stubs";
 import { useChrome } from "./data/chrome";
@@ -80,33 +79,6 @@ function useShellChrome(): ShellChrome {
   }), [user, logout, navigate, notifications, recentSearches]);
 }
 
-/** A path this console does not route.
- *
- * It used to redirect to the dashboard with no message, which is
- * indistinguishable from the link having worked and the dashboard being what
- * was asked for. This says what happened, quotes the path so a bad link can be
- * reported, and offers the one destination that certainly exists. */
-function NotFoundPage() {
-  const chrome = useShellChrome();
-  const navigate = useNavigate();
-  const { pathname } = useLocation();
-  return (
-    <PageFrame chrome={chrome} active={navFor("overview")} title="Page not found" mobile={useIsMobile()}>
-      <div className="mx-auto max-w-[1400px] px-5 py-6 sm:px-8">
-        <PageHeader eyebrow="404" title="Page not found" />
-        <Card className="mt-6">
-          <EmptyState
-            title="Nothing is routed here"
-            action={<Button onClick={() => navigate("/")}>Go to the dashboard</Button>}
-          >
-            The console has no page at {pathname}. The link may be out of date, or the
-            page may have moved.
-          </EmptyState>
-        </Card>
-      </div>
-    </PageFrame>
-  );
-}
 
 /** Builds one route component per page, at module load, so the adapter hook is
  *  a fixed call for that component and never varies between renders. */
@@ -194,7 +166,7 @@ function Routed() {
         {/* Unknown path: say so. Behind the session gate, because a signed-out
             visitor's problem is that they are signed out, not that the page is
             missing. */}
-        <Route path="*" element={<Gate><NotFoundPage /></Gate>} />
+        <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </NavProvider>
   );

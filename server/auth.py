@@ -283,6 +283,25 @@ def current_user(request: Request) -> dict | None:
         with _conn() as conn:
             user = conn.execute("""SELECT u.* FROM sessions s JOIN users u ON u.id = s.user_id
                                    WHERE s.token = %s AND s.expires_at > now()""", (token,)).fetchone()
+    # A server with the bypass ON has declared that it does not require
+    # authentication: POST /auth/bypass already hands a workspace-admin session
+    # to anyone who asks, so resolving an unauthenticated caller to the same
+    # admin grants nothing that was not already free. It is off by default, so
+    # this branch never runs on a server that has not opted in.
+    #
+    # This is not the old static token coming back. There is still no string a
+    # caller can present to authenticate — the difference is that a server which
+    # says it wants no auth is believed, rather than being handed a session row
+    # it may not be able to read back.
+    #
+    # Which is the real reason this exists: deploy/lambda runs an embedded
+    # Postgres per execution environment, so under any concurrency a session
+    # minted by one instance does not exist for the next. Requiring the row made
+    # the demo 401 at random. The row is still required, and still the only way
+    # in, on every server that has not turned auth off.
+    if user is None and config.get("auth", "bypass_enabled", False):
+        with _conn() as conn:
+            user = _bypass_target(conn)
     if isinstance(scope, dict):
         scope["mari_user"] = user
     set_caller(user)
