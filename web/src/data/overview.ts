@@ -17,7 +17,7 @@ import type { ReviewTask } from "@mari-design/components/features/OverviewTodayR
 import type { FeedItem } from "@mari-design/components/features/OverviewLiveActivity";
 import type { DigestTopic } from "@mari-design/components/features/OverviewDigestCard";
 import type { DateRange } from "@mari-design/components/data-display/DateRangePicker";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useQuery } from "../lib/api";
 import { useAuth } from "../lib/auth";
@@ -226,8 +226,20 @@ export function useOverview(): PageData<OverviewData> {
     variables: { since: rangeVars(range).since },
     map: (d: Res) => d,
   });
+  /* Built once per RESPONSE-AND-INPUT, not once per render. The mapping stays
+     outside useQuery's map for the reason above, but `rangeFromParams` mints a
+     fresh window object every render and `mapOverview` rebuilds every tile,
+     feed row and digest topic off it. Keyed on the query string rather than on
+     `range`, because `range` is the object with no stable identity; the other
+     three inputs are primitives, so the window, the name and the zone each
+     still land the moment they arrive. */
+  const search = params.toString();
+  const data = useMemo(() => {
+    const r = rangeFromParams(new URLSearchParams(search)) ?? { preset: "7d" as const };
+    return q.data ? mapOverview(q.data, personName, timeZone, r) : { ...EMPTY, range: r };
+  }, [q.data, personName, timeZone, search]);
   return {
-    data: q.data ? mapOverview(q.data, personName, timeZone, range) : { ...EMPTY, range },
+    data,
     loading: q.loading,
     error: q.error ? (q.errorText ?? "The dashboard is temporarily unavailable.") : null,
   };

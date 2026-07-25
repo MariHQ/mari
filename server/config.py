@@ -18,7 +18,16 @@ _DEFAULTS: dict[str, t.Any] = {
     "ollama": {"host": "http://localhost:11434", "embed_model": "nomic-embed-text", "gen_model": "gemma3:4b"},
     "auth": {
         "session_days": 14,
-        "bypass_enabled": True,
+        # The demo bypass (POST /auth/bypass) signs anyone in as the workspace
+        # admin without a credential. It is a real, documented feature, so it
+        # stays — but it defaults OFF: a default that hands out admin is not a
+        # default, it is an outage waiting for someone to find the port. Turn
+        # it on deliberately with MARI_AUTH_BYPASS=true for demo instances.
+        "bypass_enabled": False,
+        # Open sign-up. Off by default: an account is all the GraphQL surface
+        # asks for, so a workspace is invite-only until it says otherwise.
+        # Invited members can always register — see POST /auth/register.
+        "registration_enabled": False,
         "github_client_id": "", "github_client_secret": "",
         "google_client_id": "", "google_client_secret": "",
         "oauth_redirect_base": "http://localhost:8000",
@@ -70,6 +79,7 @@ def _load() -> dict:
         "MARI_GOOGLE_CLIENT_ID": ("auth", "google_client_id"),
         "MARI_GOOGLE_CLIENT_SECRET": ("auth", "google_client_secret"),
         "MARI_AUTH_BYPASS": ("auth", "bypass_enabled"),
+        "MARI_AUTH_REGISTRATION": ("auth", "registration_enabled"),
         "MARI_CORS_ORIGINS": ("server", "cors_origins"),
         "MARI_GITHUB_TOKEN": ("github", "token"),
         "MARI_GITHUB_POLL_MINUTES": ("github", "poll_minutes"),
@@ -80,7 +90,7 @@ def _load() -> dict:
             value: t.Any = os.environ[env]
             if key == "cors_origins":
                 value = [o.strip() for o in value.split(",")]
-            elif key == "bypass_enabled":
+            elif key in ("bypass_enabled", "registration_enabled"):
                 value = value.strip().lower() in {"1", "true", "yes", "on"}
             elif key == "poll_minutes":
                 try:

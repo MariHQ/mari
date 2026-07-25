@@ -84,13 +84,6 @@ CREATE TABLE IF NOT EXISTS digest_topics (
   impact   jsonb NOT NULL DEFAULT '[]'       -- [{name,tone}]
 );
 
-CREATE TABLE IF NOT EXISTS ask_answers (
-  id       serial PRIMARY KEY,
-  question text NOT NULL UNIQUE,
-  answer   text NOT NULL,
-  sources  jsonb NOT NULL DEFAULT '[]'
-);
-
 CREATE TABLE IF NOT EXISTS events (
   id          serial PRIMARY KEY,
   actor       text NOT NULL,
@@ -710,3 +703,63 @@ ON CONFLICT (key) DO NOTHING;
 -- same as a recorded one and there is no way to tell them apart afterwards.
 ALTER TABLE facts ADD COLUMN IF NOT EXISTS document_id int REFERENCES documents(id) ON DELETE SET NULL;
 CREATE INDEX IF NOT EXISTS facts_document_id_idx ON facts (document_id) WHERE document_id IS NOT NULL;
+
+
+-- ═══════════════════════════════════════════════════════════════════════
+-- ▼ sessions expire (AUTH-3)
+-- ═══════════════════════════════════════════════════════════════════════
+
+-- Cookie sessions. Created here so a fresh database has the table with its
+-- expiry column from the start; server/auth.py:ensure_schema() runs the same
+-- migration for databases that already had the two-column version.
+--
+-- `expires_at` is the fix: created_at was recorded and never consulted, so the
+-- cookie's max_age was the only lifetime and it is a client-side hint. A
+-- stolen token stayed valid forever. current_user() now joins on
+-- `expires_at > now()`, logout deletes the row, and changing a password
+-- deletes every other row for that user — three ways to end a session that all
+-- agree, instead of one that only asked the browser nicely.
+CREATE TABLE IF NOT EXISTS sessions (
+  token      text PRIMARY KEY,
+  user_id    int NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  expires_at timestamptz NOT NULL DEFAULT now() + interval '14 days'
+);
+
+-- Pre-existing installs: add the column, give rows an expiry derived from when
+-- they were actually created (never a fresh 14 days — that would extend every
+-- live session as a side effect of deploying the fix), then enforce it.
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS expires_at timestamptz;
+UPDATE sessions SET expires_at = created_at + interval '14 days' WHERE expires_at IS NULL;
+ALTER TABLE sessions ALTER COLUMN expires_at SET NOT NULL;
+ALTER TABLE sessions ALTER COLUMN expires_at SET DEFAULT now() + interval '14 days';
+CREATE INDEX IF NOT EXISTS sessions_expires_idx ON sessions (expires_at);
+DELETE FROM sessions WHERE expires_at <= now();
+
+-- The static bypass cookie ("mari-bypass") was accepted as a session value and
+-- resolved to the workspace admin. It is no longer accepted anywhere; this
+-- clears any row a previous version may have written under it.
+DELETE FROM sessions WHERE token = 'mari-bypass';
+
+
+-- ═══════════════════════════════════════════════════════════════════════
+-- ▼ invitations (AUTH-2)
+-- ═══════════════════════════════════════════════════════════════════════
+
+-- Who invited this member, or '' for accounts nobody invited. POST
+-- /auth/register lets someone claim a credential-less row by proving they hold
+-- the address, so "credential-less" cannot be the whole test: repoaudit's
+-- invite_member fix creates member rows from addresses it finds in a
+-- repository (CODEOWNERS, commit authors), and those are not invitations. Only
+-- a row an admin created through inviteMember carries a name here, and only
+-- such a row can be claimed.
+--
+-- Rows that predate this column keep '' — an install upgrading mid-invite has
+-- to re-issue it. Failing closed is the right side to be wrong on: the other
+-- direction hands an account to whoever appears in a git log.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS invited_by text NOT NULL DEFAULT '';
+
+-- `ask_answers` is gone: nothing ever wrote it, and the resolver that read
+-- it could only raise on an empty table. The live question-and-answer surface
+-- is `approved_answers`. Drop the vestigial table where it still exists.
+DROP TABLE IF EXISTS ask_answers;

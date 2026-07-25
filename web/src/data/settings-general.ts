@@ -6,6 +6,7 @@
 
 import type { SettingsGeneralData } from "@mari-design/components/pages/SettingsGeneralPage";
 import type { PropertyItem } from "@mari-design/components";
+import { useMemo } from "react";
 import { useQuery } from "../lib/api";
 import type { PageData } from "./types";
 
@@ -109,8 +110,14 @@ export function buildSettingsGeneral(res: Res | null): SettingsGeneralData {
 
 export function useSettingsGeneral(): PageData<SettingsGeneralData> {
   const q = useQuery<Res>(QUERY, { map: (d: Res) => d });
+  /* Built once per RESPONSE, not once per render. SettingsGeneralPage seeds
+     its whole edit buffer from this object and resyncs on `seen !== data` —
+     comparing the OBJECT, not its fields — so a mapper that returned a fresh
+     object every render would reset name/slug/plan/timezone/language on every
+     keystroke. */
+  const data = useMemo(() => buildSettingsGeneral(q.data), [q.data]);
   return {
-    data: buildSettingsGeneral(q.data),
+    data,
     loading: q.loading,
     error: q.error ? (q.errorText ?? "Workspace settings are temporarily unavailable.") : null,
   };

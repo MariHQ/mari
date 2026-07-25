@@ -3,6 +3,7 @@
  * is given, so the adapter's only job is to fetch that window — and to say
  * how deep the log it is a window onto actually goes. */
 
+import { useMemo } from "react";
 import { useSearchParams } from "react-router-dom";
 import type { PropertyItem } from "@mari-design/components";
 import type { AuditDetail, SettingsAuditLogData } from "@mari-design/components/pages/SettingsAuditLogPage";
@@ -115,14 +116,23 @@ export function useSettingsAuditLog(): PageData<SettingsAuditLogData> {
     variables: { q: query, from: from || null, to: to || null },
     map: (d: Res) => d,
   });
-  return {
-    data: buildAuditLog(
+  /* Built once per RESPONSE, not once per render. Nothing on this page seeds a
+     draft from the row list today — its sentinel is on `expandedId` and the
+     filter string, both primitives — so this is cost, not a live bug: without
+     it every render re-walked the log and rebuilt the details Map. Keeping the
+     identity stable is also what makes the row list safe to seed from later. */
+  const data = useMemo(
+    () => buildAuditLog(
       q.data ? mapAuditLog(q.data) : [],
       q.data?.auditLogTotal ?? 0,
       q.data ? mapDetails(q.data) : new Map(),
       expandedId,
       filterLabel(query, from, to),
     ),
+    [q.data, expandedId, query, from, to],
+  );
+  return {
+    data,
     loading: q.loading,
     error: q.error ? (q.errorText ?? "The access log is temporarily unavailable.") : null,
   };

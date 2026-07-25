@@ -4,6 +4,7 @@
  * rename: the server already does the auto-layout, the roll-up classification
  * and the staleness arithmetic. */
 
+import { useMemo } from "react";
 import { useSearchParams } from "react-router-dom";
 import type { LineageData, LineageDrawer } from "@mari-design/components/pages/LineagePage";
 import type { LEdge, LNode, Lens, LayoutMode } from "@mari-design/components/features/LineageDataModel";
@@ -251,15 +252,28 @@ export function buildLineage(res: Res | null, view: LineageView = LIVE): Lineage
 
 export function useLineage(): PageData<LineageData> {
   const [params] = useSearchParams();
-  const view = readView(params);
 
-  /* The response is cached unmapped and the view is applied on every render:
-     the query cache is keyed on GraphQL variables, and none of the view state
-     is a variable — mapping it in would freeze the graph at whatever view the
-     first visit asked for. */
+  /* The response is cached unmapped and the view is applied outside useQuery's
+     map: the query cache is keyed on GraphQL variables, and none of the view
+     state is a variable — mapping it in would freeze the graph at whatever
+     view the first visit asked for.
+
+     Applied once per RESPONSE-AND-VIEW, though, not once per render.
+     `readView` mints a fresh object every render and `buildLineage` maps every
+     node and edge off it, and LineagePage resets the reader's chosen drawer
+     whenever `data.drawer` changes identity (`seenDrawer !== data.drawer`),
+     while LineageGraph re-adopts `trace` from a `[trace]` effect. Rebuilt per
+     render, an open drawer would close itself on the next render. The key is
+     the query string rather than the view object, because the view object is
+     exactly the thing that has no stable identity. */
   const q = useQuery<Res>(QUERY);
+  const search = params.toString();
+  const data = useMemo(
+    () => buildLineage(q.data, readView(new URLSearchParams(search))),
+    [q.data, search],
+  );
   return {
-    data: buildLineage(q.data, view),
+    data,
     loading: q.loading,
     error: q.error ? (q.errorText ?? "The lineage graph is temporarily unavailable.") : null,
   };

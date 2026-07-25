@@ -63,7 +63,7 @@ Everything runs on your infrastructure: Postgres + pgvector for storage and sear
 - **Glossary**: shared definitions in the Library, seedable by an LLM that reads your actual documents (grounded — terms must appear in the text).
 
 ### 🧑‍💻 Codebase intelligence
-- **Repo audit**: clones your connected repos (token never persisted to disk) and scans for documentation drift — coverage gaps, unmapped commit authors, stale localization — with one-click fixes that ingest the missing docs.
+- **Repo audit**: clones your connected repos (token never persisted to disk) and scans for documentation drift — coverage gaps, unmapped commit authors, stale localization — with one-click fixes that ingest the missing docs. An unmapped commit author becomes a suggestion or a mapping onto an existing member — the audit never creates an account, since a commit address is evidence that someone committed, not that they belong in your workspace.
 
 ### 🚀 Publishing
 - Turn tagged documents into a deployed docs site under `/sites/<slug>`: the native handcrafted generator, or a real **Docusaurus** build (warm builds in seconds).
@@ -71,7 +71,7 @@ Everything runs on your infrastructure: Postgres + pgvector for storage and sear
 
 ### 💬 Bots (self-serve)
 - **Slack bot**: copy a generated app manifest, paste your bot token, verify — then @mention Mari in any channel and it answers from your knowledge base.
-- **GitHub webhook**: guided setup with generated secret and delivery verification.
+- **GitHub webhook**: guided setup with generated secret and delivery verification. A secret is **required** — with none configured (`MARI_GITHUB_WEBHOOK_SECRET`, or one generated in Settings → Bots) every delivery is rejected with a 401 that says so, because an unverified webhook is an open endpoint for driving syncs.
 
 ### 🎨 Bring your own branding
 - The entire UI is driven by design tokens; workspace branding (accent palette, logo, display/body fonts) re-skins every component with **zero page changes**.
@@ -80,6 +80,9 @@ Everything runs on your infrastructure: Postgres + pgvector for storage and sear
 
 ### 🔐 Auth & workspace
 - Email/password (scrypt), GitHub & Google OAuth, first-run setup token, session cookies.
+- **Invite-only by default.** An account is all the GraphQL surface asks for, so only people an admin invited can register — open sign-up is a deliberate switch (`MARI_AUTH_REGISTRATION`).
+- **Sessions expire** (14 days by default, `auth.session_days`; a demo-bypass session gets 12 hours). Expired rows are deleted, not just ignored.
+- Three tiers — admin, manager, user — enforced on every mutation, and the audit log records the person who actually made the request.
 - Members, roles, API keys (one-time reveal), full audit log.
 
 ---
@@ -118,6 +121,10 @@ docker compose logs api | grep -A3 "FIRST-TIME SETUP"
 
 Open **http://localhost:8080**, redeem the token to create your admin account, and the onboarding wizard takes it from there — connect a source, pick a style guide, seed your glossary.
 
+The setup token is good for **24 hours**; if it expires, restart the API for a new one. The Setup page checks it (`POST /auth/setup/check`) before asking for a password, so a wrong token is rejected up front and a right one is only spent by the setup that completes.
+
+After that the workspace is **invite-only**: admins invite members from Settings → Members, and only an invited address can register.
+
 **Optional — local LLM features** (chat, refine, fact-check, digest, brand import): run [ollama](https://ollama.com) with `nomic-embed-text` and `gemma3:4b` pulled. Without it, search falls back to keyword ranking and LLM features degrade to deterministic fallbacks — the product stays functional.
 
 ### Configuration
@@ -133,7 +140,8 @@ Everything is env-driven (`.env.example` documents the full list; env overrides 
 | `MARI_GITHUB_WEBHOOK_SECRET` | Webhook HMAC verification |
 | `MARI_OLLAMA_HOST` | ollama endpoint |
 | `MARI_S3_BUCKET` | S3 site publishing |
-| `MARI_AUTH_BYPASS` | One-click demo login (default on; disable for real deployments) |
+| `MARI_AUTH_BYPASS` | One-click demo login, off unless you set it to `true`. It signs anyone who can reach the port in as the workspace admin, with no credential — turn it on only for throwaway demo instances. The server logs a warning at startup while it is on |
+| `MARI_AUTH_REGISTRATION` | Open sign-up (default off — the workspace is invite-only). Invited people can always register whether or not this is set |
 | `MARI_CRAWL_ALLOW_LOOPBACK` | Allow the website connector to crawl localhost (dev only) |
 
 ---

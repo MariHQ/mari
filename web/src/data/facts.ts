@@ -1,6 +1,6 @@
 /* Facts ledger adapter. */
 
-import { useEffect } from "react";
+import { useEffect, useMemo } from "react";
 import type { FactsData, FactFilter } from "@mari-design/components/pages/FactsPage";
 import type { Fact } from "@mari-design/components/features/FactsVerificationAudit";
 import { useQuery } from "../lib/api";
@@ -98,8 +98,16 @@ export function useFacts(): PageData<FactsData> {
     listeners.add(refetch);
     return () => { listeners.delete(refetch); };
   }, [refetch]);
+  /* Built once per RESPONSE, not once per render. The facts list clears its
+     verified / retired / failed overlays whenever `facts` changes identity —
+     that is how a fresh read supersedes an optimistic one — so remapping every
+     render would erase the "verified" tick the moment after it was clicked. */
+  const data = useMemo(
+    () => buildFacts(q.data ? mapFacts(q.data) : [], q.data ? mapBanner(q.data) : null),
+    [q.data],
+  );
   return {
-    data: buildFacts(q.data ? mapFacts(q.data) : [], q.data ? mapBanner(q.data) : null),
+    data,
     loading: q.loading,
     error: q.error ? (q.errorText ?? "The fact ledger is temporarily unavailable.") : null,
   };

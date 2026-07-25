@@ -8,6 +8,7 @@
 import type { SettingsModelsData } from "@mari-design/components/pages/SettingsModelsPage";
 import type { ChunkRow, ProviderKeys } from "@mari-design/components/features/SettingsModelsConfig";
 import type { PropertyItem } from "@mari-design/components";
+import { useMemo } from "react";
 import { useQuery } from "../lib/api";
 import type { PageData } from "./types";
 
@@ -109,8 +110,13 @@ export function buildSettingsModels(res: Res | null): SettingsModelsData {
 
 export function useSettingsModels(): PageData<SettingsModelsData> {
   const q = useQuery<Res>(QUERY, { map: (d: Res) => d });
+  /* Built once per RESPONSE, not once per render. SettingsModelsConfig's
+     sentinel compares `keys` (an object) and `chunking` (an array) by
+     identity, so a fresh build per render would wipe the API-key and
+     chunk-size fields the user is typing into. */
+  const data = useMemo(() => buildSettingsModels(q.data), [q.data]);
   return {
-    data: buildSettingsModels(q.data),
+    data,
     loading: q.loading,
     error: q.error ? (q.errorText ?? "Model configuration is temporarily unavailable.") : null,
   };

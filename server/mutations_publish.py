@@ -11,7 +11,8 @@ import brandimport
 import flowengine
 import llm
 import sitebuilder
-from db import ME, audit, exec_, jload, q, q1
+from db import actor_name, audit, exec_, jload, q, q1
+from mutations_admin import _require_admin
 
 
 @strawberry.type
@@ -28,7 +29,7 @@ class MutPublish:
               (workflow_id, n, json.dumps({"ctx": {"dry_run": True}, "dry_run": True} if dry_run else {})))
         run = q1("SELECT id FROM workflow_runs WHERE workflow_id = %s AND number = %s", (workflow_id, n))
         exec_("INSERT INTO events (actor, verb, target) SELECT %s, 'started run #' || %s, name FROM workflows WHERE id = %s",
-              (ME, n, workflow_id))
+              (actor_name(), n, workflow_id))
         flowengine.start_run(run["id"])
         return n
 
@@ -43,10 +44,10 @@ class MutPublish:
         rows = jload(run["rows_data"]) or []
         if paused_at < len(rows):
             rows[paused_at]["status"] = "passed"
-            rows[paused_at]["detail"] = f"approved by {ME}"
+            rows[paused_at]["detail"] = f"approved by {actor_name()}"
         exec_("UPDATE workflow_runs SET rows_data = %s, status = 'running' WHERE id = %s",
               (json.dumps(rows), run_id))
-        exec_("INSERT INTO events (actor, verb, target) VALUES (%s, 'approved run', '#' || %s)", (ME, run["number"]))
+        exec_("INSERT INTO events (actor, verb, target) VALUES (%s, 'approved run', '#' || %s)", (actor_name(), run["number"]))
         flowengine.start_run(run_id, paused_at + 1)
         return True
 
@@ -79,7 +80,7 @@ class MutPublish:
     @strawberry.mutation
     def delete_workflow(self, id: int) -> bool:
         exec_("DELETE FROM workflow_runs WHERE workflow_id = %s", (id,))
-        exec_("INSERT INTO events (actor, verb, target) SELECT %s, 'deleted flow', name FROM workflows WHERE id = %s", (ME, id))
+        exec_("INSERT INTO events (actor, verb, target) SELECT %s, 'deleted flow', name FROM workflows WHERE id = %s", (actor_name(), id))
         exec_("DELETE FROM workflows WHERE id = %s", (id,))
         return True
 
@@ -87,7 +88,7 @@ class MutPublish:
     def set_workflow_status(self, id: int, status: str) -> bool:
         exec_("UPDATE workflows SET status = %s WHERE id = %s", (status, id))
         exec_("INSERT INTO events (actor, verb, target) SELECT %s, %s || ' flow', name FROM workflows WHERE id = %s",
-              (ME, 'enabled' if status == 'active' else 'paused', id))
+              (actor_name(), 'enabled' if status == 'active' else 'paused', id))
         return True
 
     @strawberry.mutation
@@ -257,12 +258,18 @@ class MutPublish:
             return {"error": f"{type(e).__name__}: {e}", "warnings": []}
 
     # ——— MCP servers (DESIGN.md §19: per-project, configurable in UI) ———
+    #
+    # An MCP server is a bearer token that reads the whole knowledge base from
+    # outside the console. Minting, rescoping and deleting one is the same kind
+    # of act as creating an API key, so it carries the same guard (AUTH-4):
+    # admin. Testing an existing one reads nothing new and stays open.
     @strawberry.mutation
-    def create_mcp_server(self, name: str, scope: str, capabilities: JSON) -> str:
+    def create_mcp_server(self, info: strawberry.Info, name: str, scope: str, capabilities: JSON) -> str:
         """Create an MCP server: generated endpoint + bearer token; capability
         toggles decide which tool groups it exposes. Returns the token (shown once)."""
         import re as _re
         import secrets
+        actor = _require_admin(info)
         slug = _re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "server"
         token = "mari_mcp_" + secrets.token_hex(12)
         caps = [c for c in (capabilities or []) if isinstance(c, str)]
@@ -273,11 +280,14 @@ class MutPublish:
                  ON CONFLICT (name) DO UPDATE SET config = EXCLUDED.config, tools = EXCLUDED.tools""",
               (name, f"https://mcp.mari.cloud/{slug}", scope, n_tools,
                json.dumps({"capabilities": caps}), token))
-        audit("created MCP server", name)
+        audit("created MCP server", name, actor["name"],
+              detail=[("Scope", scope), ("Capabilities", ", ".join(caps) or "(none)")])
         return token
 
     @strawberry.mutation
-    def update_mcp_server(self, id: int, scope: str | None = None, capabilities: JSON = None) -> bool:
+    def update_mcp_server(self, info: strawberry.Info, id: int, scope: str | None = None,
+                          capabilities: JSON = None) -> bool:
+        _require_admin(info)
         if scope:
             exec_("UPDATE mcp_servers SET scope = %s WHERE id = %s", (scope, id))
         if capabilities is not None:
@@ -285,12 +295,13 @@ class MutPublish:
             tools = {"search": 3, "facts": 4, "glossary": 2, "chat": 1, "lineage": 2, "answers": 2}
             exec_("UPDATE mcp_servers SET config = jsonb_set(config, '{capabilities}', %s), tools = %s WHERE id = %s",
                   (json.dumps(caps), sum(tools.get(c, 0) for c in caps) or 1, id))
-        exec_("INSERT INTO events (actor, verb, target) SELECT %s, 'updated MCP server', name FROM mcp_servers WHERE id = %s", (ME, id))
+        exec_("INSERT INTO events (actor, verb, target) SELECT %s, 'updated MCP server', name FROM mcp_servers WHERE id = %s", (actor_name(), id))
         return True
 
     @strawberry.mutation
-    def delete_mcp_server(self, id: int) -> bool:
-        exec_("INSERT INTO events (actor, verb, target) SELECT %s, 'deleted MCP server', name FROM mcp_servers WHERE id = %s", (ME, id))
+    def delete_mcp_server(self, info: strawberry.Info, id: int) -> bool:
+        _require_admin(info)
+        exec_("INSERT INTO events (actor, verb, target) SELECT %s, 'deleted MCP server', name FROM mcp_servers WHERE id = %s", (actor_name(), id))
         exec_("DELETE FROM mcp_servers WHERE id = %s", (id,))
         return True
 

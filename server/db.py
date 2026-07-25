@@ -26,7 +26,18 @@ flowengine.DB_URL_REF["url"] = DB_URL
 ingest.DB_URL_REF["url"] = DB_URL
 auth_module.DB_URL_REF["url"] = DB_URL
 repoaudit.DB_URL_REF["url"] = DB_URL
-ME = "Daniel Henneberger"
+
+# ————— who did this —————
+#
+# AUTH-5: the audit log used to attribute every write to one hardcoded person
+# ("Daniel Henneberger"), including approvals nobody by that name granted.
+# `auth.current_user` publishes the caller for the duration of the request, so
+# `actor_name()` returns the person actually signed in. Work with no human
+# behind it — the ingest poller, a scheduled flow, a webhook — records
+# SERVICE_ACTOR ("Mari"), which is a true statement about who did it.
+SERVICE_ACTOR = auth_module.SERVICE_ACTOR
+actor_name = auth_module.actor_name
+caller = auth_module.caller
 
 # Shared pool for the request path (q/q1/exec_). Long-lived background workers
 # (ingest/connect_sync/flowengine) keep their own dedicated connections — they
@@ -56,12 +67,15 @@ def exec_(sql: str, args: tuple = ()) -> None:
         conn.execute(sql, args)
 
 
-def audit(verb: str, target: str, actor: str = ME,
+def audit(verb: str, target: str, actor: str | None = None,
           detail: t.Sequence[tuple[str, t.Any]] | None = None) -> None:
     """Record an access-log event. `detail` is the ordered label/value rows the
     console shows when the row is expanded — pass only facts the caller
     actually knows (the previous value of a field, the scope of a key). Order
-    is preserved because it is stored as a jsonb array, not an object."""
+    is preserved because it is stored as a jsonb array, not an object.
+
+    `actor` defaults to whoever made the request; pass one only to override."""
+    actor = actor or actor_name()
     rows = [{"label": str(lbl), "value": "" if val is None else str(val)}
             for lbl, val in (detail or []) if str(lbl)]
     exec_("INSERT INTO events (actor, verb, target, detail) VALUES (%s, %s, %s, %s)",

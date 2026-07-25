@@ -8,6 +8,7 @@
 
 import type { AnswerStat, AnswersData, HarvestSource } from "@mari-design/components/pages/AnswersPage";
 import type { Answer } from "@mari-design/components/features/AnswerCard";
+import { useMemo } from "react";
 import { useQuery } from "../lib/api";
 import type { PageData } from "./types";
 
@@ -122,8 +123,18 @@ export function useAnswers(): PageData<AnswersData> {
       answers: mapAnswers(d), coverage: d.answerCoverageGaps ?? [], harvest: mapHarvestSources(d),
     }),
   });
+  /* Built once per RESPONSE, not once per render. `buildAnswers` returns a
+     fresh `pane: { kind: "answers" }` every call, and AnswersPage closes the
+     coverage pane and the harvest wizard whenever `data.pane` changes identity
+     (`seenPane !== data.pane`) — so rebuilt per render, "See all coverage"
+     opened and shut again before the reader saw it. The `?? []` defaults have
+     the same problem on an empty workspace. */
+  const data = useMemo(
+    () => buildAnswers(q.data?.answers ?? [], q.data?.coverage ?? [], "all", q.data?.harvest ?? []),
+    [q.data],
+  );
   return {
-    data: buildAnswers(q.data?.answers ?? [], q.data?.coverage ?? [], "all", q.data?.harvest ?? []),
+    data,
     loading: q.loading,
     error: q.error ? (q.errorText ?? "Answers are temporarily unavailable.") : null,
   };

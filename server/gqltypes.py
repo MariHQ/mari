@@ -203,25 +203,6 @@ class TaskSummary:
 
 
 @strawberry.type
-class AskSource:
-    n: int
-    source: str
-    name: str
-    meta: str
-    date: str
-    text: str
-    by: str
-    tags: list[str]
-
-
-@strawberry.type
-class AskMari:
-    question: str
-    answer: str
-    sources: list[AskSource]
-
-
-@strawberry.type
 class DigestWhere:
     source: str
     label: str

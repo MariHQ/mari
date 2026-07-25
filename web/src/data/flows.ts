@@ -7,7 +7,7 @@
  * app can link to. The run inspector and the run-history surfaces have no
  * route yet, so they are honestly absent rather than opened onto a guess. */
 
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { useSearchParams } from "react-router-dom";
 
 import type { FlowsData, FlowsEditor } from "@mari-design/components/pages/FlowsPage";
@@ -268,8 +268,18 @@ export function useFlows(): PageData<FlowsData> {
     refetch();
   }, [flowId, refetch]);
 
+  /* Built once per RESPONSE, not once per render. The pipeline editor and the
+     run panel resync their local draft/selection when the props they were
+     seeded from change identity (the seen-sentinel idiom), and a mapper that
+     rebuilt `steps` and `runs` on every render would hand them a new array on
+     every keystroke — resetting the draft the user is typing into. */
+  const data = useMemo(
+    () => (q.data ? buildFlows(q.data, flowId, creating) : { ...EMPTY, creating }),
+    [q.data, flowId, creating],
+  );
+
   return {
-    data: q.data ? buildFlows(q.data, flowId, creating) : { ...EMPTY, creating },
+    data,
     loading: q.loading,
     error: q.error ? (q.errorText ?? "Flows are temporarily unavailable.") : null,
   };

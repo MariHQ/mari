@@ -8,7 +8,7 @@
  * made, and this is where the next one gets created. `/publish?site=<id>` is
  * that site's editor. */
 
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { useSearchParams } from "react-router-dom";
 
 import type {
@@ -231,8 +231,19 @@ export function usePublish(): PageData<PublishData> {
     variables: { siteId },
     map: (d: FeaturesRes) => d.siteFeatures ?? [],
   });
+  /* Built once per RESPONSE, not once per render. The site editor seeds the
+     nav tree and the feature switches from `site` and resyncs on
+     `seen !== site` (object identity), and the sites list re-adopts `sites`
+     from a `[sites]` effect — so rebuilding here every render would reset the
+     nav the user is reordering and the switches they are flipping, on every
+     render. `f.data ?? []` is also a new empty array per render, which is the
+     same trap on a site whose feature list is genuinely empty. */
+  const data = useMemo(
+    () => buildPublish(q.data, askedId, creating, f.data ?? []),
+    [q.data, askedId, creating, f.data],
+  );
   return {
-    data: buildPublish(q.data, askedId, creating, f.data ?? []),
+    data,
     loading: q.loading,
     error: q.error ? (q.errorText ?? "Publishing is temporarily unavailable.") : null,
   };

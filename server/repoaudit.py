@@ -37,6 +37,18 @@ def ensure_schema() -> None:
             fix_action text NOT NULL DEFAULT '', fix_payload jsonb NOT NULL DEFAULT '{}',
             status text NOT NULL DEFAULT 'open',
             UNIQUE (run_id, kind, title))""")
+        # Git authors are not accounts. Scanning a repository learns that an
+        # address committed to it — never that its owner is a member here — so
+        # the authorship fix records the address in this table instead of
+        # writing a `users` row. 'mapped' means an admin said this address is
+        # an existing member; 'suggested' means the audit put it forward and
+        # nobody has acted yet. Only inviteMember creates members.
+        conn.execute("""CREATE TABLE IF NOT EXISTS audit_author_map (
+            id serial PRIMARY KEY, email text NOT NULL UNIQUE,
+            git_name text NOT NULL DEFAULT '', member_name text NOT NULL DEFAULT '',
+            status text NOT NULL DEFAULT 'suggested',   -- suggested|mapped
+            decided_by text NOT NULL DEFAULT '',
+            decided_at timestamptz NOT NULL DEFAULT now())""")
 
 
 # ——— real GitHub repo resolution (sources with kind='github') ———
@@ -154,6 +166,8 @@ def run_audit(provider: str = "github") -> int:
             "SELECT d.*, array_remove(array_agg(t.tag), NULL) AS tags FROM documents d "
             "LEFT JOIN tags t ON t.document_id = d.id WHERE d.source = 'github' GROUP BY d.id").fetchall()}
         members = {r["email"]: r["name"] for r in conn.execute("SELECT name, email FROM users").fetchall()}
+        author_map = {r["email"].lower(): r for r in conn.execute(
+            "SELECT email, member_name, status FROM audit_author_map").fetchall()}
 
     # 1. coverage: repo files not indexed
     for stem, f in base_docs.items():
@@ -185,10 +199,18 @@ def run_audit(provider: str = "github") -> int:
 
     # 4. authorship: git authors not mapped to members
     for email, name in _git_authors(repo).items():
-        if email not in members and name not in members.values():
-            findings.append(dict(kind="authorship", title=f"Commits by {name} <{email}> are unmapped",
-                                 detail="This git author isn't a workspace member.",
-                                 fix_action="invite_member", fix_payload={"name": name, "email": email}))
+        if email in members or name in members.values():
+            continue
+        prior = author_map.get(email.lower())
+        if prior and prior["status"] == "mapped":
+            continue  # an admin already said which member this address is
+        detail = "This git author isn't a workspace member."
+        if prior:
+            detail += (f" Suggested as an invitation for {prior['member_name'] or name}; "
+                       "still not a member — invite them from Settings → Members.")
+        findings.append(dict(kind="authorship", title=f"Commits by {name} <{email}> are unmapped",
+                             detail=detail,
+                             fix_action="invite_member", fix_payload={"name": name, "email": email}))
 
     # 5. repo hygiene
     for required, why in (("README.md", "Repos should carry a README."),
@@ -257,21 +279,53 @@ def fix_finding(finding_id: int, actor: str, member_name: str = "") -> str:
             summary = f"linked {stem}.{lang}.md as a translation"
         elif action == "translation_task":
             title = f"Translate {payload['stem']}.md to {payload['lang'].upper()}"
+            # Unassigned: the audit knows a translation is missing, not who
+            # should write it. (The names that used to be here belonged to
+            # nobody in the installing workspace.)
             conn.execute("""INSERT INTO tasks (title, assignee, assignee_initials, assignee_tint, kind, kind_label)
-                            VALUES (%s, 'Lena S.', 'LS', 1, 'approval', 'Translation')
+                            VALUES (%s, '', '', 1, 'approval', 'Translation')
                             ON CONFLICT (title) DO NOTHING""", (title,))
             summary = "translation task created"
         elif action == "invite_member":
-            name = member_name or payload["name"]
-            initials = "".join(w[0].upper() for w in name.split()[:2]) or "??"
-            conn.execute("""INSERT INTO users (name, initials, tint, email, role, provider)
-                            VALUES (%s, %s, 3, %s, 'user', 'manual') ON CONFLICT (name) DO NOTHING""",
-                         (name, initials, payload["email"]))
-            summary = f"mapped to member {name}"
+            # This fix does not create an account. A commit address found in a
+            # git history is evidence that someone committed, not that they
+            # belong in this workspace, and a `users` row written here would be
+            # indistinguishable in Settings → Members from a person who was
+            # actually invited. Two honest outcomes instead:
+            #   • member_name given → record that this address is that member.
+            #   • nothing given     → record the address as a suggestion, which
+            #     an admin turns into a real account via inviteMember.
+            email, git_name = payload["email"], payload["name"]
+            if member_name:
+                known = conn.execute("SELECT name FROM users WHERE name = %s", (member_name,)).fetchone()
+                if not known:
+                    raise ValueError(
+                        f"No workspace member named {member_name!r}. Invite them from "
+                        f"Settings → Members first, then map {email} to that account.")
+                conn.execute("""INSERT INTO audit_author_map
+                                (email, git_name, member_name, status, decided_by)
+                                VALUES (%s, %s, %s, 'mapped', %s)
+                                ON CONFLICT (email) DO UPDATE SET
+                                  git_name = EXCLUDED.git_name, member_name = EXCLUDED.member_name,
+                                  status = 'mapped', decided_by = EXCLUDED.decided_by,
+                                  decided_at = now()""",
+                             (email, git_name, member_name, actor))
+                summary = f"mapped {email} to member {member_name}"
+            else:
+                conn.execute("""INSERT INTO audit_author_map
+                                (email, git_name, member_name, status, decided_by)
+                                VALUES (%s, %s, %s, 'suggested', %s)
+                                ON CONFLICT (email) DO UPDATE SET
+                                  git_name = EXCLUDED.git_name, decided_by = EXCLUDED.decided_by,
+                                  decided_at = now()
+                                WHERE audit_author_map.status <> 'mapped'""",
+                             (email, git_name, git_name, actor))
+                summary = (f"recorded {git_name} <{email}> as a suggested invitation — "
+                           "invite them from Settings → Members to create the account")
         elif action == "hygiene_task":
             title = f"Add {payload['file']} to the repo"
             conn.execute("""INSERT INTO tasks (title, assignee, assignee_initials, assignee_tint, kind, kind_label)
-                            VALUES (%s, 'Alex R.', 'AR', 3, 'approval', 'Repo hygiene')
+                            VALUES (%s, '', '', 3, 'approval', 'Repo hygiene')
                             ON CONFLICT (title) DO NOTHING""", (title,))
             summary = "hygiene task created"
 

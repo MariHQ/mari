@@ -6,7 +6,7 @@
  * can drive every lifecycle step through the same rendering path, and an app
  * drives it from its own `useState`. Only the collections come from the API. */
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import type { PropertyItem } from "@mari-design/components";
 import type { SettingsApiKeysData } from "@mari-design/components/pages/SettingsApiKeysPage";
 import type { ApiKey } from "@mari-design/components/features/SettingsApiKeys";
@@ -79,13 +79,21 @@ export function buildMembers(
 export function useSettingsMembers(): PageData<SettingsMembersData> {
   const [interaction] = useState<SettingsMembersData["interaction"]>("none");
   const q = useQuery<MembersRes>(MEMBERS_QUERY, { map: (d: MembersRes) => d });
-  return {
-    data: buildMembers(
+  /* Built once per RESPONSE, not once per render. SettingsMembersTable
+     resyncs its roster on `seenMembers !== members` (array identity), so
+     re-running mapMembers every render would throw away every optimistic
+     role change the moment the next render happened. */
+  const data = useMemo(
+    () => buildMembers(
       q.data ? mapMembers(q.data) : [],
       q.data?.workspace?.name ?? "",
       q.data ? mapGithubTeam(q.data) : { connected: false, team: "" },
       interaction,
     ),
+    [q.data, interaction],
+  );
+  return {
+    data,
     loading: q.loading,
     error: q.error ? (q.errorText ?? "The member list is temporarily unavailable.") : null,
   };
@@ -134,8 +142,15 @@ export function buildApiKeys(keys: ApiKey[], phase: SettingsApiKeysData["phase"]
 export function useSettingsApiKeys(): PageData<SettingsApiKeysData> {
   const [phase] = useState<SettingsApiKeysData["phase"]>("list");
   const q = useQuery<ApiKey[]>(KEYS_QUERY, { map: mapApiKeys });
+  /* Built once per RESPONSE, not once per render. SettingsApiKeys resyncs its
+     list on `seenKeys !== keys`, and `q.data ?? []` mints a NEW empty array
+     every render while the query is in flight or has failed — which fires the
+     sentinel forever on a workspace with no keys. The `?? []` still means
+     exactly what it did (no keys read yet); `loading`/`error` below are what
+     tell the page whether that is an answer or an absence. */
+  const data = useMemo(() => buildApiKeys(q.data ?? [], phase), [q.data, phase]);
   return {
-    data: buildApiKeys(q.data ?? [], phase),
+    data,
     loading: q.loading,
     error: q.error ? (q.errorText ?? "API keys are temporarily unavailable.") : null,
   };

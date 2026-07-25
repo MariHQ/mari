@@ -3,7 +3,7 @@
  * server counts off those very rows, so the strip can never disagree with the
  * board underneath it. */
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import type { TasksData, Task, TaskAssignee, TaskStrip } from "@mari-design/components/pages/TasksPage";
 import { useQuery } from "../lib/api";
 import type { PageData } from "./types";
@@ -86,13 +86,22 @@ export function useTasks(): PageData<TasksData> {
   // Composer contents are local UI state, not workspace content.
   const [draft] = useState("");
   const q = useQuery<Res>(QUERY, { map: (d: Res) => d });
-  return {
-    data: buildTasks(
+  /* Built once per RESPONSE, not once per render. The board adopts each new
+     server read via `seenTasks !== data.tasks` (array identity) and drops the
+     optimistic moves that read overwrote — so a fresh `mapTasks` per render
+     would discard every drag and every close the instant anything re-rendered
+     the page. */
+  const data = useMemo(
+    () => buildTasks(
       q.data ? mapTasks(q.data) : [],
       q.data ? mapStrip(q.data) : null,
       draft,
       q.data ? mapAssignees(q.data) : [],
     ),
+    [q.data, draft],
+  );
+  return {
+    data,
     loading: q.loading,
     error: q.error ? (q.errorText ?? "Tasks are temporarily unavailable.") : null,
   };

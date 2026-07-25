@@ -18,9 +18,9 @@ import config
 import github
 import ingest
 import llm
-from db import ME, jload, log_usage, q, q1
+from db import actor_name, jload, log_usage, q, q1
 from gqltypes import (
-    ActivityBucket, ActivityItem, ApiKey, ApprovedAnswer, AskMari, AskSource,
+    ActivityBucket, ActivityItem, ApiKey, ApprovedAnswer,
     AuditDetail, AuditEvent, AuditFinding, AuditRun, Change, ChatMessage,
     ChatSession, Checkpoint, Decision, DigestImpact, DigestTopic, DigestWhere,
     DocHistory, Document, DocumentTemplate, Fact, FactContradiction, Finding,
@@ -499,7 +499,10 @@ class Query:
         rows = q(DOC_SQL.format(where="WHERE d.id = %s"), (id,))
         if not rows:
             return None
-        watched = q1("SELECT 1 AS x FROM watches WHERE user_name = %s AND document_id = %s", (ME, id)) is not None
+        # Per-user, and it must be the same name toggleWatch writes, or the
+        # star never comes back lit for the person who set it.
+        watched = q1("SELECT 1 AS x FROM watches WHERE user_name = %s AND document_id = %s",
+                     (actor_name(), id)) is not None
         return _doc(rows[0], watched)
 
     @strawberry.field
@@ -690,11 +693,14 @@ class Query:
             open_count=int(s["open"]), done_count=int(s["done"]),
             overdue_count=int(s["overdue"]), due_soon_count=int(s["due_soon"]))
 
-    @strawberry.field
-    def ask_mari(self) -> AskMari:
-        r = q("SELECT * FROM ask_answers ORDER BY id DESC LIMIT 1")[0]
-        return AskMari(question=r["question"], answer=r["answer"],
-                       sources=[AskSource(**s) for s in jload(r["sources"])])
+    # `askMari` used to live here, reading the last row of `ask_answers`. That
+    # table has no writer anywhere in the tree, so the field raised IndexError
+    # on every install, and nothing in the console queried it: the live
+    # question-and-answer surface is `approvedAnswers` (app.py /chat serves it,
+    # mutations_knowledge writes it). A field that can only throw is worse than
+    # no field, so it is gone. Left for whoever owns those files:
+    # gqltypes.AskMari/AskSource and init.sql's `ask_answers` table are now
+    # unreferenced and should go with it.
 
     @strawberry.field
     def digest(self) -> list[DigestTopic]:
@@ -972,9 +978,12 @@ class Query:
 
     @strawberry.field
     def notifications(self) -> list[Notification]:
+        """Only the caller's notifications — markNotificationsRead marks rows
+        for `actor_name()`, so reading by anything else leaves the badge stuck."""
         return [Notification(id=r["id"], kind=r["kind"], text=r["text"], detail=r["detail"],
                              at=r["at_label"], read=r["read"])
-                for r in q("SELECT * FROM notifications WHERE user_name = %s ORDER BY id", (ME,))]
+                for r in q("SELECT * FROM notifications WHERE user_name = %s ORDER BY id",
+                           (actor_name(),))]
 
     @strawberry.field
     def workspace(self) -> Workspace:

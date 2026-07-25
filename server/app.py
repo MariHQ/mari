@@ -55,8 +55,9 @@ schema = strawberry.Schema(query=Query, mutation=Mutation)
 
 
 def graphql_context(request: Request) -> dict[str, t.Any]:
-    """The whole GraphQL surface requires a session (the bypass cookie resolves
-    to the workspace admin, so it passes). Resolvers read context['user']."""
+    """The whole GraphQL surface requires a session. Resolvers read
+    context['user']; `current_user` also publishes the caller for db.audit(),
+    so a resolver that writes an event records who asked for it."""
     user = auth_module.current_user(request)
     if not user:
         raise HTTPException(401, "Authentication required.")
@@ -64,6 +65,11 @@ def graphql_context(request: Request) -> dict[str, t.Any]:
 
 
 app = FastAPI(title="Mari Cloud API")
+# Resolve who is calling once, for the whole request, so every write can record
+# the real actor (AUTH-5) instead of a hardcoded name. Added before CORS so it
+# sits INSIDE it (Starlette makes the last-added middleware outermost) — a CORS
+# preflight never needs a session, and never gets a database query here.
+app.add_middleware(auth_module.CallerMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173"],
@@ -211,14 +217,20 @@ async def github_webhook(request: "Request"):
             (bots.get_setting("github_bot").get("webhook_secret") or "").strip(),
         ) if s
     ]
-    if secrets:
-        sig = request.headers.get("X-Hub-Signature-256", "")
-        if not any(
-            hmac.compare_digest(sig, "sha256=" + hmac.new(s.encode(), raw, hashlib.sha256).hexdigest())
-            for s in secrets
-        ):
-            # A loud 401 so GitHub's delivery log surfaces the misconfiguration.
-            raise HTTPException(401, "bad signature")
+    # AUTH-10: no secret used to mean no verification, which made this an
+    # unauthenticated endpoint anyone could use to drive syncs. No secret now
+    # means no deliveries — the same verdict bots.py gives Slack.
+    if not secrets:
+        raise HTTPException(
+            401, "This webhook has no secret configured, so no delivery can be verified. "
+                 "Set MARI_GITHUB_WEBHOOK_SECRET, or generate one in Settings → Bots.")
+    sig = request.headers.get("X-Hub-Signature-256", "")
+    if not any(
+        hmac.compare_digest(sig, "sha256=" + hmac.new(s.encode(), raw, hashlib.sha256).hexdigest())
+        for s in secrets
+    ):
+        # A loud 401 so GitHub's delivery log surfaces the misconfiguration.
+        raise HTTPException(401, "bad signature")
     try:
         payload = json.loads(raw or b"{}")
     except json.JSONDecodeError:

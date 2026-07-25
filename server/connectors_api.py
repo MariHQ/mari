@@ -14,9 +14,10 @@ from __future__ import annotations
 
 import json
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
+import auth
 import connect_sync
 import connectors
 import flowengine
@@ -24,6 +25,14 @@ import ingest
 from db import audit, exec_, q, q1
 
 router = APIRouter(prefix="/connectors")
+
+# Reading the catalog is a listing of what this build supports — any signed-in
+# member may see it. /validate and /connect both take a live credential and
+# make the server talk to a third party with it, and /connect stores it on a
+# source row: those are the admin operations the GraphQL side calls
+# connectSource, so they carry the same guard here (AUTH-4). The router-level
+# `dependencies=_authed` in app.py stays; this narrows the two that write.
+_admin = [Depends(auth.require_admin)]
 
 # Main-step order (contract): the rest appear under "Show all".
 TOP8 = ["github", "slack", "upload", "website", "notion", "gdrive", "confluence", "jira"]
@@ -94,7 +103,7 @@ def catalog() -> list[dict]:
     return head + tail
 
 
-@router.post("/validate")
+@router.post("/validate", dependencies=_admin)
 def validate(body: ProviderIn) -> dict:
     entry = connectors.REGISTRY.get(body.provider)
     if not entry or not entry.get("provider"):
@@ -120,7 +129,7 @@ def _qualifier(provider: dict, config: dict) -> str:
     return ""
 
 
-@router.post("/connect")
+@router.post("/connect", dependencies=_admin)
 def connect(body: ProviderIn) -> dict:
     check = validate(body)
     if not check["ok"]:

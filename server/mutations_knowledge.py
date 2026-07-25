@@ -11,7 +11,7 @@ import strawberry
 
 import flowengine
 import llm
-from db import ME, audit, exec_, jload, q, q1
+from db import actor_name, audit, exec_, jload, q, q1
 from gqltypes import AnswerCandidate, ImpactDoc, ImpactResult
 from queries import hybrid_search
 
@@ -104,7 +104,7 @@ class MutKnowledge:
     def set_task_done(self, id: int, done: bool) -> bool:
         exec_("UPDATE tasks SET done = %s WHERE id = %s", (done, id))
         exec_("INSERT INTO events (actor, verb, target) SELECT %s, %s, title FROM tasks WHERE id = %s",
-              (ME, "completed" if done else "reopened", id))
+              (actor_name(), "completed" if done else "reopened", id))
         return True
 
     @strawberry.mutation
@@ -120,20 +120,25 @@ class MutKnowledge:
         # verified_at is a DATE; the legacy `verified` text column held a
         # display string the console could neither re-format nor sort on.
         exec_("UPDATE facts SET status = 'Verified', verified_at = current_date WHERE id = %s", (id,))
-        exec_("INSERT INTO events (actor, verb, target) SELECT %s, 'verified fact', claim FROM facts WHERE id = %s", (ME, id))
+        exec_("INSERT INTO events (actor, verb, target) SELECT %s, 'verified fact', claim FROM facts WHERE id = %s", (actor_name(), id))
         return True
 
     @strawberry.mutation
     def create_task(self, title: str, kind: str = "factcheck", kind_label: str = "Fact check",
-                    assignee: str = "Daniel H.", due: str | None = None) -> bool:
+                    assignee: str = "", due: str | None = None) -> bool:
         """`due` is an ISO date (YYYY-MM-DD) or null. Null is the default:
         nothing in the product assigns a deadline on its own, so a task only
-        has one when whoever created it said so."""
-        initials = "".join(w[0].upper() for w in assignee.split()[:2]) or "DH"
+        has one when whoever created it said so.
+
+        `assignee` defaults to unassigned for the same reason — the product
+        does not know who should do this, and naming a person nobody chose put
+        one developer's name on tasks in every workspace that installed it."""
+        assignee = assignee.strip()
+        initials = "".join(w[0].upper() for w in assignee.split()[:2])
         exec_("""INSERT INTO tasks (title, assignee, assignee_initials, assignee_tint, kind, kind_label, due_date)
                  VALUES (%s, %s, %s, 1, %s, %s, %s) ON CONFLICT (title) DO NOTHING""",
               (title, assignee, initials, kind, kind_label, _iso_date(due)))
-        audit("created task", title, detail=[("Assignee", assignee), ("Kind", kind_label),
+        audit("created task", title, detail=[("Assignee", assignee or "(unassigned)"), ("Kind", kind_label),
                                              ("Due", _iso_date(due) or "(no deadline)")])
         return True
 
@@ -152,9 +157,13 @@ class MutKnowledge:
         return True
 
     @strawberry.mutation
-    def add_fact(self, claim: str, source: str, owner: str = "Daniel H.",
+    def add_fact(self, claim: str, source: str, owner: str = "",
                  document_id: int | None = None) -> bool:
-        """`document_id` is the document this claim was read out of — pass it
+        """`owner` is who stands behind the claim. It defaults to whoever added
+        it — a true statement about this row — rather than to a name hardcoded
+        at build time that no workspace ever chose.
+
+        `document_id` is the document this claim was read out of — pass it
         only when there is one. A claim typed in by hand cites no document and
         keeps NULL, which is the truth about it: Doc Review lists a document's
         claims by this key, so a guessed id would put someone else's claim
@@ -162,10 +171,11 @@ class MutKnowledge:
         doc_id = document_id or None
         if doc_id and not q1("SELECT 1 FROM documents WHERE id = %s", (doc_id,)):
             raise ValueError(f"No document {doc_id} to attribute this claim to")
+        owner = owner.strip() or actor_name()
         exec_("""INSERT INTO facts (claim, source, owner_name, owner_tint, status, verified, document_id)
                  VALUES (%s, %s, %s, 1, 'Needs review', '—', %s) ON CONFLICT (claim) DO NOTHING""",
               (claim, source, owner, doc_id))
-        audit("added fact", claim)
+        audit("added fact", claim, detail=[("Owner", owner), ("Source", source)])
         return True
 
     # ——— glossary CRUD ———
@@ -191,7 +201,7 @@ class MutKnowledge:
                      ON CONFLICT (term) DO UPDATE SET definition = EXCLUDED.definition, updated = now(),
                        evidence = CASE WHEN EXCLUDED.evidence <> '' THEN EXCLUDED.evidence ELSE glossary.evidence END,
                        evidence_doc_id = coalesce(EXCLUDED.evidence_doc_id, glossary.evidence_doc_id)""",
-                  (term, definition, ME, evidence, doc_id))
+                  (term, definition, actor_name(), evidence, doc_id))
             audit("added glossary term", term, detail=[("Evidence", evidence or "(none)")])
         return True
 
@@ -366,7 +376,7 @@ class MutKnowledge:
         vec = llm.embed(body[:3000])
         if vec:
             exec_("UPDATE documents SET embedding = %s::vector WHERE id = %s", (str(vec), id))
-        exec_("INSERT INTO events (actor, verb, target) SELECT %s, 'edited', title FROM documents WHERE id = %s", (ME, id))
+        exec_("INSERT INTO events (actor, verb, target) SELECT %s, 'edited', title FROM documents WHERE id = %s", (actor_name(), id))
         return True
 
     @strawberry.mutation
@@ -376,7 +386,7 @@ class MutKnowledge:
             exec_("""UPDATE documents d SET body = replace(d.body, c.original, c.replacement)
                      FROM changes c WHERE c.id = %s AND d.id = c.document_id""", (id,))
         exec_("INSERT INTO events (actor, verb, target) SELECT %s, %s || ' change', original FROM changes WHERE id = %s",
-              (ME, status, id))
+              (actor_name(), status, id))
         return True
 
     @strawberry.mutation
@@ -469,7 +479,7 @@ class MutKnowledge:
     def pin_node(self, document_id: int, x: float, y: float) -> bool:
         exec_("UPDATE documents SET graph_x = %s, graph_y = %s WHERE id = %s", (x, y, document_id))
         exec_("INSERT INTO events (actor, verb, target) SELECT %s, 'pinned graph node', title FROM documents WHERE id = %s",
-              (ME, document_id))
+              (actor_name(), document_id))
         return True
 
     @strawberry.mutation
@@ -480,7 +490,7 @@ class MutKnowledge:
     @strawberry.mutation
     def save_graph_view(self, name: str, state: str) -> int:
         exec_("""INSERT INTO graph_views (name, state, created_by) VALUES (%s, %s::jsonb, %s)
-                 ON CONFLICT (name) DO UPDATE SET state = EXCLUDED.state""", (name, state, ME))
+                 ON CONFLICT (name) DO UPDATE SET state = EXCLUDED.state""", (name, state, actor_name()))
         audit("saved graph view", name)
         return (q1("SELECT id FROM graph_views WHERE name = %s", (name,)) or {"id": 0})["id"]
 
@@ -545,7 +555,7 @@ class MutKnowledge:
             exec_("""INSERT INTO approved_answers (question, answer, status, owner_name, updated)
                      VALUES (%s, %s, 'draft', %s, now())
                      ON CONFLICT (question) DO UPDATE SET answer = EXCLUDED.answer, updated = now()""",
-                  (question, answer, ME))
+                  (question, answer, actor_name()))
         audit("drafted answer", question)
         return True
 
@@ -560,7 +570,7 @@ class MutKnowledge:
             if vec:
                 exec_("UPDATE approved_answers SET embedding = %s::vector WHERE id = %s", (str(vec), id))
         exec_("INSERT INTO events (actor, verb, target) SELECT %s, %s || ' answer', question FROM approved_answers WHERE id = %s",
-              (ME, status, id))
+              (actor_name(), status, id))
         return True
 
     @strawberry.mutation
@@ -573,7 +583,7 @@ class MutKnowledge:
     def add_decision(self, statement: str, context: str = "", source_label: str = "") -> bool:
         exec_("""INSERT INTO decisions (statement, context, status, source_label, owners)
                  VALUES (%s, %s, 'proposed', %s, %s) ON CONFLICT (statement) DO NOTHING""",
-              (statement, context, source_label or "Captured in Mari", [ME]))
+              (statement, context, source_label or "Captured in Mari", [actor_name()]))
         audit("captured decision", statement)
         return True
 
@@ -581,19 +591,19 @@ class MutKnowledge:
     def ratify_decision(self, id: int) -> bool:
         exec_("UPDATE decisions SET status = 'ratified', decided_on = now() WHERE id = %s", (id,))
         exec_("INSERT INTO events (actor, verb, target) SELECT %s, 'ratified decision', statement FROM decisions WHERE id = %s",
-              (ME, id))
+              (actor_name(), id))
         return True
 
     @strawberry.mutation
     def supersede_decision(self, id: int, by_statement: str) -> bool:
         exec_("""INSERT INTO decisions (statement, status, source_label, owners, decided_on)
                  VALUES (%s, 'ratified', 'Supersedes an earlier decision', %s, now())
-                 ON CONFLICT (statement) DO NOTHING""", (by_statement, [ME]))
+                 ON CONFLICT (statement) DO NOTHING""", (by_statement, [actor_name()]))
         exec_("""UPDATE decisions SET status = 'superseded',
                    superseded_by = (SELECT id FROM decisions WHERE statement = %s)
                  WHERE id = %s""", (by_statement, id))
         exec_("INSERT INTO events (actor, verb, target) SELECT %s, 'superseded decision', statement FROM decisions WHERE id = %s",
-              (ME, id))
+              (actor_name(), id))
         return True
 
     @strawberry.mutation
@@ -663,7 +673,7 @@ class MutKnowledge:
     def promote_glossary_candidate(self, id: int, accept: bool) -> bool:
         if accept:
             exec_("UPDATE glossary SET candidate = false WHERE id = %s", (id,))
-            exec_("INSERT INTO events (actor, verb, target) SELECT %s, 'accepted glossary term', term FROM glossary WHERE id = %s", (ME, id))
+            exec_("INSERT INTO events (actor, verb, target) SELECT %s, 'accepted glossary term', term FROM glossary WHERE id = %s", (actor_name(), id))
         else:
             exec_("DELETE FROM glossary WHERE id = %s AND candidate", (id,))
         return True
@@ -693,7 +703,7 @@ class MutKnowledge:
                     exec_("""INSERT INTO decisions (statement, context, status, source_label, owners)
                              VALUES (%s, %s, 'proposed', %s, %s) ON CONFLICT (statement) DO NOTHING""",
                           (stmt, str(d.get("context", ""))[:400],
-                           ("Mari scan · " + str(d.get("source_label", "doc graph")))[:120], [ME]))
+                           ("Mari scan · " + str(d.get("source_label", "doc graph")))[:120], [actor_name()]))
                     added += 1
         audit("scanned for decisions", f"{added} candidates")
         return added
@@ -741,7 +751,7 @@ class MutKnowledge:
                 # is the key, and it is the document this call actually read.
                 exec_("""INSERT INTO facts (claim, source, owner_name, owner_tint, status, verified, document_id)
                          VALUES (%s, %s, %s, 1, 'Needs review', '—', %s) ON CONFLICT (claim) DO NOTHING""",
-                      (claim, ("Mari scan · " + d["title"])[:80], ME, d["id"]))
+                      (claim, ("Mari scan · " + d["title"])[:80], actor_name(), d["id"]))
                 existing.add(claim.lower())
                 added += 1
                 if added >= 4:
@@ -765,7 +775,7 @@ class MutKnowledge:
               (wf_id, n))
         run = q1("SELECT id FROM workflow_runs WHERE workflow_id = %s AND number = %s", (wf_id, n))
         exec_("INSERT INTO events (actor, verb, target) VALUES (%s, %s, %s)",
-              (ME, f"started run #{n}", flowengine.FACT_SCAN_FLOW))
+              (actor_name(), f"started run #{n}", flowengine.FACT_SCAN_FLOW))
         flowengine.start_run(run["id"])
         return run["id"]
 
@@ -784,7 +794,7 @@ class MutKnowledge:
               (wf_id, n))
         run = q1("SELECT id FROM workflow_runs WHERE workflow_id = %s AND number = %s", (wf_id, n))
         exec_("INSERT INTO events (actor, verb, target) VALUES (%s, %s, %s)",
-              (ME, f"started run #{n}", flowengine.DECISION_SCAN_FLOW))
+              (actor_name(), f"started run #{n}", flowengine.DECISION_SCAN_FLOW))
         flowengine.start_run(run["id"])
         return run["id"]
 
@@ -896,13 +906,13 @@ class MutKnowledge:
     # ——— notifications / watches ———
     @strawberry.mutation
     def mark_notifications_read(self) -> bool:
-        exec_("UPDATE notifications SET read = true WHERE user_name = %s", (ME,))
+        exec_("UPDATE notifications SET read = true WHERE user_name = %s", (actor_name(),))
         return True
 
     @strawberry.mutation
     def toggle_watch(self, document_id: int) -> bool:
-        if q1("SELECT 1 AS x FROM watches WHERE user_name = %s AND document_id = %s", (ME, document_id)):
-            exec_("DELETE FROM watches WHERE user_name = %s AND document_id = %s", (ME, document_id))
+        if q1("SELECT 1 AS x FROM watches WHERE user_name = %s AND document_id = %s", (actor_name(), document_id)):
+            exec_("DELETE FROM watches WHERE user_name = %s AND document_id = %s", (actor_name(), document_id))
             return False
-        exec_("INSERT INTO watches (user_name, document_id) VALUES (%s, %s) ON CONFLICT DO NOTHING", (ME, document_id))
+        exec_("INSERT INTO watches (user_name, document_id) VALUES (%s, %s) ON CONFLICT DO NOTHING", (actor_name(), document_id))
         return True

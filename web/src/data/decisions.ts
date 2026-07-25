@@ -2,7 +2,7 @@
 
 import type { DecisionsData, LedgerFilterTab } from "@mari-design/components/pages/DecisionsPage";
 import type { Decision } from "@mari-design/components/features/DecisionCardFeature";
-import { useEffect } from "react";
+import { useEffect, useMemo } from "react";
 import { useQuery } from "../lib/api";
 import type { PageData } from "./types";
 
@@ -111,9 +111,17 @@ export function useDecisions(): PageData<DecisionsData> {
     listeners.add(refetch);
     return () => { listeners.delete(refetch); };
   }, [refetch]);
+  /* Built once per RESPONSE, not once per render. The rows themselves already
+     keep their identity (`mapDecisions` runs inside useQuery's map, once per
+     fetch), but `q.data ?? []` mints a new empty array on every render before
+     the first response lands, and the ratify pane re-adopts its card on
+     `seenCard !== card`. Memoising keeps the empty case as stable as the
+     loaded one. `?? []` is still "nothing read yet", and `loading` below says
+     which. */
+  // "all" is where the ledger opens; the page's tab strip takes it from there.
+  const data = useMemo(() => buildDecisions(q.data ?? [], "all"), [q.data]);
   return {
-    // "all" is where the ledger opens; the page's tab strip takes it from there.
-    data: buildDecisions(q.data ?? [], "all"),
+    data,
     loading: q.loading,
     error: q.error ? (q.errorText ?? "The decision ledger is temporarily unavailable.") : null,
   };

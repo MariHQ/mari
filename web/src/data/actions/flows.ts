@@ -23,6 +23,11 @@ const UPDATE = `mutation($id: Int!, $name: String!, $description: String!, $step
 const SET_STATUS = `mutation($id: Int!, $status: String!) { setWorkflowStatus(id: $id, status: $status) }`;
 const SET_TRIGGER = `mutation($id: Int!, $trigger: String!) { setWorkflowTrigger(workflowId: $id, trigger: $trigger) }`;
 const NODES = `{ workflows { id nodes } }`;
+/* Which flow a run belongs to. `workflow_runs.workflow_id` has always been a
+   column and `WorkflowRun.workflowId` has always been in the schema; the
+   re-run control was left unwired on the stated grounds that "a run row does
+   not carry which workflow it belongs to", which was simply not true. */
+const RUN_OWNER = `{ workflowRuns { id workflowId workflowName } }`;
 
 /** The trigger, narrowed to the shape `setWorkflowTrigger` validates. It
  *  rejects an unknown key rather than silently dropping it, so the payload is
@@ -99,8 +104,16 @@ export function flowsActions({ navigate }: ActionContext): FlowsActions {
     approveRun: async (runId: string) => {
       await mutate("mutation($runId: Int!) { approveRun(runId: $runId) }", { runId: Number(runId) });
     },
-    // No re-run handler: `runWorkflow` needs the workflow, and a run row does
-    // not carry which workflow it belongs to, so the inspector's Re-run stays
-    // the local echo rather than guessing an id.
+    // Re-run IS `runWorkflow` on the flow the run belongs to: a fresh run of
+    // the current pipeline, which is the only re-run the engine has. The
+    // workflow is read off the run rather than inferred, and a run the API
+    // does not return is an error rather than a guessed id.
+    rerunRun: async (runId: string, dry: boolean) => {
+      const res = await gql<{ workflowRuns: { id: number; workflowId: number; workflowName: string }[] }>(RUN_OWNER);
+      const owner = (res?.workflowRuns ?? []).find((r) => String(r.id) === String(runId));
+      if (!owner) throw new Error(`Run ${runId} could not be found, so there is nothing to re-run.`);
+      await mutate("mutation($id: Int!, $dryRun: Boolean!) { runWorkflow(workflowId: $id, dryRun: $dryRun) }",
+        { id: owner.workflowId, dryRun: dry });
+    },
   };
 }

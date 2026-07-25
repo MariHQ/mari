@@ -12,6 +12,7 @@ import type { Term } from "@mari-design/components/features/LibraryGlossaryPanel
 import type { Guide, VoiceLayer } from "@mari-design/components/features/LibraryGuidesPanel";
 import type { Template, TemplateIcon } from "@mari-design/components/features/LibraryTemplatesPanel";
 import { RULE_COUNT, type CheckerDoc } from "@mari-design/components/features/LibraryRulesPanel";
+import { useMemo } from "react";
 import { useQuery } from "../lib/api";
 import type { PageData } from "./types";
 
@@ -199,8 +200,14 @@ export function buildLibrary(res: Res | null, tab: LibraryTab): LibraryData {
 
 export function useLibrary(): PageData<LibraryData> {
   const q = useQuery<Res>(QUERY, { map: (d: Res) => d });
+  /* Built once per RESPONSE, not once per render. The tags, glossary and
+     template panels each seed an editable list from these arrays but never
+     resync, so a per-render identity does not clobber them today — this is the
+     five mappers, not a live bug. It also stops the panels' identity churning
+     under any resync they gain later. */
+  const data = useMemo(() => buildLibrary(q.data, "tags"), [q.data]);
   return {
-    data: buildLibrary(q.data, "tags"),
+    data,
     loading: q.loading,
     error: q.error ? (q.errorText ?? "The library is temporarily unavailable.") : null,
   };
