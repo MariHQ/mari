@@ -5,8 +5,10 @@
  * The page cannot pass the id down: its `data` carries the document's title and
  * body, not its key.
  *
- * Not wired: "Share". Nothing in the schema shares a document, so the control
- * keeps whatever local behaviour it has rather than pointing at a 404.
+ * "Share" is a client-side capability, not a mutation: this document already
+ * has an address, and sharing it means handing that address over. The native
+ * share sheet where the browser has one, the clipboard everywhere else — both
+ * are real, and neither invents a server feature that does not exist.
  */
 
 import type { DocReviewActions } from "@mari-design/components/pages/DocReviewPage";
@@ -43,9 +45,28 @@ const CREATE_TASK = `mutation CreateTask($title: String!, $assignee: String!, $d
   createTask(title: $title, kind: "factcheck", kindLabel: "Fact check", assignee: $assignee, due: $due)
 }`;
 
+/** Hand this document's URL to whoever is being shared with. */
+async function share(): Promise<void> {
+  const url = window.location.href;
+  // The share sheet is only available over HTTPS and on a user gesture, and
+  // the user can dismiss it — a dismissal is a cancel, not a failure.
+  if (navigator.share) {
+    try {
+      await navigator.share({ url, title: document.title });
+      return;
+    } catch (e) {
+      if (e instanceof DOMException && e.name === "AbortError") return;
+      // Anything else: fall through to the clipboard rather than reporting a
+      // failure the reader can do nothing about.
+    }
+  }
+  await navigator.clipboard.writeText(url);
+}
+
 export function docReviewActions(): DocReviewActions {
   return {
     save: async ({ body }) => { await mutate(SAVE, { id: docId(), body }); },
+    share,
 
     acceptChange: async ({ id }) => { await mutate(SET_CHANGE, { id, status: "accepted" }); },
     rejectChange: async ({ id }) => { await mutate(SET_CHANGE, { id, status: "rejected" }); },

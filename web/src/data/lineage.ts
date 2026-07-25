@@ -110,7 +110,7 @@ export const EMPTY: LineageData = {
   nodes: [], edges: [], dates: [], activity: [],
   lens: "source", layout: "flow",
   focalId: null, trace: null, asOf: null, search: null, drawer: null,
-  crumbs: null, extras: null, action: "",
+  crumbs: null, extras: null, action: null,
 };
 
 export function buildLineage(res: Res | null): LineageData {
@@ -136,7 +136,10 @@ export function buildLineage(res: Res | null): LineageData {
     drawer: null,
     crumbs: null,
     extras: null,
-    action: "",
+    // The header's "document being traced" needs a document to trace. Nothing
+    // is in focus on a freshly opened graph, and the field carries an id now,
+    // so there is no label to invent.
+    action: null,
   };
 }
 
