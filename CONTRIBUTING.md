@@ -20,12 +20,18 @@ Git adds it for you with `-s`:
 git commit -s -m "Fix chunk hash comparison on resync"
 ```
 
-The name and email must be real and must match the ones on the commit. To make
-sign-off automatic for this repo:
+Use your real name, and make sure the name and email match the ones on the commit.
+For the address, either one that reaches you or your GitHub noreply address works.
+The noreply form is `<id>+<username>@users.noreply.github.com` and it's listed on
+your [email settings](https://github.com/settings/emails) page. Nobody needs to
+publish a personal address to contribute here, and if you've enabled "Block command
+line pushes that expose my email" on GitHub, the noreply address is the one to use.
+
+To make sign-off automatic for this repo:
 
 ```sh
 git config user.name "Jane Doe"
-git config user.email "jane@example.com"
+git config user.email "jane@example.com"   # or 1234567+jane@users.noreply.github.com
 git config format.signOff true
 ```
 
