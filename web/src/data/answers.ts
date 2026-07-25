@@ -66,25 +66,23 @@ const TILES: { label: string; sub: string; tone: AnswerStat["tone"]; of: (a: Ans
   { label: "Served", sub: "all time", tone: "info", of: (a) => a.reduce((n, x) => n + (x.served ?? 0), 0) },
 ];
 
-/** Pure: the answers + coverage gaps → everything the page renders. */
+/** Pure: the answers + coverage gaps → everything the page renders.
+    `filter` is only which tab opens selected: the page's own tab strip filters
+    the list, so handing it a pre-filtered one would leave the other tabs with
+    nothing to show. */
 export function buildAnswers(answers: Answer[], coverage: string[], filter: AnswersData["filter"]): AnswersData {
   return {
     stats: TILES.map<AnswerStat>((t) => ({
       value: t.of(answers).toLocaleString("en-US"), label: t.label, tone: t.tone, sub: t.sub,
     })),
     filter,
-    answers: filter === "all" ? answers : answers.filter((a) => a.status === SINGULAR[filter]),
+    answers,
     coverage,
     // The harvest wizard and the coverage pane are routes this app does not
     // have yet; the list is what `/answers` is.
     pane: { kind: "answers" },
   };
 }
-
-/** Tab id → the status it filters to. The tabs are plural, the column is not. */
-const SINGULAR: Record<Exclude<AnswersData["filter"], "all">, Answer["status"]> = {
-  approved: "approved", drafts: "draft", retired: "retired",
-};
 
 export const EMPTY: AnswersData = buildAnswers([], [], "all");
 

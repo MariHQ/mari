@@ -9,10 +9,31 @@ import re
 
 import strawberry
 
+import flowengine
 import llm
 from db import ME, audit, exec_, jload, q, q1
 from gqltypes import AnswerCandidate, ImpactDoc, ImpactResult
 from queries import hybrid_search
+
+
+# A document's metadata line is not a claim. The scanner is fed
+# "[source] title: body", and for a GitHub PR the body IS the header line, so
+# the model happily returned "PR #340 · petk · closed · updated
+# 2016-01-17T01:57:54Z" as a fact — a row nobody can verify, and one the
+# contradiction detector then compares digit by digit against its neighbour.
+_META_CLAIM = re.compile(
+    r"""(^\s*(PR|MR|Issue|Commit)\s*\#?\d)   # starts as a PR/issue/commit header
+      | (\d{4}-\d{2}-\d{2}T\d{2}:\d{2})      # carries a raw ISO timestamp
+      | (^[^.!?]*·[^.!?]*·)                  # a "a · b · c" pill line, not a sentence
+    """,
+    re.IGNORECASE | re.VERBOSE)
+
+
+def is_claim(text: str) -> bool:
+    """Is this a sentence someone could agree or disagree with? Guards the
+    ledger against metadata the extractor echoed back at us."""
+    claim = (text or "").strip()
+    return bool(claim) and len(claim.split()) >= 4 and not _META_CLAIM.search(claim)
 
 def _iso_date(value: str | None) -> str | None:
     """Accept an ISO date (or an ISO timestamp) and return YYYY-MM-DD; None for
@@ -679,6 +700,8 @@ class MutKnowledge:
         prompt = (
             f"Recent team documents:\n{corpus}\n\n"
             "Extract atomic, checkable FACTS (numbers, limits, defaults, policies). "
+            "Write each claim as a plain English sentence a person could agree or disagree with; "
+            "never copy a document's metadata line (PR/issue headers, authors, timestamps, status). "
             'JSON: [{"claim": "one factual sentence", "source": "doc title"}]. At most 4; no opinions.'
         )
         out = llm.generate_json(prompt, system="You extract verifiable facts from documentation.")
@@ -686,13 +709,52 @@ class MutKnowledge:
         if isinstance(out, list):
             for f in out[:4]:
                 claim = str(f.get("claim", ""))[:200]
-                if claim and claim.lower() not in existing:
+                if is_claim(claim) and claim.lower() not in existing:
                     exec_("""INSERT INTO facts (claim, source, owner_name, owner_tint, status, verified)
                              VALUES (%s, %s, %s, 1, 'Needs review', '—') ON CONFLICT (claim) DO NOTHING""",
                           (claim, ("Mari scan · " + str(f.get("source", "doc graph")))[:80], ME))
                     added += 1
         audit("scanned for facts", f"{added} candidates")
         return added
+
+    @strawberry.mutation
+    def start_fact_scan(self) -> int:
+        """Start the fact scan as a real background run and answer with the run
+        id, so the page that asked can follow it. The scan reads the whole
+        recent corpus through a model: it is a flow with steps and a history
+        like every other long job here, not something a link fires and forgets.
+        """
+        wf_id = flowengine.ensure_fact_scan_flow()
+        n = (q1("SELECT coalesce(max(number), 1800) AS n FROM workflow_runs WHERE workflow_id = %s",
+                (wf_id,)) or {"n": 1800})["n"] + 1
+        exec_("""INSERT INTO workflow_runs (workflow_id, number, status, started_label, duration,
+                                            progress, stats, rows_data)
+                 VALUES (%s, %s, 'running', to_char(now(), 'Mon DD, HH12:MI AM'), '00:00:00', 0, '{}', '[]')""",
+              (wf_id, n))
+        run = q1("SELECT id FROM workflow_runs WHERE workflow_id = %s AND number = %s", (wf_id, n))
+        exec_("INSERT INTO events (actor, verb, target) VALUES (%s, %s, %s)",
+              (ME, f"started run #{n}", flowengine.FACT_SCAN_FLOW))
+        flowengine.start_run(run["id"])
+        return run["id"]
+
+    @strawberry.mutation
+    def start_decision_scan(self) -> int:
+        """Start the decision scan as a real background run and answer with the
+        run id, for the same reason the fact scan does: it reads the corpus
+        through a model and writes to the ledger, so it belongs in the run
+        history rather than behind a link that fires and forgets."""
+        wf_id = flowengine.ensure_decision_scan_flow()
+        n = (q1("SELECT coalesce(max(number), 1800) AS n FROM workflow_runs WHERE workflow_id = %s",
+                (wf_id,)) or {"n": 1800})["n"] + 1
+        exec_("""INSERT INTO workflow_runs (workflow_id, number, status, started_label, duration,
+                                            progress, stats, rows_data)
+                 VALUES (%s, %s, 'running', to_char(now(), 'Mon DD, HH12:MI AM'), '00:00:00', 0, '{}', '[]')""",
+              (wf_id, n))
+        run = q1("SELECT id FROM workflow_runs WHERE workflow_id = %s AND number = %s", (wf_id, n))
+        exec_("INSERT INTO events (actor, verb, target) VALUES (%s, %s, %s)",
+              (ME, f"started run #{n}", flowengine.DECISION_SCAN_FLOW))
+        flowengine.start_run(run["id"])
+        return run["id"]
 
     @strawberry.mutation
     def scan_answer_candidates(self, sources: list[str]) -> list[AnswerCandidate]:

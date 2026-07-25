@@ -2,11 +2,18 @@
  *
  * `releases` takes an optional site id (added for this page), so the site, its
  * release history and the MCP list all arrive in one document instead of
- * chaining a second round trip on the first site's id. */
+ * chaining a second round trip on the first site's id.
+ *
+ * `/publish` is the list of doc sites — the workspace has as many as it has
+ * made, and this is where the next one gets created. `/publish?site=<id>` is
+ * that site's editor. */
+
+import { useEffect, useRef } from "react";
+import { useSearchParams } from "react-router-dom";
 
 import type {
   DocSite, McpCreated, McpDraft, NavSection, PublishData, PublishGate,
-  SiteFeature, SiteRelease, SiteTheme,
+  SiteFeature, SiteRelease, SiteSummary, SiteTheme,
 } from "@mari-design/components/pages/PublishPage";
 import type { McpServer } from "@mari-design/components/features/PublishMcpServers";
 import { useQuery } from "../lib/api";
@@ -20,6 +27,7 @@ const QUERY = `{
   mcpServers { id name url scope status tools config }
   siteThemePresets { key name accent bg }
   settings { key value }
+  tagDefs { tag }
 }`;
 
 /* The generator's switches resolve per site: the shipped default overlaid with
@@ -47,6 +55,7 @@ type Res = {
   }[];
   siteThemePresets: { key: string; name: string; accent: string; bg: string }[];
   settings: { key: string; value: unknown }[];
+  tagDefs: { tag: string }[];
 };
 
 type FeaturesRes = { siteFeatures: { key: string; label: string; hint: string; on: boolean }[] };
@@ -72,19 +81,29 @@ export function mapServers(res: Res): McpServer[] {
     }));
 }
 
-/** The workspace's one doc site: the live one if there is one, else the first.
- *  A workspace with no site returns null, which is what makes the page's own
- *  "publishes nothing" state true. */
-/** The workspace's one doc site, before its release history is attached: the
- *  live one if there is one, else the first. `siteFeatures` is asked for by
- *  this id, so both halves of the page describe the same site. */
-export function pickSiteRow(res: Res): Res["sites"][number] | null {
-  const sites = res.sites ?? [];
-  return sites.find((s) => s.status === "live") ?? sites[0] ?? null;
+/** Every doc site, as the list shows them. */
+export function mapSites(res: Res): SiteSummary[] {
+  return (res.sites ?? []).map<SiteSummary>((s) => ({
+    id: s.id,
+    name: s.name,
+    domain: s.domain,
+    // The list draws two states; anything else has not been released, which is
+    // what "draft" says.
+    status: s.status === "live" ? "live" : "draft",
+    docs: s.docs,
+  }));
 }
 
-export function mapSite(res: Res, features: SiteFeature[]): DocSite | null {
-  const site = pickSiteRow(res);
+/** The site an editor is open on: the one `?site=` names. Null when the route
+ *  names none (the list) or names one that is not there — `siteFeatures` is
+ *  asked for by this same id, so both halves of the page describe one site. */
+export function pickSiteRow(res: Res, siteId: number | null): Res["sites"][number] | null {
+  if (siteId == null) return null;
+  return (res.sites ?? []).find((s) => s.id === siteId) ?? null;
+}
+
+export function mapSite(res: Res, siteId: number | null, features: SiteFeature[]): DocSite | null {
+  const site = pickSiteRow(res, siteId);
   if (!site) return null;
 
   const releases = (res.releases ?? []).filter((r) => r.siteId === site.id);
@@ -101,6 +120,8 @@ export function mapSite(res: Res, features: SiteFeature[]): DocSite | null {
   return {
     name: site.name,
     domain: site.domain,
+    // Two states, and only a deployed one is serving anything.
+    status: site.status === "live" ? "live" : "draft",
     // The version the next deploy builds on: the newest release there is.
     version: live?.version ?? "",
     // sites.sources is the tag list that decides which documents are eligible.
@@ -142,26 +163,34 @@ const NO_CREATED: McpCreated = { name: "", scopeLabel: "", toolCount: 0, token: 
 /* ── mapper ─────────────────────────────────────────────────────────────── */
 
 export const EMPTY: PublishData = {
-  view: "site-editor", editorTab: "content", phase: "draft",
-  site: null, servers: [], serverCount: 0, draft: NO_DRAFT, created: NO_CREATED,
+  view: "site-list", editorTab: "content", phase: "draft",
+  sites: [], tagOptions: [], site: null, servers: [], serverCount: 0,
+  draft: NO_DRAFT, created: NO_CREATED,
 };
 
 /** Pure: the whole response → everything Publish renders. `features` comes
  *  from the dependent `siteFeatures(siteId:)` query — [] until it answers,
  *  which renders the switch list as the empty block it is at that moment. */
-export function buildPublish(res: Res | null, features: SiteFeature[] = []): PublishData {
-  if (!res) return EMPTY;
+export function buildPublish(
+  res: Res | null, siteId: number | null = null, creating = false, features: SiteFeature[] = [],
+): PublishData {
+  if (!res) return creating ? { ...EMPTY, view: "site-new" } : EMPTY;
   const servers = mapServers(res);
-  const site = mapSite(res, features);
-  const row = pickSiteRow(res);
+  const site = mapSite(res, siteId, features);
+  const row = pickSiteRow(res, siteId);
   return {
-    // `/publish` opens on the site editor's content tab. The deploy flow and
-    // the three MCP screens are routes this app does not have yet.
-    view: "site-editor",
+    // `/publish` is the site list, `?new` its create form, `?site=` one site's
+    // editor. The deploy flow and the three MCP screens are routes this app
+    // does not have yet.
+    view: site ? "site-editor" : creating ? "site-new" : "site-list",
     editorTab: "content",
     // A deploy is in flight only while a mutation is running; a page load is
     // looking at what is already there.
     phase: row?.status === "live" ? "published" : "draft",
+    sites: mapSites(res),
+    // What a new site can draw its documents from: the tags this workspace
+    // actually defines, so the form cannot offer a filter that matches nothing.
+    tagOptions: (res.tagDefs ?? []).map((t) => t.tag).filter(Boolean),
     site,
     servers,
     serverCount: servers.length,
@@ -173,18 +202,37 @@ export function buildPublish(res: Res | null, features: SiteFeature[] = []): Pub
 /* ── adapter ────────────────────────────────────────────────────────────── */
 
 export function usePublish(): PageData<PublishData> {
+  const [params] = useSearchParams();
+  const asked = Number(params.get("site"));
+  const askedId = Number.isInteger(asked) && asked > 0 ? asked : null;
+  const creating = params.get("new") !== null;
   const q = useQuery<Res>(QUERY, { map: (d: Res) => d });
-  // Which site the switches belong to is only known once the first query has
-  // answered. `siteId: null` asks for the shipped defaults, which is what the
-  // page needs when there is no site at all — and in that case `site` is null,
-  // so nothing renders them.
-  const siteId = q.data ? pickSiteRow(q.data)?.id ?? null : null;
+
+/* The route names the subject; the query behind it takes no variables, so
+   navigating from the list to one site does not change useQuery's key and
+   the page would render the new site off a response taken before it
+   existed. Creating one lands on exactly that route, so the read is re-run
+   whenever the subject changes. Mount is not a change: the ref starts on the
+   subject the first render already fetched. */
+  const { refetch } = q;
+  const seen = useRef<number | null>(askedId);
+  useEffect(() => {
+    if (seen.current === askedId) return;
+    seen.current = askedId;
+    refetch();
+  }, [askedId, refetch]);
+
+  // The switches belong to the site the route names, and only once the first
+  // query has confirmed that site exists. `siteId: null` asks for the shipped
+  // defaults, which is what the page needs when no editor is open — and in
+  // that case `site` is null, so nothing renders them.
+  const siteId = q.data ? pickSiteRow(q.data, askedId)?.id ?? null : null;
   const f = useQuery<SiteFeature[]>(FEATURES_QUERY, {
     variables: { siteId },
     map: (d: FeaturesRes) => d.siteFeatures ?? [],
   });
   return {
-    data: buildPublish(q.data, f.data ?? []),
+    data: buildPublish(q.data, askedId, creating, f.data ?? []),
     loading: q.loading,
     error: q.error ? (q.errorText ?? "Publishing is temporarily unavailable.") : null,
   };

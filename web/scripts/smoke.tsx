@@ -169,13 +169,13 @@ check("facts: the banner quotes both stored claims",
 check("facts: the banner names why they disagree", factsBanner.body.includes("100 vs 250"));
 check("facts: a consistent ledger raises no banner",
   mapBanner({ facts: [], factContradictions: [] } as any) === null);
-const factsData = buildFacts(factRows, factsBanner, "all");
+const factsData = buildFacts(factRows, factsBanner);
 check("facts: tab counts come off the rows",
   factsData.filters.find((f) => f.id === "verified")?.count === 1);
 const factsHtml = render(facts, { data: factsData, loading: false, error: null });
 check("facts: renders claims", factsHtml.includes("Growth tier prorates monthly"));
 check("facts: renders the contradiction banner", factsHtml.includes("Two claims contradict each other"));
-states(facts, buildFacts([], null, "all"));
+states(facts, buildFacts([], null));
 
 /* ── Decisions ──────────────────────────────────────────────────────────── */
 
@@ -541,15 +541,19 @@ const PUBLISH_FEATURES: any[] = [
   { key: "search", label: "Search", hint: "Client-side index.", on: true },
   { key: "feedback", label: "Was this helpful?", hint: "Per-page rating.", on: false },
 ];
-const publishData = buildPublish(PUBLISH_RES, PUBLISH_FEATURES);
+// `?site=1` is the editor route; the list is what the same response
+// renders without one.
+const publishData = buildPublish(PUBLISH_RES, 1, false, PUBLISH_FEATURES);
 check("publish: the theme catalog is what the generator can render",
   publishData.site?.themes.length === 2 && publishData.site?.themes[0].accent === "#b04e2c");
 check("publish: the feature switches carry the site's resolved state",
   publishData.site?.features.length === 2
   && publishData.site?.features[0].on === true && publishData.site?.features[1].on === false);
-check("publish: features asked for by the picked site's id", pickSiteRow(PUBLISH_RES)?.id === 1);
+check("publish: features asked for by the routed site's id", pickSiteRow(PUBLISH_RES, 1)?.id === 1);
+check("publish: no ?site= opens the list, not an editor", buildPublish(PUBLISH_RES).view === "site-list");
+check("publish: the list carries every site", buildPublish(PUBLISH_RES).sites.length === 1);
 check("publish: a site whose switches have not arrived shows none, not defaults",
-  buildPublish(PUBLISH_RES).site?.features.length === 0);
+  buildPublish(PUBLISH_RES, 1).site?.features.length === 0);
 check("publish: a scope this build cannot label is dropped", publishData.servers.length === 1);
 check("publish: releases are scoped to the site", publishData.site?.releases.length === 2);
 check("publish: the version is the newest release", publishData.site?.version === "v14");
@@ -561,7 +565,7 @@ check("publish: the deploy target comes off the settings row",
 check("publish: a live site is published, not a draft", publishData.phase === "published");
 check("publish: no sites means nothing to publish", buildPublish({
   sites: [], releases: [], mcpServers: [], siteThemePresets: [], settings: [],
-} as any).site === null);
+} as any, 1).site === null);
 const publishHtml = render(publish, { data: publishData, loading: false, error: null });
 check("publish: renders the site", publishHtml.includes("docs.acme.com"));
 // The preset list lives on the editor's Theme tab, not its Content tab.

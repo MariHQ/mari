@@ -5,6 +5,14 @@
 @tailwind components;
 @tailwind utilities;
 
+/* The console frame asks for the viewport, and a percentage height only
+   resolves if every ancestor has one. Without this the shell fell back to
+   document height on a long page, so the sidebar stretched past the fold and
+   the internal scroll regions never engaged. */
+html, body, #root {
+  height: 100%;
+}
+
 body {
   background: #f7f8fa;
   color: #10263b;

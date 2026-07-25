@@ -790,6 +790,22 @@ class Query:
                             triggered_by=r.get("triggered_by") or "") for r in rows]
 
     @strawberry.field
+    def workflow_run(self, id: int) -> WorkflowRun | None:
+        """One run by id. `workflowRuns` only returns the ten newest of a flow,
+        which is not a way to follow a specific run someone just started."""
+        rows = q("""SELECT r.*, w.name AS wf_name FROM workflow_runs r
+                    JOIN workflows w ON w.id = r.workflow_id WHERE r.id = %s""", (id,))
+        if not rows:
+            return None
+        r = rows[0]
+        return WorkflowRun(id=r["id"], workflow_id=r["workflow_id"], workflow_name=r["wf_name"],
+                           number=r["number"], status=r["status"],
+                           started=r["started_at"].isoformat() if r.get("started_at") else "",
+                           duration=r["duration"], progress=r["progress"],
+                           stats=jload(r["stats"]), rows=jload(r["rows_data"]),
+                           triggered_by=r.get("triggered_by") or "")
+
+    @strawberry.field
     def sites(self) -> list[Site]:
         return [Site(id=r["id"], name=r["name"], domain=r["domain"], status=r["status"],
                      theme=jload(r["theme"]), sources=jload(r["sources"]), nav=jload(r["nav"]),

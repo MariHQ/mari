@@ -1,16 +1,16 @@
 /* Publish actions — the doc site and the workspace's MCP servers.
  *
  * The page edits ONE site and does not carry its id (the adapter maps a row
- * onto a presentational shape), so the site handlers resolve it here, by the
- * same rule the adapter picks it with: the live one, else the first. That
- * keeps the two halves talking about the same site without the page having to
- * carry a database key it never renders. */
+ * onto a presentational shape), so the site handlers resolve it here from the
+ * route — `?site=<id>` — which is the same thing the adapter reads. That keeps
+ * the two halves talking about the same site without the page having to carry
+ * a database key it never renders. */
 
 import type { PublishActions } from "@mari-design/components/pages/PublishPage";
 import { gql } from "../../lib/api";
 import { mutate, type ActionContext } from "./index";
 
-const SITES = `{ sites { id status theme } }`;
+const SITES = `{ sites { id name status theme } }`;
 const RELEASES = `{ releases { id siteId version } }`;
 const SERVERS = `{ mcpServers { id name url } }`;
 const SETTINGS = `{ settings { key value } }`;
@@ -21,6 +21,9 @@ const ROLLBACK = `mutation($id: Int!) { rollbackRelease(id: $id) }`;
 const SET_FEATURE = `mutation($id: Int!, $key: String!, $on: Boolean!) { setSiteFeature(id: $id, key: $key, on: $on) }`;
 const SET_THEME = `mutation($id: Int!, $theme: JSON!) { updateSiteTheme(id: $id, theme: $theme) }`;
 const UPDATE_SETTING = `mutation($key: String!, $value: JSON!) { updateSetting(key: $key, value: $value) }`;
+const CREATE_SITE = `mutation($name: String!, $domain: String!, $sources: JSON!) {
+  createSite(name: $name, domain: $domain, sources: $sources)
+}`;
 const CREATE_SERVER = `mutation($name: String!, $scope: String!, $capabilities: JSON!) {
   createMcpServer(name: $name, scope: $scope, capabilities: $capabilities)
 }`;
@@ -30,15 +33,16 @@ const UPDATE_SERVER = `mutation($id: Int!, $scope: String, $capabilities: JSON!)
 const DELETE_SERVER = `mutation($id: Int!) { deleteMcpServer(id: $id) }`;
 const TEST_SERVER = `mutation($id: Int!) { testMcpServer(id: $id) }`;
 
-type SiteRow = { id: number; status: string; theme: Record<string, unknown> | null };
+type SiteRow = { id: number; name: string; status: string; theme: Record<string, unknown> | null };
 
-/** The site this page is editing. Throws rather than guessing when there is
- *  none: the page shows the message, which beats a silent no-op. */
+/** The site this page is editing: the one the route names. Throws rather than
+ *  guessing when the route names none — a deploy that silently went to a
+ *  different site than the one on screen is worse than a message. */
 async function currentSite(): Promise<SiteRow> {
+  const asked = Number(new URLSearchParams(window.location.search).get("site"));
   const res = await gql<{ sites: SiteRow[] }>(SITES);
-  const sites = res?.sites ?? [];
-  const site = sites.find((s) => s.status === "live") ?? sites[0];
-  if (!site) throw new Error("This workspace has no doc site to publish yet.");
+  const site = (res?.sites ?? []).find((s) => s.id === asked);
+  if (!site) throw new Error("That doc site is no longer in this workspace.");
   return site;
 }
 
@@ -46,6 +50,17 @@ export function publishActions({ navigate }: ActionContext): PublishActions {
   return {
     // "All sites" is the Publish page with no site selected.
     openSites: () => navigate("/publish"),
+    openSite: (id: number) => navigate(`/publish?site=${id}`),
+    /* Creating a site is where its sources are decided — the editor treats
+       them as fixed — and the new site is where the user then is. */
+    createSite: async ({ name, domain, sourceTags }) => {
+      const d = await mutate(CREATE_SITE, { name, domain, sources: sourceTags });
+      const id = d?.createSite;
+      if (typeof id !== "number" || id <= 0) {
+        throw new Error(`"${name}" could not be created. A site with that name may already exist.`);
+      }
+      navigate(`/publish?site=${id}`);
+    },
     /* ── the doc site ─────────────────────────────────────────────────────*/
     deploySite: async () => {
       const site = await currentSite();

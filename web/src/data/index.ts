@@ -17,6 +17,7 @@ import { useOverview } from "./overview";
 import { usePreferences } from "./preferences";
 import { usePublish } from "./publish";
 import { useSettingsApiKeys, useSettingsMembers } from "./settings";
+import { useSettingsDesign } from "./settings-design";
 import { useSettingsGeneral } from "./settings-general";
 import { useSettingsModels } from "./settings-models";
 import { useSources } from "./sources";
@@ -43,6 +44,7 @@ const ADAPTERS: Record<string, Adapter<any>> = {
   setup: useSetup,
   "settings-api-keys": useSettingsApiKeys,
   "settings-audit-log": useSettingsAuditLog,
+  "settings-design": useSettingsDesign,
   "settings-general": useSettingsGeneral,
   "settings-members": useSettingsMembers,
   "settings-models": useSettingsModels,

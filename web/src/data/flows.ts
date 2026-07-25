@@ -1,29 +1,49 @@
 /* Flows adapter — the flow list, the sources a document trigger can name, and
  * the run history under it.
  *
- * `/flows` is the list surface. The pipeline editor, the run inspector and the
- * trigger drawer are surfaces the page derives from `editor` / `runPanel` /
- * `trigger` being present; this app has no routes for them yet, so they are
- * honestly absent rather than opened onto a guessed flow. */
+ * `/flows` is the list surface and `/flows?flow=<id>` is that flow's pipeline
+ * editor — the surface a newly created flow lands on, where its steps get
+ * built. `/flows?new` opens the create drawer, so "New flow" is a place the
+ * app can link to. The run inspector and the run-history surfaces have no
+ * route yet, so they are honestly absent rather than opened onto a guess. */
 
-import type { FlowsData } from "@mari-design/components/pages/FlowsPage";
+import { useEffect, useRef } from "react";
+import { useSearchParams } from "react-router-dom";
+
+import type { FlowsData, FlowsEditor } from "@mari-design/components/pages/FlowsPage";
 import type { Flow, SourceRef } from "@mari-design/components/features/FlowsList";
+import {
+  STEP_KINDS, type EditorStep, type SiteRef, type StepKind,
+} from "@mari-design/components/features/FlowsPipelineEditor";
 import type { RunStat, RunStepRow, RunStatus, WorkflowRun } from "@mari-design/components/workflow/RunHistory";
 import { useQuery } from "../lib/api";
 import type { PageData } from "./types";
 
 /* ── query ──────────────────────────────────────────────────────────────── */
 
+/* The editor's pickers are real workspace data, not a vocabulary this file
+   invents: an assignee it offers must be someone who can be assigned, a deploy
+   target must be a site that exists, a tag must be a tag. */
 const QUERY = `{
   workflows { id name description color status nodes trigger }
   workflowRuns { id workflowId workflowName number status started duration stats rows triggeredBy }
   sourcePulse { id name }
+  members { name }
+  sites { id name }
+  tagDefs { tag }
 }`;
 
 type Res = {
   workflows: {
     id: number; name: string; description: string; color: string; status: string;
-    nodes: { kind?: string; label?: string }[] | null;
+    // The engine's own step shape: `kind` picks the implementation, `config`
+    // is that step's settings, `only_if_branch` puts it on a condition's
+    // yes-branch. The list only needs the label; the editor needs all of it.
+    nodes: {
+      kind?: string; label?: string;
+      config?: Record<string, unknown> | null;
+      only_if_branch?: boolean | null;
+    }[] | null;
     trigger: { on?: string; source_id?: number | null; tag?: string | null; path_glob?: string | null; every_minutes?: number | null } | null;
   }[];
   workflowRuns: {
@@ -34,6 +54,9 @@ type Res = {
     triggeredBy: string;
   }[];
   sourcePulse: { id: number; name: string }[];
+  members: { name: string }[];
+  sites: { id: number; name: string }[];
+  tagDefs: { tag: string }[];
 };
 
 /* ── mapping helpers ────────────────────────────────────────────────────── */
@@ -151,26 +174,70 @@ export function mapFlows(res: Res, runs: WorkflowRun[]): Flow[] {
   });
 }
 
+/* ── the pipeline editor ────────────────────────────────────────────────── */
+
+/** A stored step, narrowed to the kinds this build of the editor can draw and
+ *  configure. A kind it has no panel for would render as a step with no
+ *  settings behind it, so it is dropped — the server and the library ship
+ *  separately. */
+const KNOWN_KIND = new Set<string>(STEP_KINDS);
+
+export function mapSteps(nodes: Res["workflows"][number]["nodes"]): EditorStep[] {
+  return (nodes ?? [])
+    .map((n): EditorStep | null => {
+      const kind = n.kind ?? "";
+      if (!KNOWN_KIND.has(kind)) return null;
+      return {
+        kind: kind as StepKind,
+        label: n.label ?? kind,
+        config: (n.config ?? {}) as Record<string, unknown>,
+        only_if_branch: n.only_if_branch ?? undefined,
+      };
+    })
+    .filter((s): s is EditorStep => s !== null);
+}
+
+/** The editor, open on one flow. Null when no `?flow=` names a real workflow —
+ *  a page cannot edit a row that is not there. */
+export function buildEditor(res: Res, flowId: number | null, runs: WorkflowRun[]): FlowsEditor | null {
+  if (flowId == null) return null;
+  const w = (res.workflows ?? []).find((x) => x.id === flowId);
+  if (!w) return null;
+  const mine = new Set((res.workflowRuns ?? []).filter((r) => r.workflowId === w.id).map((r) => String(r.id)));
+  return {
+    id: w.id,
+    name: w.name,
+    description: w.description,
+    enabled: w.status === "active",
+    steps: mapSteps(w.nodes),
+    runs: runs.filter((r) => mine.has(r.id)),
+    members: (res.members ?? []).map((m) => m.name).filter(Boolean),
+    sites: (res.sites ?? []).map<SiteRef>((s) => ({ id: s.id, name: s.name })),
+    tags: (res.tagDefs ?? []).map((t) => t.tag).filter(Boolean),
+  };
+}
+
 /* ── mapper ─────────────────────────────────────────────────────────────── */
 
 /** A workspace with no automation at all, on any surface — which is exactly
  *  what makes the page's own `isEmpty` fire. */
 export const EMPTY: FlowsData = {
-  flows: [], sources: [], editor: null, runPanel: null, runHistory: null,
+  flows: [], sources: [], creating: false, editor: null, runPanel: null, runHistory: null,
   trigger: null, extras: null,
 };
 
-/** Pure: the whole response → everything the list surface renders. */
-export function buildFlows(res: Res | null): FlowsData {
-  if (!res) return EMPTY;
+/** Pure: the whole response → everything the surface named by the route
+ *  renders. `flowId` is `?flow=`, `creating` is `?new`. */
+export function buildFlows(res: Res | null, flowId: number | null = null, creating = false): FlowsData {
+  if (!res) return { ...EMPTY, creating };
   const runs = mapRuns(res);
   return {
     flows: mapFlows(res, runs),
     sources: (res.sourcePulse ?? []).map<SourceRef>((s) => ({ id: s.id, name: s.name })),
-    // The list surface only. `runHistory` would replace the flow list with the
-    // history table (see FlowsPage's Body), so it stays null until this app
-    // routes to it.
-    editor: null,
+    creating,
+    editor: buildEditor(res, flowId, runs),
+    // `runHistory` would replace the flow list with the history table (see
+    // FlowsPage's Body), so it stays null until this app routes to it.
     runPanel: null,
     runHistory: null,
     trigger: null,
@@ -181,9 +248,28 @@ export function buildFlows(res: Res | null): FlowsData {
 /* ── adapter ────────────────────────────────────────────────────────────── */
 
 export function useFlows(): PageData<FlowsData> {
-  const q = useQuery<FlowsData>(QUERY, { map: buildFlows });
+  const [params] = useSearchParams();
+  const flow = Number(params.get("flow"));
+  const flowId = Number.isInteger(flow) && flow > 0 ? flow : null;
+  const creating = params.get("new") !== null;
+  const q = useQuery<Res>(QUERY, { map: (d: Res) => d });
+
+/* The route names the subject; the query behind it takes no variables, so
+   navigating from the list to one flow does not change useQuery's key and
+   the page would render the new flow off a response taken before it
+   existed. Creating one lands on exactly that route, so the read is re-run
+   whenever the subject changes. Mount is not a change: the ref starts on the
+   subject the first render already fetched. */
+  const { refetch } = q;
+  const seen = useRef<number | null>(flowId);
+  useEffect(() => {
+    if (seen.current === flowId) return;
+    seen.current = flowId;
+    refetch();
+  }, [flowId, refetch]);
+
   return {
-    data: q.data ?? EMPTY,
+    data: q.data ? buildFlows(q.data, flowId, creating) : { ...EMPTY, creating },
     loading: q.loading,
     error: q.error ? (q.errorText ?? "Flows are temporarily unavailable.") : null,
   };

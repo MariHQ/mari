@@ -32,6 +32,7 @@ import { preferencesActions } from "./preferences";
 import { publishActions } from "./publish";
 import { settingsApiKeysActions } from "./settings-api-keys";
 import { settingsAuditLogActions } from "./settings-audit-log";
+import { settingsDesignActions } from "./settings-design";
 import { settingsGeneralActions } from "./settings-general";
 import { settingsMembersActions } from "./settings-members";
 import { settingsModelsActions } from "./settings-models";
@@ -78,6 +79,7 @@ export const ACTION_FACTORIES: Record<string, (ctx: ActionContext) => unknown> =
   publish: publishActions,
   "settings-api-keys": settingsApiKeysActions,
   "settings-audit-log": settingsAuditLogActions,
+  "settings-design": settingsDesignActions,
   "settings-general": settingsGeneralActions,
   "settings-members": settingsMembersActions,
   "settings-models": settingsModelsActions,

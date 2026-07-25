@@ -1,6 +1,6 @@
 /* Facts ledger adapter. */
 
-import { useState } from "react";
+import { useEffect } from "react";
 import type { FactsData, FactFilter } from "@mari-design/components/pages/FactsPage";
 import type { Fact } from "@mari-design/components/features/FactsVerificationAudit";
 import { useQuery } from "../lib/api";
@@ -19,13 +19,21 @@ type Res = {
   }[];
 };
 
-/** Status tabs are the page's vocabulary; the API supplies only the rows. */
-const TABS: { id: string; label: string; match: (f: Fact) => boolean }[] = [
-  { id: "all", label: "All", match: () => true },
-  { id: "verified", label: "Verified", match: (f) => f.status === "Verified" },
-  { id: "needs-evidence", label: "Needs evidence", match: (f) => f.status === "Needs evidence" },
-  { id: "draft", label: "Draft", match: (f) => f.status === "Draft" },
-];
+/* The status tabs used to be a hardcoded list ("Needs evidence", "Draft") that
+ * the ledger never uses: every claim the API actually returns is "Verified" or
+ * "Needs review", so two tabs read 0 forever and five rows sat under no tab at
+ * all. The vocabulary belongs to the data, so the tabs are derived from the
+ * statuses present — "All" first, then one tab per status, most rows first. */
+export function tabsFor(facts: Fact[]): FactFilter[] {
+  const counts = new Map<string, number>();
+  for (const f of facts) counts.set(f.status, (counts.get(f.status) ?? 0) + 1);
+  return [
+    { id: "all", label: "All", count: facts.length },
+    ...[...counts]
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .map(([status, count]) => ({ id: status.toLowerCase().replace(/\s+/g, "-"), label: status, count, status })),
+  ];
+}
 
 export function mapFacts(res: Res): Fact[] {
   return (res.facts ?? []).map<Fact>((f) => ({
@@ -53,17 +61,14 @@ export function mapBanner(res: Res): FactsData["banner"] {
   };
 }
 
-/** Pure: rows + the contradiction pairs + the selected tab → everything the
- *  page renders. */
-export function buildFacts(facts: Fact[], banner: FactsData["banner"], filter: string): FactsData {
-  const filters: FactFilter[] = TABS.map((t) => ({
-    id: t.id, label: t.label, count: facts.filter(t.match).length,
-  }));
-
+/** Pure: rows + the contradiction pairs → everything the page renders. The
+ *  page owns which tab is selected (it filters the rows it was given), so the
+ *  ledger hands over every row and the tab it opens on. */
+export function buildFacts(facts: Fact[], banner: FactsData["banner"]): FactsData {
   return {
-    filters,
-    filter,
-    facts: facts.filter(TABS.find((t) => t.id === filter)?.match ?? (() => true)),
+    filters: tabsFor(facts),
+    filter: "all",
+    facts,
     banner,
     // The verification-audit card re-lists facts by staleness. It is a view
     // of the same rows, so it only appears once the user asks for it.
@@ -74,11 +79,27 @@ export function buildFacts(facts: Fact[], banner: FactsData["banner"], filter: s
   };
 }
 
+/* A fact scan lands new claims minutes after the page asked for them, and a
+ * write from `actions/facts.ts` cannot reach this hook. So the write side says
+ * "the ledger moved" and an open Facts page re-reads. Without this the run
+ * finishes, reports "4 new claims", and the table underneath still shows the
+ * old rows until the next visit. */
+const listeners = new Set<() => void>();
+
+/** Announce that the stored ledger changed. Called by the facts actions. */
+export function factsChanged(): void {
+  for (const l of [...listeners]) l();
+}
+
 export function useFacts(): PageData<FactsData> {
-  const [filter] = useState("all");
   const q = useQuery<Res>(QUERY, { map: (d: Res) => d });
+  const refetch = q.refetch;
+  useEffect(() => {
+    listeners.add(refetch);
+    return () => { listeners.delete(refetch); };
+  }, [refetch]);
   return {
-    data: buildFacts(q.data ? mapFacts(q.data) : [], q.data ? mapBanner(q.data) : null, filter),
+    data: buildFacts(q.data ? mapFacts(q.data) : [], q.data ? mapBanner(q.data) : null),
     loading: q.loading,
     error: q.error ? (q.errorText ?? "The fact ledger is temporarily unavailable.") : null,
   };

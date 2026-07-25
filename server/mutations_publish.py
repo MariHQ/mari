@@ -53,14 +53,25 @@ class MutPublish:
     @strawberry.mutation
     def save_workflow(self, name: str, description: str, steps: JSON, id: int | None = None,
                       color: str = "#5c7a4c", pinned: bool = True) -> int:
+        """Create a flow (no id) or rewrite one (id). `steps` is the engine's
+        node list — kind, label and config per step — so what the pipeline
+        editor drew is what the next run executes.
+
+        Creating used to UPSERT on the name, so "create" with a name already in
+        use silently REPLACED that flow's pipeline and handed back its id. A
+        name clash is an error, not a merge."""
+        name = (name or "").strip()
+        if not name:
+            raise ValueError("A flow needs a name.")
         if id:
             exec_("UPDATE workflows SET name = %s, description = %s, nodes = %s WHERE id = %s",
                   (name, description, json.dumps(steps), id))
             audit("updated flow", name)
             return id
+        if q1("SELECT id FROM workflows WHERE name = %s", (name,)):
+            raise ValueError(f"A flow called '{name}' already exists.")
         exec_("""INSERT INTO workflows (name, description, color, pinned, status, nodes)
-                 VALUES (%s, %s, %s, %s, 'active', %s)
-                 ON CONFLICT (name) DO UPDATE SET description = EXCLUDED.description, nodes = EXCLUDED.nodes""",
+                 VALUES (%s, %s, %s, %s, 'active', %s)""",
               (name, description, color, pinned, json.dumps(steps)))
         audit("created flow", name)
         return (q1("SELECT id FROM workflows WHERE name = %s", (name,)) or {"id": 0})["id"]
@@ -160,6 +171,15 @@ class MutPublish:
 
     @strawberry.mutation
     def create_site(self, name: str, domain: str, sources: JSON) -> int:
+        """Create a doc site. `sources` is the tag list that decides which
+        documents it may publish. Site names are unique, and a clash used to
+        fall through ON CONFLICT DO NOTHING and return the EXISTING site's id —
+        the caller was told it had created a site it had not. It is an error."""
+        name, domain = (name or "").strip(), (domain or "").strip()
+        if not name or not domain:
+            raise ValueError("A doc site needs a name and a domain.")
+        if q1("SELECT id FROM sites WHERE name = %s", (name,)):
+            raise ValueError(f"A doc site called '{name}' already exists.")
         exec_("""INSERT INTO sites (name, domain, status, theme, sources, nav, gates, docs, warnings)
                  VALUES (%s, %s, 'draft',
                          '{"theme":"Mari Editorial","accent":"#b04e2c","radius":10,"density":"comfortable","mode":"light"}',

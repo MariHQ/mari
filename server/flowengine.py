@@ -200,6 +200,29 @@ def _step_sync_source(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
                               "items_changed": stats["items_changed"], "embedded": stats["embedded"]}
 
 
+def _step_scan_facts(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
+    """Mine recent documents for checkable claims — the same scan the Facts page
+    used to fire inline, run as a step so it has a run, a progress reading and a
+    history like every other long job in the product."""
+    if ctx.get("dry_run"):
+        return "passed", "would mine recent documents for claims (dry run)", {}
+    from app import Mutation  # late import to reuse the app's mutation
+    added = Mutation.scan_facts(None)  # type: ignore[arg-type]
+    return "passed", f"{added} new claim{'' if added == 1 else 's'} captured", {"facts": added}
+
+
+def _step_scan_decisions(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
+    """Mine recent documents for decisions the team made, for the same reason
+    the fact scan is a step: it is a multi-minute model pass that writes to the
+    ledger, so it needs a run, a progress reading and a history rather than a
+    link that fires and forgets."""
+    if ctx.get("dry_run"):
+        return "passed", "would mine recent documents for decisions (dry run)", {}
+    from app import Mutation  # late import to reuse the app's mutation
+    added = Mutation.scan_decisions(None)  # type: ignore[arg-type]
+    return "passed", f"{added} new decision{'' if added == 1 else 's'} captured", {"decisions": added}
+
+
 def _step_refresh_digest(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
     """Regenerate the weekly digest — same logic as the regenerateDigest mutation."""
     if ctx.get("dry_run"):
@@ -228,10 +251,12 @@ STEP_IMPLS: dict[str, t.Callable] = {
     "summarize": _step_summarize,
     "sync_source": _step_sync_source,
     "refresh_digest": _step_refresh_digest,
+    "scan_facts": _step_scan_facts,
+    "scan_decisions": _step_scan_decisions,
 }
 
 # steps that call the local LLM (shown as slow in the UI)
-LLM_STEPS = {"refine", "fact_check", "derive_links", "summarize", "refresh_digest"}
+LLM_STEPS = {"refine", "fact_check", "derive_links", "summarize", "refresh_digest", "scan_facts", "scan_decisions"}
 
 
 def _persist(run_id: int, rows: list[dict], status: str, progress: int, stats: dict, start: float) -> None:
@@ -280,8 +305,15 @@ def execute_run(run_id: int, resume_from: int = 0) -> None:
 def _public_stats(ctx: dict) -> dict:
     # only real, per-run numbers — the UI renders a stat tile per key present,
     # so fields with no honest value are simply omitted
-    return {"contradictions": ctx.get("contradictions", 0),
-            "edits": ctx.get("edits", 0), "links": ctx.get("links", 0)}
+    stats = {"contradictions": ctx.get("contradictions", 0),
+             "edits": ctx.get("edits", 0), "links": ctx.get("links", 0)}
+    # Only runs that actually scanned report a count; a zero here would read as
+    # "the scan found nothing" on every run that never scanned.
+    if "facts" in ctx:
+        stats["facts"] = ctx["facts"]
+    if "decisions" in ctx:
+        stats["decisions"] = ctx["decisions"]
+    return stats
 
 
 def start_run(run_id: int, resume_from: int = 0) -> None:
@@ -518,6 +550,59 @@ def ensure_digest_flow() -> int | None:
              status, json.dumps(nodes), json.dumps({"on": "schedule", "every_minutes": 10080}))).fetchone()
         conn.execute("INSERT INTO events (actor, verb, target) VALUES (%s, %s, %s)",
                      ("Flow scheduler", "created scheduled digest flow", "Weekly digest refresh"))
+        conn.commit()
+        return row["id"]
+
+
+FACT_SCAN_FLOW = "Fact scan"
+DECISION_SCAN_FLOW = "Decision scan"
+
+
+def ensure_fact_scan_flow() -> int:
+    """Get-or-create the manual 'Fact scan' flow the Facts page starts. Returns
+    its workflow id — the caller needs it to open a run, so unlike the scheduled
+    seeds this one answers with the existing id rather than None."""
+    with _conn() as conn:
+        for r in conn.execute("SELECT id, nodes FROM workflows").fetchall():
+            if any(s.get("kind") == "scan_facts" for s in _wf_nodes(r)):
+                return r["id"]
+        nodes = [
+            {"kind": "trigger", "label": "Manual", "config": {"label": "Started from Facts"}},
+            {"kind": "fetch_docs", "label": "Read recent documents", "config": {"k": 8}},
+            {"kind": "scan_facts", "label": "Extract checkable claims", "config": {}},
+        ]
+        row = conn.execute(
+            """INSERT INTO workflows (name, description, color, pinned, status, nodes, trigger)
+               VALUES (%s, %s, '#1E6FA8', false, 'active', %s, %s) RETURNING id""",
+            (FACT_SCAN_FLOW,
+             "Mines recent documents for atomic, checkable claims and files them for verification.",
+             json.dumps(nodes), json.dumps({"on": ""}))).fetchone()
+        conn.execute("INSERT INTO events (actor, verb, target) VALUES (%s, %s, %s)",
+                     ("Flow scheduler", "created flow", FACT_SCAN_FLOW))
+        conn.commit()
+        return row["id"]
+
+
+def ensure_decision_scan_flow() -> int:
+    """Get-or-create the manual 'Decision scan' flow the Decisions page starts.
+    Mirrors ensure_fact_scan_flow — same shape, different step."""
+    with _conn() as conn:
+        for r in conn.execute("SELECT id, nodes FROM workflows").fetchall():
+            if any(s.get("kind") == "scan_decisions" for s in _wf_nodes(r)):
+                return r["id"]
+        nodes = [
+            {"kind": "trigger", "label": "Manual", "config": {"label": "Started from Decisions"}},
+            {"kind": "fetch_docs", "label": "Read recent documents", "config": {"k": 8}},
+            {"kind": "scan_decisions", "label": "Extract decisions", "config": {}},
+        ]
+        row = conn.execute(
+            """INSERT INTO workflows (name, description, color, pinned, status, nodes, trigger)
+               VALUES (%s, %s, '#7A2E1F', false, 'active', %s, %s) RETURNING id""",
+            (DECISION_SCAN_FLOW,
+             "Mines recent documents for decisions the team made and files them awaiting sign-off.",
+             json.dumps(nodes), json.dumps({"on": ""}))).fetchone()
+        conn.execute("INSERT INTO events (actor, verb, target) VALUES (%s, %s, %s)",
+                     ("Flow scheduler", "created flow", DECISION_SCAN_FLOW))
         conn.commit()
         return row["id"]
 
