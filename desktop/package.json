@@ -56,22 +56,7 @@
         "zip"
       ]
     },
-    "win": {
-      "icon": "build/icon.png",
-      "target": [
-        "nsis"
-      ]
-    },
-    "linux": {
-      "category": "Office",
-      "icon": "build/icon.png",
-      "maintainer": "MariHQ <hello@marihq.com>",
-      "syncDesktopName": true,
-      "synopsis": "Local product knowledge workspace",
-      "target": [
-        "AppImage",
-        "deb"
-      ]
-    }
+    "win": null,
+    "linux": null
   }
 }

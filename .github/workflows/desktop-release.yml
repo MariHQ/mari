@@ -27,18 +27,6 @@ jobs:
             platform: darwin
             arch: arm64
             args: --mac --arm64
-          - name: Windows
-            slug: windows-x64
-            os: windows-2025
-            platform: win32
-            arch: x64
-            args: --win --x64
-          - name: Linux
-            slug: linux-x64
-            os: ubuntu-24.04
-            platform: linux
-            arch: x64
-            args: --linux --x64
     runs-on: ${{ matrix.os }}
     defaults:
       run:
