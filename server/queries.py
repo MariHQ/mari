@@ -538,6 +538,11 @@ class Query:
             cfg = jload(r["config"]) or {}
             if r.get("kind") == "connector":
                 return connect_sync.masked_config(r["provider"], cfg)
+            if r.get("kind") == "github":
+                token = str(cfg.pop("token", "") or "")
+                if token:
+                    cfg["token_set"] = True
+                    cfg["token_hint"] = _mask_secret(token)
             return {k: v for k, v in cfg.items() if k != "shas"}
 
         # A source's automatic cadence is not a column on `sources`: it is the
@@ -572,12 +577,22 @@ class Query:
     @strawberry.field
     def github_repos(self) -> list[GithubRepo]:
         """Repos visible to the configured token; [] (never errors) without a token."""
-        if not github.token():
+        source = q1(
+            """SELECT config FROM sources
+               WHERE kind = 'github' AND config->>'token' <> ''
+               ORDER BY id DESC LIMIT 1"""
+        )
+        source_cfg = jload(source["config"]) if source else {}
+        available_token = github.token() or str((source_cfg or {}).get("token") or "")
+        if not available_token:
             return []
+        token_state = github.push_token(available_token)
         try:
             repos = github.list_repos()
         except github.GithubError:
             return []
+        finally:
+            github.pop_token(token_state)
         connected = {jload(r["config"]).get("repo", "")
                      for r in q("SELECT config FROM sources WHERE kind = 'github'")}
         return [GithubRepo(

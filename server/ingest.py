@@ -213,6 +213,7 @@ def _sync_worker(source_id: int, full: bool) -> dict:
                  time.strftime("%H:%M:%S", time.gmtime(time.time() - started)), cp_status))
             c.commit()
 
+    token_state = github.push_token(str(cfg.get("token") or ""))
     try:
         max_tokens, overlap = _chunk_settings()
         if full:
@@ -456,6 +457,8 @@ def _sync_worker(source_id: int, full: bool) -> dict:
             conn.commit()
         checkpoint("fetched", 0, 1, "", "paused")
         return {**stats, "error": msg}
+    finally:
+        github.pop_token(token_state)
 
 
 _RUNNING: set[int] = set()

@@ -12,5 +12,6 @@ import type { ActionContext } from "./index";
 export function overviewActions({ navigate }: ActionContext): OverviewActions {
   return {
     setRange: (range) => navigate(rangeHref("/", range, new URLSearchParams(window.location.search))),
+    connectSources: () => navigate("/welcome"),
   };
 }

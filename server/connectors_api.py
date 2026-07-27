@@ -23,6 +23,7 @@ import auth
 import connect_sync
 import connectors
 import flowengine
+import github
 import ingest
 from db import audit, exec_, q, q1
 
@@ -44,7 +45,16 @@ TOP8 = ["github", "slack", "upload", "website", "notion", "gdrive", "confluence"
 BUILTIN = [
     {"key": "github", "name": "GitHub", "builtin": True,
      "blurb": "Markdown docs, issues, PRs and commit messages from your repos.",
-     "fields": [], "docsUrl": "https://docs.github.com/en/authentication"},
+     "fields": [
+         {"key": "token", "label": "Fine-grained personal access token", "secret": True,
+          "placeholder": "github_pat_…",
+          "help": "1. Open “Where do I get these?” above. 2. Choose the resource owner and only the repositories Mari should read. 3. Under Repository permissions, grant read-only Contents, Issues, Pull requests, and Metadata. 4. Generate the token and paste it here."},
+         {"key": "repo", "label": "Repository", "placeholder": "owner/repository",
+          "help": "Enter one repository selected for the token, for example MariHQ/mari."},
+         {"key": "paths", "label": "Paths filter (optional)", "placeholder": "docs/**",
+          "required": False,
+          "help": "Leave blank to ingest all supported files, or narrow the sync with a glob such as docs/**."},
+     ], "docsUrl": "https://github.com/settings/personal-access-tokens/new"},
     {"key": "upload", "name": "Upload", "builtin": True,
      "blurb": "Markdown and text files straight from your device.",
      "fields": [], "docsUrl": ""},
@@ -65,7 +75,13 @@ def _field_specs(provider: dict) -> list[dict]:
     """Field SPECS only — never stored values."""
     return [{"key": f.get("key", ""), "label": f.get("label", ""),
              "secret": bool(f.get("secret")), "placeholder": f.get("placeholder", ""),
-             "help": f.get("help", "")} for f in provider.get("fields", [])]
+             "help": f.get("help", ""),
+             # Older provider modules mark optional inputs in their label.
+             # Preserve that contract while exposing a machine-readable flag
+             # so clients never gate Test/Connect on an optional blank.
+             "required": bool(f.get(
+                 "required", "(optional)" not in str(f.get("label", "")).lower()
+             ))} for f in provider.get("fields", [])]
 
 
 def _connected_map() -> dict[str, int]:
@@ -158,6 +174,22 @@ def _error_for(provider: str, e: Exception) -> str:
 
 @router.post("/validate", dependencies=_admin)
 def validate(body: ProviderIn) -> dict:
+    if body.provider == "github":
+        cfg = body.config or {}
+        token = str(cfg.get("token") or "").strip()
+        repo = str(cfg.get("repo") or "").strip()
+        if not token:
+            return {"ok": False, "error": "Enter a GitHub personal access token."}
+        if not repo or "/" not in repo:
+            return {"ok": False, "error": "Name the repository as owner/repository."}
+        state = github.push_token(token)
+        try:
+            github.default_branch(repo)
+            return {"ok": True, "error": ""}
+        except github.GithubError as e:
+            return {"ok": False, "error": _clean_error(str(e))}
+        finally:
+            github.pop_token(state)
     entry = connectors.REGISTRY.get(body.provider)
     if not entry or not entry.get("provider"):
         connectors.REGISTRY.refresh()

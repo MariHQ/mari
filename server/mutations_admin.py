@@ -234,16 +234,25 @@ class MutAdmin:
 
     # ——— GitHub ingestion (real — GITHUB-SYNC-CONTRACT.md) ———
     @strawberry.mutation
-    def connect_github_repo(self, info: strawberry.Info, repo: str, paths: str | None = None) -> int:
+    def connect_github_repo(
+        self, info: strawberry.Info, repo: str, paths: str | None = None,
+        token: str | None = None,
+    ) -> int:
         """Create a real GitHub source and start the initial sync in the background."""
         actor = _require_admin(info)
-        if not github.token():
+        requested_token = (token or "").strip()
+        if not requested_token and not github.token():
             raise ValueError("No GitHub token configured (github.token / MARI_GITHUB_TOKEN)")
         if q1("SELECT id FROM sources WHERE kind = 'github' AND config->>'repo' = %s", (repo,)):
             raise ValueError(f"Repository {repo} is already connected")
-        branch = github.default_branch(repo)  # also validates the repo is reachable
+        token_state = github.push_token(requested_token)
+        try:
+            branch = github.default_branch(repo)  # also validates the repo is reachable
+        finally:
+            github.pop_token(token_state)
         cfg = {"repo": repo, "branch": branch, "paths": paths or "",
-               "cursor": "", "last_sync_at": "", "last_error": "", "shas": {}}
+               "token": requested_token, "cursor": "", "last_sync_at": "",
+               "last_error": "", "shas": {}}
         exec_("""INSERT INTO sources (provider, display_name, kind, status, stat_num, stat_unit, bars,
                                       config, docs_count, health)
                  VALUES (%s, %s, 'github', 'active', '0', 'docs', '{}', %s, 0, 'Syncing')""",

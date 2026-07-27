@@ -78,6 +78,7 @@ def _load() -> dict:
         "MARI_GITHUB_CLIENT_SECRET": ("auth", "github_client_secret"),
         "MARI_GOOGLE_CLIENT_ID": ("auth", "google_client_id"),
         "MARI_GOOGLE_CLIENT_SECRET": ("auth", "google_client_secret"),
+        "MARI_OAUTH_REDIRECT_BASE": ("auth", "oauth_redirect_base"),
         "MARI_AUTH_BYPASS": ("auth", "bypass_enabled"),
         "MARI_AUTH_REGISTRATION": ("auth", "registration_enabled"),
         "MARI_CORS_ORIGINS": ("server", "cors_origins"),

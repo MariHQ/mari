@@ -70,14 +70,21 @@ export async function uploadDocuments(files: File[]): Promise<void> {
  *  and is chosen by repository. Both its connect and its test go elsewhere. */
 const GITHUB = "github";
 
-async function connectAny(provider: string, config: Record<string, string>): Promise<void> {
+export async function connectAny(provider: string, config: Record<string, string>): Promise<void> {
   if (provider === GITHUB) {
     const repo = (config.repo ?? "").trim();
     if (!repo) throw new Error("Name the repository to connect, as owner/name.");
     await mutate(
-      `mutation($repo: String!, $paths: String) { connectGithubRepo(repo: $repo, paths: $paths) }`,
-      { repo, paths: (config.paths ?? "").trim() || null },
+      `mutation($repo: String!, $paths: String, $token: String) {
+        connectGithubRepo(repo: $repo, paths: $paths, token: $token)
+      }`,
+      {
+        repo,
+        paths: (config.paths ?? "").trim() || null,
+        token: (config.token ?? "").trim() || null,
+      },
     );
+    clearQueryCache();
     return;
   }
   // 200 with {error} is this endpoint's refusal: validate ran, nothing was
@@ -87,18 +94,9 @@ async function connectAny(provider: string, config: Record<string, string>): Pro
   clearQueryCache();
 }
 
-async function testAny(provider: string, config: Record<string, string>): Promise<{ ok: boolean; error?: string }> {
+export async function testAny(provider: string, config: Record<string, string>): Promise<{ ok: boolean; error?: string }> {
   if (provider === GITHUB) {
-    // The connector registry has no github module, so the honest test is the
-    // one the connect will do: is this repository in the token's scope?
-    const repo = (config.repo ?? "").trim();
-    if (!repo) return { ok: false, error: "Name the repository to connect, as owner/name." };
-    const r = await gqlResult<{ githubRepos: { fullName: string }[] }>(`{ githubRepos { fullName } }`);
-    if (!r.ok) return { ok: false, error: r.error };
-    const names = (r.data.githubRepos ?? []).map((x) => x.fullName);
-    return names.includes(repo)
-      ? { ok: true }
-      : { ok: false, error: `This workspace's GitHub token cannot see ${repo}. It reaches ${names.length} repositories.` };
+    return postJson<{ ok: boolean; error?: string }>("/connectors/validate", { provider, config });
   }
   const r = await postJson<{ ok: boolean; error?: string }>("/connectors/validate", { provider, config });
   return { ok: r.ok, error: r.error };

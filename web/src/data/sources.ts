@@ -34,7 +34,7 @@ type Res = {
   }[];
   connectorCatalog: {
     key: string; name: string; blurb: string; docsUrl?: string; connected?: boolean;
-    fields: { key: string; label: string; secret?: boolean; placeholder?: string; help?: string; multiline?: boolean }[];
+    fields: { key: string; label: string; secret?: boolean; placeholder?: string; help?: string; multiline?: boolean; required?: boolean }[];
   }[];
   botsStatus: {
     slack: { configured: boolean; teamName: string; lastEventAt: string | null; lastError: string | null };
@@ -105,7 +105,7 @@ export function mapCatalog(res: Res): WizardProviderSpec[] {
     fields: (p.fields ?? []).map((f) => ({
       key: f.key, label: f.label, secret: f.secret,
       placeholder: f.placeholder || undefined, help: f.help || undefined,
-      multiline: f.multiline,
+      multiline: f.multiline, required: f.required,
     })),
   }));
 }

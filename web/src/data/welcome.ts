@@ -10,6 +10,7 @@ import type { CField, Repo, Tile, UploadedFile, WelcomeData } from "@mari-design
 import type { GuidePack } from "@mari-design/components/features/WelcomeGuideStep";
 import type { Candidate } from "@mari-design/components/features/WelcomeGlossaryStep";
 import type { SyncRow } from "@mari-design/components/features/WelcomeSyncPanel";
+import { useEffect } from "react";
 import { useQuery } from "../lib/api";
 import type { PageData } from "./types";
 
@@ -28,7 +29,8 @@ const QUERY = `{
 type Res = {
   connectorCatalog: {
     key: string; name: string; blurb: string; connected?: boolean;
-    fields: { key: string; label: string; secret?: boolean; placeholder?: string; help?: string; multiline?: boolean }[];
+    docsUrl?: string;
+    fields: { key: string; label: string; secret?: boolean; placeholder?: string; help?: string; multiline?: boolean; required?: boolean }[];
   }[];
   githubRepos: { fullName: string; description: string; private: boolean; defaultBranch: string; connected: boolean }[];
   glossaryCandidates: { id: number; term: string; variants: string; definition: string; evidence: string }[];
@@ -54,6 +56,7 @@ function fieldsFor(res: Res, key: string): CField[] {
     multiline: f.multiline,
     placeholder: f.placeholder || undefined,
     help: f.help || undefined,
+    required: f.required,
   }));
 }
 
@@ -70,7 +73,10 @@ const SYNC_STATE: Record<string, SyncRow["state"]> = {
 export function mapSyncRows(res: Res): SyncRow[] {
   return (res.sourcePulse ?? []).map<SyncRow>((s) => ({
     id: String(s.id),
-    provider: s.provider,
+    // Sources qualify one provider instance as `github:owner/repo` or
+    // `website:docs.example.com`; onboarding selects the catalog key.
+    // Normalize the live row so the just-connected tile can find it.
+    provider: (s.provider || s.kind || "").split(":", 1)[0],
     name: s.name,
     state: SYNC_STATE[(s.health || s.status || "").toLowerCase()] ?? "queued",
     docCount: s.docsCount,
@@ -134,6 +140,8 @@ export function buildWelcome(res: Res | null): WelcomeData {
     step: "hero",
     tiles: catalog.map<Tile>((p) => ({
       key: p.key, name: p.name, blurb: p.blurb, connected: p.connected,
+      docsUrl: p.docsUrl || undefined,
+      fields: fieldsFor(res, p.key),
     })),
     connectorCount: catalog.length,
     repos: (res.githubRepos ?? []).map<Repo>((r) => ({
@@ -170,6 +178,14 @@ export function buildWelcome(res: Res | null): WelcomeData {
 
 export function useWelcome(): PageData<WelcomeData> {
   const q = useQuery<WelcomeData>(QUERY, { map: buildWelcome });
+  const refetch = q.refetch;
+  // A connection starts a background ingest after this page's initial read.
+  // Keep the remaining onboarding steps live so the just-added source moves
+  // from queued/syncing to its actual terminal state without leaving setup.
+  useEffect(() => {
+    const timer = window.setInterval(refetch, 2_000);
+    return () => window.clearInterval(timer);
+  }, [refetch]);
   return {
     data: q.data ?? EMPTY,
     loading: q.loading,

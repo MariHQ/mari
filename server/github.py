@@ -8,6 +8,7 @@ decide whether to degrade. Rate limits surface as GithubError too.
 from __future__ import annotations
 
 import base64
+import contextvars
 import json
 import typing as t
 import urllib.error
@@ -17,6 +18,9 @@ import urllib.request
 import config
 
 API = "https://api.github.com"
+_TOKEN_OVERRIDE: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "mari_github_token_override", default=""
+)
 
 
 class GithubError(Exception):
@@ -26,7 +30,16 @@ class GithubError(Exception):
 
 
 def token() -> str:
-    return (config.get("github", "token") or "").strip()
+    return (_TOKEN_OVERRIDE.get() or config.get("github", "token") or "").strip()
+
+
+def push_token(value: str):
+    """Use one source's stored token in this worker/context only."""
+    return _TOKEN_OVERRIDE.set((value or "").strip())
+
+
+def pop_token(state) -> None:
+    _TOKEN_OVERRIDE.reset(state)
 
 
 def _request(path: str, params: dict | None = None) -> tuple[t.Any, dict]:

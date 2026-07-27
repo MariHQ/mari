@@ -1,0 +1,69 @@
+{
+  "name": "mari-cloud-desktop",
+  "version": "0.0.1",
+  "description": "Mari Cloud desktop client",
+  "main": "main.cjs",
+  "author": "MariHQ",
+  "license": "Apache-2.0",
+  "private": true,
+  "scripts": {
+    "prepare:resources": "node scripts/prepare-resources.mjs",
+    "build:api": "node scripts/build-api.mjs",
+    "start": "electron .",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder"
+  },
+  "devDependencies": {
+    "electron": "^43.2.0",
+    "electron-builder": "^26.15.3"
+  },
+  "build": {
+    "appId": "cloud.mari.desktop",
+    "productName": "Mari Cloud",
+    "artifactName": "${productName}-${version}-${os}-${arch}.${ext}",
+    "files": [
+      "main.cjs"
+    ],
+    "extraResources": [
+      {
+        "from": "vendor/bin",
+        "to": "bin"
+      },
+      {
+        "from": "vendor/api",
+        "to": "api"
+      },
+      {
+        "from": "../web/dist",
+        "to": "web"
+      }
+    ],
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "mac": {
+      "category": "public.app-category.productivity",
+      "icon": "build/icon.png",
+      "identity": null,
+      "target": [
+        "dmg",
+        "zip"
+      ]
+    },
+    "win": {
+      "icon": "build/icon.png",
+      "target": [
+        "nsis"
+      ]
+    },
+    "linux": {
+      "category": "Office",
+      "icon": "build/icon.png",
+      "target": [
+        "AppImage",
+        "deb"
+      ]
+    }
+  }
+}

@@ -144,6 +144,31 @@ Everything is env-driven (`.env.example` documents the full list; env overrides 
 | `MARI_AUTH_REGISTRATION` | Open sign-up (default off — the workspace is invite-only). Invited people can always register whether or not this is set |
 | `MARI_CRAWL_ALLOW_LOOPBACK` | Allow the website connector to crawl localhost (dev only) |
 
+### Desktop app
+
+Mari Cloud is also available as a self-contained Electron app. The installer
+includes the existing React console, FastAPI service, and a private local
+PostgreSQL + pgvector database. Launching the app starts the whole local stack;
+closing it stops the services, while the workspace data stays on the device.
+Docker, Python, and a separately deployed Mari server are not required.
+
+The browser/server deployment remains available independently through Docker.
+Both distributions run the same UI and API; the desktop build simply supervises
+its own local copies. Ollama remains optional for local model features.
+
+To run or package the desktop client from source:
+
+```sh
+cd desktop
+npm install
+npm run prepare:resources
+python -m pip install -r ../server/requirements.txt pyinstaller
+npm run build:api
+(cd ../web && npm run build)
+npm start       # development
+npm run dist    # self-contained installer for the current platform
+```
+
 ---
 
 ## 🏗 Architecture

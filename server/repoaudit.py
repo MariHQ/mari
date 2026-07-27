@@ -9,6 +9,7 @@ design: every finding has exactly one obvious fix.
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import re
 import subprocess
@@ -53,7 +54,9 @@ def ensure_schema() -> None:
 
 # ——— real GitHub repo resolution (sources with kind='github') ———
 
-BUILDS_DIR = pathlib.Path(__file__).parent / "builds" / "audit"
+BUILDS_DIR = pathlib.Path(
+    os.environ.get("MARI_BUILDS_DIR", pathlib.Path(__file__).parent / "builds")
+) / "audit"
 
 
 def _github_source() -> dict | None:

@@ -76,19 +76,25 @@ export function useLogin(): PageData<LoginData> {
 }
 
 /** Pure: whether first-run claiming has happened → everything Setup renders. */
-export function buildSetup(needsSetup: boolean): SetupData {
+export function buildSetup(needsSetup: boolean, desktopToken = ""): SetupData {
   return {
     // needsSetup false means first-run claiming already happened.
-    step: needsSetup ? "token" : "done",
+    // The self-contained desktop supervisor already proved local ownership by
+    // injecting its private one-time token. Keep it in the eventual claim
+    // request, but take the user straight to creating their admin account.
+    step: needsSetup ? (desktopToken ? "admin" : "token") : "done",
     // The one-time admin token is printed to the server log and never
     // exposed over HTTP, so the page shows the operator where to look
     // rather than the token itself.
-    logSample: "docker compose logs api | grep 'admin token'",
-    token: "", name: "", email: "", password: "", workspace: "",
+    logSample: desktopToken
+      ? "The desktop app created this private local workspace."
+      : "docker compose logs api | grep 'admin token'",
+    token: desktopToken, name: "", email: "", password: "", workspace: "",
   };
 }
 
 export function useSetup(): PageData<SetupData> {
   const { needsSetup, loading } = useAuth();
-  return { data: buildSetup(needsSetup), loading, error: null };
+  const [params] = useSearchParams();
+  return { data: buildSetup(needsSetup, params.get("desktop_token") ?? ""), loading, error: null };
 }

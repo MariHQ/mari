@@ -1,5 +1,8 @@
 node_modules/
 dist/
+desktop/release/
+desktop/vendor/
+desktop/build/pyinstaller/
 __pycache__/
 *.pyc
 .venv/

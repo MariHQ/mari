@@ -127,7 +127,7 @@ check("greets by given name",
 check("renders digest content", def.includes("Pricing FAQ"));
 check("formats the ISO date for display", def.includes("Jul 20, 2026"));
 check("empty state derives from the data",
-  render(overview, { data: EMPTY, loading: false, error: null }).includes("Nothing here yet"));
+  render(overview, { data: EMPTY, loading: false, error: null }).includes("Connect your first source"));
 check("error is shown verbatim",
   render(overview, { data: EMPTY, loading: false, error: "API offline" }).includes("API offline"));
 states(overview, EMPTY);

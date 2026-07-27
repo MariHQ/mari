@@ -18,6 +18,11 @@ export function lineageActions({ navigate }: ActionContext): LineageActions {
     // The graph's nodes ARE documents; the drawers offered "Open document" and
     // linked to "#". The library names the destination, the app follows it.
     openDocument: (docId: number) => navigate(`/knowledge/doc?id=${docId}`),
+    setFocalNode: (nodeId: string) => {
+      const params = new URLSearchParams(window.location.search);
+      params.set("focal", nodeId);
+      navigate(`/lineage?${params.toString()}`);
+    },
     // x/y are 0..1 fractions of the canvas, which is exactly what `documents.
     // graph_x`/`graph_y` store and what the lineage query reads back.
     pinNode: async ({ docId, x, y }) => {

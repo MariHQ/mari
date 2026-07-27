@@ -10,6 +10,7 @@
 
 import type { Claim, SetupActions } from "@mari-design/components/pages/SetupPage";
 import { authPost } from "../../lib/auth";
+import { gqlResult } from "../../lib/api";
 import type { ActionContext } from "./index";
 
 /** `onDone` re-reads /auth/me: the setup POST creates the session cookie, so
@@ -28,6 +29,12 @@ export function setupActions({ refresh, navigate }: ActionContext): SetupActions
     claimWorkspace: async ({ token, name, email, password, workspace }: Claim) => {
       await authPost("/auth/setup", { token, name, email, password, workspace });
       await refresh();
+      const sources = await gqlResult<{ sourcePulse: { id: number }[] }>(
+        "{ sourcePulse { id } }",
+      );
+      if (sources.ok && (sources.data.sourcePulse ?? []).length === 0) {
+        navigate("/welcome");
+      }
     },
   };
 }

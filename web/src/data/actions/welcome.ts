@@ -14,7 +14,7 @@ import type { WelcomeActions } from "@mari-design/components/pages/WelcomePage";
 import type { Candidate } from "@mari-design/components/features/WelcomeGlossaryStep";
 import { gqlResult } from "../../lib/api";
 import { mutate } from "./index";
-import { postJson, uploadDocuments } from "./sources";
+import { connectAny, testAny, uploadDocuments } from "./sources";
 
 type CandidateRow = {
   id: number; term: string; definition: string; evidence: string; evidenceDocId: number;
@@ -72,12 +72,9 @@ export function welcomeActions({ navigate }: { navigate: (href: string) => void 
       mutate(`mutation($repo: String!, $paths: String) { connectGithubRepo(repo: $repo, paths: $paths) }`,
         { repo: repo.trim(), paths: paths.trim() || null }),
 
-    connectSource: async ({ provider, config }) => {
-      const r = await postJson<{ error?: string; sourceId?: number }>("/connectors/connect", { provider, config });
-      // A refusal arrives as a 200 with {error}: validate ran and nothing was
-      // created. Re-thrown so the step shows the provider's own words.
-      if (r.error) throw new Error(r.error);
-    },
+    testConnection: ({ provider, config }) => testAny(provider, config),
+
+    connectSource: ({ provider, config }) => connectAny(provider, config),
 
     uploadFiles: uploadDocuments,
 

@@ -12,6 +12,7 @@ import contextvars
 import hashlib
 import json
 import logging
+import os
 import secrets
 import threading
 import time
@@ -170,7 +171,9 @@ def first_run_check() -> None:
         if can_login or done:
             _warn_if_bypass_enabled()
             return
-        token = secrets.token_urlsafe(24)
+        # The desktop supervisor passes a fresh token directly to the bundled
+        # local web client. Server deployments keep the log-only token flow.
+        token = os.environ.get("MARI_DESKTOP_SETUP_TOKEN") or secrets.token_urlsafe(24)
         conn.execute("""INSERT INTO settings (key, value) VALUES ('setup_token', %s)
                         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value""",
                      (json.dumps({"hash": hashlib.sha256(token.encode()).hexdigest(),
