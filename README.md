@@ -281,6 +281,22 @@ Deeper docs: [DESIGN.md](DESIGN.md) (product design), [LINEAGE-DESIGN.md](LINEAG
 
 ---
 
+## 📄 License
+
+Mari Cloud is licensed under the [Apache License 2.0](LICENSE.md). You can use, modify, and
+redistribute it, including commercially, as long as you keep the copyright and license notices and
+state what you changed. It carries an explicit patent grant.
+
+Copyright © 2026 Eric Disque and Daniel Henneberger. See [NOTICE](NOTICE).
+
+Contributions are covered by the [Developer Certificate of Origin](DCO) rather than a CLA. Every
+commit needs a `Signed-off-by` line, which `git commit -s` adds for you. Details in
+[CONTRIBUTING.md](CONTRIBUTING.md).
+
+The `vendor/mari-design` submodule is a separate repository under its own terms.
+
+---
+
 <div align="center">
 
 Built with FastAPI · Strawberry GraphQL · Postgres + pgvector · React · Cytoscape.js · Radix UI · ollama
