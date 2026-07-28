@@ -651,19 +651,53 @@ CREATE TABLE IF NOT EXISTS site_theme_presets (
   line         text NOT NULL,
   display_font text NOT NULL,
   serif_font   text NOT NULL,
-  sort         int NOT NULL DEFAULT 100
+  sort         int NOT NULL DEFAULT 100,
+  -- A preset's own dark-mode colours. NULL (the default for every preset
+  -- above) means "no opinion" — dark mode falls back to sharing Starlight's
+  -- colours, same as before this existed. A preset only needs these if its
+  -- dark mode is a specific, deliberate palette rather than generic
+  -- "whatever dark mode this generator has" — Mari Blueprint is the first:
+  -- its own theme (mari-cli/theme/mari.css) ships a named "navy" dark mode,
+  -- not Starlight's near-black.
+  dark_bg      text,
+  dark_card    text,
+  dark_ink     text,
+  dark_line    text
 );
 
-INSERT INTO site_theme_presets (key, name, accent, bg, card, ink, line, display_font, serif_font, sort) VALUES
+ALTER TABLE site_theme_presets ADD COLUMN IF NOT EXISTS dark_bg text;
+ALTER TABLE site_theme_presets ADD COLUMN IF NOT EXISTS dark_card text;
+ALTER TABLE site_theme_presets ADD COLUMN IF NOT EXISTS dark_ink text;
+ALTER TABLE site_theme_presets ADD COLUMN IF NOT EXISTS dark_line text;
+
+INSERT INTO site_theme_presets (key, name, accent, bg, card, ink, line, display_font, serif_font, sort,
+                                 dark_bg, dark_card, dark_ink, dark_line) VALUES
   ('Mari Editorial', 'Mari Editorial', '#b04e2c', '#f6f0e3', '#fcf9f1', '#2d2a22', '#e2d8c2',
-   '''Playfair Display'', Georgia, serif', '''Lora'', Georgia, serif', 10),
+   '''Playfair Display'', Georgia, serif', '''Lora'', Georgia, serif', 10, NULL, NULL, NULL, NULL),
   ('Minimal', 'Minimal', '#1f6feb', '#ffffff', '#fafafa', '#1a1a1a', '#e5e5e5',
-   '''Source Sans 3'', system-ui, sans-serif', '''Source Sans 3'', system-ui, sans-serif', 20),
+   '''Source Sans 3'', system-ui, sans-serif', '''Source Sans 3'', system-ui, sans-serif', 20, NULL, NULL, NULL, NULL),
   ('Material', 'Material', '#1a73e8', '#f5f5f6', '#ffffff', '#202124', '#dadce0',
-   '''Source Sans 3'', Roboto, sans-serif', '''Source Sans 3'', Roboto, sans-serif', 30),
+   '''Source Sans 3'', Roboto, sans-serif', '''Source Sans 3'', Roboto, sans-serif', 30, NULL, NULL, NULL, NULL),
   ('Starlight', 'Starlight', '#7c9cff', '#17181c', '#1f2127', '#e7e9ee', '#33363f',
-   '''Source Sans 3'', system-ui, sans-serif', '''Source Sans 3'', system-ui, sans-serif', 40)
+   '''Source Sans 3'', system-ui, sans-serif', '''Source Sans 3'', system-ui, sans-serif', 40, NULL, NULL, NULL, NULL),
+  -- mari.guru/docs's OWN brand — not the marketing homepage's warm-sand look,
+  -- but the "Brutalist Blueprint" skin the docs specifically ship today
+  -- (mari-cli/theme/mari.css, served live as mari.guru/docs/theme/*.css):
+  -- white paper, ink-blue #10263B, biscay-blue links, sharp corners, hairline
+  -- borders. Pair with theme.radius = 0 for the sharp-corners part — presets
+  -- don't carry their own radius, that's a per-site setting. Its dark mode
+  -- (`html.navy` in the source theme) is a navy blue, not black.
+  ('Mari Blueprint', 'Mari Blueprint', '#1e6fa8', '#ffffff', '#f7f8fa', '#10263b', '#d4d5d8',
+   '''Inter'', ui-sans-serif, system-ui, sans-serif', '''Inter'', ui-sans-serif, system-ui, sans-serif', 5,
+   '#0e2032', '#0a1926', '#eaf0f5', '#2d4356')
 ON CONFLICT (key) DO NOTHING;
+
+-- Backfills the row above on a database where it was already seeded before
+-- dark_bg/dark_card/dark_ink/dark_line existed (ON CONFLICT DO NOTHING above
+-- would otherwise leave those columns null forever on such a database).
+UPDATE site_theme_presets SET dark_bg = '#0e2032', dark_card = '#0a1926',
+  dark_ink = '#eaf0f5', dark_line = '#2d4356'
+WHERE key = 'Mari Blueprint' AND dark_bg IS NULL;
 
 -- ————— site generator feature switches —————
 -- One row per switch the generator actually honours; sites.features holds the

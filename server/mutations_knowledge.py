@@ -587,6 +587,30 @@ class MutKnowledge:
         audit("deleted tag definition", tag)
         return True
 
+    @strawberry.mutation
+    def tag_document(self, document_id: int, tag: str) -> list[str]:
+        """Assign a tag to a document — e.g. 'customer-facing', which is what
+        the Publish build selects by. Before this mutation existed, the only
+        way to set it was the agent's chat tool loop or a workflow's tag step;
+        the Knowledge inspector's tag picker had nothing to call, so it only
+        ever changed its own local state. Returns the document's tags after
+        the change, so the caller doesn't need a second round-trip."""
+        clean = re.sub(r"[^a-z0-9\-]", "", tag.lower().strip())
+        if not clean:
+            raise ValueError("Not a valid tag.")
+        exec_("INSERT INTO tags (document_id, tag) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+              (document_id, clean))
+        row = q1("SELECT title FROM documents WHERE id = %s", (document_id,))
+        audit(f"tagged {clean}", row["title"] if row else f"document {document_id}")
+        return [r["tag"] for r in q("SELECT tag FROM tags WHERE document_id = %s ORDER BY tag", (document_id,))]
+
+    @strawberry.mutation
+    def untag_document(self, document_id: int, tag: str) -> list[str]:
+        exec_("DELETE FROM tags WHERE document_id = %s AND tag = %s", (document_id, tag.lower().strip()))
+        row = q1("SELECT title FROM documents WHERE id = %s", (document_id,))
+        audit(f"untagged {tag}", row["title"] if row else f"document {document_id}")
+        return [r["tag"] for r in q("SELECT tag FROM tags WHERE document_id = %s ORDER BY tag", (document_id,))]
+
     # ——— doc review ———
     @strawberry.mutation
     def update_document(self, id: int, body: str, title: str | None = None) -> bool:

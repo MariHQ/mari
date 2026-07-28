@@ -81,6 +81,14 @@ async def upload(files: list[UploadFile] = File(...)):
         raise HTTPException(400, f"at most {MAX_FILES} files per upload")
     max_tokens, overlap = _chunk_settings()
     results: list[dict] = []
+    # A document is keyed on its flattened filename (the endpoint never sees
+    # the client's folder structure), so two files from different folders that
+    # happen to share a name — e.g. guides/rules.md and reference/rules.md —
+    # are indistinguishable to it. Across separate uploads that is the desired
+    # "resync the same file" behaviour; within ONE batch it can only mean two
+    # different files collided, and upserting both in turn would silently
+    # discard the first one's content with no sign anything was lost.
+    seen_names: set[str] = set()
     with _conn() as conn:
         source_id = _upload_source(conn)
         for f in files:
@@ -90,6 +98,12 @@ async def upload(files: list[UploadFile] = File(...)):
                 results.append({"name": name or "?", "docId": None, "chunks": 0,
                                 "embedded": 0, "error": f"unsupported type (allowed: {', '.join(sorted(ALLOWED_EXT))})"})
                 continue
+            if name in seen_names:
+                results.append({"name": name, "docId": None, "chunks": 0, "embedded": 0,
+                                "error": "duplicate filename in this upload (files are matched by name only, "
+                                         "with no folder path) — rename one and upload it separately"})
+                continue
+            seen_names.add(name)
             raw = await f.read()
             if len(raw) > MAX_BYTES:
                 results.append({"name": name, "docId": None, "chunks": 0,

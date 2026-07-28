@@ -179,12 +179,22 @@ class MutPublish:
         if not site:
             return {"ok": False, "error": f"site {id} not found"}
         site["theme"] = jload(site["theme"]) or {}
+        site["nav"] = jload(site.get("nav")) or []
         gen = (generator or site["theme"].get("generator") or "mari").lower()
+        # `sources` is the tag list createSite persisted for this site; it used
+        # to be stored and never read, so every site — regardless of what its
+        # own config said — published whatever happened to be tagged
+        # 'customer-facing' globally. A site scoped to its own tags is what
+        # makes running more than one published site (e.g. public docs vs. an
+        # internal partner site) possible at all.
+        tags = [t for t in (jload(site.get("sources")) or []) if isinstance(t, str) and t.strip()]
+        if not tags:
+            tags = ["customer-facing"]
         # source_path rides along for the 'source_path' feature switch: the page
         # prints the document path it was built from when the site asks for it.
         docs = q("""SELECT DISTINCT d.id, d.title, d.snippet, d.body, d.source_path FROM documents d
                     JOIN tags t ON t.document_id = d.id
-                    WHERE t.tag = 'customer-facing' AND d.body <> '' ORDER BY d.id""")
+                    WHERE t.tag = ANY(%s) AND d.body <> '' ORDER BY d.id""", (tags,))
         if not docs:
             docs = q("SELECT id, title, snippet, body, source_path FROM documents WHERE body <> '' ORDER BY id LIMIT 8")
         t0 = time.time()
@@ -270,6 +280,24 @@ class MutPublish:
         return (q1("SELECT id FROM sites WHERE name = %s", (name,)) or {"id": 0})["id"]
 
     @strawberry.mutation
+    def rename_site(self, id: int, name: str) -> bool:
+        """Rename a site — the name is what the generator upper-cases into the
+        header logotype, so this is the only way to fix it short of editing
+        the row directly. Same uniqueness rule as create_site."""
+        name = (name or "").strip()
+        if not name:
+            raise ValueError("A doc site needs a name.")
+        clash = q1("SELECT id FROM sites WHERE name = %s AND id != %s", (name, id))
+        if clash:
+            raise ValueError(f"A doc site called '{name}' already exists.")
+        site = q1("SELECT name FROM sites WHERE id = %s", (id,))
+        if not site:
+            return False
+        exec_("UPDATE sites SET name = %s WHERE id = %s", (name, id))
+        audit("renamed site", f"{site['name']} → {name}")
+        return True
+
+    @strawberry.mutation
     def update_site_theme(self, id: int, theme: JSON) -> bool:
         """Store theme values the generator can actually render. A rejected
         value is an error naming the value and what was expected — silently
@@ -281,6 +309,34 @@ class MutPublish:
         if not clean:
             return False
         exec_("UPDATE sites SET theme = theme || %s::jsonb WHERE id = %s", (json.dumps(clean), id))
+        return True
+
+    @strawberry.mutation
+    def set_site_nav(self, id: int, nav: JSON) -> bool:
+        """Curate the published sidebar: an ordered list of
+        `{label, docs: [document id, ...]}` sections (label omitted/null for
+        an unlabeled group — used to pin a page above every section, e.g. a
+        landing/overview doc). This ONLY reorders and groups; it doesn't
+        change which documents get published — a doc missing from every
+        section still ships, just in a trailing unlabeled group (see
+        sitebuilder._apply_nav), so a nav a builder forgot to update can't
+        silently un-publish something. Nothing here reaches a template raw:
+        labels are HTML-escaped at render time same as any other doc title."""
+        if not isinstance(nav, list):
+            raise ValueError("nav must be a list of sections.")
+        clean: list[dict] = []
+        for i, section in enumerate(nav):
+            if not isinstance(section, dict):
+                raise ValueError(f"Section {i} must be an object with 'label' and 'docs'.")
+            label = section.get("label")
+            if label is not None and not isinstance(label, str):
+                raise ValueError(f"Section {i}'s label must be a string or null.")
+            docs = section.get("docs")
+            if not isinstance(docs, list) or not all(isinstance(d, int) for d in docs):
+                raise ValueError(f"Section {i}'s docs must be a list of document ids.")
+            clean.append({"label": label, "docs": docs})
+        exec_("UPDATE sites SET nav = %s::jsonb WHERE id = %s", (json.dumps(clean), id))
+        audit("updated site nav", (q1("SELECT name FROM sites WHERE id = %s", (id,)) or {}).get("name", f"site {id}"))
         return True
 
     @strawberry.mutation

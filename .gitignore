@@ -11,3 +11,4 @@ __pycache__/
 mari.toml
 server/builds/
 deploy/lambda/mari_cloud.dump
+docker-compose.override.yml

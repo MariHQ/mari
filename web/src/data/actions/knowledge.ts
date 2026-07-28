@@ -15,6 +15,8 @@ import { PAGE } from "../knowledge";
 import { mutate, type ActionContext } from "../actions";
 
 const TOGGLE_WATCH = `mutation ToggleWatch($documentId: Int!) { toggleWatch(documentId: $documentId) }`;
+const TAG_DOCUMENT = `mutation TagDocument($documentId: Int!, $tag: String!) { tagDocument(documentId: $documentId, tag: $tag) }`;
+const UNTAG_DOCUMENT = `mutation UntagDocument($documentId: Int!, $tag: String!) { untagDocument(documentId: $documentId, tag: $tag) }`;
 
 /** The Knowledge URL with one parameter changed and the empty ones dropped, so
  *  a shared link carries the search and nothing else. */
@@ -55,6 +57,18 @@ export function knowledgeActions({ navigate, replace }: ActionContext): Knowledg
     toggleWatch: async ({ id }) => {
       const d: { toggleWatch: boolean } = await mutate(TOGGLE_WATCH, { documentId: Number(id) });
       return d.toggleWatch;
+    },
+
+    // The rail sends the one tag that changed and which way; the mutation
+    // answers with the document's full tag list, so a page of results and the
+    // inspector never disagree about what's tagged.
+    setTag: async ({ id, tag, on }) => {
+      if (on) {
+        const d: { tagDocument: string[] } = await mutate(TAG_DOCUMENT, { documentId: Number(id), tag });
+        return d.tagDocument;
+      }
+      const d: { untagDocument: string[] } = await mutate(UNTAG_DOCUMENT, { documentId: Number(id), tag });
+      return d.untagDocument;
     },
   };
 }

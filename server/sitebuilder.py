@@ -8,10 +8,12 @@ when credentials are configured; otherwise the release is an honest local build.
 
 from __future__ import annotations
 
+import base64
 import html as html_mod
 import json
 import os
 import pathlib
+import posixpath
 import re
 import shutil
 import subprocess
@@ -22,7 +24,42 @@ import nh3
 
 BUILDS = pathlib.Path(os.environ.get("MARI_BUILDS_DIR", pathlib.Path(__file__).parent / "builds"))
 
-FONTS = "https://fonts.googleapis.com/css2?family=Playfair+Display:wght@500;600&family=Lora:ital@0;1&family=Source+Sans+3:wght@400;600&display=swap"
+FONTS = ("https://fonts.googleapis.com/css2?family=Playfair+Display:wght@500;600&family=Lora:ital@0;1"
+         "&family=Source+Sans+3:wght@400;600&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap")
+
+# The mari.guru node-graph "M" mark — identical file (byte for byte, confirmed
+# by fetching both) at mari.guru/assets/mari-mark.svg and mari.guru/docs's own
+# favicon, so it's the one shared brand mark, not a theme-specific asset.
+# Used two ways below: MARK_SVG is inlined next to the site name with fixed
+# colors swapped for currentColor/var(--accent) so it follows the active
+# theme; FAVICON_SVG keeps the original hardcoded ink-on-white and is only
+# ever base64'd into a <link rel="icon"> data URI, so it reads the same in
+# every browser tab regardless of which site theme is active.
+MARK_SVG = """<svg viewBox="0 0 32 32" width="22" height="22" aria-hidden="true" class="mari-mark">
+<rect x="1" y="1" width="30" height="30" fill="none" stroke="currentColor" stroke-width="2"/>
+<path d="M7 25V9l9 9 9-9v16" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linejoin="miter"/>
+<rect x="5" y="7" width="4" height="4" fill="currentColor"/><rect x="23" y="7" width="4" height="4" fill="currentColor"/>
+<rect x="5" y="23" width="4" height="4" fill="currentColor"/><rect x="23" y="23" width="4" height="4" fill="currentColor"/>
+<rect x="14" y="16" width="4" height="4" fill="var(--accent)"/></svg>"""
+
+FAVICON_SVG = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32">
+<rect x="1" y="1" width="30" height="30" fill="#FFFFFF" stroke="#10263B" stroke-width="2"/>
+<path d="M7 25V9l9 9 9-9v16" fill="none" stroke="#10263B" stroke-width="2.4" stroke-linejoin="miter"/>
+<rect x="5" y="7" width="4" height="4" fill="#10263B"/><rect x="23" y="7" width="4" height="4" fill="#10263B"/>
+<rect x="5" y="23" width="4" height="4" fill="#10263B"/><rect x="23" y="23" width="4" height="4" fill="#10263B"/>
+<rect x="14" y="16" width="4" height="4" fill="#1C3F60"/></svg>"""
+FAVICON_HREF = "data:image/svg+xml;base64," + base64.b64encode(FAVICON_SVG.encode()).decode()
+
+# Night-mode toggle icon: a sun in light mode (what's active), a moon in dark
+# mode — swapped by NIGHTMODE_JS. Lucide-style line icons (stroke, not fill)
+# so no icon library needs to ship with a static build.
+SUN_ICON = ('<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" '
+            'stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/>'
+            '<path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41'
+            'M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>')
+MOON_ICON = ('<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" '
+             'stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
+             '<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79Z"/></svg>')
 
 # Fallback copy of the presets seeded into site_theme_presets. The table is the
 # source of truth (the Publish page reads it, and an operator can edit a row);
@@ -37,6 +74,14 @@ THEME_PRESETS = {
                  "display": "'Source Sans 3', Roboto, sans-serif", "serif": "'Source Sans 3', Roboto, sans-serif"},
     "Starlight": {"accent": "#7c9cff", "bg": "#17181c", "card": "#1f2127", "ink": "#e7e9ee", "line": "#33363f",
                   "display": "'Source Sans 3', system-ui, sans-serif", "serif": "'Source Sans 3', system-ui, sans-serif"},
+    # mari.guru/docs's own "Brutalist Blueprint" skin — see the matching seed
+    # row in init.sql for where these values come from. Its dark mode is its
+    # own named "navy" palette (mari-cli/theme/mari.css's `html.navy`), not
+    # Starlight's black — hence the "dark" override other presets don't have.
+    "Mari Blueprint": {"accent": "#1e6fa8", "bg": "#ffffff", "card": "#f7f8fa", "ink": "#10263b", "line": "#d4d5d8",
+                       "display": "'Inter', ui-sans-serif, system-ui, sans-serif",
+                       "serif": "'Inter', ui-sans-serif, system-ui, sans-serif",
+                       "dark": {"bg": "#0e2032", "card": "#0a1926", "ink": "#eaf0f5", "line": "#2d4356"}},
 }
 
 # The switches this generator honours, and what they do when nothing overrides
@@ -114,9 +159,18 @@ def theme_presets() -> dict:
     rows = _rows("SELECT * FROM site_theme_presets ORDER BY sort, key")
     if not rows:
         return THEME_PRESETS
-    return {r["key"]: {"accent": r["accent"], "bg": r["bg"], "card": r["card"], "ink": r["ink"],
-                       "line": r["line"], "display": r["display_font"], "serif": r["serif_font"]}
-            for r in rows}
+    out = {}
+    for r in rows:
+        preset = {"accent": r["accent"], "bg": r["bg"], "card": r["card"], "ink": r["ink"],
+                  "line": r["line"], "display": r["display_font"], "serif": r["serif_font"]}
+        # A preset's own dark-mode colours, if it has one (site_theme_presets.
+        # dark_*) — bg and ink are the two that actually distinguish a real
+        # palette from an unset one, so both must be present to opt in.
+        if r.get("dark_bg") and r.get("dark_ink"):
+            preset["dark"] = {"bg": r["dark_bg"], "card": r.get("dark_card") or r["dark_bg"],
+                              "ink": r["dark_ink"], "line": r.get("dark_line") or r["dark_ink"]}
+        out[r["key"]] = preset
+    return out
 
 
 def site_features(site: dict) -> dict[str, bool]:
@@ -183,17 +237,94 @@ CUSTOMIZER_JS = """
 })();
 """
 
+NIGHTMODE_JS = """
+(function () {
+  var KEY = 'mari-mode';
+  var btn = document.querySelector('.mari-nightmode');
+  if (!btn) return;
+  // Icon markup lives here too (not just server-rendered), so the toggle
+  // still works correctly if a cached page's initial icon predates this file.
+  var SUN = '""" + SUN_ICON + """';
+  var MOON = '""" + MOON_ICON + """';
+  function apply(mode) {
+    document.body.classList.toggle('dark', mode === 'dark');
+    btn.innerHTML = mode === 'dark' ? MOON : SUN;
+    btn.setAttribute('aria-pressed', mode === 'dark' ? 'true' : 'false');
+    btn.setAttribute('aria-label', mode === 'dark' ? 'Switch to day mode' : 'Switch to night mode');
+  }
+  var saved = null;
+  try { saved = localStorage.getItem(KEY); } catch (e) { /* private mode etc. */ }
+  // A visitor's own choice (once made) overrides the site's built-in default
+  // mode; until then the page shows whatever the site owner built it with.
+  apply(saved === 'dark' || saved === 'light' ? saved : (document.body.classList.contains('dark') ? 'dark' : 'light'));
+  btn.addEventListener('click', function () {
+    var next = document.body.classList.contains('dark') ? 'light' : 'dark';
+    apply(next);
+    try { localStorage.setItem(KEY, next); } catch (e) { /* private mode etc. */ }
+  });
+})();
+"""
+
 SEARCH_JS = """
 (function () {
   var box = document.querySelector('.mari-search');
   if (!box) return;
-  var scope = box.closest('aside') || box.closest('.mari-pages');
-  var links = scope ? Array.prototype.slice.call(scope.querySelectorAll('a')) : [];
+  // Real search over every page's text (search-index.json, written at build
+  // time next to this file), not just the nav's own link labels — the old
+  // version filtered the sidebar by page TITLE only, so it found nothing a
+  // page's body talked about unless the title happened to say it too.
+  var block = box.closest('.mari-search-block') || box.parentNode;
+  var results = document.createElement('div');
+  results.className = 'mari-search-results';
+  block.appendChild(results);
+  var base = location.pathname.replace(/[^/]*$/, '');
+  var index = null;
+  function ensureIndex() {
+    if (index) return Promise.resolve(index);
+    return fetch(base + 'search-index.json').then(function (r) { return r.json(); })
+      .then(function (j) { index = j; return index; })
+      .catch(function () { index = []; return index; });
+  }
+  function esc(s) {
+    var d = document.createElement('div');
+    d.textContent = s;
+    return d.innerHTML;
+  }
+  function snippet(text, q) {
+    var i = text.toLowerCase().indexOf(q);
+    if (i < 0) return esc(text.slice(0, 120));
+    var start = Math.max(0, i - 40);
+    var pre = (start > 0 ? '\\u2026' : '') + text.slice(start, i);
+    var match = text.slice(i, i + q.length);
+    var post = text.slice(i + q.length, i + q.length + 80) + '\\u2026';
+    return esc(pre) + '<mark>' + esc(match) + '</mark>' + esc(post);
+  }
+  function render(qs) {
+    var q = qs.toLowerCase();
+    var hits = index.filter(function (p) {
+      return p.title.toLowerCase().indexOf(q) !== -1 || p.text.toLowerCase().indexOf(q) !== -1;
+    }).sort(function (a, b) {
+      var at = a.title.toLowerCase().indexOf(q) === -1 ? 1 : 0;
+      var bt = b.title.toLowerCase().indexOf(q) === -1 ? 1 : 0;
+      return at - bt;
+    }).slice(0, 8);
+    if (!hits.length) {
+      results.innerHTML = '<div class="msr-empty">No pages match \\u201c' + esc(qs) + '\\u201d</div>';
+    } else {
+      results.innerHTML = hits.map(function (p) {
+        return '<a href="' + p.slug + '.html"><span class="msr-title">' + esc(p.title) + '</span>' +
+          '<span class="msr-snippet">' + snippet(p.text, q) + '</span></a>';
+      }).join('');
+    }
+    results.classList.add('open');
+  }
   box.addEventListener('input', function () {
-    var qs = box.value.trim().toLowerCase();
-    links.forEach(function (a) {
-      a.style.display = !qs || a.textContent.toLowerCase().indexOf(qs) !== -1 ? '' : 'none';
-    });
+    var qs = box.value.trim();
+    if (!qs) { results.classList.remove('open'); results.innerHTML = ''; return; }
+    ensureIndex().then(function () { render(qs); });
+  });
+  document.addEventListener('click', function (e) {
+    if (e.target !== box && !results.contains(e.target)) results.classList.remove('open');
   });
 })();
 """
@@ -201,12 +332,12 @@ SEARCH_JS = """
 CUSTOMIZER_CSS = """
 #mari-customize-btn { position: fixed; right: 18px; bottom: 18px; z-index: 999;
   background: var(--accent); color: #fff; border: none; border-radius: 999px;
-  padding: 10px 16px; font: 600 13px 'Source Sans 3', sans-serif; cursor: pointer;
+  padding: 10px 16px; font: 600 13px var(--serif); cursor: pointer;
   box-shadow: 2px 3px 0 rgba(0,0,0,0.18); }
 #mari-customize-panel { position: fixed; right: 18px; bottom: 66px; z-index: 999;
   width: 250px; background: var(--card); color: var(--ink); border: 1.5px solid var(--line);
   border-radius: 12px 14px 11px 13px; padding: 14px; display: none;
-  box-shadow: 3px 4px 0 rgba(0,0,0,0.12); font: 13px 'Source Sans 3', sans-serif; }
+  box-shadow: 3px 4px 0 rgba(0,0,0,0.12); font: 13px var(--serif); }
 #mari-customize-panel.open { display: block; }
 #mari-customize-panel h3 { margin: 0 0 10px; font: 600 15px var(--display); }
 #mari-customize-panel label { display: flex; justify-content: space-between; align-items: center;
@@ -214,7 +345,7 @@ CUSTOMIZER_CSS = """
 #mari-customize-panel .mc-row { justify-content: flex-start; }
 #mari-customize-panel .mc-actions { display: flex; gap: 8px; align-items: center; margin-top: 10px; }
 #mari-customize-panel .mc-actions button { background: var(--accent); color: #fff; border: none;
-  border-radius: 8px; padding: 6px 12px; font: 600 12.5px 'Source Sans 3', sans-serif; cursor: pointer; }
+  border-radius: 8px; padding: 6px 12px; font: 600 12.5px var(--serif); cursor: pointer; }
 #mari-customize-panel .mc-note { color: color-mix(in srgb, var(--ink) 55%, transparent);
   font-size: 11px; margin: 8px 0 0; }
 #mc-status { font-size: 11.5px; }
@@ -224,7 +355,8 @@ CUSTOMIZER_CSS = """
 def _site_css(theme: dict) -> str:
     presets = theme_presets()
     fallback = presets.get("Mari Editorial") or next(iter(presets.values()))
-    preset = _safe_preset(presets.get(theme.get("theme", "Mari Editorial"), fallback))
+    preset_raw = presets.get(theme.get("theme", "Mari Editorial"), fallback)
+    preset = _safe_preset(preset_raw)
     # A site that has not picked an accent ships its preset's own — which is
     # the swatch the Publish page shows for that preset.
     accent = css_color(theme.get("accent") or preset["accent"], preset["accent"])
@@ -234,49 +366,97 @@ def _site_css(theme: dict) -> str:
         radius = 10
     density = _token(theme.get("density"), DENSITIES, "comfortable")
     pad = {"comfortable": 28, "compact": 20, "dense": 14}[density]
-    dark = _safe_preset(presets.get("Starlight", THEME_PRESETS["Starlight"]))
+    starlight = _safe_preset(presets.get("Starlight", THEME_PRESETS["Starlight"]))
+    # Most presets have no opinion about dark mode, so they all share
+    # Starlight's — but a preset that DOES ship its own (Mari Blueprint's navy,
+    # matching mari-cli/theme/mari.css's `html.navy`) uses that instead of
+    # being forced into Starlight's black.
+    own_dark = preset_raw.get("dark") if isinstance(preset_raw.get("dark"), dict) else None
+    dark = ({k: css_color(own_dark.get(k), starlight[k]) for k in ("bg", "card", "ink", "line")}
+            if own_dark else starlight)
     return f"""
 :root {{ --accent: {accent}; --radius: {radius}px; --bg: {preset['bg']}; --card: {preset['card']};
-  --ink: {preset['ink']}; --line: {preset['line']}; --display: {preset['display']}; --serif: {preset['serif']}; }}
+  --ink: {preset['ink']}; --line: {preset['line']}; --display: {preset['display']}; --serif: {preset['serif']};
+  --mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace; }}
 body.dark {{ --bg: {dark['bg']}; --card: {dark['card']}; --ink: {dark['ink']}; --line: {dark['line']}; }}
 * {{ box-sizing: border-box; }}
 body {{ margin: 0; background: var(--bg); color: var(--ink); font-family: var(--serif); line-height: 1.6; }}
 .wrap {{ display: grid; grid-template-columns: 250px 1fr; min-height: 100vh; }}
 header {{ grid-column: 1 / -1; display: flex; align-items: center; gap: 18px;
   padding: 14px {pad}px; border-bottom: 1.5px solid var(--line); background: var(--card); }}
-header .logo {{ font: 600 17px var(--display); letter-spacing: 0.06em; }}
-header nav {{ margin-left: auto; display: flex; gap: 16px; font: 13.5px 'Source Sans 3', sans-serif; }}
+header .logo {{ display: inline-flex; align-items: center; gap: 8px; font: 600 17px var(--display); letter-spacing: 0.06em; }}
+.mari-mark {{ color: var(--ink); flex: none; }}
+header nav {{ margin-left: auto; display: flex; align-items: center; gap: 16px; font: 13.5px var(--serif); }}
 header nav a {{ color: inherit; text-decoration: none; opacity: 0.75; }}
 header nav a:hover {{ opacity: 1; color: var(--accent); }}
+.mari-nightmode {{ display: inline-flex; align-items: center; justify-content: center;
+  width: 28px; height: 28px; border: 1.5px solid var(--line); background: var(--card); color: inherit;
+  border-radius: var(--radius); cursor: pointer; }}
+.mari-nightmode:hover {{ border-color: var(--accent); color: var(--accent); }}
+.mari-nightmode svg {{ display: block; }}
 aside {{ border-right: 1.5px solid var(--line); padding: {pad}px 18px; background: var(--card); }}
 aside a {{ display: block; padding: 6px 10px; border-radius: var(--radius); color: inherit;
-  text-decoration: none; font: 14px 'Source Sans 3', sans-serif; opacity: 0.8; }}
+  text-decoration: none; font: 14px var(--serif); opacity: 0.8; }}
 aside a:hover {{ background: color-mix(in srgb, var(--accent) 9%, transparent); opacity: 1; }}
 aside a.active {{ background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent);
   font-weight: 600; opacity: 1; }}
+.mari-nav-section {{ margin: 16px 0 4px; padding: 0 10px; font: 600 11px var(--mono);
+  text-transform: uppercase; letter-spacing: 0.08em; opacity: 0.55; }}
+.mari-nav-section:first-child {{ margin-top: 0; }}
 main {{ padding: {pad + 8}px {pad + 14}px; max-width: 760px; }}
 main h1 {{ font: 600 34px var(--display); margin: 0 0 14px; }}
 main h2 {{ font: 500 23px var(--display); margin: 28px 0 8px; border-bottom: 1px solid var(--line); padding-bottom: 6px; }}
 main h3 {{ font: 600 17px var(--display); margin: 20px 0 6px; }}
 main a {{ color: var(--accent); }}
 main code {{ background: color-mix(in srgb, var(--ink) 8%, transparent); padding: 1.5px 6px;
-  border-radius: 6px; font-size: 0.9em; }}
+  border-radius: 6px; font-size: 0.9em; font-family: var(--mono); }}
 main pre {{ background: #26231c; color: #f3ecd9; padding: 16px 18px; border-radius: var(--radius);
   overflow-x: auto; }}
-main pre code {{ background: none; padding: 0; color: inherit; }}
+main pre code {{ background: none; padding: 0; color: inherit; font-family: var(--mono); }}
 main table {{ border-collapse: collapse; width: 100%; font-size: 14.5px; }}
 main th, main td {{ border: 1px solid var(--line); padding: 8px 12px; text-align: left; }}
-main th {{ font-family: 'Source Sans 3', sans-serif; background: color-mix(in srgb, var(--ink) 4%, transparent); }}
+main th {{ font-family: var(--serif); background: color-mix(in srgb, var(--ink) 4%, transparent); }}
 footer {{ grid-column: 1 / -1; padding: 18px {pad}px; border-top: 1.5px solid var(--line);
-  font: 12px 'Source Sans 3', sans-serif; opacity: 0.65; }}
+  font: 12px var(--serif); opacity: 0.65; }}
 /* feature switches (site_feature_defs) */
 body.no-sidebar .wrap {{ grid-template-columns: 1fr; }}
 .mari-search {{ width: 100%; margin-bottom: 10px; padding: 6px 10px; border-radius: var(--radius);
   border: 1.5px solid var(--line); background: var(--bg); color: inherit;
-  font: 13.5px 'Source Sans 3', sans-serif; }}
-.mari-search-block {{ margin-bottom: 18px; max-width: 320px; }}
-.mari-source {{ margin: -6px 0 18px; font: 12px 'Source Sans 3', sans-serif; opacity: 0.6; }}
+  font: 13.5px var(--serif); }}
+.mari-search-block {{ position: relative; margin-bottom: 18px; max-width: 320px; }}
+.mari-search-results {{ display: none; position: absolute; z-index: 20; top: calc(100% + 4px); left: 0; right: 0;
+  max-height: 340px; overflow-y: auto; background: var(--card); border: 1.5px solid var(--line);
+  border-radius: var(--radius); box-shadow: 0 8px 24px -8px color-mix(in srgb, var(--ink) 25%, transparent); }}
+.mari-search-results.open {{ display: block; }}
+.mari-search-results a {{ display: block; padding: 8px 12px; text-decoration: none; color: inherit;
+  border-bottom: 1px solid var(--line); }}
+.mari-search-results a:last-child {{ border-bottom: none; }}
+.mari-search-results a:hover, .mari-search-results a.active {{
+  background: color-mix(in srgb, var(--accent) 9%, transparent); }}
+.mari-search-results .msr-title {{ font: 600 13.5px var(--serif); }}
+.mari-search-results .msr-snippet {{ display: block; margin-top: 2px; font: 12px var(--serif); opacity: 0.7; }}
+.mari-search-results .msr-snippet mark {{ background: color-mix(in srgb, var(--accent) 30%, transparent);
+  color: inherit; border-radius: 3px; }}
+.mari-search-results .msr-empty {{ padding: 10px 12px; font: 13px var(--serif); opacity: 0.65; }}
+.mari-source {{ margin: -6px 0 18px; font: 12px var(--serif); opacity: 0.6; }}
 {CUSTOMIZER_CSS}
+{_blueprint_css() if str(theme.get("theme", "Mari Editorial")) == "Mari Blueprint" else ""}
+"""
+
+
+def _blueprint_css() -> str:
+    """The one flourish the generic accent/bg/card/ink/line preset shape can't
+    express: mari.guru/docs's real theme (mari-cli/theme/mari.css) puts a hard
+    3px block shadow under code blocks and pins code/table/blockquote corners
+    to near-zero regardless of the site's own radius slider — brutalist
+    details, not just a different palette. Scoped to the 'Mari Blueprint'
+    preset only; every other preset keeps following the radius slider as-is."""
+    return """
+main pre { border: 1px solid var(--line); border-radius: 2px; box-shadow: 3px 3px 0 color-mix(in srgb, var(--ink) 16%, transparent); }
+main code { border: 1px solid var(--line); border-radius: 2px; }
+main pre code { border: none; border-radius: 0; }
+main blockquote { border-inline-start: 3px solid var(--accent); border-radius: 0; padding-left: 14px; margin-left: 0; }
+main table, main th, main td { border-radius: 2px; }
 """
 
 
@@ -294,8 +474,157 @@ def _sanitize_html(html: str) -> str:
     return nh3.clean(html, tags=_ALLOWED_TAGS, attributes=_ALLOWED_ATTRS)
 
 
+_TAG_RE = re.compile(r"<[^>]+>")
+_MAX_INDEX_CHARS = 4000
+
+
+def _html_to_text(html: str) -> str:
+    """Sanitized page HTML -> plain text for the search index. Same content
+    the page renders, just without markup — no separate extraction pass to
+    keep in sync with what a reader (or the detector) actually sees."""
+    return " ".join(html_mod.unescape(_TAG_RE.sub(" ", html)).split())[:_MAX_INDEX_CHARS]
+
+
 def _slug(title: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-") or "page"
+
+
+def _slugify_pages(docs: list[dict]) -> list[dict]:
+    """One slug per document, deduped when two titles collide — both
+    generators publish one file per document with no subfolders, so two docs
+    slugging to the same name would otherwise silently overwrite each other
+    (the same failure mode as onboard.py's basename collision, one stage
+    later: at build time instead of ingest time)."""
+    seen: set[str] = set()
+    pages = []
+    for pos, d in enumerate(docs, start=1):
+        slug = _slug(d["title"])
+        if slug in seen:
+            slug = f"{slug}-{pos}"
+        seen.add(slug)
+        pages.append({"slug": slug, "title": d["title"], "body": d["body"] or d.get("snippet") or "",
+                      "source_path": d.get("source_path") or "", "id": d.get("id")})
+    return pages
+
+
+def _apply_nav(pages: list[dict], nav) -> list[dict]:
+    """Reorder/group `pages` by the site's curated nav, if it has one.
+
+    `nav` is `[{"label": str | None, "docs": [document id, ...]}, ...]` —
+    sections in the order they should render, each listing its documents in
+    the order they should render. It's a curation layer ON TOP of which
+    documents got published (that's still the site's tag scope): a document
+    the nav doesn't mention isn't dropped, it lands in a trailing unlabeled
+    group, so a page always has SOME way to reach it even if nav curation
+    hasn't caught up with what's tagged. Sets `section` on each page dict —
+    None for an unlabeled group, which the caller renders with no header.
+    Falls back to the original (id) order, all in one unlabeled group, if nav
+    is empty or malformed — the shape every caller had before nav existed."""
+    sections = nav if isinstance(nav, list) else []
+    by_id = {p["id"]: p for p in pages if p.get("id") is not None}
+    placed: set[int] = set()
+    ordered: list[dict] = []
+    for section in sections:
+        if not isinstance(section, dict):
+            continue
+        label = section.get("label")
+        label = str(label).strip() if label else None
+        for doc_id in section.get("docs") or []:
+            page = by_id.get(doc_id)
+            if page is None or doc_id in placed:
+                continue
+            placed.add(doc_id)
+            ordered.append(dict(page, section=label))
+    for p in pages:
+        if p.get("id") not in placed:
+            ordered.append(dict(p, section=None))
+    return ordered
+
+
+def _nav_html(pages: list[dict], active: str) -> str:
+    """The sidebar/page-list markup: a section header wherever `section`
+    changes from the page before it (nothing for an unlabeled run), then the
+    page links themselves — in the order `_apply_nav` already put `pages` in."""
+    out = []
+    seen_section = False
+    last_section = None
+    for p in pages:
+        section = p.get("section")
+        if not seen_section or section != last_section:
+            seen_section, last_section = True, section
+            if section:
+                out.append(f'<div class="mari-nav-section">{html_mod.escape(section)}</div>')
+        cls = "active" if p["slug"] == active else ""
+        out.append(f'<a href="{p["slug"]}.html" class="{cls}">{html_mod.escape(p["title"])}</a>')
+    return "\n".join(out)
+
+
+_MD_LINK_RE = re.compile(r'(\]\()([^)\s]+)((?:\s+"[^"]*")?\))')
+
+
+def _link_index(pages: list[dict]) -> dict[str, str]:
+    """Map every path a document's own relative links might target — its
+    source_path, each of that path's suffixes, and its bare basename when
+    that basename is unique across the build — to the slug the build gave it.
+
+    Every generator flattens the doc tree into one page per document with no
+    subfolders, so a source link like `../reference/cli.md` (correct relative
+    to the *original* file tree) no longer points anywhere in the built site.
+    Without this, virtually every cross-document link in a real docs tree
+    (built from nested folders, exactly what mari-cli's own docs look like)
+    404s in the published site."""
+    index: dict[str, str] = {}
+    basename_hits: dict[str, int] = {}
+    basename_slug: dict[str, str] = {}
+    for p in pages:
+        sp = (p["source_path"] or "").lstrip("/")
+        if not sp:
+            continue
+        index[sp] = p["slug"]
+        parts = sp.split("/")
+        for i in range(1, len(parts)):
+            index.setdefault("/".join(parts[i:]), p["slug"])
+        base = parts[-1]
+        basename_hits[base] = basename_hits.get(base, 0) + 1
+        basename_slug[base] = p["slug"]
+    for base, n in basename_hits.items():
+        if n == 1:
+            index.setdefault(base, basename_slug[base])
+    return index
+
+
+def _resolve_doc_link(target: str, source_path: str, index: dict[str, str]) -> tuple[str, str] | None:
+    """Resolve one `](target)` from a document at source_path to (slug,
+    fragment), or None if it isn't an internal doc link this build can
+    place (external URL, anchor-only, or a target this build didn't
+    publish — left untouched rather than guessed at)."""
+    if not target or "://" in target or target.startswith(("#", "mailto:")):
+        return None
+    path, _, fragment = target.partition("#")
+    if not path:
+        return None
+    ext = path.rsplit(".", 1)[-1].lower() if "." in path else ""
+    if ext not in ("md", "mdx", "markdown"):
+        return None
+    if path.startswith("/"):
+        resolved = path.lstrip("/")
+    else:
+        base_dir = posixpath.dirname((source_path or "").lstrip("/"))
+        resolved = posixpath.normpath(posixpath.join(base_dir, path))
+    slug = index.get(resolved) or index.get(posixpath.basename(resolved))
+    return (slug, fragment) if slug else None
+
+
+def _rewrite_doc_links(body: str, source_path: str, index: dict[str, str], href) -> str:
+    """Rewrite internal `](./other.md)`-style links in `body` to the slug
+    `href(slug, fragment)` builds; anything unresolved is left as-is."""
+    def sub(m: re.Match) -> str:
+        hit = _resolve_doc_link(m.group(2), source_path, index)
+        if hit is None:
+            return m.group(0)
+        slug, fragment = hit
+        return m.group(1) + href(slug, fragment) + m.group(3)
+    return _MD_LINK_RE.sub(sub, body)
 
 
 class SiteBuildError(Exception):
@@ -326,18 +655,34 @@ def build_mari_site(site: dict, docs: list[dict]) -> str:
     shutil.rmtree(out, ignore_errors=True)
     out.mkdir(parents=True)
 
-    pages = [{"slug": _slug(d["title"]), "title": d["title"], "body": d["body"] or d["snippet"],
-              "source_path": d.get("source_path") or ""} for d in docs]
+    pages = _slugify_pages(docs)
+    nav_cfg = site.get("nav") if isinstance(site.get("nav"), list) else []
+    pages = _apply_nav(pages, nav_cfg)
+    link_index = _link_index(pages)
 
     # Which switches this site has on. Every one of them changes the output
     # below — nothing here is decorative.
     feat = site_features(site)
 
     (out / "style.css").write_text(_site_css(theme))
+    (out / "nightmode.js").write_text(NIGHTMODE_JS)
     if feat["customizer"]:
         (out / "customize.js").write_text(CUSTOMIZER_JS)
     if feat["search"]:
         (out / "search.js").write_text(SEARCH_JS)
+        # One entry per page, body text only (markup stripped) — real search
+        # over what a page actually says, not just its title. Static and
+        # fetched client-side, so it works the same in the FastAPI preview and
+        # after an S3/CloudFront deploy: no server-side search endpoint to run.
+        index_entries = [
+            {"slug": p["slug"], "title": p["title"],
+             "text": _html_to_text(_sanitize_html(markdown.markdown(
+                 _rewrite_doc_links(p["body"], p["source_path"], link_index,
+                                    lambda slug, frag: f"{slug}.html" + (f"#{frag}" if frag else "")),
+                 extensions=["tables", "fenced_code"])))}
+            for p in pages
+        ]
+        (out / "search-index.json").write_text(json.dumps(index_entries))
 
     # Theme values reach an HTML attribute; a token allowlist is the check, and
     # escaping on interpolation below is the belt (AUTH-12).
@@ -345,13 +690,32 @@ def build_mari_site(site: dict, docs: list[dict]) -> str:
     density = _token(theme.get("density"), DENSITIES, "comfortable")
     name_esc = html_mod.escape(str(site["name"]))
     search_html = ('<div class="mari-search-block"><input class="mari-search" type="search" '
-                   'placeholder="Filter pages…" aria-label="Filter pages"></div>') if feat["search"] else ""
+                   'placeholder="Search docs…" aria-label="Search docs"></div>') if feat["search"] else ""
+
+    # Header links point at real pages, computed from what actually got
+    # published rather than hardcoded — "API reference" used to be
+    # `pages[0]`, which meant it silently pointed at whatever document
+    # happened to sort first (the site's own intro page, once nav pinned it
+    # to the top) instead of anything resembling a reference. "Changelog" was
+    # a bare `#` — a link that goes nowhere is worse than no link.
+    first_slug = pages[0]["slug"] if pages else "index"
+    guides_slug = next((p["slug"] for p in pages if p.get("section")), first_slug)
+    api_ref_slug = next((p["slug"] for p in pages if p["title"] == "CLI reference"),
+                        next((p["slug"] for p in pages if p.get("section") == "Reference"), first_slug))
+    changelog_slug = next((p["slug"] for p in pages if p["title"] == "Changelog"), None)
+    nightmode_btn = (f'<button type="button" class="mari-nightmode" aria-pressed="{"true" if mode == "dark" else "false"}" '
+                     f'aria-label="Switch to {"day" if mode == "dark" else "night"} mode">'
+                     f'{MOON_ICON if mode == "dark" else SUN_ICON}</button>')
+    header_nav = (nightmode_btn +
+                  f'<a href="{guides_slug}.html">Guides</a><a href="{api_ref_slug}.html">API reference</a>')
+    if changelog_slug:
+        header_nav += f'<a href="{changelog_slug}.html">Changelog</a>'
 
     def render(page: dict, active: str) -> str:
-        body_html = _sanitize_html(markdown.markdown(page["body"], extensions=["tables", "fenced_code"]))
-        nav = "\n".join(
-            f'<a href="{p["slug"]}.html" class="{"active" if p["slug"] == active else ""}">{html_mod.escape(p["title"])}</a>'
-            for p in pages)
+        body_md = _rewrite_doc_links(page["body"], page.get("source_path") or "", link_index,
+                                      lambda slug, frag: f"{slug}.html" + (f"#{frag}" if frag else ""))
+        body_html = _sanitize_html(markdown.markdown(body_md, extensions=["tables", "fenced_code"]))
+        nav = _nav_html(pages, active)
         title_esc = html_mod.escape(page["title"])
         body_class = " ".join(c for c in (("dark" if mode == "dark" else ""),
                                           ("" if feat["sidebar"] else "no-sidebar")) if c)
@@ -363,19 +727,21 @@ def build_mari_site(site: dict, docs: list[dict]) -> str:
                   if feat["source_path"] and page.get("source_path") else "")
         footer = (f"<footer>Published with Mari Cloud · {html_mod.escape(site['domain'])} · "
                   "every fact on this page traces to a verified source</footer>") if feat["provenance"] else ""
-        scripts = ('<script src="search.js"></script>' if feat["search"] else "") + \
+        scripts = '<script src="nightmode.js"></script>' + \
+                  ('<script src="search.js"></script>' if feat["search"] else "") + \
                   ('<script src="customize.js"></script>' if feat["customizer"] else "")
         site_id_js = (f"<script>window.__MARI_SITE_ID__ = {int(site['id'])};</script>"
                       if feat["customizer"] else "")
         return f"""<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{title_esc} · {name_esc}</title>
+<link rel="icon" type="image/svg+xml" href="{FAVICON_HREF}">
 <link rel="stylesheet" href="{FONTS}"><link rel="stylesheet" href="style.css">
 {site_id_js}</head>
 <body class="{html_mod.escape(body_class, quote=True)}" data-density="{html_mod.escape(density, quote=True)}">
 <div class="wrap">
-<header><span class="logo">✳ {html_mod.escape(site['name'].upper())}</span>
-<nav><a href="index.html">Guides</a><a href="{pages[0]['slug'] if pages else 'index'}.html">API reference</a><a href="#">Changelog</a></nav></header>
+<header><span class="logo">{MARK_SVG}{html_mod.escape(site['name'].upper())}</span>
+<nav>{header_nav}</nav></header>
 {aside}
 <main>{main_nav}<h1>{title_esc}</h1>{source}{body_html}</main>
 {footer}
@@ -523,16 +889,21 @@ def _write_docusaurus_project(work: pathlib.Path, site: dict, docs: list[dict]) 
     docs_dir = work / "docs"
     shutil.rmtree(docs_dir, ignore_errors=True)
     docs_dir.mkdir()
-    pages = docs or [{"title": site["name"], "body": "No documents matched this site's sources yet.", "snippet": ""}]
-    seen: set[str] = set()
-    for pos, d in enumerate(pages, start=1):
-        slug = _slug(d["title"])
-        if slug in seen:
-            slug = f"{slug}-{pos}"
-        seen.add(slug)
-        body = _mdx_sanitize(d.get("body") or d.get("snippet") or "")
+    raw_pages = docs or [{"title": site["name"], "body": "No documents matched this site's sources yet.", "snippet": ""}]
+    pages = _slugify_pages(raw_pages)
+    link_index = _link_index(pages)
+    first_slug = pages[0]["slug"] if pages else None
+
+    def _docusaurus_href(slug: str, fragment: str) -> str:
+        path = "/" if slug == first_slug else f"/{slug}/"
+        return path + (f"#{fragment}" if fragment else "")
+
+    for pos, p in enumerate(pages, start=1):
+        slug = p["slug"]
+        body = _rewrite_doc_links(p["body"], p["source_path"], link_index, _docusaurus_href)
+        body = _mdx_sanitize(body)
         body = re.sub(r"^#\s+.*\n", "", body, count=1)  # title rendered from frontmatter
-        title = str(d["title"]).replace('"', "'")
+        title = str(p["title"]).replace('"', "'")
         fm = [f'id: {slug}', f'title: "{title}"', f"sidebar_position: {pos}"]
         if pos == 1:
             fm.append("slug: /")
