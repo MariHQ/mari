@@ -424,6 +424,16 @@ body.no-sidebar .wrap {{ grid-template-columns: 1fr; }}
   border: 1.5px solid var(--line); background: var(--bg); color: inherit;
   font: 13.5px var(--serif); }}
 .mari-search-block {{ position: relative; margin-bottom: 18px; max-width: 320px; }}
+.mari-editions {{ display: flex; margin-bottom: 10px; max-width: 320px;
+  border: 1.5px solid var(--line); border-radius: var(--radius); overflow: hidden; }}
+.mari-edition {{ flex: 1 1 0; padding: 7px 10px; text-align: center; color: var(--ink);
+  opacity: 0.65; text-decoration: none; white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis; font: 600 12px var(--serif);
+  transition: background-color 90ms linear, color 90ms linear, opacity 90ms linear; }}
+.mari-edition + .mari-edition {{ border-left: 1.5px solid var(--line); }}
+.mari-edition:hover {{ background: var(--card); opacity: 1; }}
+.mari-edition[aria-current="page"] {{ background: var(--accent); color: var(--bg); opacity: 1; }}
+.mari-edition[aria-current="page"]:hover {{ background: var(--accent); color: var(--bg); }}
 .mari-search-results {{ display: none; position: absolute; z-index: 20; top: calc(100% + 4px); left: 0; right: 0;
   max-height: 340px; overflow-y: auto; background: var(--card); border: 1.5px solid var(--line);
   border-radius: var(--radius); box-shadow: 0 8px 24px -8px color-mix(in srgb, var(--ink) 25%, transparent); }}
@@ -539,6 +549,55 @@ def _apply_nav(pages: list[dict], nav) -> list[dict]:
         if p.get("id") not in placed:
             ordered.append(dict(p, section=None))
     return ordered
+
+
+# Relative paths and https only. An edition href is rendered into every page of
+# a published site, and those sites are served from the same origin as /graphql,
+# so a `javascript:` or `data:` URL here would be a stored XSS with a session
+# cookie behind it (AUTH-12). Scheme-relative `//host` is refused too: it is not
+# obviously a different origin to a reviewer reading the config.
+_EDITION_HREF_RE = re.compile(
+    r"^(?:"
+    r"https://[\w.-]+(?::\d+)?(?:/[^\s\"'<>]*)?"   # absolute, https only
+    r"|/(?!/)[^\s\"'<>]*"                          # root-relative, but not //host
+    r"|[\w.-]+\.html(?:#[\w-]+)?"                  # a sibling page
+    r")$")
+
+
+def _editions_html(site: dict) -> str:
+    """The edition toggle, rendered above the sidebar search.
+
+    Two or more sibling doc sets, one marked current. One entry is not a
+    choice, so it renders nothing rather than a toggle that cannot toggle.
+    """
+    raw = site.get("editions") or []
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (ValueError, TypeError):
+            return ""
+    if not isinstance(raw, list) or len(raw) < 2:
+        return ""
+
+    items = []
+    for e in raw:
+        if not isinstance(e, dict):
+            continue
+        label = str(e.get("label") or "").strip()
+        href = str(e.get("href") or "").strip()
+        if not label or len(label) > 40 or not _EDITION_HREF_RE.match(href):
+            continue
+        current = bool(e.get("current"))
+        attrs = ' aria-current="page"' if current else ""
+        items.append(
+            f'<a class="mari-edition" href="{html_mod.escape(href, quote=True)}"{attrs}>'
+            f'{html_mod.escape(label)}</a>'
+        )
+
+    if len(items) < 2:
+        return ""
+    return ('<nav class="mari-editions" aria-label="Documentation edition">'
+            + "".join(items) + "</nav>")
 
 
 def _nav_html(pages: list[dict], active: str) -> str:
@@ -691,6 +750,7 @@ def build_mari_site(site: dict, docs: list[dict]) -> str:
     name_esc = html_mod.escape(str(site["name"]))
     search_html = ('<div class="mari-search-block"><input class="mari-search" type="search" '
                    'placeholder="Search docs…" aria-label="Search docs"></div>') if feat["search"] else ""
+    editions_html = _editions_html(site)
 
     # Header links point at real pages, computed from what actually got
     # published rather than hardcoded — "API reference" used to be
@@ -721,8 +781,12 @@ def build_mari_site(site: dict, docs: list[dict]) -> str:
                                           ("" if feat["sidebar"] else "no-sidebar")) if c)
         # The sidebar carries the page list, so the filter box goes with it;
         # with the sidebar off it filters the page list rendered in main.
-        aside = f"<aside>{search_html}{nav}</aside>" if feat["sidebar"] else ""
-        main_nav = "" if feat["sidebar"] else f'<div class="mari-pages">{search_html}{nav}</div>'
+        # Editions sit above the search box, so the reader picks which product
+        # they are searching before they type into it.
+        aside = (f"<aside>{editions_html}{search_html}{nav}</aside>"
+                 if feat["sidebar"] else "")
+        main_nav = ("" if feat["sidebar"]
+                    else f'<div class="mari-pages">{editions_html}{search_html}{nav}</div>')
         source = (f'<p class="mari-source">Source: {html_mod.escape(page["source_path"])}</p>'
                   if feat["source_path"] and page.get("source_path") else "")
         footer = (f"<footer>Published with Mari Cloud · {html_mod.escape(site['domain'])} · "

@@ -714,6 +714,13 @@ CREATE TABLE IF NOT EXISTS site_feature_defs (
 
 ALTER TABLE sites ADD COLUMN IF NOT EXISTS features jsonb NOT NULL DEFAULT '{}';
 
+-- Editions: sibling doc sets a reader can switch between, rendered as a toggle
+-- above the sidebar search. Deliberately NOT part of theme. theme is written by
+-- updateSiteTheme (user JSON) and aiCustomizeSite (LLM output), and an edition
+-- carries a URL, so putting it there would let either of those paths write the
+-- destination of a link on every page of a published site.
+ALTER TABLE sites ADD COLUMN IF NOT EXISTS editions jsonb NOT NULL DEFAULT '[]';
+
 INSERT INTO site_feature_defs (key, label, hint, default_on, sort) VALUES
   ('sidebar',    'Sidebar navigation',  'Lists every published page down the left of each page.',              true, 10),
   ('search',     'In-page search',      'Ships a title index with the site so readers can filter pages in the browser.', true, 20),
