@@ -941,24 +941,67 @@ def build_docusaurus_site(site: dict, docs: list[dict]) -> str:
     return str(out)
 
 
-def deploy_to_s3(build_dir: str, deploy_cfg: dict) -> tuple[bool, str]:
-    """Upload the build to S3 if configured. Returns (uploaded, detail)."""
+def _s3_prefix(domain: str) -> str:
+    """The S3 key prefix implied by a site's own domain. A deploy bucket is
+    routinely shared — mari.guru's own hosts the marketing landing page at
+    the root AND however many published doc sites at their own paths — so a
+    site whose domain is 'mari.guru/docs' has to land under the 'docs/'
+    prefix, not the bucket root, or its deploy silently overwrites (or
+    --delete-removes) whatever else is up there. A bare domain with no path
+    (e.g. a site that owns the whole bucket) still deploys to the root."""
+    path = domain.split("/", 1)[1] if "/" in domain else ""
+    return path.strip("/")
+
+
+def deploy_to_s3(build_dir: str, deploy_cfg: dict, site: dict | None = None) -> tuple[bool, str]:
+    """Upload the build to S3 if configured, scoped to the prefix the site's
+    own domain implies, and invalidate CloudFront if a distribution is
+    configured — otherwise a "successful" deploy still shows visitors the
+    previous build until the CDN cache expires on its own. Returns
+    (uploaded, detail)."""
     bucket = deploy_cfg.get("bucket") or os.environ.get("MARI_S3_BUCKET", "")
     if not bucket:
         return False, "local build (no S3 bucket configured)"
+    prefix = _s3_prefix(str((site or {}).get("domain") or ""))
+    key_prefix = f"{prefix}/" if prefix else ""
     try:
         import boto3
         s3 = boto3.client("s3", region_name=deploy_cfg.get("region") or None)
         root = pathlib.Path(build_dir)
-        n = 0
+        keys: set[str] = set()
         for f in root.rglob("*"):
             if f.is_file():
-                ctype = {"html": "text/html", "css": "text/css", "js": "application/javascript"}.get(
-                    f.suffix.lstrip("."), "application/octet-stream")
-                s3.upload_file(str(f), bucket, f.relative_to(root).as_posix(),
-                               ExtraArgs={"ContentType": ctype})
-                n += 1
-        return True, f"uploaded {n} files to s3://{bucket}"
+                ctype = {"html": "text/html", "css": "text/css", "js": "application/javascript",
+                         "json": "application/json"}.get(f.suffix.lstrip("."), "application/octet-stream")
+                key = key_prefix + f.relative_to(root).as_posix()
+                s3.upload_file(str(f), bucket, key, ExtraArgs={"ContentType": ctype})
+                keys.add(key)
+
+        # Objects under this prefix from a previous build that the new one no
+        # longer has — a page renamed or removed shouldn't keep serving stale
+        # content forever just because nothing overwrote it (list_objects_v2
+        # and delete_objects each cap at 1000 keys per call, hence paginate
+        # and chunk rather than assume a small site).
+        paginator = s3.get_paginator("list_objects_v2")
+        stale = [o["Key"] for page in paginator.paginate(Bucket=bucket, Prefix=key_prefix)
+                 for o in page.get("Contents", []) if o["Key"] not in keys]
+        for i in range(0, len(stale), 1000):
+            chunk = stale[i:i + 1000]
+            s3.delete_objects(Bucket=bucket, Delete={"Objects": [{"Key": k} for k in chunk]})
+
+        detail = f"uploaded {len(keys)} files to s3://{bucket}/{key_prefix}"
+        if stale:
+            detail += f", removed {len(stale)} stale"
+
+        dist_id = deploy_cfg.get("distributionId") or os.environ.get("MARI_CLOUDFRONT_DISTRIBUTION_ID", "")
+        if dist_id:
+            cf = boto3.client("cloudfront")
+            cf.create_invalidation(
+                DistributionId=dist_id,
+                InvalidationBatch={"Paths": {"Quantity": 1, "Items": [f"/{prefix}/*" if prefix else "/*"]},
+                                   "CallerReference": f"mari-{int(time.time() * 1000)}"})
+            detail += f", invalidated CloudFront ({dist_id})"
+        return True, detail
     except Exception as e:  # credentials missing, bucket denied, etc. — stay honest
         # The class name alone made NoSuchBucket, AccessDenied and an expired
         # token indistinguishable, and every one of those is fixed differently
@@ -971,6 +1014,6 @@ def deploy_to_s3(build_dir: str, deploy_cfg: dict) -> tuple[bool, str]:
             code, msg = err.get("Code", ""), err.get("Message", "")
             detail = " — ".join(p for p in (code, msg) if p)
         detail = detail or str(e) or e.__class__.__name__
-        return False, f"S3 upload to s3://{bucket} failed: {type(e).__name__}: {detail}"
+        return False, f"S3 deploy to s3://{bucket}/{key_prefix} failed: {type(e).__name__}: {detail}"
 
 

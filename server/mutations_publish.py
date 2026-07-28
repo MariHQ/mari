@@ -369,7 +369,7 @@ class MutPublish:
         site = q1("SELECT * FROM sites WHERE id = %s", (id,))
         dep_row = q1("SELECT value FROM settings WHERE key = 'deploy'")
         deploy_cfg = jload(dep_row["value"]) if dep_row else {}
-        uploaded, detail = sitebuilder.deploy_to_s3(str(sitebuilder.BUILDS / f"site_{id}"), deploy_cfg or {})
+        uploaded, detail = sitebuilder.deploy_to_s3(str(sitebuilder.BUILDS / f"site_{id}"), deploy_cfg or {}, site)
         bucket_configured = bool((deploy_cfg or {}).get("bucket") or os.environ.get("MARI_S3_BUCKET"))
         if bucket_configured and not uploaded:
             # A site whose upload failed is not live anywhere. Recording the
