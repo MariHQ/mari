@@ -24,19 +24,38 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
-STACK=mari-cloud-prod
-REGION=us-east-1
-ACCOUNT=386318010728
+STACK="${MARI_STACK:-mari-cloud-prod}"
+REGION="${MARI_REGION:-us-east-1}"
+DOMAIN="${MARI_DOMAIN:-cloud.mari.guru}"
+
+echo "==> Preflight"
+# This repo is public, so the account id and hosted zone are resolved at run
+# time rather than committed. Both can be overridden by environment variable
+# when deploying somewhere else.
+#
+# Resolving the account also serves as the SSO check the preflight used to do
+# on its own: it fails loudly when the session has expired.
+ACCOUNT="${MARI_AWS_ACCOUNT:-$(aws sts get-caller-identity --query Account --output text)}"
+case "$ACCOUNT" in
+  [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
+  *) echo "    could not resolve the AWS account id (got '$ACCOUNT'). Is the SSO session live?" >&2; exit 1 ;;
+esac
+
+# The hosted zone for the parent of $DOMAIN, so cloud.mari.guru looks up
+# mari.guru. Set MARI_HOSTED_ZONE_ID when the zone is not the immediate parent.
+ZONE="${MARI_HOSTED_ZONE_ID:-$(aws route53 list-hosted-zones-by-name --dns-name "${DOMAIN#*.}" \
+  --query 'HostedZones[0].Id' --output text 2>/dev/null | sed 's|^/hostedzone/||')}"
+case "$ZONE" in
+  Z*) ;;
+  *) echo "    could not resolve a hosted zone for ${DOMAIN#*.}. Set MARI_HOSTED_ZONE_ID." >&2; exit 1 ;;
+esac
+
 REPO="$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/mari-cloud"
-DOMAIN=cloud.mari.guru
-ZONE=Z078478638DMYR1QGRLRH
 
 TAG="${1:-$(date -u +%Y%m%d)-lambda-$(( $(aws ecr list-images --repository-name mari-cloud --region "$REGION" \
   --query 'length(imageIds)' --output text 2>/dev/null || echo 0) + 1 ))}"
 IMAGE="$REPO:$TAG"
 
-echo "==> Preflight"
-aws sts get-caller-identity >/dev/null   # fails loudly if SSO has expired
 [ -z "$(git status --porcelain)" ] || echo "    WARNING: working tree is dirty; you are shipping uncommitted code"
 
 echo "==> Checks (typecheck + server-render smoke)"
