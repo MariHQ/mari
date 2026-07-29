@@ -594,6 +594,15 @@ def _editions_html(site: dict) -> str:
             continue
         current = bool(e.get("current"))
         attrs = ' aria-current="page"' if current else ""
+        # The other edition's site id, when it is a sibling on this server.
+        # The hrefs above are production URLs; served from the local preview at
+        # /sites/site_N/ they would leave the preview and land on the console.
+        # With the id in the markup, the inline script below rewrites the
+        # toggle to /sites/site_<id>/ when — and only when — the page detects
+        # it is being previewed. Int-validated: it lands in an attribute.
+        sid = e.get("siteId")
+        if isinstance(sid, int) and sid > 0:
+            attrs += f' data-site-id="{sid}"'
         items.append(
             f'<a class="mari-edition" href="{html_mod.escape(href, quote=True)}"{attrs}>'
             f'{html_mod.escape(label)}</a>'
@@ -601,8 +610,24 @@ def _editions_html(site: dict) -> str:
 
     if len(items) < 2:
         return ""
+    # The rewrite runs where the nav is, before paint, and only under /sites/.
+    # Production pages match nothing and are left exactly as rendered. No
+    # edition with a siteId, no script: the nav ships exactly as before.
+    if not any("data-site-id" in it for it in items):
+        return ('<nav class="mari-editions" aria-label="Documentation edition">'
+                + "".join(items) + "</nav>")
+    script = (
+        "<script>(function(){"
+        "var m=location.pathname.match(/^\\/sites\\/site_\\d+\\//);"
+        "if(!m)return;"
+        "var links=document.currentScript.previousElementSibling"
+        ".querySelectorAll('.mari-edition[data-site-id]');"
+        "for(var i=0;i<links.length;i++){"
+        "links[i].setAttribute('href','/sites/site_'+links[i].getAttribute('data-site-id')+'/');}"
+        "})();</script>"
+    )
     return ('<nav class="mari-editions" aria-label="Documentation edition">'
-            + "".join(items) + "</nav>")
+            + "".join(items) + "</nav>" + script)
 
 
 def _nav_html(pages: list[dict], active: str) -> str:
