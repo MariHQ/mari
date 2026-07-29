@@ -17,6 +17,23 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+# The db container's published port, discovered rather than assumed. Compose
+# will happily report 5432 while something else on the host already holds it,
+# in which case connecting there reaches the wrong Postgres and the API dies on
+# `role "mari" does not exist`. Probe every published port and take the one that
+# actually answers as our role.
+db_port() {
+  local candidates p
+  candidates=$(docker compose port db 5432 2>/dev/null | awk -F: '{print $NF}')
+  candidates="$candidates $(docker port "$(docker compose ps -q db 2>/dev/null)" 5432 2>/dev/null | awk -F: '{print $NF}')"
+  for p in $(printf '%s\n' $candidates | sort -un); do
+    if PGPASSWORD=mari psql -h 127.0.0.1 -p "$p" -U mari -d mari_cloud -tAc 'select 1' >/dev/null 2>&1; then
+      printf '%s' "$p"; return 0
+    fi
+  done
+  return 1
+}
+
 DB_URL="postgresql://mari:mari@localhost:5432/mari_cloud"
 
 # .env is read by docker compose, and until now by nothing else, so anything
@@ -34,6 +51,15 @@ fi
 echo "==> Postgres (docker)"
 docker compose up -d db >/dev/null
 until docker compose exec -T db pg_isready -U mari -d mari_cloud >/dev/null 2>&1; do sleep 1; done
+
+DB_PORT=$(db_port) || {
+  echo "!! the db container is up but no published port answers as role 'mari'." >&2
+  echo "   Published: $(docker port "$(docker compose ps -q db)" 5432 2>/dev/null | tr '\n' ' ')" >&2
+  echo "   Something else is probably holding 5432. Free it, or publish another port." >&2
+  exit 1
+}
+DB_URL="postgresql://mari:mari@localhost:${DB_PORT}/mari_cloud"
+[ "$DB_PORT" = "5432" ] || echo "==> Postgres on :$DB_PORT (5432 is taken by something else)"
 
 echo "==> Schema (idempotent)"
 docker compose exec -T db psql -U mari -d mari_cloud -v ON_ERROR_STOP=1 -q -f - < server/init.sql
