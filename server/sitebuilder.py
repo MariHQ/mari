@@ -1022,16 +1022,32 @@ def _s3_prefix(domain: str) -> str:
     return path.strip("/")
 
 
-def deploy_to_s3(build_dir: str, deploy_cfg: dict, site: dict | None = None) -> tuple[bool, str]:
+def deploy_to_s3(build_dir: str, deploy_cfg: dict, site: dict | None = None,
+                 reserved_prefixes: list[str] | None = None) -> tuple[bool, str]:
     """Upload the build to S3 if configured, scoped to the prefix the site's
     own domain implies, and invalidate CloudFront if a distribution is
     configured — otherwise a "successful" deploy still shows visitors the
     previous build until the CDN cache expires on its own. Returns
-    (uploaded, detail)."""
+    (uploaded, detail).
+
+    reserved_prefixes: key prefixes owned by OTHER sites, which this deploy
+    must not treat as its own stale objects. See the stale sweep below."""
     bucket = deploy_cfg.get("bucket") or os.environ.get("MARI_S3_BUCKET", "")
     if not bucket:
         return False, "local build (no S3 bucket configured)"
     prefix = _s3_prefix(str((site or {}).get("domain") or ""))
+
+    # A site whose domain carries no path deploys to the bucket root, and the
+    # stale sweep below then treats every object in the bucket as its own. On a
+    # shared bucket — mari.guru's holds the marketing site and every published
+    # doc site — that is one publish away from deleting the lot. Refuse it
+    # rather than trust that the bucket is dedicated.
+    if not prefix and not deploy_cfg.get("allowRootDeploy"):
+        return False, ("refusing to deploy to the bucket root: site domain "
+                       f"'{(site or {}).get('domain', '')}' has no path, so this would "
+                       "delete every other object in the bucket. Give the site a "
+                       "domain path, or set deploy.allowRootDeploy if it really "
+                       "owns the whole bucket.")
     key_prefix = f"{prefix}/" if prefix else ""
     try:
         import boto3
@@ -1051,9 +1067,20 @@ def deploy_to_s3(build_dir: str, deploy_cfg: dict, site: dict | None = None) -> 
         # content forever just because nothing overwrote it (list_objects_v2
         # and delete_objects each cap at 1000 keys per call, hence paginate
         # and chunk rather than assume a small site).
+        #
+        # Sites nest: mari.guru/docs owns 'docs/', and mari.guru/docs/canon owns
+        # 'docs/canon/', which is INSIDE it. Listing 'docs/' returns canon's
+        # objects too, and none of them are in this build, so without this guard
+        # publishing the parent silently deletes the whole child site.
+        owned = [p if p.endswith("/") else p + "/"
+                 for p in (reserved_prefixes or []) if p and p.strip("/")]
+        def _belongs_to_another_site(key: str) -> bool:
+            return any(key.startswith(p) for p in owned)
+
         paginator = s3.get_paginator("list_objects_v2")
         stale = [o["Key"] for page in paginator.paginate(Bucket=bucket, Prefix=key_prefix)
-                 for o in page.get("Contents", []) if o["Key"] not in keys]
+                 for o in page.get("Contents", [])
+                 if o["Key"] not in keys and not _belongs_to_another_site(o["Key"])]
         for i in range(0, len(stale), 1000):
             chunk = stale[i:i + 1000]
             s3.delete_objects(Bucket=bucket, Delete={"Objects": [{"Key": k} for k in chunk]})

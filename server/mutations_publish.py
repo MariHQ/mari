@@ -369,7 +369,14 @@ class MutPublish:
         site = q1("SELECT * FROM sites WHERE id = %s", (id,))
         dep_row = q1("SELECT value FROM settings WHERE key = 'deploy'")
         deploy_cfg = jload(dep_row["value"]) if dep_row else {}
-        uploaded, detail = sitebuilder.deploy_to_s3(str(sitebuilder.BUILDS / f"site_{id}"), deploy_cfg or {}, site)
+        # Every other site's prefix, so the stale sweep does not delete a
+        # neighbour. Sites nest by design: mari.guru/docs owns 'docs/' and
+        # mari.guru/docs/canon owns 'docs/canon/' inside it.
+        others = q("SELECT domain FROM sites WHERE id <> %s", (id,)) or []
+        reserved = [sitebuilder._s3_prefix(str(r["domain"] or "")) for r in others]
+        uploaded, detail = sitebuilder.deploy_to_s3(
+            str(sitebuilder.BUILDS / f"site_{id}"), deploy_cfg or {}, site,
+            reserved_prefixes=[p for p in reserved if p])
         bucket_configured = bool((deploy_cfg or {}).get("bucket") or os.environ.get("MARI_S3_BUCKET"))
         if bucket_configured and not uploaded:
             # A site whose upload failed is not live anywhere. Recording the

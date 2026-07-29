@@ -63,10 +63,26 @@ services:
       # gracefully without it). To use the compose-managed ollama service
       # below instead, change this to http://ollama:11434.
       MARI_OLLAMA_HOST: ${MARI_OLLAMA_HOST:-http://host.docker.internal:11434}
-      # OAuth / S3 credentials come from .env (see .env.example), e.g.:
+      # OAuth credentials come from .env (see .env.example), e.g.:
       # MARI_GITHUB_CLIENT_ID / MARI_GITHUB_CLIENT_SECRET
       # MARI_GOOGLE_CLIENT_ID / MARI_GOOGLE_CLIENT_SECRET
-      # MARI_S3_BUCKET
+      #
+      # Publishing. With a bucket set, Publish uploads the build and the site is
+      # live; without one it builds locally and says so. The distribution is
+      # what makes a deploy visible: skip it and readers keep being served the
+      # previous build from the CDN, which looks like a deploy that failed.
+      MARI_S3_BUCKET: ${MARI_S3_BUCKET:-}
+      MARI_CLOUDFRONT_DISTRIBUTION_ID: ${MARI_CLOUDFRONT_DISTRIBUTION_ID:-}
+      # Credentials come from the standard AWS chain. In production that is the
+      # task or instance role and none of this applies. Locally it is the ~/.aws
+      # mount below, which needs a profile named to pick from it.
+      AWS_PROFILE: ${AWS_PROFILE:-}
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+    volumes:
+      # Local only, read-only: carries the SSO cache boto3 needs to mint
+      # credentials. Nothing is written back, and in production the role
+      # supplies credentials so this mount is unused.
+      - ${HOME}/.aws:/root/.aws:ro
     extra_hosts:
       # Makes host.docker.internal resolve on Linux (no-op on Docker Desktop).
       - host.docker.internal:host-gateway
