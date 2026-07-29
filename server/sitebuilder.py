@@ -104,7 +104,12 @@ FEATURE_DEFAULTS = {"sidebar": True, "search": True, "customizer": True,
 
 DENSITIES = {"comfortable", "compact", "dense"}
 MODES = {"light", "dark"}
-DEFAULT_ACCENT = "#b04e2c"
+# Mari's own brand, and the fallback for any site that has not chosen. It is
+# deliberately NOT "Mari Editorial": that preset is rust on cream, which Mari
+# Cloud does not use. Editorial stays available for customers who want it, but
+# nothing Mari publishes should land on it by omission.
+DEFAULT_PRESET = "Mari Blueprint"
+DEFAULT_ACCENT = "#1e6fa8"
 
 # #rgb / #rgba / #rrggbb / #rrggbbaa, the functional forms with numeric-only
 # arguments, and bare CSS colour keywords. No url(), no var(), no ; or }.
@@ -138,7 +143,7 @@ def _token(value, allowed: set[str], fallback: str) -> str:
 def _safe_preset(preset: dict) -> dict:
     """A preset with every interpolated value validated. Preset rows live in
     site_theme_presets, which an operator edits — same treatment."""
-    base = THEME_PRESETS["Mari Editorial"]
+    base = THEME_PRESETS[DEFAULT_PRESET]
     out = {k: css_color(preset.get(k), base[k]) for k in ("accent", "bg", "card", "ink", "line")}
     out["display"] = css_font(preset.get("display"), base["display"])
     out["serif"] = css_font(preset.get("serif"), base["serif"])
@@ -210,7 +215,7 @@ CUSTOMIZER_JS = """
   var radius = document.getElementById('mc-radius');
   var density = document.getElementById('mc-density');
   var dark = document.getElementById('mc-dark');
-  accent.value = readVar('--accent') || '#b04e2c';
+  accent.value = readVar('--accent') || '#1e6fa8';
   radius.value = parseInt(readVar('--radius')) || 10;
   density.value = document.body.dataset.density || 'comfortable';
   dark.checked = document.body.classList.contains('dark');
@@ -354,8 +359,8 @@ CUSTOMIZER_CSS = """
 
 def _site_css(theme: dict) -> str:
     presets = theme_presets()
-    fallback = presets.get("Mari Editorial") or next(iter(presets.values()))
-    preset_raw = presets.get(theme.get("theme", "Mari Editorial"), fallback)
+    fallback = presets.get(DEFAULT_PRESET) or next(iter(presets.values()))
+    preset_raw = presets.get(theme.get("theme", DEFAULT_PRESET), fallback)
     preset = _safe_preset(preset_raw)
     # A site that has not picked an accent ships its preset's own — which is
     # the swatch the Publish page shows for that preset.
@@ -450,7 +455,7 @@ body.no-sidebar .wrap {{ grid-template-columns: 1fr; }}
 .mari-search-results .msr-empty {{ padding: 10px 12px; font: 13px var(--serif); opacity: 0.65; }}
 .mari-source {{ margin: -6px 0 18px; font: 12px var(--serif); opacity: 0.6; }}
 {CUSTOMIZER_CSS}
-{_blueprint_css() if str(theme.get("theme", "Mari Editorial")) == "Mari Blueprint" else ""}
+{_blueprint_css() if str(theme.get("theme", DEFAULT_PRESET)) == "Mari Blueprint" else ""}
 """
 
 
@@ -902,7 +907,7 @@ def _write_docusaurus_project(work: pathlib.Path, site: dict, docs: list[dict]) 
     # Same accent resolution as the mari generator: the site's own, else the
     # preset's, so switching generators does not silently change the colour.
     presets = theme_presets()
-    preset = presets.get(theme.get("theme", "Mari Editorial")) or {}
+    preset = presets.get(theme.get("theme", DEFAULT_PRESET)) or {}
     # Same validation as the mari generator: this accent lands in a CSS
     # declaration, and sites.theme is user- and LLM-written (AUTH-12).
     accent = css_color(theme.get("accent") or preset.get("accent"), DEFAULT_ACCENT)
