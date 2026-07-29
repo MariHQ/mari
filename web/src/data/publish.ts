@@ -122,6 +122,7 @@ export function mapSite(res: Res, siteId: number | null, features: SiteFeature[]
     .map<NavSection>((n) => ({ label: n.label!, docs: n.docs ?? 0 }));
 
   return {
+    id: site.id,
     name: site.name,
     domain: site.domain,
     // Two states, and only a deployed one is serving anything.
