@@ -19,6 +19,18 @@ cd "$(dirname "$0")"
 
 DB_URL="postgresql://mari:mari@localhost:5432/mari_cloud"
 
+# .env is read by docker compose, and until now by nothing else, so anything
+# configured there was invisible to this script: Publish, for one, would build
+# locally and report no bucket however carefully MARI_S3_BUCKET was set. Load it
+# here too, without overriding a variable already exported in this shell.
+if [ -f .env ]; then
+  while IFS= read -r line; do
+    case "$line" in ''|'#'*) continue;; *=*) ;; *) continue;; esac
+    key=${line%%=*}
+    [ -n "${!key-}" ] || export "$line"
+  done < .env
+fi
+
 echo "==> Postgres (docker)"
 docker compose up -d db >/dev/null
 until docker compose exec -T db pg_isready -U mari -d mari_cloud >/dev/null 2>&1; do sleep 1; done
