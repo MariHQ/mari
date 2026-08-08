@@ -178,13 +178,17 @@ def first_run_check() -> None:
                         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value""",
                      (json.dumps({"hash": hashlib.sha256(token.encode()).hexdigest(),
                                   "minted_at": time.time()}),))
+    # Default the printed URL to the docker compose port: the quick start is
+    # the flow where someone actually reads this banner cold. A dev running
+    # uvicorn + vite (5173) can set auth.app_url, and already knows their port.
+    app_url = config.get("auth", "app_url", "http://localhost:8080").rstrip("/")
     banner = "\n".join([
         "", "=" * 68,
-        "  MARI CLOUD — FIRST-TIME SETUP",
+        "  MARI — FIRST-TIME SETUP",
         "  No admin account exists yet. Open the app and finish setup with",
         "  this one-time admin token (it will not be shown again):",
         "", f"      {token}", "",
-        "  Setup URL: http://localhost:5173/setup", "=" * 68, "",
+        f"  Setup URL: {app_url}/setup", "=" * 68, "",
     ])
     log.warning(banner)
     print(banner, flush=True)
