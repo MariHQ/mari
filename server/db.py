@@ -1,4 +1,4 @@
-"""Mari Cloud — database helpers (shared by all API modules).
+"""Mari — database helpers (shared by all API modules).
 
 DB_URL comes from MARI_DB (default local Postgres); the DB_URL_REF dicts in
 flowengine/auth/repoaudit are injected here so every module talks to the same

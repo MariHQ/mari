@@ -1,4 +1,4 @@
-"""Mari Cloud connector — Linear (stdlib urllib, no deps).
+"""Mari connector — Linear (stdlib urllib, no deps).
 
 Standalone-importable: no imports from server internals. All configuration
 arrives via the `config` dict (api_key). GraphQL POSTs to api.linear.app.

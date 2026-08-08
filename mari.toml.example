@@ -1,4 +1,4 @@
-# Mari Cloud configuration — copy to mari.toml (or set MARI_CONFIG).
+# Mari configuration — copy to mari.toml (or set MARI_CONFIG).
 # Every value can also be set by environment variable (see server/config.py),
 # which is how docker-compose.yml configures the containers.
 

@@ -1,4 +1,4 @@
-"""Mari Cloud — connector REST surface (CONNECTORS-CONTRACT.md).
+"""Mari — connector REST surface (CONNECTORS-CONTRACT.md).
 
 GET  /connectors/catalog   → registry-driven catalog; field SPECS only, never
                              stored values; connected/sourceId from live sources.

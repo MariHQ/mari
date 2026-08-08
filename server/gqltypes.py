@@ -1,4 +1,4 @@
-"""Mari Cloud — GraphQL type definitions.
+"""Mari — GraphQL type definitions.
 
 Dates and timestamps are **ISO 8601 strings**, never pre-formatted for display.
 The console renders every date through the component library's own `fmtDate` /

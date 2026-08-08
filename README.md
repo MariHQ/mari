@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🌿 Mari Cloud
+# 🌿 Mari
 
 **The product knowledge cloud — connect everything your team knows, keep it true, and put it to work.**
 
@@ -12,9 +12,9 @@
 
 ---
 
-## What is Mari Cloud?
+## What is Mari?
 
-Mari Cloud is a self-hosted **product knowledge platform**. It continuously ingests the places your team's knowledge actually lives — GitHub repos, Slack threads, wikis, tickets, docs — into one searchable, verifiable, traceable knowledge base, then puts an **agent** on top of it that can answer questions *and act*: edit documents, tag drift, trigger syncs, run workflows, and walk you around the product.
+Mari is a self-hosted **product knowledge platform**. It continuously ingests the places your team's knowledge actually lives — GitHub repos, Slack threads, wikis, tickets, docs — into one searchable, verifiable, traceable knowledge base, then puts an **agent** on top of it that can answer questions *and act*: edit documents, tag drift, trigger syncs, run workflows, and walk you around the product.
 
 Where a search tool stops at "here are ten links," Mari keeps going:
 
@@ -108,7 +108,7 @@ Connecting is self-serve: pick a provider, fill its credential fields, **Test co
 
 ```sh
 # --recurse-submodules is required: the console's component library is a submodule.
-git clone --recurse-submodules <this repo> && cd mari-cloud
+git clone --recurse-submodules <this repo> && cd mari
 cp .env.example .env          # every value optional — defaults just work
 docker compose up --build
 ```
@@ -146,7 +146,7 @@ Everything is env-driven (`.env.example` documents the full list; env overrides 
 
 ### Desktop app
 
-Mari Cloud is also available as a self-contained Electron app. The installer
+Mari is also available as a self-contained Electron app. The installer
 includes the existing React console, FastAPI service, and a private local
 PostgreSQL + pgvector database. Launching the app starts the whole local stack;
 closing it stops the services, while the workspace data stays on the device.
@@ -283,7 +283,7 @@ Deeper docs: [DESIGN.md](DESIGN.md) (product design), [LINEAGE-DESIGN.md](LINEAG
 
 ## 📄 License
 
-Mari Cloud is licensed under the [Apache License 2.0](LICENSE.md). You can use, modify, and
+Mari is licensed under the [Apache License 2.0](LICENSE.md). You can use, modify, and
 redistribute it, including commercially, as long as you keep the copyright and license notices and
 state what you changed. It carries an explicit patent grant.
 

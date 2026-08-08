@@ -1,4 +1,4 @@
-"""Mari Cloud — LLM-driven brand import.
+"""Mari — LLM-driven brand import.
 
 Given a company/product homepage URL, harvest brand identity deterministically
 (theme-color, manifest, icons, stylesheet colors, fonts) and let the local LLM

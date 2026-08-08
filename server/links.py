@@ -1,4 +1,4 @@
-"""Mari Cloud — document link extraction (LINEAGE-ROLLUP-CONTRACT.md §2).
+"""Mari — document link extraction (LINEAGE-ROLLUP-CONTRACT.md §2).
 
 Three edge rels written into the existing `edges` table:
 

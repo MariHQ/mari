@@ -1,4 +1,4 @@
-"""Mari Cloud — agent chat: a Claude-Code-style agentic loop over Mari's own powers.
+"""Mari — agent chat: a Claude-Code-style agentic loop over Mari's own powers.
 
 POST /agent/chat (SSE). The LLM (gemma3:4b via llm.py) drives a tool loop —
 it replies with one JSON object per step, either {"tool": name, "args": {...}}
@@ -243,7 +243,7 @@ NAV_DESC = ("navigate(path) — route the user's screen to a page. Allowed: /, /
             "/publish, /insights, /library, /settings/sources, /settings/general")
 
 SYSTEM = (
-    "You are Mari, the agent that operates the Mari Cloud knowledge app for the user's team. "
+    "You are Mari, the agent that operates the Mari knowledge app for the user's team. "
     "You act on the user's behalf with their own powers: search and read team knowledge, edit and "
     "tag documents, approve answers, sync sources, run flows, create tasks, and navigate their screen.\n\n"
     "TOOLS:\n"

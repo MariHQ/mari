@@ -1,4 +1,4 @@
-"""Mari Cloud — knowledge mutations: docs, facts, decisions, answers, glossary,
+"""Mari — knowledge mutations: docs, facts, decisions, answers, glossary,
 tags, tasks, lineage, digest, insights, watches."""
 
 from __future__ import annotations

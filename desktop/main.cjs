@@ -19,7 +19,7 @@ let appUrl;
 
 // Keep development and packaged builds on the product's stable data path
 // instead of Electron's package-name-derived default.
-app.setPath("userData", path.join(app.getPath("appData"), "Mari Cloud"));
+app.setPath("userData", path.join(app.getPath("appData"), "Mari"));
 
 function resourcePath(...parts) {
   const root = app.isPackaged ? process.resourcesPath : __dirname;
@@ -114,7 +114,7 @@ function startApi(port, dbPort, setupToken) {
   apiProcess.once("exit", (code) => {
     if (!stackStopping && code !== 0) {
       dialog.showErrorBox(
-        "Mari Cloud stopped",
+        "Mari stopped",
         `The local Mari service exited unexpectedly. Details are in ${path.join(logsDir, "mari-api.log")}.`,
       );
       app.quit();
@@ -226,7 +226,7 @@ function createWindow() {
     minWidth: 900,
     minHeight: 640,
     show: false,
-    title: "Mari Cloud",
+    title: "Mari",
     backgroundColor: "#f5ead4",
     webPreferences: {
       contextIsolation: true,
@@ -258,7 +258,7 @@ if (!app.requestSingleInstanceLock()) {
       await mainWindow.loadURL(await startStack());
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
-      dialog.showErrorBox("Mari Cloud could not start", detail);
+      dialog.showErrorBox("Mari could not start", detail);
       app.quit();
     }
     app.on("activate", () => {

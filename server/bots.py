@@ -1,4 +1,4 @@
-"""Mari Cloud bots — Slack bot + GitHub webhook self-serve (BOTS-CONTRACT.md §B).
+"""Mari bots — Slack bot + GitHub webhook self-serve (BOTS-CONTRACT.md §B).
 
 Routes (APIRouter, included from app.py):
   GET  /bots/slack/manifest   Slack app manifest YAML with this deployment's URLs

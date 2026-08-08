@@ -1,4 +1,4 @@
-"""Mari Cloud — repository audit engine (DESIGN.md §20, FLOWS-DESIGN.md).
+"""Mari — repository audit engine (DESIGN.md §20, FLOWS-DESIGN.md).
 
 Scans the connected GitHub repo (sources with kind='github') for markdown
 docs, localization variants, git authorship, and tag coverage. Findings land in

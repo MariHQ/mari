@@ -1,4 +1,4 @@
--- Mari Cloud — complete database schema (idempotent).
+-- Mari — complete database schema (idempotent).
 --
 -- Single source of truth for the schema: safe to run any number of times,
 -- via `psql -f init.sql` and at server startup (db.ensure_schema()).

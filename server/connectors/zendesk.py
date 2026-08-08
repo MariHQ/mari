@@ -1,4 +1,4 @@
-"""Mari Cloud connector — Zendesk Help Center (stdlib urllib, no deps).
+"""Mari connector — Zendesk Help Center (stdlib urllib, no deps).
 
 Standalone-importable: no imports from server internals. All configuration
 arrives via the `config` dict (subdomain, email, api_token). Syncs Help

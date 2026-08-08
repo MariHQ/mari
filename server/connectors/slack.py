@@ -1,4 +1,4 @@
-"""Mari Cloud connector — Slack channel-history import (stdlib urllib, no deps).
+"""Mari connector — Slack channel-history import (stdlib urllib, no deps).
 
 Bot-token import of public-channel history. Messages are grouped into one Item
 per channel per day: path "slack/<channel>/<YYYY-MM-DD>", body lines

@@ -1,4 +1,4 @@
-"""Mari Cloud — real GitHub ingestion pipeline (GITHUB-SYNC-CONTRACT.md).
+"""Mari — real GitHub ingestion pipeline (GITHUB-SYNC-CONTRACT.md).
 
 Diff-based sync per source, run on a daemon thread (model: flowengine.start_run):
 tree at HEAD → path filter → blob-sha diff → fetch only changed files → upsert

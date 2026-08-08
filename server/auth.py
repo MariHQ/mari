@@ -1,4 +1,4 @@
-"""Mari Cloud — authentication (DESIGN.md §3).
+"""Mari — authentication (DESIGN.md §3).
 
 Email/password (scrypt, stdlib), GitHub/Google OAuth (when configured in
 mari.toml), cookie sessions, and first-run setup: when no account can log in,
@@ -262,7 +262,7 @@ def _create_session(user_id: int, response: Response, request: Request | None = 
         # Every sign-in path funnels through here, so the access log records
         # them all — with the client detail the expanded row shows.
         conn.execute("""INSERT INTO events (actor, verb, target, detail)
-                        SELECT name, %s, 'Mari Cloud', %s FROM users WHERE id = %s""",
+                        SELECT name, %s, 'Mari', %s FROM users WHERE id = %s""",
                      (verb, json.dumps(_client_detail(request)), user_id))
     _set_session_cookie(response, token, request, max_age=ttl)
     return token
@@ -536,7 +536,7 @@ def register(body: Credentials, request: Request, response: Response):
                          (_hash(body.password), invited["id"]))
             user = conn.execute("SELECT * FROM users WHERE id = %s", (invited["id"],)).fetchone()
             conn.execute("""INSERT INTO events (actor, verb, target, detail)
-                            VALUES (%s, 'claimed an invitation', 'Mari Cloud', %s)""",
+                            VALUES (%s, 'claimed an invitation', 'Mari', %s)""",
                          (user["name"], json.dumps(_client_detail(request))))
         else:
             if not config.get("auth", "registration_enabled", False):

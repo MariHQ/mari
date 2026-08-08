@@ -1,4 +1,4 @@
-# Contributing to Mari Cloud
+# Contributing to Mari
 
 Thanks for taking the time to contribute. This guide covers how to get the project
 running, what we expect from a change, and how to sign your commits off.

@@ -1,4 +1,4 @@
-"""Mari Cloud — GraphQL Query root, hybrid search, and lineage layout.
+"""Mari — GraphQL Query root, hybrid search, and lineage layout.
 
 DESIGN.md §4–§5: hybrid search = tsvector rank + pgvector cosine, boosted by
 tag weights (tag_definitions.search_weight).

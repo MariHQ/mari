@@ -1,4 +1,4 @@
-# Mari Cloud web — Vite build, served by nginx with API proxying.
+# Mari web — Vite build, served by nginx with API proxying.
 #
 # Build context is the REPOSITORY ROOT, not web/, because the app compiles
 # against the component library in the vendor/mari-design submodule:

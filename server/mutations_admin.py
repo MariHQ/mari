@@ -1,4 +1,4 @@
-"""Mari Cloud — admin mutations: members, API keys, settings, sources, sync, repo audit."""
+"""Mari — admin mutations: members, API keys, settings, sources, sync, repo audit."""
 
 from __future__ import annotations
 

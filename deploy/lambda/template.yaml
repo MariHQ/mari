@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: "2010-09-09"
-Description: Mari Cloud single-container Lambda with ephemeral embedded PostgreSQL
+Description: Mari single-container Lambda with ephemeral embedded PostgreSQL
 
 Parameters:
   ImageUri:
@@ -31,7 +31,7 @@ Resources:
     Type: AWS::Lambda::Function
     Properties:
       FunctionName: mari-cloud
-      Description: Mari Cloud web, API, and ephemeral embedded PostgreSQL
+      Description: Mari web, API, and ephemeral embedded PostgreSQL
       PackageType: Image
       Code:
         ImageUri: !Ref ImageUri

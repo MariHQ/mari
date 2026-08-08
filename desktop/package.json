@@ -1,8 +1,8 @@
 {
   "name": "mari-cloud-desktop",
   "version": "0.0.1",
-  "description": "Mari Cloud desktop client",
-  "desktopName": "Mari Cloud",
+  "description": "Mari desktop client",
+  "desktopName": "Mari",
   "main": "main.cjs",
   "homepage": "https://github.com/MariHQ/mari",
   "author": {
@@ -24,7 +24,7 @@
   },
   "build": {
     "appId": "cloud.mari.desktop",
-    "productName": "Mari Cloud",
+    "productName": "Mari",
     "artifactName": "${productName}-${version}-${os}-${arch}.${ext}",
     "files": [
       "main.cjs"

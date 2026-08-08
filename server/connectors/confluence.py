@@ -1,4 +1,4 @@
-"""Mari Cloud connector — Confluence Cloud (stdlib urllib, no deps).
+"""Mari connector — Confluence Cloud (stdlib urllib, no deps).
 
 Standalone-importable: no imports from server internals. All configuration
 arrives via the `config` dict (site_url, email, api_token, space_key).

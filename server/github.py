@@ -1,4 +1,4 @@
-"""Mari Cloud — minimal GitHub REST v3 client (stdlib urllib, no deps).
+"""Mari — minimal GitHub REST v3 client (stdlib urllib, no deps).
 
 Token comes from config (github.token / MARI_GITHUB_TOKEN). Every helper
 raises GithubError with a safe message (never the token) on failure; callers

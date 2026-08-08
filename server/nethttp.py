@@ -1,4 +1,4 @@
-"""Mari Cloud — the one SSRF-guarded outbound HTTP client.
+"""Mari — the one SSRF-guarded outbound HTTP client.
 
 Every request this server makes to a host a *user* named — connector site URLs,
 Zendesk subdomains, brand-import homepages, crawled websites — goes through

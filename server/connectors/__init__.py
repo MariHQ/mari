@@ -1,4 +1,4 @@
-"""Mari Cloud — connector provider registry.
+"""Mari — connector provider registry.
 
 Every provider is one sibling module exposing PROVIDER (dict), validate(config)
 and list_items(config, cursor) per CONNECTORS-CONTRACT.md. This package

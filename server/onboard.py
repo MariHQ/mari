@@ -1,4 +1,4 @@
-"""Mari Cloud — onboarding endpoints (file upload ingestion + glossary harvest).
+"""Mari — onboarding endpoints (file upload ingestion + glossary harvest).
 
 POST /onboard/upload            multipart .md/.mdx/.markdown/.txt files → the same
                                 document→chunk→hash→embed pipeline GitHub sync uses

@@ -1,4 +1,4 @@
-"""Mari Cloud connector — website crawler (same-origin, SSRF-guarded).
+"""Mari connector — website crawler (same-origin, SSRF-guarded).
 
 Crawls a public site from a start URL: sitemap.xml when present, otherwise a
 same-origin BFS over links. HTML is reduced to markdown-ish text (headings

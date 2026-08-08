@@ -1,4 +1,4 @@
-"""Mari Cloud — publishing mutations: sites, releases, MCP servers, workflows."""
+"""Mari — publishing mutations: sites, releases, MCP servers, workflows."""
 
 from __future__ import annotations
 

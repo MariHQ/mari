@@ -1,4 +1,4 @@
-"""Mari Cloud — static doc-site builder (DESIGN.md §16).
+"""Mari — static doc-site builder (DESIGN.md §16).
 
 Builds a real static website from documents in Postgres, themed by the site's
 config, with an injected customizer widget. Output: server/builds/site_<id>/.
@@ -105,8 +105,8 @@ FEATURE_DEFAULTS = {"sidebar": True, "search": True, "customizer": True,
 DENSITIES = {"comfortable", "compact", "dense"}
 MODES = {"light", "dark"}
 # Mari's own brand, and the fallback for any site that has not chosen. It is
-# deliberately NOT "Mari Editorial": that preset is rust on cream, which Mari
-# Cloud does not use. Editorial stays available for customers who want it, but
+# deliberately NOT "Mari Editorial": that preset is rust on cream, which
+# Mari does not use. Editorial stays available for customers who want it, but
 # nothing Mari publishes should land on it by omission.
 DEFAULT_PRESET = "Mari Blueprint"
 DEFAULT_ACCENT = "#1e6fa8"
@@ -207,7 +207,7 @@ CUSTOMIZER_JS = """
     '<label>Density <select id="mc-density"><option>comfortable</option><option>compact</option><option>dense</option></select></label>' +
     '<label class="mc-row"><input type="checkbox" id="mc-dark"> Dark mode</label>' +
     '<div class="mc-actions"><button id="mc-save">Save to Mari</button><span id="mc-status"></span></div>' +
-    '<p class="mc-note">Changes preview instantly. Save writes the theme back to Mari Cloud; the next deploy ships it.</p>';
+    '<p class="mc-note">Changes preview instantly. Save writes the theme back to Mari; the next deploy ships it.</p>';
   document.body.appendChild(panel);
   var root = document.documentElement;
   function readVar(n) { return getComputedStyle(root).getPropertyValue(n).trim(); }
@@ -819,7 +819,7 @@ def build_mari_site(site: dict, docs: list[dict]) -> str:
                     else f'<div class="mari-pages">{editions_html}{search_html}{nav}</div>')
         source = (f'<p class="mari-source">Source: {html_mod.escape(page["source_path"])}</p>'
                   if feat["source_path"] and page.get("source_path") else "")
-        footer = (f"<footer>Published with Mari Cloud · {html_mod.escape(site['domain'])} · "
+        footer = (f"<footer>Published with Mari · {html_mod.escape(site['domain'])} · "
                   "every fact on this page traces to a verified source</footer>") if feat["provenance"] else ""
         scripts = '<script src="nightmode.js"></script>' + \
                   ('<script src="search.js"></script>' if feat["search"] else "") + \
@@ -947,7 +947,7 @@ def _write_docusaurus_project(work: pathlib.Path, site: dict, docs: list[dict]) 
 
     config = {
         "title": site["name"],
-        "tagline": f"Published with Mari Cloud · {site['domain']}",
+        "tagline": f"Published with Mari · {site['domain']}",
         "url": "http://localhost:8000",
         "baseUrl": base_url,
         "onBrokenLinks": "warn",
@@ -965,7 +965,7 @@ def _write_docusaurus_project(work: pathlib.Path, site: dict, docs: list[dict]) 
                        "items": [{"to": "/", "label": "Docs", "position": "left"}]},
             "colorMode": {"defaultMode": mode if mode in ("light", "dark") else "light"},
             "footer": {"style": "dark",
-                       "copyright": f"Published with Mari Cloud · {site['domain']} · "
+                       "copyright": f"Published with Mari · {site['domain']} · "
                                     "every fact on this page traces to a verified source"},
         },
         "markdown": {"format": "md"},

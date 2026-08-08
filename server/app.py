@@ -1,4 +1,4 @@
-"""Mari Cloud API — FastAPI + Strawberry GraphQL over local Postgres.
+"""Mari API — FastAPI + Strawberry GraphQL over local Postgres.
 
 Setup (idempotent):  createdb mari_cloud; psql mari_cloud -f init.sql
 Backfill:            python backfill.py         (embeds documents via ollama)
@@ -64,7 +64,7 @@ def graphql_context(request: Request) -> dict[str, t.Any]:
     return {"user": user, "request": request}
 
 
-app = FastAPI(title="Mari Cloud API")
+app = FastAPI(title="Mari API")
 # Resolve who is calling once, for the whole request, so every write can record
 # the real actor (AUTH-5) instead of a hardcoded name. Added before CORS so it
 # sits INSIDE it (Starlette makes the last-added middleware outermost) — a CORS

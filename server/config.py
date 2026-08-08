@@ -1,4 +1,4 @@
-"""Mari Cloud — configuration (DESIGN.md §24).
+"""Mari — configuration (DESIGN.md §24).
 
 Reads mari.toml (path from MARI_CONFIG, default ./mari.toml or ../mari.toml),
 then lets environment variables override. Everything a cloud deployment needs

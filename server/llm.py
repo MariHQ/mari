@@ -1,4 +1,4 @@
-"""Mari Cloud — the model client: embeddings, generation, chat streaming.
+"""Mari — the model client: embeddings, generation, chat streaming.
 
 DESIGN.md §5/§10: the embedding model and the LLM are configurable. This module
 now actually reads that configuration.

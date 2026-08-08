@@ -1,4 +1,4 @@
-"""Mari Cloud — generic connector sync worker (CONNECTORS-CONTRACT.md).
+"""Mari — generic connector sync worker (CONNECTORS-CONTRACT.md).
 
 One worker for every kind='connector' source: validate() → list_items(config,
 cursor) → upsert documents (source_path = f"{provider}/{path}") → chunk +

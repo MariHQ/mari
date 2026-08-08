@@ -1,4 +1,4 @@
-"""Mari Cloud — flow execution engine (FLOWS-DESIGN.md).
+"""Mari — flow execution engine (FLOWS-DESIGN.md).
 
 Executes a workflow's step pipeline for real: each step maps to an existing
 platform primitive (hybrid search, LLM refine, fact check, tagging, link

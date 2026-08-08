@@ -1,4 +1,4 @@
-"""Mari Cloud connector — Notion pages import (stdlib urllib, no deps).
+"""Mari connector — Notion pages import (stdlib urllib, no deps).
 
 Internal-integration token. list_items walks POST /v1/search (pages, sorted by
 last_edited_time descending) and stops at the cursor timestamp; per page the

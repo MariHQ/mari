@@ -1,4 +1,4 @@
-# Mari Cloud API — FastAPI + psycopg + pgvector client.
+# Mari API — FastAPI + psycopg + pgvector client.
 # Build context is the REPO ROOT (see docker-compose.yml), not server/.
 FROM python:3.12-slim
 

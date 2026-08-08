@@ -1,4 +1,4 @@
-# Mari Cloud — one-command deploy: `cp .env.example .env && docker compose up --build`
+# Mari — one-command deploy: `cp .env.example .env && docker compose up --build`
 # Web UI on http://localhost:8080. First-run admin token: `docker compose logs api`.
 
 services:
