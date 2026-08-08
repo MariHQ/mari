@@ -99,6 +99,16 @@ init scripts are re-run on every deploy.
 - **Frozen contracts stay frozen.** The `*-CONTRACT.md` files describe integration
   boundaries; changing one is a deliberate, separately discussed step.
 
+## Adding a connector
+
+New source connectors are one of the friendliest ways in. Each connector is a
+single module in `server/connectors/` that the registry discovers automatically,
+so there is no wiring to add. The full specification, with a checklist, is
+[server/CONNECTORS-CONTRACT.md](server/CONNECTORS-CONTRACT.md); copy a small
+existing module like `connectors/trello.py` and make it satisfy the contract.
+The short version: expose `PROVIDER`, `validate`, and `list_items`, route every
+HTTP call through `_net.fetch`, and keep the sync incremental with a cursor.
+
 ## Commit messages
 
 Write a short imperative subject line (under ~72 characters) describing what the
