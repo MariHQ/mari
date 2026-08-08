@@ -24,7 +24,7 @@ from mutations_admin import _require_admin
 # aiCustomizeSite, which writes LLM output straight into a template variable —
 # a prompt-injected document could otherwise choose the accent colour.
 
-THEME_KEYS = ("theme", "accent", "radius", "density", "mode")
+THEME_KEYS = ("theme", "accent", "radius", "density", "mode", "masthead")
 
 
 def _next_version(site_id: int) -> str:
@@ -84,6 +84,15 @@ def _clean_theme(theme) -> tuple[dict, list[str]]:
                 out[key] = value
             else:
                 bad.append(f"mode '{value}' is not light or dark")
+        elif key == "masthead":
+            # Display text for the header and <title>, so sibling edition
+            # sites can share one masthead while sites.name stays unique.
+            # Plain text only; the generator escapes it on interpolation.
+            text = str(value or "").strip()
+            if 0 < len(text) <= 60:
+                out[key] = text
+            else:
+                bad.append("masthead must be 1-60 characters of plain text")
     return out, bad
 
 

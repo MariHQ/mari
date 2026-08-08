@@ -737,6 +737,17 @@ def build_site(site: dict, docs: list[dict], generator: str = "mari") -> str:
     return build_mari_site(site, docs)
 
 
+def display_name(site: dict) -> str:
+    """The text the header and <title> carry. theme.masthead overrides the
+    site's unique name so sibling edition sites can share one masthead; it is
+    display text only — identity (Publish page, releases, S3 prefix) stays on
+    sites.name. Validated on write in mutations_publish, re-checked here
+    because a row may predate that check."""
+    theme = site.get("theme") if isinstance(site.get("theme"), dict) else {}
+    text = str((theme or {}).get("masthead") or "").strip()
+    return text if 0 < len(text) <= 60 else str(site["name"])
+
+
 def build_mari_site(site: dict, docs: list[dict]) -> str:
     """Build the static site; returns the build directory path."""
     theme = site["theme"] if isinstance(site["theme"], dict) else {}
@@ -777,7 +788,7 @@ def build_mari_site(site: dict, docs: list[dict]) -> str:
     # escaping on interpolation below is the belt (AUTH-12).
     mode = _token(theme.get("mode"), MODES, "light")
     density = _token(theme.get("density"), DENSITIES, "comfortable")
-    name_esc = html_mod.escape(str(site["name"]))
+    name_esc = html_mod.escape(display_name(site))
     search_html = ('<div class="mari-search-block"><input class="mari-search" type="search" '
                    'placeholder="Search docs…" aria-label="Search docs"></div>') if feat["search"] else ""
     editions_html = _editions_html(site)
@@ -834,7 +845,7 @@ def build_mari_site(site: dict, docs: list[dict]) -> str:
 {site_id_js}</head>
 <body class="{html_mod.escape(body_class, quote=True)}" data-density="{html_mod.escape(density, quote=True)}">
 <div class="wrap">
-<header><span class="logo">{MARK_SVG}{html_mod.escape(site['name'].upper())}</span>
+<header><span class="logo">{MARK_SVG}{html_mod.escape(display_name(site).upper())}</span>
 <nav>{header_nav}</nav></header>
 {aside}
 <main>{main_nav}<h1>{title_esc}</h1>{source}{body_html}</main>
@@ -851,7 +862,7 @@ def build_mari_site(site: dict, docs: list[dict]) -> str:
         index["body"] = re.sub(r"^#\s+.*\n", "", index["body"], count=1)
         (out / "index.html").write_text(render(index, pages[0]["slug"]))
     else:
-        (out / "index.html").write_text(render({"slug": "index", "title": site["name"], "body": "No documents matched this site's sources yet."}, "index"))
+        (out / "index.html").write_text(render({"slug": "index", "title": display_name(site), "body": "No documents matched this site's sources yet."}, "index"))
     return str(out)
 
 
@@ -946,7 +957,7 @@ def _write_docusaurus_project(work: pathlib.Path, site: dict, docs: list[dict]) 
         nm.symlink_to(TEMPLATE_DIR / "node_modules")
 
     config = {
-        "title": site["name"],
+        "title": display_name(site),
         "tagline": f"Published with Mari · {site['domain']}",
         "url": "http://localhost:8000",
         "baseUrl": base_url,
@@ -961,7 +972,7 @@ def _write_docusaurus_project(work: pathlib.Path, site: dict, docs: list[dict]) 
             "theme": {"customCss": "./src/css/custom.css"},
         }]],
         "themeConfig": {
-            "navbar": {"title": site["name"],
+            "navbar": {"title": display_name(site),
                        "items": [{"to": "/", "label": "Docs", "position": "left"}]},
             "colorMode": {"defaultMode": mode if mode in ("light", "dark") else "light"},
             "footer": {"style": "dark",
@@ -983,7 +994,7 @@ def _write_docusaurus_project(work: pathlib.Path, site: dict, docs: list[dict]) 
     docs_dir = work / "docs"
     shutil.rmtree(docs_dir, ignore_errors=True)
     docs_dir.mkdir()
-    raw_pages = docs or [{"title": site["name"], "body": "No documents matched this site's sources yet.", "snippet": ""}]
+    raw_pages = docs or [{"title": display_name(site), "body": "No documents matched this site's sources yet.", "snippet": ""}]
     pages = _slugify_pages(raw_pages)
     link_index = _link_index(pages)
     first_slug = pages[0]["slug"] if pages else None
