@@ -1,0 +1,63 @@
+name: Bug report
+description: Something works differently than you expected.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. The more concrete the repro, the faster this gets fixed.
+        For security issues, do not file here. See our [security policy](https://github.com/MariHQ/mari/security/policy).
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you expected, and what you got instead.
+      placeholder: I expected X. Instead, Y.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: The smallest set of steps that triggers it.
+      placeholder: |
+        1. Connect a GitHub source
+        2. Run a sync
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Paste the log output verbatim. This is rendered as code, so no backticks needed.
+      render: text
+    validations:
+      required: false
+  - type: input
+    id: postgres
+    attributes:
+      label: Postgres version
+      description: Output of "psql --version".
+      placeholder: "16.2"
+    validations:
+      required: true
+  - type: dropdown
+    id: ollama
+    attributes:
+      label: Was ollama running?
+      description: Every LLM feature has a deterministic fallback, so this narrows things down.
+      options:
+        - "Yes"
+        - "No"
+        - "Not sure"
+    validations:
+      required: true
+  - type: input
+    id: install
+    attributes:
+      label: How are you running Mari?
+      description: Docker compose, a local dev setup, the desktop app, or a hosted instance.
+      placeholder: docker compose (quick start)
+    validations:
+      required: false
