@@ -250,7 +250,7 @@ async def github_webhook(request: "Request"):
 def healthz() -> dict[str, t.Any]:
     docs = q("SELECT count(*) AS n FROM documents")[0]["n"]
     embedded = q("SELECT count(*) AS n FROM documents WHERE embedding IS NOT NULL")[0]["n"]
-    return {"ok": True, "service": "mari-cloud-api", "documents": docs, "embedded": embedded}
+    return {"ok": True, "service": "mari-api", "documents": docs, "embedded": embedded}
 
 
 # In the Lambda container the API also serves the compiled React application.
