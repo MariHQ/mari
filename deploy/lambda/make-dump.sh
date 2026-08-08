@@ -51,7 +51,10 @@ docker compose exec -T db pg_restore -U mari -d "$WORK" --no-owner --no-privileg
 echo "==> remove credential material"
 psql_ -d "$WORK" -v ON_ERROR_STOP=1 <<'SQL'
 TRUNCATE sessions;
-DELETE FROM magic_links;
+-- magic_links is created lazily (auth.py, on the first mint), so a workspace
+-- that never sent one has no table. DROP IF EXISTS covers both cases and is
+-- the stronger scrub for a public image; the server recreates it on demand.
+DROP TABLE IF EXISTS magic_links;
 UPDATE users SET password_hash = '';
 UPDATE settings
    SET value = jsonb_set(value, '{keys}', '{"openai": "", "anthropic": ""}'::jsonb)
@@ -66,7 +69,9 @@ DO $$
 DECLARE bad int;
 BEGIN
   SELECT (SELECT count(*) FROM sessions)
-       + (SELECT count(*) FROM magic_links)
+       -- the scrub DROPs magic_links; any surviving table is a failure
+       + (SELECT count(*) FROM pg_tables
+           WHERE schemaname = 'public' AND tablename = 'magic_links')
        + (SELECT count(*) FROM users WHERE password_hash <> '')
     INTO bad;
   IF bad <> 0 THEN
