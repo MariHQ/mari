@@ -396,6 +396,18 @@ def agent_events(session_id: int, message: str) -> t.Iterator[str]:
         name = str(parsed.get("tool", ""))
         args = parsed.get("args") if isinstance(parsed.get("args"), dict) else {}
 
+        # Small models sometimes phrase the finish as a tool call named
+        # "answer" instead of the bare {"answer": ...} the protocol asks for.
+        # The intent is unambiguous — take it as the final answer rather than
+        # rendering a red "unknown tool" row over a perfectly good reply.
+        if name == "answer":
+            final = str(
+                args.get("body") or args.get("text") or args.get("answer")
+                or args.get("content") or ""
+            ).strip()
+            if final:
+                break
+
         if force_answer:  # last step asked for a tool anyway — wrap up ourselves
             break
 

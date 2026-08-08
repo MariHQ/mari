@@ -9,6 +9,7 @@ import { useChrome } from "./data/chrome";
 import { SEARCH_SCOPES, globalSearch } from "./data/search";
 import { ACTION_FACTORIES } from "./data/actions";
 import { AuthProvider, useAuth } from "./lib/auth";
+import { AgentDock } from "./components/AgentDock";
 import { useIsMobile } from "./lib/mobile";
 
 /* The whole console, routed off the component library's own page registry.
@@ -168,6 +169,11 @@ function Routed() {
             missing. */}
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
+      {/* The agent dock floats over every routed page and survives route
+          changes — which is the point: the agent's navigate events move the
+          SPA underneath it while the conversation stays open. Renders nothing
+          until there is a session. */}
+      <AgentDock />
     </NavProvider>
   );
 }
