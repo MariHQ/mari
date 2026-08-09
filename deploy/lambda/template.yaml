@@ -9,6 +9,17 @@ Parameters:
   DomainName:
     Type: String
     Default: cloud.mari.guru
+  # Demo model wiring (optional). LlmDefault is a provider:model ref the boot
+  # script pins into settings.llm, e.g. anthropic:claude-haiku-4-5-20251001.
+  # Empty means no pinning: the dump's self-hosted default (ollama) stands and
+  # the dock answers through the deterministic fallback.
+  LlmDefault:
+    Type: String
+    Default: ""
+  LlmKey:
+    Type: String
+    Default: ""
+    NoEcho: true
 
 Resources:
   LambdaRole:
@@ -48,6 +59,8 @@ Resources:
           MARI_OLLAMA_HOST: http://127.0.0.1:11434
           MARI_PGDATA: /tmp/mari/pgdata
           MARI_BUILDS_DIR: /tmp/mari/builds
+          MARI_LLM_DEFAULT: !Ref LlmDefault
+          MARI_LLM_KEY: !Ref LlmKey
       Tags:
         - Key: Project
           Value: mari-cloud

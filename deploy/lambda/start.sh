@@ -23,6 +23,26 @@ if [[ "$FIRST_START" == "1" ]]; then
   pg_restore -h 127.0.0.1 -U postgres -d mari_cloud --no-owner --no-privileges /app/mari_cloud.dump
 fi
 
+# Demo model wiring: the dump ships settings.llm with the self-hosted default
+# (provider ollama), and this image carries no ollama, so without intervention
+# the dock answers only through the deterministic fallback. When the stack
+# names a model, pin the settings row to it. Idempotent, runs every boot, and
+# an empty MARI_LLM_DEFAULT leaves the row exactly as the dump restored it.
+if [[ -n "${MARI_LLM_DEFAULT:-}" ]]; then
+  LLM_PROVIDER="${MARI_LLM_DEFAULT%%:*}"
+  LLM_MODEL="${MARI_LLM_DEFAULT#*:}"
+  psql -h 127.0.0.1 -U postgres -d mari_cloud -q \
+    -v prov="$LLM_PROVIDER" -v model="$LLM_MODEL" -v key="${MARI_LLM_KEY:-}" <<'SQL'
+INSERT INTO settings (key, value)
+VALUES ('llm', jsonb_build_object(
+  'provider', :'prov'::text,
+  'model',    :'model'::text,
+  'keys',     jsonb_build_object(:'prov'::text, :'key'::text)))
+ON CONFLICT (key) DO UPDATE
+  SET value = settings.value || EXCLUDED.value;
+SQL
+fi
+
 shutdown() {
   if [[ -n "${API_PID:-}" ]]; then
     kill -TERM "$API_PID" 2>/dev/null || true
