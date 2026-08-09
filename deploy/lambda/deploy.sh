@@ -77,10 +77,18 @@ docker buildx build \
   .
 
 echo "==> Release (stack update, NOT update-function-code)"
+# Demo model wiring: pass LlmDefault/LlmKey only when set in the environment.
+# cloudformation deploy keeps a parameter's previous stack value when it is
+# omitted from --parameter-overrides, so a release without these env vars
+# leaves the running model configuration untouched.
+EXTRA_PARAMS=()
+[ -n "${MARI_LLM_DEFAULT:-}" ] && EXTRA_PARAMS+=("LlmDefault=$MARI_LLM_DEFAULT")
+[ -n "${MARI_LLM_KEY:-}" ] && EXTRA_PARAMS+=("LlmKey=$MARI_LLM_KEY")
 aws cloudformation deploy \
   --template-file deploy/lambda/template.yaml \
   --stack-name "$STACK" \
   --parameter-overrides "ImageUri=$IMAGE" "HostedZoneId=$ZONE" "DomainName=$DOMAIN" \
+    ${EXTRA_PARAMS[@]+"${EXTRA_PARAMS[@]}"} \
   --capabilities CAPABILITY_IAM \
   --region "$REGION"
 
