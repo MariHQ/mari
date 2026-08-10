@@ -84,6 +84,8 @@ echo "==> Release (stack update, NOT update-function-code)"
 EXTRA_PARAMS=()
 [ -n "${MARI_LLM_DEFAULT:-}" ] && EXTRA_PARAMS+=("LlmDefault=$MARI_LLM_DEFAULT")
 [ -n "${MARI_LLM_KEY:-}" ] && EXTRA_PARAMS+=("LlmKey=$MARI_LLM_KEY")
+[ -n "${MARI_SESSION_SECRET:-}" ] && EXTRA_PARAMS+=("SessionSecret=$MARI_SESSION_SECRET")
+[ -n "${MARI_SEED_ADMINS:-}" ] && EXTRA_PARAMS+=("SeedAdmins=$MARI_SEED_ADMINS")
 aws cloudformation deploy \
   --template-file deploy/lambda/template.yaml \
   --stack-name "$STACK" \

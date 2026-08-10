@@ -24,6 +24,12 @@ _DEFAULTS: dict[str, t.Any] = {
         # default, it is an outage waiting for someone to find the port. Turn
         # it on deliberately with MARI_AUTH_BYPASS=true for demo instances.
         "bypass_enabled": False,
+        # When set, session cookies are HMAC-signed statements verified against
+        # this secret instead of rows looked up in the database. For deployments
+        # whose instances do not share a database (deploy/lambda) — anywhere
+        # with a shared database should leave it unset and keep row-backed
+        # sessions, which can actually be revoked.
+        "session_secret": "",
         # Open sign-up. Off by default: an account is all the GraphQL surface
         # asks for, so a workspace is invite-only until it says otherwise.
         # Invited members can always register — see POST /auth/register.
@@ -80,6 +86,7 @@ def _load() -> dict:
         "MARI_GOOGLE_CLIENT_SECRET": ("auth", "google_client_secret"),
         "MARI_OAUTH_REDIRECT_BASE": ("auth", "oauth_redirect_base"),
         "MARI_AUTH_BYPASS": ("auth", "bypass_enabled"),
+        "MARI_SESSION_SECRET": ("auth", "session_secret"),
         "MARI_AUTH_REGISTRATION": ("auth", "registration_enabled"),
         "MARI_CORS_ORIGINS": ("server", "cors_origins"),
         "MARI_GITHUB_TOKEN": ("github", "token"),

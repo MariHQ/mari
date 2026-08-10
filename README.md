@@ -142,6 +142,7 @@ Everything is env-driven (`.env.example` documents the full list; env overrides 
 | `MARI_S3_BUCKET` | S3 site publishing |
 | `MARI_AUTH_BYPASS` | One-click demo login, off unless you set it to `true`. It signs anyone who can reach the port in as the workspace admin, with no credential — turn it on only for throwaway demo instances. The server logs a warning at startup while it is on |
 | `MARI_AUTH_REGISTRATION` | Open sign-up (default off — the workspace is invite-only). Invited people can always register whether or not this is set |
+| `MARI_SESSION_SECRET` | Switches session cookies to HMAC-signed tokens verified against this secret, for deployments whose instances don't share a database (the Lambda demo). Leave unset anywhere with a shared database — row-backed sessions can actually be revoked |
 | `MARI_CRAWL_ALLOW_LOOPBACK` | Allow the website connector to crawl localhost (dev only) |
 
 ### Desktop app

@@ -20,6 +20,19 @@ Parameters:
     Type: String
     Default: ""
     NoEcho: true
+  # Founders-only sign-in. SessionSecret makes session cookies verifiable on
+  # every execution environment (each runs its own restored Postgres, so
+  # row-backed sessions cannot cross instances). SeedAdmins is the JSON array
+  # start.sh upserts at boot — the only accounts that can sign in. Empty keeps
+  # each parameter's previous stack value out of the picture entirely.
+  SessionSecret:
+    Type: String
+    Default: ""
+    NoEcho: true
+  SeedAdmins:
+    Type: String
+    Default: ""
+    NoEcho: true
 
 Resources:
   LambdaRole:
@@ -55,7 +68,8 @@ Resources:
         Size: 512
       Environment:
         Variables:
-          MARI_AUTH_BYPASS: "true"
+          MARI_SESSION_SECRET: !Ref SessionSecret
+          MARI_SEED_ADMINS: !Ref SeedAdmins
           MARI_OLLAMA_HOST: http://127.0.0.1:11434
           MARI_PGDATA: /tmp/mari/pgdata
           MARI_BUILDS_DIR: /tmp/mari/builds

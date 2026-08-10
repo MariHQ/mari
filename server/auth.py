@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import contextvars
 import hashlib
+import hmac
 import json
 import logging
 import os
@@ -251,12 +252,53 @@ def _client_detail(request: Request | None) -> list[dict]:
             {"label": "User agent", "value": (request.headers.get("User-Agent") or "unknown")[:200]}]
 
 
+# ————— stateless signed sessions —————
+#
+# deploy/lambda runs one embedded Postgres per execution environment, restored
+# from a dump, so a session ROW minted by one instance does not exist for the
+# next. When auth.session_secret is set, the cookie value is instead an
+# HMAC-signed statement — "user <id> until <expiry>" — that any instance
+# holding the same secret verifies without a lookup. The trade is revocation:
+# signing out clears the browser's cookie, but a copied token stays valid
+# until it expires. Deployments whose instances share a database should leave
+# the secret unset and keep row-backed sessions, which revoke for real.
+
+def _session_secret() -> str:
+    return str(config.get("auth", "session_secret", "") or "")
+
+
+def _signed_token(user_id: int, ttl_seconds: int) -> str:
+    payload = f"s1.{user_id}.{int(time.time()) + ttl_seconds}"
+    sig = hmac.new(_session_secret().encode(), payload.encode(), hashlib.sha256).hexdigest()
+    return f"{payload}.{sig}"
+
+
+def _signed_token_user_id(token: str) -> int | None:
+    """The user id a valid, unexpired signed token names — None for anything
+    else, including every token when no secret is configured."""
+    secret = _session_secret()
+    parts = token.split(".")
+    if not secret or len(parts) != 4 or parts[0] != "s1":
+        return None
+    payload = ".".join(parts[:3])
+    expected = hmac.new(secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected, parts[3]):
+        return None
+    try:
+        uid, expires = int(parts[1]), int(parts[2])
+    except ValueError:
+        return None
+    return uid if time.time() < expires else None
+
+
 def _create_session(user_id: int, response: Response, request: Request | None = None,
                     ttl_seconds: int | None = None, verb: str = "signed in") -> str:
-    """Mint one real session row. EVERY authenticated path goes through here —
-    there is no token the server accepts that it did not generate and store."""
+    """Mint one session. EVERY authenticated path goes through here — the
+    server accepts no token it did not generate and store, or (with
+    auth.session_secret set) generate and sign. The row is written either way:
+    it is what the access log and same-instance logout act on."""
     ttl = ttl_seconds if ttl_seconds is not None else int(config.get("auth", "session_days", 14)) * 86400
-    token = secrets.token_urlsafe(32)
+    token = _signed_token(user_id, ttl) if _session_secret() else secrets.token_urlsafe(32)
     with _conn() as conn:
         conn.execute("""INSERT INTO sessions (token, user_id, expires_at)
                         VALUES (%s, %s, now() + (%s || ' seconds')::interval)""",
@@ -287,9 +329,16 @@ def current_user(request: Request) -> dict | None:
     token = request.cookies.get(COOKIE)
     user = None
     if token:
+        # A signed token authenticates by its signature, not by a row this
+        # instance may never have seen; anything else is looked up as the row
+        # it claims to be.
+        signed_uid = _signed_token_user_id(token)
         with _conn() as conn:
-            user = conn.execute("""SELECT u.* FROM sessions s JOIN users u ON u.id = s.user_id
-                                   WHERE s.token = %s AND s.expires_at > now()""", (token,)).fetchone()
+            if signed_uid is not None:
+                user = conn.execute("SELECT * FROM users WHERE id = %s", (signed_uid,)).fetchone()
+            else:
+                user = conn.execute("""SELECT u.* FROM sessions s JOIN users u ON u.id = s.user_id
+                                       WHERE s.token = %s AND s.expires_at > now()""", (token,)).fetchone()
     # On a bypass server, a PRESENTED cookie whose row is missing still
     # resolves to the workspace admin — but only a presented one.
     #

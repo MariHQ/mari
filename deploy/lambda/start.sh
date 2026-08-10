@@ -43,6 +43,47 @@ ON CONFLICT (key) DO UPDATE
 SQL
 fi
 
+# Founders-only sign-in: MARI_SEED_ADMINS is a JSON array of
+# {name, email, password}. Every listed account is upserted as an admin with
+# that password, and every OTHER account's credentials are blanked, so the
+# only people who can sign in are the ones the stack names. Runs every boot:
+# the database is restored from the dump per execution environment, and this
+# is what makes the accounts exist on all of them. Empty means the dump's own
+# accounts stand untouched.
+if [[ -n "${MARI_SEED_ADMINS:-}" ]]; then
+  python3 - <<'PY'
+import hashlib, json, os, secrets
+import psycopg
+
+def scrypt_hash(password):  # same format server/auth.py _hash writes
+    salt = secrets.token_bytes(16)
+    digest = hashlib.scrypt(password.encode(), salt=salt, n=2**14, r=8, p=1)
+    return salt.hex() + ":" + digest.hex()
+
+admins = json.loads(os.environ["MARI_SEED_ADMINS"])
+emails = [a["email"].lower() for a in admins]
+with psycopg.connect(os.environ["MARI_DB"]) as conn:
+    for a in admins:
+        name, email, pw = a["name"], a["email"], a["password"]
+        initials = "".join(w[0].upper() for w in name.split()[:2]) or "AD"
+        row = conn.execute("SELECT id FROM users WHERE lower(email) = lower(%s)", (email,)).fetchone()
+        if row:
+            conn.execute("UPDATE users SET role = 'admin', provider = 'manual', password_hash = %s WHERE id = %s",
+                         (scrypt_hash(pw), row[0]))
+            continue
+        # users.name is unique; a dump row already using this display name
+        # must not block the account (or be taken over by it).
+        if conn.execute("SELECT 1 FROM users WHERE name = %s", (name,)).fetchone():
+            name = name + " (owner)"
+        conn.execute("""INSERT INTO users (name, initials, tint, email, role, provider, password_hash)
+                        VALUES (%s, %s, 1, %s, 'admin', 'manual', %s)""",
+                     (name, initials, email, scrypt_hash(pw)))
+    conn.execute("UPDATE users SET password_hash = '', github_id = '', google_id = '' WHERE lower(email) != ALL(%s)",
+                 (emails,))
+print(f"seeded {len(admins)} admin account(s); all other credentials blanked", flush=True)
+PY
+fi
+
 shutdown() {
   if [[ -n "${API_PID:-}" ]]; then
     kill -TERM "$API_PID" 2>/dev/null || true
