@@ -13,11 +13,12 @@ type GqlResult<T> = { ok: true; data: T } | { ok: false; error: string };
  * unavailable" one, and rendering it as `HTTP 401` inside the read-error card
  * is the console telling a visitor to retry something no retry will fix.
  *
- * The demo deployment produces this for a reason no page can see: each Lambda
- * execution environment runs its own Postgres restored from a dump, so a
- * session minted by one instance is unknown to the next one that answers.
- * Before the hardening pass the accepted cookie was a static string, so every
- * instance honoured it and this never showed.
+ * The demo deployment used to produce this for a reason no page can see: each
+ * Lambda execution environment runs its own Postgres restored from a dump, so
+ * a session minted by one instance was unknown to the next one that answered.
+ * The server now resolves any presented cookie on a bypass deployment, so the
+ * 401s recovery still handles are the ordinary kind — a session that expired
+ * or was revoked — and recovery's job is to notice and route to /login.
  *
  * api.ts must not import the auth context (auth.tsx imports this module), so
  * the auth layer registers the recovery and this only knows "ask once, then

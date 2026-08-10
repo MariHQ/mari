@@ -21,11 +21,6 @@ type AuthContextValue = {
   bypassEnabled: boolean;
   oauth: OAuthAvailability;
   loading: boolean;
-  /** Why the app could not sign the visitor in on its own, verbatim from the
-   *  server. Only ever set on a bypass-enabled deployment whose /auth/bypass
-   *  refused — a silent failure there would be a blank sign-in screen with no
-   *  account to sign into. */
-  error: string | null;
   refresh: () => Promise<void>;
   logout: () => Promise<void>;
 };
@@ -36,7 +31,6 @@ const AuthContext = createContext<AuthContextValue>({
   bypassEnabled: false,
   oauth: { github: false, google: false },
   loading: true,
-  error: null,
   refresh: async () => {},
   logout: async () => {},
 });
@@ -61,7 +55,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [bypassEnabled, setBypassEnabled] = useState(false);
   const [oauth, setOauth] = useState<OAuthAvailability>({ github: false, google: false });
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
 
   // Last seen session identity — when it changes (sign-in, sign-out, user
   // switch) every cached query result belongs to someone else: drop it.
@@ -100,38 +93,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return load().then(() => setLoading(false));
   }, [load]);
 
-  /* Demo deployments sign the visitor in rather than showing a wall.
-   *
-   * `bypassEnabled` is the SERVER's setting, and when it is on, an
-   * unauthenticated POST /auth/bypass already returns a workspace-admin
-   * session to anyone who asks — the button on the sign-in screen is one
-   * click over exactly this call. Making the app place that call itself
-   * grants nothing that was not already public; it removes a click on a
-   * deployment whose whole purpose is to be walked into. Where the setting is
-   * off, /auth/me reports false, none of this runs, and the ordinary login
-   * flow is untouched.
-   *
-   * At most one attempt per page load, whatever the outcome:
-   *   • a bypass that fails must not be retried in a loop, and
-   *   • signing out must not sign you straight back in. */
-  const autoSignInUsed = useRef(false);
-  const autoSignIn = useCallback((): Promise<boolean> => {
-    return load().then(({ user: found, bypassEnabled: offered }) => {
-      if (found) return true;
-      if (!offered || autoSignInUsed.current) return false;
-      autoSignInUsed.current = true;
-      return authPost("/auth/bypass", {})
-        .then(() => load().then(({ user: signedIn }) => Boolean(signedIn)))
-        .catch((e: unknown) => {
-          // The demo could not let them in. Say why, in the server's words, on
-          // the sign-in screen — the alternative is a login form for a
-          // workspace whose credentials the visitor was never given.
-          setError(e instanceof Error ? e.message : "Could not start a demo session.");
-          return false;
-        });
-    });
-  }, [load]);
-
+  /* There is deliberately no automatic POST /auth/bypass here. A demo server
+   * (`bypassEnabled`) offers a one-click way in, but it is a button on the
+   * sign-in screen, not something the app does to a visitor on arrival —
+   * every deployment shows the wall first, and signing out lands on it and
+   * stays there. The server enforces the same line: with no cookie presented
+   * it resolves nobody, bypass or not (see server/auth.py). */
   const logout = useCallback(async () => {
     try {
       await fetch("/auth/logout", { method: "POST" });
@@ -141,32 +108,25 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     await refresh();
   }, [refresh]);
 
-  // One boot per page load. Without it React 18's development double-invoke
-  // runs two attempts, and the one that loses the race resolves false and
-  // drops `loading` while the other is still signing in — which is the /login
-  // flash this is here to prevent.
-  const booted = useRef(false);
   useEffect(() => {
-    if (booted.current) return;
-    booted.current = true;
-    // `loading` stays true across the auto sign-in, so the gate in App.tsx
-    // renders nothing until the session question is settled. Letting it fall
-    // false first would redirect to /login and then yank the visitor back —
-    // the sign-in screen as a flash of the wrong page.
-    void autoSignIn().then(() => setLoading(false));
-  }, [autoSignIn]);
+    void refresh();
+  }, [refresh]);
 
   /* A read that comes back 401 is holding a cookie this server does not
-     accept (see api.ts). Re-resolving the session is the honest recovery: on
-     an ordinary deployment it just confirms we are signed out, and the 401
-     reaches the page. */
+     accept (see api.ts). Re-resolving the session is the honest recovery: it
+     either finds the session is actually fine (retry the read) or confirms we
+     are signed out, in which case `user` drops to null and the gate routes to
+     /login instead of a page rendering its 401. */
+  const recheck = useCallback((): Promise<boolean> => {
+    return load().then(({ user: found }) => Boolean(found));
+  }, [load]);
   useEffect(() => {
-    setSessionRecovery(autoSignIn);
+    setSessionRecovery(recheck);
     return () => setSessionRecovery(null);
-  }, [autoSignIn]);
+  }, [recheck]);
 
   return (
-    <AuthContext.Provider value={{ user, needsSetup, bypassEnabled, oauth, loading, error, refresh, logout }}>
+    <AuthContext.Provider value={{ user, needsSetup, bypassEnabled, oauth, loading, refresh, logout }}>
       {children}
     </AuthContext.Provider>
   );
