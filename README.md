@@ -268,7 +268,7 @@ Two rules follow from the pages being pure presenters:
   indistinguishable from "there is nothing", and ships a number no one can
   trace.
 
-Want to contribute? Read [CONTRIBUTING.md](CONTRIBUTING.md) — commits must be signed off under the [Developer Certificate of Origin](DCO) (`git commit -s`).
+Want to contribute? Read [CONTRIBUTING.md](CONTRIBUTING.md) — commits must be signed off (`git commit -s`), which is how you agree to the [CLA](CLA.md).
 
 Deeper docs: [DESIGN.md](DESIGN.md) (product design), [LINEAGE-DESIGN.md](LINEAGE-DESIGN.md), [FLOWS-DESIGN.md](FLOWS-DESIGN.md), and the frozen integration contracts (`*-CONTRACT.md`).
 
@@ -290,9 +290,9 @@ state what you changed. It carries an explicit patent grant.
 
 Copyright © 2026 Eric Disque and Daniel Henneberger. See [NOTICE](NOTICE).
 
-Contributions are covered by the [Developer Certificate of Origin](DCO) rather than a CLA. Every
-commit needs a `Signed-off-by` line, which `git commit -s` adds for you. Details in
-[CONTRIBUTING.md](CONTRIBUTING.md).
+Contributions are covered by a lightweight [Contributor License Agreement](CLA.md): you keep your
+copyright, and your sign-off licenses the contribution to the project. Every commit needs a
+`Signed-off-by` line, which `git commit -s` adds for you. Details in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 The `vendor/mari-design` submodule is a separate repository under its own terms.
 

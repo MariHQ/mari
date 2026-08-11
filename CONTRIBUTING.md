@@ -3,12 +3,14 @@
 Thanks for taking the time to contribute. This guide covers how to get the project
 running, what we expect from a change, and how to sign your commits off.
 
-## Developer Certificate of Origin
+## Contributor License Agreement
 
-This project uses the [Developer Certificate of Origin](https://developercertificate.org/)
-(DCO), reproduced in full in [DCO](DCO). There is no CLA to sign — instead, every
-commit must carry a `Signed-off-by` line certifying that you have the right to
-submit the work under this project's license:
+This project uses a lightweight [Contributor License Agreement](CLA.md). You
+keep the copyright to your work; the CLA licenses it to the project broadly
+enough that we can keep our licensing options open (the project is Apache 2.0
+today, and paid offerings are built from the same tree). There is nothing to
+mail in and no bot to argue with — every commit must carry a `Signed-off-by`
+line, and that sign-off is your agreement to the CLA for that contribution:
 
 ```
 Signed-off-by: Jane Doe <jane@example.com>
@@ -129,5 +131,5 @@ privately to the maintainers so a fix can ship before details are public.
 
 ## License
 
-By contributing, you agree that your contributions are licensed under the same
-license as this project, and you certify the DCO as described above.
+By contributing, you agree to the [Contributor License Agreement](CLA.md) as
+described above. The project itself is licensed under Apache 2.0.
