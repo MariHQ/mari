@@ -66,7 +66,13 @@ export function useLogin(): PageData<LoginData> {
      can be linked to, and gives "Back to sign in" something real to undo. */
   const [params] = useSearchParams();
   const sentTo = params.get("sent") ?? "";
-  const screen: LoginData["screen"] = sentTo ? "magic-link" : "credentials";
+  /* `?twofactor=1` is set by the sign-in action when the password was right but
+     the account has a second factor. It is route state for the same reason the
+     magic-link confirmation is: the code screen then survives a re-render and
+     "Back to sign in" has somewhere to return from. */
+  const screen: LoginData["screen"] = params.get("twofactor")
+    ? "two-factor"
+    : sentTo ? "magic-link" : "credentials";
 
   /* Nothing can have failed before anyone types: the app no longer signs
      visitors in on its own, so the demo button is the first call this screen

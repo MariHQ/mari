@@ -80,6 +80,7 @@ Everything runs on your infrastructure: Postgres + pgvector for storage and sear
 
 ### 🔐 Auth & workspace
 - Email/password (scrypt), GitHub & Google OAuth, first-run setup token, session cookies.
+- **TOTP two-factor** (authenticator apps): enroll at `/auth/2fa/setup` + `/auth/2fa/enable`, which returns one-time recovery codes. A password alone never completes a login once it's on. Off by default, per account.
 - **Invite-only by default.** An account is all the GraphQL surface asks for, so only people an admin invited can register — open sign-up is a deliberate switch (`MARI_AUTH_REGISTRATION`).
 - **Sessions expire** (14 days by default, `auth.session_days`; a demo-bypass session gets 12 hours). Expired rows are deleted, not just ignored.
 - Three tiers — admin, manager, user — enforced on every mutation, and the audit log records the person who actually made the request.

@@ -15,7 +15,6 @@ import json
 import logging
 import os
 import secrets
-import threading
 import time
 import typing as t
 import urllib.error
@@ -23,6 +22,7 @@ import urllib.parse
 import urllib.request
 
 import psycopg
+import pyotp
 from fastapi import APIRouter, HTTPException, Request, Response
 from psycopg.rows import dict_row
 from pydantic import BaseModel
@@ -84,12 +84,19 @@ def _conn():
 
 # ————— rate limiting —————
 #
-# In-process sliding window. This is one API process per container, so it is a
-# per-instance brake, not a cluster-wide quota — enough to make credential
-# stuffing and setup-token guessing expensive, and it never fails a request for
-# a reason it will not name.
-_ATTEMPTS: dict[str, list[float]] = {}
-_ATTEMPTS_LOCK = threading.Lock()
+# The window lives in Postgres (table auth_rate), so the limit is one quota
+# shared by every worker and unbroken by a restart — the old in-process dict
+# reset to empty on every deploy and every cold start, which on a serverless
+# deployment meant the effective ceiling was the per-instance limit times the
+# instance count. One caveat stays, and it is the same one that gives us signed
+# sessions: deploy/lambda runs an embedded Postgres per execution environment,
+# so there the counter is still per-instance. Any deployment with a shared
+# database — every self-hosted install — now gets a genuinely global limit.
+#
+# It fails OPEN: if the counter query errors, the request proceeds. A database
+# blip must not lock everyone out of sign-in, and the philosophy here is to
+# never fail a request for a reason it will not name. TOTP is the backstop that
+# makes a slipped rate limit non-fatal on accounts that matter.
 
 
 def _client_ip(request: Request | None) -> str:
@@ -100,27 +107,36 @@ def _client_ip(request: Request | None) -> str:
 
 
 def _rate_limit(bucket: str, key: str, limit: int, window_s: int) -> None:
-    ident = f"{bucket}:{key}"
-    now = time.time()
-    with _ATTEMPTS_LOCK:
-        if len(_ATTEMPTS) > 8192:  # bounded: a flood must not grow the process
-            _ATTEMPTS.clear()
-        hits = [t for t in _ATTEMPTS.get(ident, ()) if now - t < window_s]
-        if len(hits) >= limit:
-            retry = max(1, int(window_s - (now - hits[0])) + 1)
-            _ATTEMPTS[ident] = hits
-            raise HTTPException(
-                429, f"Too many attempts. Try again in {retry} seconds.",
-                headers={"Retry-After": str(retry)})
-        hits.append(now)
-        _ATTEMPTS[ident] = hits
+    """Record one attempt and raise 429 if the window is already at its limit."""
+    try:
+        with _conn() as conn:
+            row = conn.execute(
+                """SELECT count(*) AS n, min(at) AS oldest FROM auth_rate
+                     WHERE bucket = %s AND key = %s AND at > now() - (%s || ' seconds')::interval""",
+                (bucket, key, window_s)).fetchone()
+            if row and row["n"] >= limit:
+                retry = window_s
+                if row["oldest"]:
+                    elapsed = (time.time() - row["oldest"].timestamp())
+                    retry = max(1, int(window_s - elapsed) + 1)
+                raise HTTPException(
+                    429, f"Too many attempts. Try again in {retry} seconds.",
+                    headers={"Retry-After": str(retry)})
+            conn.execute("INSERT INTO auth_rate (bucket, key) VALUES (%s, %s)", (bucket, key))
+    except HTTPException:
+        raise
+    except Exception:  # noqa: BLE001 — a limiter that is down must not be a wall
+        log.warning("rate limiter unavailable, allowing request through", exc_info=True)
 
 
 def _rate_clear(bucket: str, key: str) -> None:
     """Called on success: a person who got in should not be throttled by their
     own earlier typos."""
-    with _ATTEMPTS_LOCK:
-        _ATTEMPTS.pop(f"{bucket}:{key}", None)
+    try:
+        with _conn() as conn:
+            conn.execute("DELETE FROM auth_rate WHERE bucket = %s AND key = %s", (bucket, key))
+    except Exception:  # noqa: BLE001 — clearing is best-effort
+        pass
 
 
 def _hash(password: str, salt: bytes | None = None) -> str:
@@ -147,6 +163,23 @@ def ensure_schema() -> None:
         # POST /auth/register. See init.sql for why credential-less is not
         # sufficient on its own.
         conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS invited_by text NOT NULL DEFAULT ''")
+        # AUTH-6: TOTP two-factor. `totp_secret` is the base32 shared secret,
+        # written at enrolment but not trusted until `totp_enabled` flips (the
+        # user proves they scanned it by entering a live code). `totp_recovery`
+        # is a JSON array of one-time recovery-code hashes so a lost
+        # authenticator is not a permanent lockout. All empty/false by default,
+        # so existing accounts and OAuth-only accounts are unaffected.
+        conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS totp_secret text NOT NULL DEFAULT ''")
+        conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS totp_enabled boolean NOT NULL DEFAULT false")
+        conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS totp_recovery jsonb NOT NULL DEFAULT '[]'::jsonb")
+        # AUTH-7: rate-limit counters live in the database, not process memory,
+        # so the limit is one quota across every worker and survives a restart
+        # (the in-process dict reset to zero on every deploy and every cold
+        # start). One row per attempt; the window is a time range over `at`.
+        conn.execute("""CREATE TABLE IF NOT EXISTS auth_rate (
+            bucket text NOT NULL, key text NOT NULL, at timestamptz NOT NULL DEFAULT now())""")
+        conn.execute("CREATE INDEX IF NOT EXISTS auth_rate_lookup ON auth_rate (bucket, key, at)")
+        conn.execute("DELETE FROM auth_rate WHERE at < now() - interval '1 hour'")
         conn.execute("""CREATE TABLE IF NOT EXISTS sessions (
             token text PRIMARY KEY, user_id int NOT NULL REFERENCES users(id) ON DELETE CASCADE,
             created_at timestamptz NOT NULL DEFAULT now())""")
@@ -291,6 +324,83 @@ def _signed_token_user_id(token: str) -> int | None:
     return uid if time.time() < expires else None
 
 
+# ————— TOTP two-factor —————
+#
+# The login flow splits when a user has TOTP on: the password check succeeds
+# but hands back a short-lived CHALLENGE instead of a session, and only a valid
+# authenticator code (or a recovery code) at /auth/2fa/verify completes it. The
+# challenge is an HMAC-signed statement — "user <id>, purpose 2fa, until
+# <expiry>" — so it is stateless and crosses Lambda instances like the session
+# token does. Its secret falls back to a per-process random value when no
+# session_secret is configured: a single-box deployment has one process, and a
+# five-minute challenge that dies on restart just means re-entering a password.
+_CHALLENGE_SECRET = secrets.token_hex(32)
+CHALLENGE_TTL_S = 300
+
+
+def _challenge_secret() -> str:
+    return _session_secret() or _CHALLENGE_SECRET
+
+
+def _mint_2fa_challenge(user_id: int) -> str:
+    payload = f"c1.{user_id}.{int(time.time()) + CHALLENGE_TTL_S}"
+    sig = hmac.new(_challenge_secret().encode(), payload.encode(), hashlib.sha256).hexdigest()
+    return f"{payload}.{sig}"
+
+
+def _challenge_user_id(token: str) -> int | None:
+    """The user id a valid, unexpired 2FA challenge names, else None."""
+    parts = (token or "").split(".")
+    if len(parts) != 4 or parts[0] != "c1":
+        return None
+    payload = ".".join(parts[:3])
+    expected = hmac.new(_challenge_secret().encode(), payload.encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected, parts[3]):
+        return None
+    try:
+        uid, expires = int(parts[1]), int(parts[2])
+    except ValueError:
+        return None
+    return uid if time.time() < expires else None
+
+
+def _recovery_hash(code: str) -> str:
+    """Recovery codes are stored hashed, like passwords — a database read must
+    not hand someone a working second factor."""
+    return hashlib.sha256(code.replace("-", "").lower().encode()).hexdigest()
+
+
+def _new_recovery_codes(n: int = 10) -> list[str]:
+    # Grouped for legibility (xxxx-xxxx); the hash strips the dash back out.
+    def one() -> str:
+        raw = secrets.token_hex(4)
+        return f"{raw[:4]}-{raw[4:]}"
+    return [one() for _ in range(n)]
+
+
+def _totp_ok(secret: str, code: str) -> bool:
+    """Verify a 6-digit code with a ±1 step window, so a clock a little off or
+    a code entered as it rolls over still passes."""
+    if not secret or not code:
+        return False
+    return pyotp.TOTP(secret).verify(code.strip().replace(" ", ""), valid_window=1)
+
+
+def _consume_recovery(conn, user: dict, code: str) -> bool:
+    """Spend a recovery code if it matches: remove it from the list so it works
+    exactly once. Returns whether one was consumed."""
+    target = _recovery_hash(code)
+    codes = user.get("totp_recovery") or []
+    if isinstance(codes, str):
+        codes = json.loads(codes or "[]")
+    if target not in codes:
+        return False
+    codes = [c for c in codes if c != target]
+    conn.execute("UPDATE users SET totp_recovery = %s WHERE id = %s",
+                 (json.dumps(codes), user["id"]))
+    return True
+
+
 def _create_session(user_id: int, response: Response, request: Request | None = None,
                     ttl_seconds: int | None = None, verb: str = "signed in") -> str:
     """Mint one session. EVERY authenticated path goes through here — the
@@ -424,7 +534,8 @@ class SetupIn(BaseModel):
 
 def _user_out(u: dict) -> dict:
     return {"id": u["id"], "name": u["name"], "email": u["email"], "role": u["role"],
-            "initials": u["initials"], "tint": u["tint"], "provider": u["provider"]}
+            "initials": u["initials"], "tint": u["tint"], "provider": u["provider"],
+            "totpEnabled": bool(u.get("totp_enabled"))}
 
 
 def _bypass_target(conn) -> dict | None:
@@ -624,8 +735,127 @@ def login(body: Credentials, request: Request, response: Response):
         raise HTTPException(401, "Wrong email or password.")
     _rate_clear("login-ip", ip)
     _rate_clear("login-account", email)
+    # Password was right. If this account has a second factor, that is not
+    # enough on its own: hand back a challenge and make /auth/2fa/verify finish
+    # the sign-in. No session cookie is set here, so a stolen password alone
+    # opens nothing.
+    if user["totp_enabled"]:
+        return {"twoFactor": True, "challenge": _mint_2fa_challenge(user["id"])}
     _create_session(user["id"], response, request)
     return {"user": _user_out(user)}
+
+
+class TwoFactorVerifyIn(BaseModel):
+    challenge: str
+    code: str
+    # A recovery code is entered in the same box; the server tells them apart.
+
+
+@router.post("/2fa/verify")
+def two_factor_verify(body: TwoFactorVerifyIn, request: Request, response: Response):
+    """Second step of a 2FA login: exchange a valid challenge plus a live code
+    (or a one-time recovery code) for a session."""
+    ip = _client_ip(request)
+    # A 6-digit code is a million-wide space; brute force is the threat here, so
+    # this bucket is tighter than the password one and keyed to the IP.
+    _rate_limit("2fa-ip", ip, 10, 300)
+    uid = _challenge_user_id(body.challenge)
+    if uid is None:
+        raise HTTPException(401, "That sign-in step expired. Start again.")
+    with _conn() as conn:
+        user = conn.execute("SELECT * FROM users WHERE id = %s", (uid,)).fetchone()
+        if not user or not user["totp_enabled"]:
+            raise HTTPException(401, "That sign-in step expired. Start again.")
+        code = (body.code or "").strip()
+        if _totp_ok(user["totp_secret"], code):
+            pass
+        elif _consume_recovery(conn, user, code):
+            conn.execute("""INSERT INTO events (actor, verb, target, detail)
+                            VALUES (%s, 'used a recovery code', 'Mari', %s)""",
+                         (user["name"], json.dumps(_client_detail(request))))
+        else:
+            raise HTTPException(401, "That code is not valid.")
+    _rate_clear("2fa-ip", ip)
+    _create_session(user["id"], response, request, verb="signed in with 2FA")
+    return {"user": _user_out(user)}
+
+
+# ————— TOTP enrolment (authenticated: the signed-in user manages their own) —————
+
+@router.post("/2fa/setup")
+def two_factor_setup(request: Request):
+    """Begin enrolment: mint a secret (not yet trusted) and return the
+    otpauth:// URI to scan and the secret to type. Enrolment is not complete
+    until /auth/2fa/enable verifies a live code."""
+    user = require_user(request)
+    secret = pyotp.random_base32()
+    with _conn() as conn:
+        # Overwrite any half-finished prior attempt; totp_enabled stays false.
+        conn.execute("UPDATE users SET totp_secret = %s, totp_enabled = false WHERE id = %s",
+                     (secret, user["id"]))
+    ws = ""
+    with _conn() as conn:
+        row = conn.execute("SELECT value FROM settings WHERE key = 'workspace'").fetchone()
+        if row:
+            value = row["value"] if isinstance(row["value"], dict) else json.loads(row["value"] or "{}")
+            ws = str(value.get("name") or "")
+    uri = pyotp.TOTP(secret).provisioning_uri(name=user["email"], issuer_name=f"Mari{(' · ' + ws) if ws else ''}")
+    return {"secret": secret, "otpauthUrl": uri}
+
+
+class TwoFactorEnableIn(BaseModel):
+    code: str
+
+
+@router.post("/2fa/enable")
+def two_factor_enable(body: TwoFactorEnableIn, request: Request):
+    """Finish enrolment: the user proves they scanned the secret by entering a
+    live code. On success, turn 2FA on and hand back one-time recovery codes,
+    shown once and never again."""
+    user = require_user(request)
+    _rate_limit("2fa-enable", str(user["id"]), 10, 300)
+    with _conn() as conn:
+        fresh = conn.execute("SELECT * FROM users WHERE id = %s", (user["id"],)).fetchone()
+        if fresh["totp_enabled"]:
+            raise HTTPException(409, "Two-factor is already on for this account.")
+        if not _totp_ok(fresh["totp_secret"], body.code):
+            raise HTTPException(401, "That code is not valid. Check your authenticator and try again.")
+        codes = _new_recovery_codes()
+        conn.execute("UPDATE users SET totp_enabled = true, totp_recovery = %s WHERE id = %s",
+                     (json.dumps([_recovery_hash(c) for c in codes]), user["id"]))
+        conn.execute("""INSERT INTO events (actor, verb, target, detail)
+                        VALUES (%s, 'enabled two-factor auth', 'Mari', %s)""",
+                     (user["name"], json.dumps(_client_detail(request))))
+    return {"enabled": True, "recoveryCodes": codes}
+
+
+class TwoFactorDisableIn(BaseModel):
+    password: str
+    code: str = ""
+
+
+@router.post("/2fa/disable")
+def two_factor_disable(body: TwoFactorDisableIn, request: Request):
+    """Turn 2FA off. Requires the account password AND a live code (or recovery
+    code): a walk-up attacker at an unlocked screen should not be able to strip
+    the second factor without knowing the password."""
+    user = require_user(request)
+    _rate_limit("2fa-disable", str(user["id"]), 10, 300)
+    with _conn() as conn:
+        fresh = conn.execute("SELECT * FROM users WHERE id = %s", (user["id"],)).fetchone()
+        if not fresh["totp_enabled"]:
+            return {"enabled": False}
+        if not _verify(body.password, fresh["password_hash"] or ""):
+            raise HTTPException(401, "That is not your current password.")
+        if not (_totp_ok(fresh["totp_secret"], body.code) or _consume_recovery(conn, fresh, body.code)):
+            raise HTTPException(401, "That code is not valid.")
+        conn.execute(
+            "UPDATE users SET totp_enabled = false, totp_secret = '', totp_recovery = '[]'::jsonb WHERE id = %s",
+            (user["id"],))
+        conn.execute("""INSERT INTO events (actor, verb, target, detail)
+                        VALUES (%s, 'disabled two-factor auth', 'Mari', %s)""",
+                     (user["name"], json.dumps(_client_detail(request))))
+    return {"enabled": False}
 
 
 @router.post("/logout")
