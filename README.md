@@ -79,7 +79,7 @@ Everything runs on your infrastructure: Postgres + pgvector for storage and sear
 - A living design system, exhibited at **Settings → Design & brand** — one Card, one Button, one Chip family across the whole product.
 
 ### 🔐 Auth & workspace
-- Email/password (scrypt), GitHub & Google OAuth, first-run setup token, session cookies.
+- Email/password (scrypt, 12-char minimum with a common-password reject-list enforced on every set), GitHub & Google OAuth, first-run setup token, session cookies.
 - **TOTP two-factor** (authenticator apps): enroll at `/auth/2fa/setup` + `/auth/2fa/enable`, which returns one-time recovery codes. A password alone never completes a login once it's on. Off by default, per account.
 - **Invite-only by default.** An account is all the GraphQL surface asks for, so only people an admin invited can register — open sign-up is a deliberate switch (`MARI_AUTH_REGISTRATION`).
 - **Sessions expire** (14 days by default, `auth.session_days`; a demo-bypass session gets 12 hours). Expired rows are deleted, not just ignored.

@@ -1,10 +1,18 @@
-fastapi
-strawberry-graphql[fastapi]
-uvicorn[standard]
-psycopg[binary]
-psycopg_pool
-nh3
-markdown
-boto3
-pydantic
-pyotp
+# Direct dependencies, pinned. A floating requirements file resolved to
+# whatever was newest on each image build, so two builds a week apart could
+# ship different code with no diff to show for it. Bump these deliberately and
+# rebuild, rather than letting the next build move them for you.
+#
+# Pinned to the versions the server currently runs against (2026-08). When you
+# raise one, rebuild the Lambda image and run `npm run check` + a boot smoke
+# before releasing — a pin is only a safety rail if the bump is tested.
+fastapi==0.139.2
+strawberry-graphql[fastapi]==0.322.1
+uvicorn[standard]==0.51.0
+psycopg[binary]==3.3.4
+psycopg_pool==3.3.1
+nh3==0.3.6
+markdown==3.10.2
+boto3==1.43.52
+pydantic==2.13.4
+pyotp==2.10.0

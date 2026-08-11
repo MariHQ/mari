@@ -145,6 +145,55 @@ def _hash(password: str, salt: bytes | None = None) -> str:
     return salt.hex() + ":" + digest.hex()
 
 
+# ————— password strength —————
+#
+# A deliberately small, offline gate: length is what actually moves the needle,
+# plus a reject-list for the handful of passwords that get tried first in every
+# credential-stuffing run. No model, no API call, no HIBP round-trip — the same
+# no-telemetry, works-offline promise the rest of the product makes. The list
+# is the worst offenders, not a dictionary; length carries the rest.
+MIN_PASSWORD_LEN = 12
+
+# Common passwords and obvious patterns, compared case-folded. Kept short on
+# purpose: past ~12 characters a blocklist has sharply diminishing value, and a
+# giant wordlist would be security theatre bolted to a promise of honesty.
+_WEAK_PASSWORDS = frozenset({
+    "password", "passw0rd", "password1", "password123", "password1234",
+    "123456789012", "1234567890123", "12345678901234", "qwertyuiop12",
+    "qwertyuiop123", "letmein12345", "welcome123456", "admin1234567",
+    "iloveyou1234", "trustno12345", "changeme1234", "correcthorse",
+    "mari12345678", "marihq123456", "abcdefghijkl", "aaaaaaaaaaaa",
+    "111111111111", "000000000000", "qwerty123456", "monkey123456",
+    "dragon123456", "sunshine1234", "princess1234", "football1234",
+    "baseball1234", "superman1234", "batman123456",
+})
+
+
+def _password_problem(password: str, email: str | None = None) -> str | None:
+    """Why this password is too weak, in words for the user — or None if it is
+    fine. Used everywhere a password is set: register, setup, and change."""
+    pw = password or ""
+    if len(pw) < MIN_PASSWORD_LEN:
+        return f"The password must be at least {MIN_PASSWORD_LEN} characters."
+    folded = pw.lower()
+    if folded in _WEAK_PASSWORDS:
+        return "That password is one of the most common ones there is. Choose another."
+    if len(set(pw)) < 5:
+        return "That password repeats too few characters. Mix it up."
+    # A password that is just the email (or its name part) is a guess away.
+    if email:
+        local = email.split("@", 1)[0].lower()
+        if folded == email.lower() or (len(local) >= 4 and local in folded):
+            return "The password should not contain your email address."
+    return None
+
+
+def _require_strong_password(password: str, email: str | None = None) -> None:
+    problem = _password_problem(password, email)
+    if problem:
+        raise HTTPException(400, problem)
+
+
 def _verify(password: str, stored: str) -> bool:
     try:
         salt_hex, digest_hex = stored.split(":", 1)
@@ -630,6 +679,9 @@ def setup_check(body: SetupCheckIn, request: Request):
 @router.post("/setup")
 def setup(body: SetupIn, request: Request, response: Response):
     _rate_limit("setup", _client_ip(request), 10, 300)
+    # The first account is the admin, so its password is the one that most
+    # needs to be strong — and this path enforced nothing before.
+    _require_strong_password(body.password, body.email)
     with _conn() as conn:
         stored = _read_setup_token(conn)
         if not secrets.compare_digest(hashlib.sha256(body.token.encode()).hexdigest(),
@@ -675,8 +727,7 @@ def register(body: Credentials, request: Request, response: Response):
     email = (body.email or "").strip()
     if not body.name or not email:
         raise HTTPException(400, "Name and email are required.")
-    if len(body.password) < 8:
-        raise HTTPException(400, "The password must be at least 8 characters.")
+    _require_strong_password(body.password, email)
     _rate_limit("register", _client_ip(request), 10, 300)
     initials = "".join(w[0].upper() for w in body.name.split()[:2]) or "??"
     with _conn() as conn:
@@ -1147,8 +1198,7 @@ def change_password(body: PasswordIn, request: Request):
         raise HTTPException(400, "This account signs in with a provider and has no password here.")
     if not _verify(body.current, u["password_hash"]):
         raise HTTPException(400, "That is not your current password.")
-    if len(body.next) < 8:
-        raise HTTPException(400, "The new password must be at least 8 characters.")
+    _require_strong_password(body.next, u.get("email"))
     with _conn() as conn:
         conn.execute("UPDATE users SET password_hash = %s WHERE id = %s", (_hash(body.next), u["id"]))
         # Every other session was authenticated with the old credential. A
