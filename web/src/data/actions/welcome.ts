@@ -12,7 +12,7 @@
 
 import type { WelcomeActions } from "@mari-design/components/pages/WelcomePage";
 import type { Candidate } from "@mari-design/components/features/WelcomeGlossaryStep";
-import { gqlResult } from "../../lib/api";
+import { clearQueryCache, gqlResult } from "../../lib/api";
 import { mutate } from "./index";
 import { connectAny, testAny, uploadDocuments } from "./sources";
 
@@ -106,7 +106,10 @@ export function welcomeActions({ navigate }: { navigate: (href: string) => void 
 
     // Onboarding is finished by leaving it: there is no "onboarding complete"
     // flag on the server, and inventing a mutation to set one would be a
-    // handler with nothing behind it.
-    finish: () => { window.location.href = "/"; },
+    // handler with nothing behind it. Leave the way the rest of the app moves
+    // (router push, not a full reload — the reference demo lands straight on
+    // the Overview), and drop the read cache first so the Overview counts
+    // what onboarding just connected instead of what it saw before.
+    finish: () => { clearQueryCache(); navigate("/"); },
   };
 }

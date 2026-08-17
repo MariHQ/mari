@@ -21,6 +21,7 @@ import github
 import ingest
 import llm
 from db import actor_name, exec_, jload, q, q1
+from excerpt import excerpt
 from gqltypes import (
     ActivityBucket, ActivityItem, ApiKey, ApprovedAnswer,
     AuditDetail, AuditEvent, AuditFinding, AuditRun, Change, ChatMessage,
@@ -117,7 +118,12 @@ def classify_node(row: dict) -> tuple[str, str]:
 
 def _doc(row: dict, watched: bool = False) -> Document:
     return Document(
-        id=row["id"], source=row["source"], title=row["title"], snippet=row["snippet"],
+        id=row["id"], source=row["source"], title=row["title"],
+        # The card's sentence, built from the body when the row carries one
+        # (excerpt.py). Rows ingested before excerpt existed stored the raw
+        # first 180 characters, Markdown preamble and all; recomputing here
+        # renders them the same as new rows without a backfill.
+        snippet=excerpt(row.get("body"), row["title"]) if row.get("body") else row["snippet"],
         body=row.get("body", ""), kind=row.get("kind", "page"), author=row["author"], author_initials=row["author_initials"],
         # ISO 8601, NOT a display string. The console formats dates itself
         # (components/tokens/format.ts fmtDate) and sorts columns on the raw

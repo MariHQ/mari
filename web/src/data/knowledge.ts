@@ -13,6 +13,7 @@ import type { KnowledgeResult } from "@mari-design/components/features/Knowledge
 import type { KnowledgeDoc } from "@mari-design/components/features/KnowledgeInspector";
 import { useQuery } from "../lib/api";
 import type { PageData } from "./types";
+import { cleanSnippet } from "./text";
 
 /** Results fetched on first load, and the size of each "show more" step. */
 export const PAGE = 40;
@@ -54,7 +55,8 @@ export function mapKnowledge(res: Res): KnowledgeResult[] {
     kind: KIND[d.kind] ?? "page",
     source: d.source,
     title: d.title,
-    snippet: d.snippet,
+    // The body's first sentence, not its Markdown preamble (see text.ts).
+    snippet: cleanSnippet(d.snippet, d.title),
     author: d.author,
     date: d.date,
     tags: d.tags ?? [],
@@ -111,7 +113,7 @@ export function mapKnowledgeDoc(res: DocRes | null): KnowledgeDoc | null {
     // (no tags, a decision-excerpt note). The message count has no column, so
     // it is left off rather than guessed at.
     slack: d.source === "slack",
-    summary: d.snippet,
+    summary: cleanSnippet(d.snippet, d.title),
     tags: d.tags ?? [],
     // `facts` is a workspace-wide table with no document foreign key, so there
     // is no honest way to say which claims came from THIS document. Left
@@ -156,7 +158,14 @@ export function useKnowledge(): PageData<KnowledgeData> {
     variables: { q: query, k }, map: mapSearch,
   });
 
-  const id = Number(params.get("doc"));
+  const asked = Number(params.get("doc"));
+  // No `?doc=` in the route: inspect the first result, the way the reference
+  // demo lands (mari.guru/demo opens Knowledge with a document already in the
+  // rail). "Nothing selected" is then a real state — no results — rather than
+  // the state every first visit started in. Choosing a row still writes
+  // `?doc=` (actions/knowledge.ts), so a shared link opens on that document.
+  const first = Number(q.data?.results[0]?.id);
+  const id = Number.isInteger(asked) && asked > 0 ? asked : first;
   const selected = Number.isInteger(id) && id > 0;
 
   // Hooks cannot be conditional, and an id of 0 matches no document: the
