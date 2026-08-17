@@ -29,6 +29,7 @@ import llm
 from ingest import _chunk_settings, _sha, _sync_chunks, _title_of
 
 from db import DB_URL
+from excerpt import excerpt
 
 router = APIRouter(prefix="/onboard")
 
@@ -59,7 +60,7 @@ def _upload_source(conn) -> int:
 def _upsert_upload_document(conn, source_id: int, filename: str, text: str) -> int:
     """Same shape as ingest._upsert_document, with source='upload'."""
     title = _title_of(text, filename)
-    snippet = " ".join(text.split())[:180]
+    snippet = excerpt(text, title)
     row = conn.execute("""
         INSERT INTO documents (source, external_id, title, snippet, body, author, author_initials,
                                kind, updated_src, created_src, content_hash, source_path, source_id)

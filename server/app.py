@@ -260,6 +260,13 @@ def healthz() -> dict[str, t.Any]:
 _static_env = os.environ.get("MARI_STATIC_DIR", "").strip()
 STATIC_DIR = pathlib.Path(_static_env) if _static_env else None
 if STATIC_DIR is not None and STATIC_DIR.is_dir():
+    # The console ships its own brand fonts (web/public/fonts). Older Python
+    # mimetypes tables have no entry for .woff2 and FileResponse would then
+    # send them as application/octet-stream; browsers still render, but the
+    # preload hint in index.html is typed font/woff2 and would be discarded.
+    import mimetypes  # noqa: E402
+    mimetypes.add_type("font/woff2", ".woff2")
+
     @app.get("/{path:path}", include_in_schema=False)
     def web_app(path: str):
         candidate = (STATIC_DIR / path).resolve()

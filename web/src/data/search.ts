@@ -12,6 +12,7 @@
  */
 
 import { gql } from "../lib/api";
+import { cleanSnippet } from "./text";
 import type { SearchResultGroup, SearchScope } from "@mari-design/components/navigation/GlobalSearch";
 
 const QUERY = `query GlobalSearch($query: String!, $k: Int!) {
@@ -60,7 +61,7 @@ export async function globalSearch(query: string): Promise<SearchResultGroup[]> 
       id: String(r.id),
       scope: "docs",
       title: r.title,
-      subtitle: r.snippet,
+      subtitle: cleanSnippet(r.snippet, r.title),
       meta: ago(r.date),
       // The document route, so Enter opens what was found — and so the row can
       // be cmd-clicked into a new tab like any other link.

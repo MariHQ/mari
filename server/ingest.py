@@ -27,6 +27,7 @@ import flowengine
 import github
 import links
 import llm
+from excerpt import excerpt
 
 DB_URL_REF: dict = {"url": "postgresql://localhost/mari_cloud"}
 
@@ -118,7 +119,7 @@ def _upsert_document(conn, source_id: int, external_id: str, title: str, body: s
     """Upsert one document. Returns (doc_id, inserted) — inserted is True for a
     brand-new row, False for an update (xmax = 0 only on fresh inserts).
     `source`/`initials` default to github; connect_sync passes the provider key."""
-    snippet = " ".join(body.split())[:180]
+    snippet = excerpt(body, title)
     row = conn.execute("""
         INSERT INTO documents (source, external_id, title, snippet, body, author, author_initials,
                                kind, updated_src, created_src, content_hash, source_path, source_id)
