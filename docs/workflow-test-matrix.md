@@ -8,7 +8,7 @@ suites with `make test`; run the real local-model probe with
 
 | Burndown area | Browser + server assurance | Status / remaining production check |
 | --- | --- | --- |
-| Demo → OSS migration | Every console route loads on desktop and mobile; OSS messaging and Ollama settings are asserted; server/web suites run together | **External check:** compare the deployed demo artifact, environment, migrations, and routing with this revision |
+| Demo → OSS migration | Every console route loads under a shared landmark/accessibility/overflow contract on desktop and mobile; Firefox and WebKit smoke every route; OSS messaging and Ollama settings are asserted | **External check:** compare the deployed demo artifact, environment, migrations, and routing with this revision |
 | Confluence polling | Browser credential wizard validates, connects, and schedules a poll; server covers auth failures, body conversion, and cursor filtering | **Live check ready:** sandbox tenant credentials. The original list said “confluent”; tests assume **Confluence**, not Confluent Kafka |
 | Slack polling | Browser validates and connects; server covers day-safe incremental polling and bot filtering | **Live check ready:** sandbox bot token and channels |
 | Google Docs/Drive polling | Browser validates and connects; server covers pagination, Docs export, text download, and cursor escaping | **Live check ready:** OAuth token/folder plus refresh-token lifecycle; bearer tokens are short-lived |
@@ -18,8 +18,10 @@ suites with `make test`; run the real local-model probe with
 | MCP | Browser creates, reveals the one-time token, configures, and health-checks a server; server covers bearer/slug auth and JSON-RPC initialize/ping/tools | **Live check ready:** deployed URL and an independent MCP client |
 | Workflows / queue | Browser runs, dry-runs, pauses, creates, and follows a flow into its editor; server covers trigger filters, bounded execution, retry, checkpoint/approval semantics | **Not production-scale:** queue is process-local; no durable cross-instance lease/recovery yet |
 | LLM insights / facts | Browser scans, verifies, captures, and renders write errors; server covers Ollama contracts, width, JSON extraction, provenance, contradictions, and cited bot answers | **External check:** fixed quality/eval corpus and acceptance thresholds |
-| MUVERA + polarquant | No executable implementation exists | **Not implemented:** requires benchmark and retrieval adapter work before it can have browser acceptance |
-| Lineage | Browser renders server-grounded graph nodes and opens detail | **Partial:** tuning settings requested in the burndown do not exist yet |
+| MUVERA + polarquant | Unit tests cover asymmetric MUVERA FDE generation, deterministic PolarQuant packing, approximate scan, exact MaxSim reranking, and filesystem snapshots; browser search reaches the fused retrieval path | **Implemented:** run a fixed production-representative recall/latency benchmark before choosing final projection and rerank limits |
+| Lineage | Browser renders server-grounded nodes, opens detail, and proves a 2,000-node response is reduced to a ranked 35-node viewport with an omission count on desktop and mobile | **Partial:** tuning settings requested in the burndown do not exist yet |
+| Agent trajectories | Browser covers progressive disclosure, taxonomy filters, URL pagination, errors, and a bounded 5,000-row archive; Ollama-backed harvesting is exercised through the server | **Implemented:** production evaluation still needs a privacy and taxonomy review against real Rippling traces |
+| High-volume UI | Tasks (1,500), answers (1,200), facts (1,000), members (700), trajectories (5,000), and lineage (2,000 nodes) assert bounded DOM pages and no viewport overflow | Complete for these highest-growth surfaces; add equivalent fixtures whenever a new unbounded collection ships |
 | Automated fact approval | Manual verification, contradiction review, and workflow approval are tested | **Not implemented:** there is no confidence/policy auto-approval engine |
 | Rippling user management | Browser invite and GitHub-team provisioning are tested; current SSO state is rendered | **Partial:** Rippling IdP contract is unknown and SCIM endpoint is explicitly unavailable |
 | Deployment / scheduled tasks | Browser saves the S3 publish target and deploys a site | **Partial:** no selected Rippling platform contract, k8s manifests, or production scheduler design |
@@ -49,21 +51,21 @@ The live spec reads these only from the environment:
 - Google Drive: `MARI_E2E_GDRIVE_ACCESS_TOKEN`, optionally `MARI_E2E_GDRIVE_FOLDER_ID`.
 - GitHub: `MARI_E2E_GITHUB_TOKEN`, `MARI_E2E_GITHUB_REPO`.
 
-## Architecture decisions not disguised as tests
+## Architecture status not disguised as tests
 
 - The current `ThreadPoolExecutor` provides backpressure only inside one API
   process. For a large deployment, use a durable Postgres-backed queue first
   (transactional enqueue, `FOR UPDATE SKIP LOCKED`, leases, attempts, idempotency
   keys), then allow a managed queue adapter if Rippling's deployment platform
   already standardizes on one.
-- Keep Postgres as the metadata, authorization, fact, workflow, and lineage
-  system of record. Object storage is a good fit for immutable raw connector
-  payloads and derived artifacts, but moving queryable knowledge rows out of
-  Postgres would make agent queries and lineage joins harder, not easier.
-- Evaluate MUVERA/polarquant behind the retrieval interface with a fixed corpus:
-  recall@k, nDCG, latency, storage amplification, rerank cost, and whether every
-  returned chunk retains document/chunk IDs for lineage. Do not pick the storage
-  layer before measuring those tradeoffs.
+- Iceberg storage primitives now provide a typed mutation journal and snapshot
+  time travel. The remaining migration step is to materialize request-time SQL
+  in embedded DuckDB, import the current Postgres corpus, and then remove the
+  Postgres runtime and deployment dependency.
+- Derived MUVERA/PolarQuant embeddings are deliberately outside the canonical
+  store and flush atomically to filesystem or S3. Continue measuring recall@k,
+  nDCG, latency, storage amplification, and rerank cost against fixed corpora;
+  every result retains document/chunk identity for lineage.
 - Lineage tuning should be workspace settings with validated bounds (edge-type
   weights, similarity threshold, recency decay, collapse threshold, max nodes),
   plus a reset-to-default action and saved views.

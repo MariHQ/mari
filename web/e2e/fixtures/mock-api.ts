@@ -93,7 +93,7 @@ function initialData() {
     glossaryCandidates: [], uploadManifest: { summary: "", files: [] },
     provisioning: { ssoProviders: ["github"], ssoEnabled: true, scimStatus: "unavailable", githubTeam: { team: "acme/docs", org: "acme", slug: "docs", connected: true, syncedMembers: 1 } },
     notifications: [{ id: 1, kind: "info", text: "Sync complete", detail: "acme/handbook", at: now, read: false }],
-    recentSearches: [{ query: "retention", at: now }],
+    recentSearches: ["retention"],
     trajectories: [{
       id: 1, sessionId: 10, prompt: "Update the retention documentation", status: "ready",
       model: "ollama:gemma3:4b", layer1: "Searched the knowledge base, inspected the runbook, and updated the document.",
@@ -191,6 +191,16 @@ export async function installMockApi(page: Page, options: { signedIn?: boolean; 
       data = { updateSetting: true };
     } else if (/createTask/.test(query)) {
       data = { createTask: true };
+    } else if (/createApiKey/.test(query)) {
+      data = { createApiKey: "mari_browser_secret_once" };
+    } else if (/revokeApiKey/.test(query)) {
+      data = { revokeApiKey: true };
+    } else if (/importBrand/.test(query)) {
+      data = { importBrand: { title: "Acme", themeColor: "#5c7a4c", cssColors: [["#5c7a4c", 8]], fonts: ["Inter"], logo: null, warnings: [] } };
+    } else if (/scanAnswerCandidates/.test(query)) {
+      data = { scanAnswerCandidates: [{ question: "How long is deletion?", draftAnswer: "Seven days.", sourceLabel: "Slack", confidence: "high" }] };
+    } else if (/decisionImpact/.test(query)) {
+      data = { decisionImpact: { summary: "One runbook is affected.", docs: [{ title: "Retention runbook", source: "github", severity: "high", reason: "Policy changed" }] } };
     }
     await route.fulfill({ json: { data } });
   });
@@ -210,6 +220,12 @@ export async function installMockApi(page: Page, options: { signedIn?: boolean; 
     restCalls.push({ path: "/onboard/upload", body: "multipart" });
     await route.fulfill({ json: { ok: true, sourceId: 43, files: [{ name: "runbook.md", docId: 3, chunks: 1, embedded: 1 }] } });
   });
+  for (const path of ["/auth/preferences/profile", "/auth/preferences/password", "/auth/preferences/notification"]) {
+    await page.route(`**${path}`, async (route) => {
+      const body = route.request().postDataJSON(); restCalls.push({ path, body });
+      await route.fulfill({ json: { ok: true } });
+    });
+  }
 
   return {
     calls, restCalls,
