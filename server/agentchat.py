@@ -42,7 +42,6 @@ from queries import hybrid_search
 router = APIRouter()
 
 MAX_STEPS = 8
-EDIT_BODY_CAP = 100_000  # bytes of new_body accepted by edit_document
 _MK = MutKnowledge()  # strawberry resolvers stay plain callables — reuse them
 _MP = MutPublish()
 
@@ -116,25 +115,6 @@ def t_read_document(args: dict):
               "updated": doc["updated_src"].isoformat() if doc["updated_src"] else "",
               "body": f"{UNTRUSTED_OPEN}\n{body}\n{UNTRUSTED_CLOSE}"}
     return True, f'read "{doc["title"]}" ({len(doc["body"] or "")} chars, tags: {", ".join(tags) or "none"})', detail
-
-
-def t_edit_document(args: dict):
-    doc = _need_doc(args.get("id"))
-    if not doc:
-        return False, f"document {args.get('id')!r} not found", "error: no such document"
-    new_body = args.get("new_body")
-    if not isinstance(new_body, str) or not new_body.strip():
-        return False, "edit_document needs new_body", "error: missing args.new_body"
-    if len(new_body.encode()) > EDIT_BODY_CAP:
-        return False, "new_body exceeds the 100KB cap", "error: body too large"
-    # Don't persist the untrusted-data markers if the model echoes them back.
-    new_body = new_body.replace(UNTRUSTED_OPEN, "").replace(UNTRUSTED_CLOSE, "")
-    # The same path the editor's Save uses: persist, re-embed, log the revision.
-    MutKnowledge.update_document(_MK, id=doc["id"], body=new_body)
-    note = str(args.get("note", "")).strip()
-    if note:
-        audit(f"agent edit: {note[:100]}", doc["title"])
-    return True, f'updated "{doc["title"]}" ({len(new_body)} chars)', f'document {doc["id"]} updated'
 
 
 def t_tag_document(args: dict):
@@ -225,8 +205,6 @@ def t_approve_answer(args: dict):
 TOOLS: dict[str, tuple[t.Callable[[dict], tuple[bool, str, t.Any]], str]] = {
     "search": (t_search, 'search(query) — hybrid search the knowledge base, top 8 hits with ids'),
     "read_document": (t_read_document, "read_document(id) — full title/body/tags/meta of one document"),
-    "edit_document": (t_edit_document, "edit_document(id, new_body, note) — REPLACE a document's whole body. "
-                      "You must read_document(id) first and send the complete new body, not just the changed part"),
     "tag_document": (t_tag_document, "tag_document(id, tag) — add a tag (canonical, stale, needs-review, …)"),
     "untag_document": (t_untag_document, "untag_document(id, tag) — remove a tag"),
     "list_sources": (t_list_sources, "list_sources() — connected knowledge sources with ids and health"),
@@ -364,7 +342,6 @@ def agent_events(session_id: int, message: str) -> t.Iterator[str]:
     tokens: t.Iterator[str] | None = None
     model_detail = "agent"
     seen_calls: set[str] = set()
-    read_ids: set[int] = set()  # docs read this turn — edits are gated on this
     repeats = 0
 
     for step in range(MAX_STEPS):
@@ -440,22 +417,6 @@ def agent_events(session_id: int, message: str) -> t.Iterator[str]:
             observations.append(f"{name or '?'}(...) → error: unknown tool. Use one from the list.")
             continue
 
-        if name == "edit_document":
-            # A full-body replacement from a model that hasn't read the doc
-            # this turn would clobber it — block and steer to read_document.
-            try:
-                eid = int(args.get("id"))  # type: ignore[arg-type]
-            except (TypeError, ValueError):
-                eid = None
-            if eid not in read_ids:
-                summary = "blocked: call read_document(id) first, then send the complete new body"
-                yield _sse("tool_start", {"name": name, "args": {k: v for k, v in args.items() if k != "new_body"}})
-                yield _sse("tool_result", {"name": name, "summary": summary, "ok": False})
-                trace.append({"kind": "tool", "name": name, "args": {"id": args.get("id")}, "summary": summary, "ok": False})
-                observations.append(f"edit_document(...) → REJECTED: {summary}")
-                seen_calls.discard(call_key)  # allow the retried edit after the read
-                continue
-
         fn, _ = TOOLS[name]
         yield _sse("tool_start", {"name": name, "args": args})
         try:
@@ -463,10 +424,7 @@ def agent_events(session_id: int, message: str) -> t.Iterator[str]:
         except Exception as e:  # noqa: BLE001 — a tool crash must not kill the stream
             ok, summary, detail = False, f"{name} failed: {e}"[:160], f"error: {e}"
         yield _sse("tool_result", {"name": name, "summary": summary, "ok": ok})
-        if name == "read_document" and ok and isinstance(detail, dict):
-            read_ids.add(int(detail["id"]))
-        trace.append({"kind": "tool", "name": name,
-                      "args": args if name != "edit_document" else {"id": args.get("id"), "note": args.get("note", "")},
+        trace.append({"kind": "tool", "name": name, "args": args,
                       "summary": summary, "ok": ok})
         obs = json.dumps(detail) if not isinstance(detail, str) else detail
         observations.append(f"{name}({json.dumps(args)}) → {obs[:2500]}")

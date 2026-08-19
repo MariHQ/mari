@@ -113,7 +113,7 @@ function initialData() {
       steps: [
         { ordinal: 0, tool: "search", actionFamily: "discover", args: { query: "retention" }, summary: "3 hits", ok: true },
         { ordinal: 1, tool: "read_document", actionFamily: "inspect", args: { id: 1 }, summary: "read Retention runbook", ok: true },
-        { ordinal: 2, tool: "edit_document", actionFamily: "change", args: { id: 1 }, summary: "updated Retention runbook", ok: true },
+        { ordinal: 2, tool: "create_task", actionFamily: "change", args: { kind: "review" }, summary: "opened review for Retention runbook", ok: true },
       ],
     }],
     trajectoryTotal: 1,

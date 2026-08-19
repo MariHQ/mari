@@ -22,7 +22,7 @@ _WORKERS = ThreadPoolExecutor(max_workers=2, thread_name_prefix="trajectory-harv
 FAMILY = {
     "search": "discover", "read_document": "inspect", "list_sources": "inspect",
     "list_flows": "inspect", "list_tasks": "inspect", "list_answers": "inspect",
-    "edit_document": "change", "tag_document": "change", "untag_document": "change",
+    "tag_document": "change", "untag_document": "change",
     "create_task": "change", "approve_answer": "approve", "sync_source": "execute",
     "run_flow": "execute", "navigate": "navigate",
 }

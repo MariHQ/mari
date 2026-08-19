@@ -10,7 +10,7 @@ import trajectory
 class TrajectoryHarvestTests(unittest.TestCase):
     def test_normalization_redacts_content_and_secrets(self):
         steps = trajectory.normalize_steps([{
-            "name": "edit_document",
+            "name": "tag_document",
             "args": {"id": 4, "new_body": "private", "token": "secret", "note": "fix typo"},
             "summary": "updated doc",
             "ok": True,
@@ -22,9 +22,9 @@ class TrajectoryHarvestTests(unittest.TestCase):
     def test_hierarchy_marks_failure_recovery_and_rework(self):
         steps = trajectory.normalize_steps([
             {"name": "search", "args": {"query": "auth"}, "summary": "3 hits", "ok": True},
-            {"name": "edit_document", "args": {"id": 4}, "summary": "blocked", "ok": False},
+            {"name": "tag_document", "args": {"id": 4}, "summary": "blocked", "ok": False},
             {"name": "read_document", "args": {"id": 4}, "summary": "read", "ok": True},
-            {"name": "edit_document", "args": {"id": 4}, "summary": "updated", "ok": True},
+            {"name": "tag_document", "args": {"id": 4}, "summary": "updated", "ok": True},
         ])
         phases = trajectory.segment_phases(steps)
         self.assertEqual([p["family"] for p in phases], ["discover", "change", "inspect", "change"])
@@ -43,7 +43,7 @@ class TrajectoryHarvestTests(unittest.TestCase):
         steps = trajectory.normalize_steps([
             {"name": "search", "args": {"query": "auth"}, "summary": "3 hits", "ok": True},
             {"name": "read_document", "args": {"id": 4}, "summary": "read", "ok": True},
-            {"name": "edit_document", "args": {"id": 4}, "summary": "updated", "ok": True},
+            {"name": "tag_document", "args": {"id": 4}, "summary": "updated", "ok": True},
         ])
         with patch.object(trajectory.llm, "generate_json", side_effect=lambda _: next(answers)), \
              patch.object(trajectory, "q", return_value=[{"category": "Incident response"}]), \

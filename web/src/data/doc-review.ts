@@ -42,7 +42,7 @@ type Res = {
    said "workspace" no matter what the URL held. Anything else in `?pane=` is
    not a pane, so the route falls back to the whole workspace rather than
    rendering nothing. */
-const PANES = new Set<ReviewPane>(["workspace", "outline", "editor", "changes", "findings", "refine"]);
+const PANES = new Set<ReviewPane>(["workspace", "outline", "findings"]);
 
 function paneOf(raw: string | null): ReviewPane {
   return raw && PANES.has(raw as ReviewPane) ? (raw as ReviewPane) : "workspace";
@@ -112,10 +112,7 @@ export function mapDocReview(res: Res | null, pane: ReviewPane = "workspace"): D
     title: d.title,
     // Owner and last-update line. Both are document columns; neither is prose.
     subtitle: [d.author, d.date].filter(Boolean).join(" · "),
-    // Where the save lifecycle STARTS, which is the only thing a read can
-    // know: a freshly loaded document is exactly what the server has. The page
-    // owns it from there — the first edit makes it dirty and enables Save,
-    // which runs `updateDocument` (see actions/doc-review.ts).
+    // Deprecated compatibility field. Synced source records are read-only.
     save: "saved",
     // Which pane the URL asked for. The whole workspace unless `?pane=` names
     // one of the five single-pane views.

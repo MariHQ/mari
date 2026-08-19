@@ -627,63 +627,6 @@ class MutKnowledge:
         audit(f"untagged {tag}", row["title"] if row else f"document {document_id}")
         return [r["tag"] for r in q("SELECT tag FROM tags WHERE document_id = %s ORDER BY tag", (document_id,))]
 
-    # ——— doc review ———
-    @strawberry.mutation
-    def update_document(self, id: int, body: str, title: str | None = None) -> bool:
-        """Editor save: persist body (and title), re-embed, log the revision."""
-        if title:
-            exec_("UPDATE documents SET body = %s, title = %s, updated_src = now() WHERE id = %s", (body, title, id))
-        else:
-            exec_("UPDATE documents SET body = %s, updated_src = now() WHERE id = %s", (body, id))
-        vec = llm.embed(body[:3000])
-        if vec:
-            exec_("UPDATE documents SET embedding = %s::vector WHERE id = %s", (str(vec), id))
-        exec_("INSERT INTO events (actor, verb, target) SELECT %s, 'edited', title FROM documents WHERE id = %s", (actor_name(), id))
-        return True
-
-    @strawberry.mutation
-    def set_change_status(self, id: int, status: str) -> bool:
-        exec_("UPDATE changes SET status = %s WHERE id = %s", (status, id))
-        if status == "accepted":
-            exec_("""UPDATE documents d SET body = replace(d.body, c.original, c.replacement)
-                     FROM changes c WHERE c.id = %s AND d.id = c.document_id""", (id,))
-        exec_("INSERT INTO events (actor, verb, target) SELECT %s, %s || ' change', original FROM changes WHERE id = %s",
-              (actor_name(), status, id))
-        return True
-
-    @strawberry.mutation
-    def accept_all_changes(self, document_id: int) -> bool:
-        exec_("""UPDATE documents d SET body = (
-                   SELECT reduce.body FROM (
-                     SELECT %s AS did) x,
-                   LATERAL (
-                     SELECT coalesce(
-                       (WITH RECURSIVE r AS (
-                          SELECT 0 AS i, d.body AS body
-                          UNION ALL
-                          SELECT r.i + 1, replace(r.body, c.original, c.replacement)
-                          FROM r JOIN (
-                            SELECT row_number() OVER (ORDER BY id) - 1 AS rn, original, replacement
-                            FROM changes WHERE document_id = %s AND status = 'pending') c ON c.rn = r.i)
-                        SELECT body FROM r ORDER BY i DESC LIMIT 1), d.body) AS body) reduce)
-                 WHERE d.id = %s""", (document_id, document_id, document_id))
-        exec_("UPDATE changes SET status = 'accepted' WHERE document_id = %s AND status = 'pending'", (document_id,))
-        audit("accepted all changes", f"document #{document_id}")
-        return True
-
-    @strawberry.mutation
-    def run_refinement(self, document_id: int, skill: str = "tighten") -> int:
-        doc = q1("SELECT * FROM documents WHERE id = %s", (document_id,))
-        if not doc:
-            return 0
-        edits = llm_refine(doc, skill)
-        for original, replacement, reason in edits:
-            exec_("""INSERT INTO changes (document_id, original, replacement, reason)
-                     VALUES (%s, %s, %s, %s) ON CONFLICT (document_id, original) DO NOTHING""",
-                  (document_id, original, replacement, reason))
-        audit(f"ran {skill} refinement", doc["title"])
-        return len(edits)
-
     @strawberry.mutation
     def fact_check(self, document_id: int) -> int:
         doc = q1("SELECT * FROM documents WHERE id = %s", (document_id,))
