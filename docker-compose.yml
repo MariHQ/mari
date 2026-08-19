@@ -86,6 +86,13 @@ services:
     extra_hosts:
       # Makes host.docker.internal resolve on Linux (no-op on Docker Desktop).
       - host.docker.internal:host-gateway
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+    restart: unless-stopped
 
   web:
     # Context is the repo root, not web/: the app compiles against the
@@ -94,9 +101,11 @@ services:
       context: .
       dockerfile: web/Dockerfile
     ports:
-      - "8080:80"
+      - "8080:8080"
     depends_on:
-      - api
+      api:
+        condition: service_healthy
+    restart: unless-stopped
 
   # Optional: run ollama inside compose instead of on the host.
   # Uncomment this service, set MARI_OLLAMA_HOST=http://ollama:11434 in .env,

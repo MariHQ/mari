@@ -510,7 +510,7 @@ def fire_document_triggers(doc_ids: list[int], change: str) -> list[int]:
 # derived from the latest run's started_at — no per-workflow state to keep.
 
 SCHEDULER_TICK_SECONDS = 30
-_SCHEDULER = {"started": False}
+_SCHEDULER = {"started": False, "thread": None, "stop": threading.Event()}
 PROCESS_START_TS = time.time()  # for startup reconciliation — never touch newer rows
 
 
@@ -594,6 +594,7 @@ def start_scheduler() -> None:
     if _SCHEDULER["started"]:
         return
     _SCHEDULER["started"] = True
+    _SCHEDULER["stop"].clear()
 
     # Reconcile BEFORE the loop begins: runs wedged in 'running'/'waiting' by
     # an unclean shutdown would otherwise block their schedule forever.
@@ -603,14 +604,26 @@ def start_scheduler() -> None:
         pass
 
     def loop() -> None:
-        while True:
-            time.sleep(SCHEDULER_TICK_SECONDS)
+        while not _SCHEDULER["stop"].wait(SCHEDULER_TICK_SECONDS):
             try:
                 run_due_schedules()
             except Exception:  # noqa: BLE001 — the scheduler must survive transient DB errors
                 pass
 
-    threading.Thread(target=loop, daemon=True, name="flow-scheduler").start()
+    thread = threading.Thread(target=loop, daemon=True, name="flow-scheduler")
+    _SCHEDULER["thread"] = thread
+    thread.start()
+
+
+def stop_scheduler(timeout: float = 5.0) -> None:
+    """Stop the scheduler loop during an orderly ASGI shutdown."""
+    if not _SCHEDULER["started"]:
+        return
+    _SCHEDULER["stop"].set()
+    thread = _SCHEDULER.get("thread")
+    if thread and thread is not threading.current_thread():
+        thread.join(timeout=max(0.0, timeout))
+    _SCHEDULER.update(started=False, thread=None)
 
 
 # ————— seeded scheduled flows (startup + connectGithubRepo) —————

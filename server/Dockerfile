@@ -20,7 +20,12 @@ COPY server/ /app/server/
 
 # app.py mkdirs builds/ at startup, but create it here too so the image
 # works read-only-ish out of the box.
-RUN mkdir -p /app/server/builds
+RUN addgroup --system mari \
+    && adduser --system --ingroup mari --home /app mari \
+    && mkdir -p /app/server/builds \
+    && chown -R mari:mari /app
+
+USER mari
 
 EXPOSE 8000
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -55,6 +55,20 @@ class WorkflowStepTests(unittest.TestCase):
         self.assertEqual(updates["facts"], 3)
         scan.assert_called_once_with([7, 8])
 
+    def test_scheduler_has_orderly_shutdown_and_can_restart(self) -> None:
+        flowengine.stop_scheduler(timeout=0)
+        with patch.object(flowengine, "reconcile_stale_runs"):
+            flowengine.start_scheduler()
+        first = flowengine._SCHEDULER["thread"]
+        self.assertTrue(first.is_alive())
+        flowengine.stop_scheduler(timeout=1)
+        self.assertFalse(first.is_alive())
+        self.assertFalse(flowengine._SCHEDULER["started"])
+        with patch.object(flowengine, "reconcile_stale_runs"):
+            flowengine.start_scheduler()
+        self.assertIsNot(first, flowengine._SCHEDULER["thread"])
+        flowengine.stop_scheduler(timeout=1)
+
 
 if __name__ == "__main__":
     unittest.main()
