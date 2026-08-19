@@ -75,6 +75,10 @@ test("large lineage opens as a comprehensible aggregate instead of a 35-node hai
   await expect(page.getByText(/2 groups · 2,000 documents, rolled up/i)).toBeVisible();
   await expect(page.getByRole("group", { name: /Documents\. Use the arrow keys/ }).getByRole("button")).toHaveCount(2);
   await expect(page.getByText("Document 1", { exact: true })).toHaveCount(0);
+  await page.getByRole("group", { name: /Documents\. Use the arrow keys/ })
+    .getByRole("button", { name: /GitHub · 1,000 documents/i }).click();
+  await expect(page.getByText("Rolled-up group", { exact: true })).toBeVisible();
+  await expect(page.getByText(/Showing 1 to 5 of 1,000 members/i)).toBeVisible();
   const horizontalOverflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
   expect(horizontalOverflow).toBeLessThanOrEqual(2);
 });
