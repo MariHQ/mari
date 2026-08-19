@@ -55,6 +55,23 @@ test("provenance and impact exclude symmetric context links", async ({ page }) =
   await expect(documents.getByRole("button", { name: /Semantically nearby/i })).toHaveCount(0);
 });
 
+test("workspace lineage defaults persist and drive focused graph depth", async ({ page }) => {
+  await page.goto("/settings/general");
+  await page.getByLabel("Maximum visible lineage nodes").selectOption("24");
+  await page.getByLabel("Lineage dependency depth").selectOption("2");
+  await page.getByRole("button", { name: "Save lineage defaults" }).click();
+  await expect.poll(() => api.calls.some((call) =>
+    call.query.includes("updateSetting") && call.variables.key === "lineage" &&
+    (call.variables.value as any).max_nodes === 24 && (call.variables.value as any).hop_depth === 2,
+  )).toBeTruthy();
+
+  await page.reload();
+  await expect(page.getByLabel("Maximum visible lineage nodes")).toHaveValue("24");
+  await expect(page.getByLabel("Lineage dependency depth")).toHaveValue("2");
+  await page.goto("/lineage?mode=provenance&focal=github%3A1");
+  await expect(page.getByText(/Showing 2 dependency hops/i)).toBeVisible();
+});
+
 test("Ollama embedding and generation settings save without cloud keys", async ({ page }) => {
   await page.goto("/settings/models");
   await expect(page.getByRole("option", { name: /Ollama: nomic-embed-text/ })).toHaveCount(1);

@@ -188,6 +188,9 @@ export async function installMockApi(page: Page, options: { signedIn?: boolean; 
     } else if (/syncSource|resyncSource/.test(query)) {
       data = { syncSource: true, resyncSource: true };
     } else if (/updateSetting/.test(query)) {
+      const existing = state.settings.find((row: any) => row.key === variables.key);
+      if (existing) existing.value = variables.value;
+      else state.settings.push({ key: variables.key, value: variables.value });
       data = { updateSetting: true };
     } else if (/createTask/.test(query)) {
       data = { createTask: true };

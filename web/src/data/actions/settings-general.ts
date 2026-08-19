@@ -3,7 +3,7 @@
  * One intent: save the form. It lands in two places because the server keeps
  * it in two places, and the page should not have to know that. */
 
-import type { SettingsGeneralActions, WorkspaceIdentity } from "@mari-design/components/pages/SettingsGeneralPage";
+import type { LineageTuning, SettingsGeneralActions, WorkspaceIdentity } from "@mari-design/components/pages/SettingsGeneralPage";
 import { gql } from "../../lib/api";
 import { mutate } from "./index";
 
@@ -35,6 +35,12 @@ export function settingsGeneralActions(): SettingsGeneralActions {
           name: w.name, slug: w.slug, plan: w.plan,
           timezone: w.timezone, language: w.language,
         },
+      });
+    },
+    saveLineageTuning: async (tuning: LineageTuning) => {
+      await mutate(UPDATE_SETTING, {
+        key: "lineage",
+        value: { max_nodes: tuning.maxNodes, hop_depth: tuning.hopDepth },
       });
     },
     // No handler for the danger zone: transferring or deleting a workspace has

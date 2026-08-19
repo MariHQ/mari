@@ -17,6 +17,7 @@ const QUERY = `{
   provisioning { ssoProviders ssoEnabled scimStatus githubTeam { team connected syncedMembers } }
   members { id status }
   graphStats { docs }
+  settings { key value }
 }`;
 
 type Res = {
@@ -27,6 +28,7 @@ type Res = {
   } | null;
   members: { id: number; status: string }[];
   graphStats: { docs: number } | null;
+  settings: { key: string; value: unknown }[];
 };
 
 type WorkspaceRow = { name?: string; slug?: string; plan?: string; timezone?: string; language?: string };
@@ -51,6 +53,7 @@ export const EMPTY: SettingsGeneralData = {
   section: "workspace",
   name: "", slug: "", plan: "", timezone: "", language: "",
   save: "clean", slugError: null, summary: [], danger: false,
+  lineage: { maxNodes: 16, hopDepth: 1 },
 };
 
 /** Pure: the whole response → everything the page renders. */
@@ -65,6 +68,8 @@ export function buildSettingsGeneral(res: Res | null): SettingsGeneralData {
   // renders, so the two can never disagree. A fact with no source (region,
   // creation date) is simply not a row.
   const prov = res.provisioning;
+  const lineageRow = (res.settings ?? []).find((row) => row.key === "lineage")?.value;
+  const lineage = lineageRow && typeof lineageRow === "object" ? lineageRow as Record<string, unknown> : {};
   const summary: PropertyItem[] = [
     ...(ws.plan ? [{ label: "Plan", value: ws.plan }] : []),
     ...(members.length ? [{ label: "Members", value: `${active} active, ${invited} invited` }] : []),
@@ -103,6 +108,10 @@ export function buildSettingsGeneral(res: Res | null): SettingsGeneralData {
     // The destructive controls are owner-only and this app has no ownership
     // check yet, so they stay off rather than being offered to everyone.
     danger: false,
+    lineage: {
+      maxNodes: Math.max(8, Math.min(35, Number(lineage.max_nodes) || 16)),
+      hopDepth: Math.max(1, Math.min(3, Number(lineage.hop_depth) || 1)),
+    },
   };
 }
 
