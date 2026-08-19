@@ -10,6 +10,7 @@ import { page as facts } from "@mari-design/components/pages/FactsPage";
 import { page as decisions } from "@mari-design/components/pages/DecisionsPage";
 import { page as knowledge } from "@mari-design/components/pages/KnowledgePage";
 import { page as insights } from "@mari-design/components/pages/InsightsPage";
+import { page as trajectories } from "@mari-design/components/pages/TrajectoriesPage";
 import { page as audit } from "@mari-design/components/pages/AuditPage";
 import { page as members } from "@mari-design/components/pages/SettingsMembersPage";
 import { page as apiKeys } from "@mari-design/components/pages/SettingsApiKeysPage";
@@ -47,6 +48,7 @@ import { mapFreshness, mapWidgets } from "../src/data/insights";
 import { EMPTY, mapOverview } from "../src/data/overview";
 import { buildApiKeys, buildMembers, mapApiKeys, mapGithubTeam, mapMembers } from "../src/data/settings";
 import { buildTasks, mapAssignees, mapStrip, mapTasks } from "../src/data/tasks";
+import { buildTrajectories, EMPTY as TRAJECTORIES_EMPTY } from "../src/data/trajectories";
 
 /* This file used to install a DOM shim so `DocReviewOutlinePanel` could be
    server-rendered: it derived its outline through `document.createElement`
@@ -288,6 +290,23 @@ check("insights: renders", insightsHtml.length > 500);
 check("insights: the chart names the source the workspace named",
   insightsHtml.includes("GitHub · acme/handbook"));
 states(insights, { widgets: null, freshness: null, extras: null });
+
+/* ── Agent trajectories ────────────────────────────────────────────────── */
+
+console.log("trajectories");
+const trajectoryData = buildTrajectories({
+  trajectories: [{
+    id: 1, sessionId: 1, prompt: "Fix docs", status: "ready", model: "ollama:gemma3:4b",
+    layer1: "Searched and updated one document.", layer2: "Updated documentation.",
+    category: "Documentation", macroIntent: "Repair docs", phases: [], stepCount: 2,
+    failureCount: 0, reworkCount: 0, startedAt: "2026-08-19T12:00:00Z",
+    completedAt: "2026-08-19T12:00:01Z", steps: [],
+  }], trajectoryTotal: 1, trajectoryCategories: ["Documentation"],
+}, null, 0);
+const trajectoryHtml = render(trajectories, { data: trajectoryData, loading: false, error: null });
+check("trajectories: renders inferred macro intent", trajectoryHtml.includes("Repair docs"));
+check("trajectories: renders bounded count", trajectoryHtml.includes("Showing 1-1 of 1"));
+states(trajectories, TRAJECTORIES_EMPTY);
 
 /* ── Audit ──────────────────────────────────────────────────────────────── */
 

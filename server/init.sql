@@ -929,3 +929,40 @@ CREATE INDEX IF NOT EXISTS documents_source_idx ON documents (source);
 CREATE INDEX IF NOT EXISTS tags_tag_idx ON tags (tag);
 CREATE INDEX IF NOT EXISTS facts_status_idx ON facts (status);
 CREATE INDEX IF NOT EXISTS workflow_runs_workflow_number_idx ON workflow_runs (workflow_id, number DESC);
+
+-- LLM trajectory harvesting. Tool results and document bodies never enter
+-- these tables: args are reduced to safe scalar hints and summaries are
+-- capped before persistence. The inferred WorkflowView layers stay auditable
+-- against the chronological steps that grounded them.
+CREATE TABLE IF NOT EXISTS trajectories (
+  id              serial PRIMARY KEY,
+  session_id      int REFERENCES chat_sessions(id) ON DELETE SET NULL,
+  prompt          text NOT NULL DEFAULT '',
+  status          text NOT NULL DEFAULT 'processing',
+  model           text NOT NULL DEFAULT '',
+  layer1          text NOT NULL DEFAULT '',
+  layer2          text NOT NULL DEFAULT '',
+  category        text NOT NULL DEFAULT 'Unclassified',
+  macro_intent    text NOT NULL DEFAULT '',
+  phases          jsonb NOT NULL DEFAULT '[]',
+  step_count      int NOT NULL DEFAULT 0,
+  failure_count   int NOT NULL DEFAULT 0,
+  rework_count    int NOT NULL DEFAULT 0,
+  started_at      timestamptz NOT NULL DEFAULT now(),
+  completed_at    timestamptz
+);
+
+CREATE TABLE IF NOT EXISTS trajectory_steps (
+  id              serial PRIMARY KEY,
+  trajectory_id   int NOT NULL REFERENCES trajectories(id) ON DELETE CASCADE,
+  ordinal         int NOT NULL,
+  tool            text NOT NULL,
+  action_family   text NOT NULL,
+  args            jsonb NOT NULL DEFAULT '{}',
+  summary         text NOT NULL DEFAULT '',
+  ok              boolean NOT NULL DEFAULT true,
+  UNIQUE (trajectory_id, ordinal)
+);
+
+CREATE INDEX IF NOT EXISTS trajectories_started_idx ON trajectories (started_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS trajectory_steps_trajectory_idx ON trajectory_steps (trajectory_id, ordinal);

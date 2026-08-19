@@ -25,7 +25,7 @@ export default defineConfig({
   },
   projects: [
     { name: "chromium", use: { ...devices["Desktop Chrome"] }, testIgnore: /\.live\.spec\.ts/ },
-    { name: "mobile-chromium", use: { ...devices["Pixel 7"] }, testMatch: /navigation\.spec\.ts/ },
+    { name: "mobile-chromium", use: { ...devices["Pixel 7"] }, testMatch: /(?:navigation|trajectories-and-scale)\.spec\.ts/ },
     ...(process.env.MARI_E2E_LIVE === "1"
       ? [{
           name: "live-chromium",

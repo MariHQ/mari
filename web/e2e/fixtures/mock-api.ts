@@ -11,6 +11,7 @@ export type MockApi = {
   calls: Call[];
   restCalls: { path: string; body: any }[];
   failNext: (pattern: RegExp, message: string) => void;
+  setData: (key: string, value: any) => void;
 };
 
 const now = "2026-08-19T12:00:00Z";
@@ -93,6 +94,25 @@ function initialData() {
     provisioning: { ssoProviders: ["github"], ssoEnabled: true, scimStatus: "unavailable", githubTeam: { team: "acme/docs", org: "acme", slug: "docs", connected: true, syncedMembers: 1 } },
     notifications: [{ id: 1, kind: "info", text: "Sync complete", detail: "acme/handbook", at: now, read: false }],
     recentSearches: [{ query: "retention", at: now }],
+    trajectories: [{
+      id: 1, sessionId: 10, prompt: "Update the retention documentation", status: "ready",
+      model: "ollama:gemma3:4b", layer1: "Searched the knowledge base, inspected the runbook, and updated the document.",
+      layer2: "Updated a policy document from retrieved evidence.", category: "Documentation maintenance",
+      macroIntent: "Repair policy documentation",
+      phases: [
+        { id: 0, name: "Discover", family: "discover", start: 0, end: 0, steps: 1, substate: "Progress", failures: 0 },
+        { id: 1, name: "Inspect", family: "inspect", start: 1, end: 1, steps: 1, substate: "Progress", failures: 0 },
+        { id: 2, name: "Change", family: "change", start: 2, end: 2, steps: 1, substate: "Progress", failures: 0 },
+      ],
+      stepCount: 3, failureCount: 0, reworkCount: 0, startedAt: now, completedAt: now,
+      steps: [
+        { ordinal: 0, tool: "search", actionFamily: "discover", args: { query: "retention" }, summary: "3 hits", ok: true },
+        { ordinal: 1, tool: "read_document", actionFamily: "inspect", args: { id: 1 }, summary: "read Retention runbook", ok: true },
+        { ordinal: 2, tool: "edit_document", actionFamily: "change", args: { id: 1 }, summary: "updated Retention runbook", ok: true },
+      ],
+    }],
+    trajectoryTotal: 1,
+    trajectoryCategories: ["Documentation maintenance"],
   } as Record<string, any>;
 }
 
@@ -130,7 +150,14 @@ export async function installMockApi(page: Page, options: { signedIn?: boolean; 
       return route.fulfill({ json: { errors: [{ message }] } });
     }
     let data: Record<string, any> = { ...state };
-    if (/verifyFact/.test(query)) {
+    if (/query Trajectories/.test(query)) {
+      const category = String(variables.category || "");
+      const matching = category ? state.trajectories.filter((row: any) => row.category === category) : state.trajectories;
+      const offset = Number(variables.offset || 0);
+      const limit = Number(variables.limit || 25);
+      data = { trajectories: matching.slice(offset, offset + limit), trajectoryTotal: matching.length,
+        trajectoryCategories: state.trajectoryCategories };
+    } else if (/verifyFact/.test(query)) {
       const fact = state.facts.find((f: any) => f.id === variables.id);
       if (fact) { fact.status = "Verified"; fact.verified = "2026-08-19"; }
       data = { verifyFact: true };
@@ -184,5 +211,9 @@ export async function installMockApi(page: Page, options: { signedIn?: boolean; 
     await route.fulfill({ json: { ok: true, sourceId: 43, files: [{ name: "runbook.md", docId: 3, chunks: 1, embedded: 1 }] } });
   });
 
-  return { calls, restCalls, failNext: (pattern, message) => { failure = { pattern, message }; } };
+  return {
+    calls, restCalls,
+    failNext: (pattern, message) => { failure = { pattern, message }; },
+    setData: (key, value) => { state[key] = value; },
+  };
 }

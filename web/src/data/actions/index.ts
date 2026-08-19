@@ -40,6 +40,7 @@ import { settingsModelsActions } from "./settings-models";
 import { setupActions } from "./setup";
 import { sourcesActions } from "./sources";
 import { tasksActions } from "./tasks";
+import { trajectoriesActions } from "./trajectories";
 import { welcomeActions } from "./welcome";
 
 /** Run a mutation, surface the real server message, then invalidate reads so
@@ -92,5 +93,6 @@ export const ACTION_FACTORIES: Record<string, (ctx: ActionContext) => unknown> =
   setup: setupActions,
   sources: sourcesActions,
   tasks: tasksActions,
+  trajectories: trajectoriesActions,
   welcome: welcomeActions,
 };

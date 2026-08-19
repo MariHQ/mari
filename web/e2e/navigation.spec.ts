@@ -7,6 +7,7 @@ const ROUTES = [
   ["/knowledge/doc?id=1", "Retention runbook"], ["/answers", "Approved answers"],
   ["/insights", "Insights"], ["/audit", "Repository audit"], ["/lineage", "Lineage"],
   ["/flows", "Flows"], ["/library", "Library"], ["/publish", "Publish"],
+  ["/trajectories", "Agent trajectories"],
   ["/sources", "Sources"], ["/settings/general", "General"],
   ["/settings/models", "Models"], ["/settings/design", "Design & brand"],
   ["/settings/members", "Members"], ["/settings/api-keys", "API keys"],

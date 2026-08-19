@@ -584,6 +584,36 @@ class ChatSession:
 
 
 @strawberry.type
+class TrajectoryStep:
+    ordinal: int
+    tool: str
+    action_family: str
+    args: JSON
+    summary: str
+    ok: bool
+
+
+@strawberry.type
+class Trajectory:
+    id: int
+    session_id: int | None
+    prompt: str
+    status: str
+    model: str
+    layer1: str
+    layer2: str
+    category: str
+    macro_intent: str
+    phases: JSON
+    step_count: int
+    failure_count: int
+    rework_count: int
+    started_at: str
+    completed_at: str
+    steps: list[TrajectoryStep]
+
+
+@strawberry.type
 class ApprovedAnswer:
     id: int
     question: str

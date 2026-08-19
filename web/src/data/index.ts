@@ -23,6 +23,7 @@ import { useSettingsModels } from "./settings-models";
 import { useSources } from "./sources";
 import { stub } from "./stubs";
 import { useTasks } from "./tasks";
+import { useTrajectories } from "./trajectories";
 import type { Adapter } from "./types";
 import { useWelcome } from "./welcome";
 
@@ -50,6 +51,7 @@ const ADAPTERS: Record<string, Adapter<any>> = {
   "settings-models": useSettingsModels,
   sources: useSources,
   tasks: useTasks,
+  trajectories: useTrajectories,
   welcome: useWelcome,
 };
 

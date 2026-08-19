@@ -33,6 +33,7 @@ from pydantic import BaseModel
 
 import ingest
 import llm
+import trajectory
 from db import DB_URL, audit, exec_, log_usage, q, q1
 from mutations_knowledge import MutKnowledge
 from mutations_publish import MutPublish
@@ -54,7 +55,7 @@ class AgentChatIn(BaseModel):
 # ————————————————— navigate whitelist —————————————————
 
 NAV_EXACT = {"/", "/ask", "/knowledge", "/answers", "/facts", "/decisions",
-             "/lineage", "/flows", "/publish", "/insights", "/library", "/sources"}
+             "/lineage", "/flows", "/publish", "/insights", "/trajectories", "/library", "/sources"}
 _SETTINGS_RE = re.compile(r"^/settings/[a-z-]+$")
 _QUERY_RE = re.compile(r"^[A-Za-z0-9_.\-]+=[A-Za-z0-9_.%\- ]*$")
 
@@ -487,6 +488,10 @@ def agent_events(session_id: int, message: str) -> t.Iterator[str]:
     try:
         log_usage("chat_answer", model_detail)
     except Exception:  # noqa: BLE001
+        pass
+    try:
+        trajectory.harvest(session_id, message, trace, model_detail)
+    except Exception:  # noqa: BLE001 -- harvesting cannot break the user turn
         pass
     yield _sse("done", {"session_id": session_id})
 

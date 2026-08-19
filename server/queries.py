@@ -34,7 +34,7 @@ from gqltypes import (
     Member, Notification, Provisioning, ReadabilityRow, RelatedDoc, Release, Setting, Site,
     SiteFeature, SiteThemePreset, SourcePulse, StyleGuide, StyleRule, SyncEvent,
     SyncStatus, TagDef, Task, TaskSummary, TopCited, UploadFile, UploadManifest,
-    VoiceLayer, Workflow, WorkflowRun, Workspace,
+    Trajectory, TrajectoryStep, VoiceLayer, Workflow, WorkflowRun, Workspace,
 )
 
 # ————————————————— lineage layout (LINEAGE-DESIGN.md §3.3) —————————————————
@@ -596,6 +596,49 @@ def _mask_setting(key: str, value):
 
 @strawberry.type
 class Query:
+    @strawberry.field
+    def trajectories(self, limit: int = 50, offset: int = 0,
+                     category: str | None = None) -> list[Trajectory]:
+        """Newest harvested agent workflows, bounded for progressive rendering."""
+        cap, start = max(1, min(int(limit), 100)), max(0, int(offset))
+        args: list = []
+        where = ""
+        if (category or "").strip():
+            where = "WHERE category = %s"
+            args.append(category.strip())
+        args.extend((cap, start))
+        rows = q(f"SELECT * FROM trajectories {where} ORDER BY started_at DESC, id DESC LIMIT %s OFFSET %s",
+                 tuple(args))
+        if not rows:
+            return []
+        by_id: dict[int, list[TrajectoryStep]] = {int(row["id"]): [] for row in rows}
+        for step in q("""SELECT trajectory_id, ordinal, tool, action_family, args, summary, ok
+                           FROM trajectory_steps WHERE trajectory_id = ANY(%s)
+                           ORDER BY trajectory_id, ordinal""", (list(by_id),)):
+            by_id[int(step["trajectory_id"])].append(TrajectoryStep(
+                ordinal=int(step["ordinal"]), tool=step["tool"], action_family=step["action_family"],
+                args=jload(step["args"]) or {}, summary=step["summary"], ok=bool(step["ok"])))
+        return [Trajectory(
+            id=int(row["id"]), session_id=row.get("session_id"), prompt=row["prompt"],
+            status=row["status"], model=row["model"], layer1=row["layer1"], layer2=row["layer2"],
+            category=row["category"], macro_intent=row["macro_intent"], phases=jload(row["phases"]) or [],
+            step_count=int(row["step_count"]), failure_count=int(row["failure_count"]),
+            rework_count=int(row["rework_count"]), started_at=row["started_at"].isoformat(),
+            completed_at=row["completed_at"].isoformat() if row.get("completed_at") else "",
+            steps=by_id[int(row["id"])]) for row in rows]
+
+    @strawberry.field
+    def trajectory_total(self, category: str | None = None) -> int:
+        if (category or "").strip():
+            return int(q1("SELECT count(*) AS n FROM trajectories WHERE category = %s",
+                          (category.strip(),))["n"])
+        return int(q1("SELECT count(*) AS n FROM trajectories")["n"])
+
+    @strawberry.field
+    def trajectory_categories(self) -> list[str]:
+        return [row["category"] for row in q(
+            "SELECT category FROM trajectories GROUP BY category ORDER BY count(*) DESC, category")]
+
     @strawberry.field
     def overview_stats(self, since: str | None = None) -> JSON:
         """`since` is an ISO date: the lower bound of the window the dashboard's

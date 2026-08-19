@@ -1,0 +1,93 @@
+import { expect, test } from "@playwright/test";
+import { installMockApi, type MockApi } from "./fixtures/mock-api";
+
+let api: MockApi;
+test.beforeEach(async ({ page }) => { api = await installMockApi(page); });
+
+test("trajectory view progressively discloses grounded layers and chronological evidence", async ({ page }) => {
+  await page.goto("/trajectories");
+  await expect(page.getByText("Repair policy documentation", { exact: true })).toBeVisible();
+  await expect(page.getByText("Updated a policy document from retrieved evidence.", { exact: true })).toBeVisible();
+  await expect(page.getByText("Searched the knowledge base, inspected the runbook, and updated the document.", { exact: true })).toBeHidden();
+  await page.getByText("Evidence and abstraction layers", { exact: true }).click();
+  await expect(page.getByText("Searched the knowledge base, inspected the runbook, and updated the document.", { exact: true })).toBeVisible();
+  await expect(page.getByRole("list", { name: "Trajectory steps" }).getByRole("listitem")).toHaveCount(3);
+  await expect(page.locator("body")).not.toContainText("private document body");
+  await expect(page.locator("body")).not.toContainText("secret-token");
+});
+
+test("trajectory taxonomy filter and pagination remain URL-addressable", async ({ page }) => {
+  const rows = Array.from({ length: 60 }, (_, index) => ({
+    id: index + 1, sessionId: index + 100, prompt: `Task ${index + 1}`, status: "ready",
+    model: "ollama:gemma3:4b", layer1: `Grounded workflow ${index + 1}`,
+    layer2: `Activity ${index + 1}`, category: index % 2 ? "Incident response" : "Documentation maintenance",
+    macroIntent: `Intent ${index + 1}`, phases: [], stepCount: 1, failureCount: 0, reworkCount: 0,
+    startedAt: "2026-08-19T12:00:00Z", completedAt: "2026-08-19T12:00:01Z",
+    steps: [{ ordinal: 0, tool: "search", actionFamily: "discover", args: {}, summary: "one hit", ok: true }],
+  }));
+  api.setData("trajectories", rows);
+  api.setData("trajectoryCategories", ["Documentation maintenance", "Incident response"]);
+  await page.goto("/trajectories");
+  await expect(page.locator("article")).toHaveCount(25);
+  await page.getByLabel("Trajectory category").selectOption("Incident response");
+  await expect(page).toHaveURL(/category=Incident(?:\+|%20)response/);
+  await expect.poll(() => api.calls.some((call) => call.query.includes("query Trajectories") && call.variables.category === "Incident response")).toBeTruthy();
+  await expect(page.locator("article")).toHaveCount(25);
+  await page.getByRole("button", { name: "Next" }).click();
+  await expect(page).toHaveURL(/offset=25/);
+  await expect(page.locator("article")).toHaveCount(5);
+});
+
+test("a 5,000-row trajectory archive renders only one bounded page", async ({ page }) => {
+  const base = {
+    sessionId: 1, prompt: "Task", status: "ready", model: "ollama:gemma3:4b",
+    layer1: "Searched and inspected evidence.", layer2: "Investigated documentation.",
+    category: "Investigation", macroIntent: "Investigate knowledge", phases: [],
+    stepCount: 1, failureCount: 0, reworkCount: 0, startedAt: "2026-08-19T12:00:00Z",
+    completedAt: "2026-08-19T12:00:01Z", steps: [],
+  };
+  api.setData("trajectories", Array.from({ length: 5000 }, (_, index) => ({ ...base, id: index + 1 })));
+  api.setData("trajectoryCategories", ["Investigation"]);
+  await page.goto("/trajectories");
+  await expect(page.getByText("Showing 1-25 of 5000", { exact: true })).toBeVisible();
+  await expect(page.locator("article")).toHaveCount(25);
+  expect(await page.locator("article").count()).toBeLessThanOrEqual(25);
+});
+
+test("large lineage renders a ranked 35-node viewport and reports what it omitted", async ({ page }) => {
+  const count = 2000;
+  const nodes = Array.from({ length: count }, (_, index) => ({
+    id: `doc-${index + 1}`, docId: index + 1, title: `Document ${index + 1}`, source: index % 2 ? "github" : "docs",
+    docKind: "page", icon: "file", x: 0.24 + (index % 20) * 0.03, y: 0.2 + (index % 30) * 0.02,
+    pinned: false, date: "2026-08-19", createdDate: "2026-08-18", warn: index % 17 === 0,
+    owner: `Owner ${index % 50}`, tags: [], staleDays: 0, orphan: false,
+    inbound: index ? 1 : 0, outbound: index < count - 1 ? 1 : 0, group: "", meta: "Large corpus",
+  }));
+  const edges = Array.from({ length: count - 1 }, (_, index) => ({
+    id: index + 1, fromId: `doc-${index + 1}`, toId: `doc-${index + 2}`,
+    kind: "references", date: "2026-08-19", meta: null,
+  }));
+  api.setData("lineage", nodes);
+  api.setData("lineageEdges", edges);
+  api.setData("graphStats", { docs: count, edges: edges.length, sources: 2, people: 50,
+    activity: [{ date: "2026-08-19", count }] });
+  await page.goto("/lineage");
+  await expect(page.getByText(/showing 35 of 2000 nodes/i)).toBeVisible();
+  await expect(page.getByRole("group", { name: /Documents\. Use the arrow keys/ }).getByRole("button")).toHaveCount(35);
+  const horizontalOverflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+  expect(horizontalOverflow).toBeLessThanOrEqual(2);
+});
+
+test("trajectory read failures replace the archive rather than masquerading as empty", async ({ page }) => {
+  await page.route("**/graphql", async (route) => {
+    const query = (route.request().postDataJSON() as { query?: string }).query ?? "";
+    if (query.includes("query Trajectories")) {
+      await route.fulfill({ json: { errors: [{ message: "Iceberg catalog unavailable" }] } });
+    } else {
+      await route.fallback();
+    }
+  });
+  await page.goto("/trajectories");
+  await expect(page.getByText("Iceberg catalog unavailable", { exact: true })).toBeVisible();
+  await expect(page.getByText("No agent trajectories yet", { exact: true })).toHaveCount(0);
+});
