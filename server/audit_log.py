@@ -93,9 +93,10 @@ class IcebergAuditTrail:
         except Exception:
             self.store.catalog.create_table(AUDIT_TABLE, schema=AUDIT_SCHEMA)
 
-    def _last_hash(self) -> str:
+    def _last_hash(self, project_id: int) -> str:
         rows = self.store.catalog.load_table(AUDIT_TABLE).scan(
-            selected_fields=("occurred_at", "event_id", "event_hash")).to_arrow().to_pylist()
+            selected_fields=("project_id", "occurred_at", "event_id", "event_hash")).to_arrow().to_pylist()
+        rows = [row for row in rows if row.get("project_id") == project_id]
         if not rows:
             return ""
         rows.sort(key=lambda row: (row["occurred_at"], row["event_id"]))
@@ -103,7 +104,7 @@ class IcebergAuditTrail:
 
     def append(self, event: AuditEvent) -> dict[str, t.Any]:
         with self._lock:
-            previous = self._last_hash()
+            previous = self._last_hash(event.project_id)
             row = asdict(event)
             row["detail_json"] = json.dumps(redact(row.pop("detail")), sort_keys=True,
                                              separators=(",", ":"), default=str)
@@ -124,13 +125,15 @@ class IcebergAuditTrail:
 
     @staticmethod
     def verify(rows: list[dict[str, t.Any]]) -> bool:
-        previous = ""
+        previous_by_project: dict[int, str] = {}
         for original in sorted(rows, key=lambda row: (row["occurred_at"], row["event_id"])):
             row = dict(original)
             actual = row.pop("event_hash")
+            project_id = int(row["project_id"])
+            previous = previous_by_project.get(project_id, "")
             if row.get("previous_hash") != previous:
                 return False
             if hashlib.sha256(previous.encode() + _canonical(row)).hexdigest() != actual:
                 return False
-            previous = actual
+            previous_by_project[project_id] = actual
         return True
