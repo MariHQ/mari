@@ -8,3 +8,5 @@ markdown
 boto3
 pydantic
 numpy>=2.0
+duckdb>=1.3
+pyiceberg[pyarrow,sql-sqlite]>=0.10
