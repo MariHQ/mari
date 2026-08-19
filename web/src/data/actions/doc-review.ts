@@ -41,8 +41,14 @@ const FACT_CHECK = `mutation FactCheck($documentId: Int!) { factCheck(documentId
 
 const TOGGLE_WATCH = `mutation ToggleWatch($documentId: Int!) { toggleWatch(documentId: $documentId) }`;
 
-const CREATE_TASK = `mutation CreateTask($title: String!, $assignee: String!, $due: String) {
-  createTask(title: $title, kind: "factcheck", kindLabel: "Fact check", assignee: $assignee, due: $due)
+const CREATE_TASK = `mutation CreateTask(
+  $title: String!, $assignee: String!, $due: String,
+  $subjectType: String!, $subjectId: String!, $subjectTitle: String!, $subjectHref: String!
+) {
+  createTask(
+    title: $title, kind: "factcheck", kindLabel: "Fact check", assignee: $assignee, due: $due,
+    subjectType: $subjectType, subjectId: $subjectId, subjectTitle: $subjectTitle, subjectHref: $subjectHref
+  )
 }`;
 
 /** Hand this document's URL to whoever is being shared with. */
@@ -96,8 +102,14 @@ export function docReviewActions({ navigate }: ActionContext): DocReviewActions 
     // The task the fact-check panel opens is about THIS document, so its title
     // names it. `due` is the ISO date the picker carries, never its label.
     createReviewTask: async ({ assignee, due }) => {
-      const title = `Review fact check on document #${docId()}`;
-      await mutate(CREATE_TASK, { title, assignee, due });
+      const id = docId();
+      const subjectTitle = `Document #${id}`;
+      const title = `Review fact check on document #${id}`;
+      await mutate(CREATE_TASK, {
+        title, assignee, due,
+        subjectType: "document", subjectId: String(id), subjectTitle,
+        subjectHref: `/knowledge/doc?id=${id}`,
+      });
     },
   };
 }

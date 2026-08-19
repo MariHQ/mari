@@ -185,6 +185,13 @@ class Task:
     done: bool
     due: str       # ISO date, "" when the task has no deadline
     overdue: bool  # due date is in the past and the task is still open
+    # A denormalized, typed pointer to the item under review. Empty strings are
+    # the backwards-compatible no-subject value for tasks created before this
+    # metadata existed.
+    subject_type: str
+    subject_id: str
+    subject_title: str
+    subject_href: str
 
 
 @strawberry.type

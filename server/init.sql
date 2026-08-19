@@ -73,7 +73,14 @@ CREATE TABLE IF NOT EXISTS tasks (
   assignee_tint int NOT NULL DEFAULT 1,
   kind     text NOT NULL,                    -- stale|factcheck|approval
   kind_label text NOT NULL,
-  done     boolean NOT NULL DEFAULT false
+  done     boolean NOT NULL DEFAULT false,
+  -- Denormalized pointer to whatever this review item is about. These stay
+  -- text rather than foreign keys because a task may refer to a document,
+  -- fact, decision, workflow run, or a subject supplied by an integration.
+  subject_type text NOT NULL DEFAULT '',
+  subject_id text NOT NULL DEFAULT '',
+  subject_title text NOT NULL DEFAULT '',
+  subject_href text NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS digest_topics (
@@ -505,6 +512,14 @@ CREATE INDEX IF NOT EXISTS changes_created_at_idx ON changes (created_at);
 -- derived (due_date < current_date AND NOT done), never stored.
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS due_date date;
 CREATE INDEX IF NOT EXISTS tasks_due_date_idx ON tasks (due_date) WHERE NOT done;
+
+-- Optional typed subject references for the unified Review queue. Existing
+-- tasks remain valid and read as having no subject; no foreign key couples the
+-- queue to one of the several kinds of object it can review.
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS subject_type text NOT NULL DEFAULT '';
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS subject_id text NOT NULL DEFAULT '';
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS subject_title text NOT NULL DEFAULT '';
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS subject_href text NOT NULL DEFAULT '';
 
 -- facts.verified_at — the verification date as a DATE. facts.verified is a
 -- pre-formatted display string ('Jul 08, 2026', or '—' for never), which the

@@ -4,12 +4,12 @@ import { installMockApi, type MockApi } from "./fixtures/mock-api";
 let api: MockApi;
 test.beforeEach(async ({ page }) => { api = await installMockApi(page); });
 
-test("tasks can be created, completed, filtered, and report write failures", async ({ page }) => {
+test("review items can be created, completed, filtered, and report write failures", async ({ page }) => {
   await page.goto("/tasks");
-  await page.getByRole("textbox", { name: "Task", exact: true }).fill("Review the deletion SLA");
+  await page.getByRole("textbox", { name: "Review item", exact: true }).fill("Review the deletion SLA");
   await page.getByLabel("Kind").selectOption("approval");
   await page.getByLabel("Due date").fill("2026-08-29");
-  await page.getByRole("button", { name: "Add task" }).click();
+  await page.getByRole("button", { name: "Add review item" }).click();
   await expect.poll(() => api.calls.some((call) => call.query.includes("createTask") && call.variables.title === "Review the deletion SLA")).toBeTruthy();
 
   await page.getByRole("button", { name: "Mark done" }).first().click();
@@ -18,10 +18,10 @@ test("tasks can be created, completed, filtered, and report write failures", asy
   await expect(page.getByRole("button", { name: /Assigned to me/ })).toHaveAttribute("aria-pressed", "true");
 
   api.failNext(/createTask/, "The work queue is unavailable");
-  await page.getByRole("textbox", { name: "Task", exact: true }).fill("This write should remain visible");
-  await page.getByRole("button", { name: "Add task" }).click();
+  await page.getByRole("textbox", { name: "Review item", exact: true }).fill("This write should remain visible");
+  await page.getByRole("button", { name: "Add review item" }).click();
   await expect(page.getByText("The work queue is unavailable")).toBeVisible();
-  await expect(page.getByRole("textbox", { name: "Task", exact: true })).toHaveValue("This write should remain visible");
+  await expect(page.getByRole("textbox", { name: "Review item", exact: true })).toHaveValue("This write should remain visible");
 });
 
 test("decisions can be captured, ratified with confirmation, and impact-analysed", async ({ page }) => {

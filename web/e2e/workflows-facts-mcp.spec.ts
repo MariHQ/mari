@@ -52,8 +52,8 @@ test("flows support real runs, dry runs, pausing, and creation handoff", async (
   expect(api.calls.some((c) => c.query.includes("runWorkflow") && c.variables.dryRun === true)).toBeTruthy();
   expect(api.calls.some((c) => c.query.includes("setWorkflowStatus") && c.variables.status === "paused")).toBeTruthy();
 
-  await page.getByRole("button", { name: "New flow" }).click();
-  const drawer = page.getByRole("dialog", { name: "New flow" });
+  await page.getByRole("button", { name: "New automation" }).click();
+  const drawer = page.getByRole("dialog", { name: "New automation" });
   await drawer.getByLabel("Name").fill("Browser acceptance flow");
   await drawer.getByLabel("What does it guarantee?").fill("Every workflow path remains executable.");
   await drawer.getByRole("button", { name: "Create and open editor" }).click();

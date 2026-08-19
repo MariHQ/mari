@@ -19,7 +19,12 @@ const now = "2026-08-19T12:00:00Z";
 function initialData() {
   return {
     overviewStats: { changes: 12, factsReview: 1, flowsRunning: 0, documents: 3 },
-    tasks: [{ id: 1, title: "Verify retention policy", assigneeInitials: "DR", kind: "factcheck", kindLabel: "Fact check", done: false, due: "2026-08-25", overdue: false }],
+    tasks: [{
+      id: 1, title: "Verify retention policy", assigneeInitials: "DR", kind: "factcheck",
+      kindLabel: "Fact check", done: false, due: "2026-08-25", overdue: false,
+      subjectType: "document", subjectId: "1", subjectTitle: "Retention runbook",
+      subjectHref: "/knowledge/doc?id=1",
+    }],
     tasksSummary: { title: "Review queue", tags: ["Fact check"], people: ["DR"], statValue: "1", statLabel: "open" },
     digest: [{ title: "Policy updated", summary: "Retention documentation changed.", where: [{ source: "github", label: "Retention runbook" }], impact: [{ name: "Support", tone: "info" }] }],
     activityFeed: [{ id: 1, kind: "run", actor: "Mari", text: "synced", target: "Retention runbook", secondsAgo: 30 }],

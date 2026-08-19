@@ -9,7 +9,10 @@ import { useQuery } from "../lib/api";
 import type { PageData } from "./types";
 
 const QUERY = `{
-  tasks { id title assigneeInitials kind kindLabel done due overdue }
+  tasks {
+    id title assigneeInitials kind kindLabel done due overdue
+    subjectType subjectId subjectTitle subjectHref
+  }
   tasksSummary { title tags people statValue statLabel }
   members { id name initials status }
 }`;
@@ -18,6 +21,8 @@ type Res = {
   tasks: {
     id: number; title: string; assigneeInitials: string; kind: string;
     kindLabel: string; done: boolean; due: string; overdue: boolean;
+    subjectType?: string | null; subjectId?: string | null;
+    subjectTitle?: string | null; subjectHref?: string | null;
   }[];
   tasksSummary: {
     title: string; tags: string[]; people: string[];
@@ -28,20 +33,32 @@ type Res = {
 
 export const EMPTY: TasksData = { tasks: [], draft: "", saving: false, strip: null, assignees: [] };
 
+/** Subject links are data, so integrations can eventually supply them. Keep
+ * queue navigation inside this console; an external or scheme URL is context,
+ * not an executable link from a review row. */
+function internalHref(value: string | null | undefined): string | undefined {
+  return value?.startsWith("/") && !value.startsWith("//") ? value : undefined;
+}
+
 export function mapTasks(res: Res): Task[] {
-  return (res.tasks ?? []).map<Task>((t) => ({
-    id: t.id, title: t.title, who: t.assigneeInitials,
-    kind: t.kind, kindLabel: t.kindLabel, done: t.done,
-    // "" is the server's "no deadline". The row formats this date itself, so
-    // an empty string would render as the epoch; absent is the honest value.
-    due: t.due || undefined,
-    // Derived in SQL against the database's own current_date, so it cannot
-    // drift from the due date the same row reports.
-    overdue: t.overdue,
-    // No `doc` and no `priority`: the `tasks` table records neither, so the
-    // row draws no document link and no urgency. Both are optional precisely
-    // so a board that does not track them shows nothing instead of a guess.
-  }));
+  return (res.tasks ?? []).map((t) => {
+    const subject = t.subjectType && t.subjectId && t.subjectTitle
+      ? { type: t.subjectType, id: t.subjectId, title: t.subjectTitle, href: internalHref(t.subjectHref) }
+      : undefined;
+    return {
+      id: t.id, title: t.title, who: t.assigneeInitials,
+      kind: t.kind, kindLabel: t.kindLabel, done: t.done,
+      // "" is the server's "no deadline". The row formats this date itself, so
+      // an empty string would render as the epoch; absent is the honest value.
+      due: t.due || undefined,
+      // Derived in SQL against the database's own current_date, so it cannot
+      // drift from the due date the same row reports.
+      overdue: t.overdue,
+      // Typed subjects let every review item return to the exact evidence it
+      // was filed from. Older rows have no subject fields and remain valid.
+      subject,
+    };
+  });
 }
 
 /** Who a task can be filed to: the workspace's own members. `id` is what the

@@ -347,21 +347,37 @@ class MutKnowledge:
 
     @strawberry.mutation
     def create_task(self, title: str, kind: str = "factcheck", kind_label: str = "Fact check",
-                    assignee: str = "", due: str | None = None) -> bool:
+                    assignee: str = "", due: str | None = None,
+                    subject_type: str = "", subject_id: str = "",
+                    subject_title: str = "", subject_href: str = "") -> bool:
         """`due` is an ISO date (YYYY-MM-DD) or null. Null is the default:
         nothing in the product assigns a deadline on its own, so a task only
         has one when whoever created it said so.
 
         `assignee` defaults to unassigned for the same reason — the product
         does not know who should do this, and naming a person nobody chose put
-        one developer's name on tasks in every workspace that installed it."""
+        one developer's name on tasks in every workspace that installed it.
+
+        Subject fields are optional denormalized references. They intentionally
+        carry no foreign key: Review can point at documents, facts, decisions,
+        runs, or integration-owned objects without coupling this queue to each
+        subject table."""
         assignee = assignee.strip()
         initials = "".join(w[0].upper() for w in assignee.split()[:2])
-        exec_("""INSERT INTO tasks (title, assignee, assignee_initials, assignee_tint, kind, kind_label, due_date)
-                 VALUES (%s, %s, %s, 1, %s, %s, %s) ON CONFLICT (title) DO NOTHING""",
-              (title, assignee, initials, kind, kind_label, _iso_date(due)))
-        audit("created task", title, detail=[("Assignee", assignee or "(unassigned)"), ("Kind", kind_label),
-                                             ("Due", _iso_date(due) or "(no deadline)")])
+        subject = tuple((value or "").strip() for value in
+                        (subject_type, subject_id, subject_title, subject_href))
+        due_date = _iso_date(due)
+        exec_("""INSERT INTO tasks
+                 (title, assignee, assignee_initials, assignee_tint, kind, kind_label, due_date,
+                  subject_type, subject_id, subject_title, subject_href)
+                 VALUES (%s, %s, %s, 1, %s, %s, %s, %s, %s, %s, %s)
+                 ON CONFLICT (title) DO NOTHING""",
+              (title, assignee, initials, kind, kind_label, due_date, *subject))
+        detail = [("Assignee", assignee or "(unassigned)"), ("Kind", kind_label),
+                  ("Due", due_date or "(no deadline)")]
+        if subject[0]:
+            detail.extend([("Subject type", subject[0]), ("Subject", subject[2] or subject[1])])
+        audit("created task", title, detail=detail)
         return True
 
     @strawberry.mutation

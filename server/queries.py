@@ -1011,7 +1011,9 @@ class Query:
         return [Task(id=r["id"], title=r["title"], assignee_initials=r["assignee_initials"],
                      assignee_tint=r["assignee_tint"], kind=r["kind"], kind_label=r["kind_label"],
                      done=r["done"], due=r["due_date"].isoformat() if r["due_date"] else "",
-                     overdue=bool(r["overdue"]))
+                     overdue=bool(r["overdue"]), subject_type=r["subject_type"],
+                     subject_id=r["subject_id"], subject_title=r["subject_title"],
+                     subject_href=r["subject_href"])
                 for r in rows]
 
     @strawberry.field

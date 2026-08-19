@@ -91,12 +91,24 @@ export function factsActions(): FactsActions {
       // claim, so re-verification is a task on the ledger row: the same
       // createTask the Tasks page reads back.
       await mutate(
-        "mutation($title: String!, $kind: String!, $kindLabel: String!, $assignee: String!) { createTask(title: $title, kind: $kind, kindLabel: $kindLabel, assignee: $assignee) }",
+        `mutation(
+          $title: String!, $kind: String!, $kindLabel: String!, $assignee: String!,
+          $subjectType: String!, $subjectId: String!, $subjectTitle: String!, $subjectHref: String!
+        ) {
+          createTask(
+            title: $title, kind: $kind, kindLabel: $kindLabel, assignee: $assignee,
+            subjectType: $subjectType, subjectId: $subjectId, subjectTitle: $subjectTitle, subjectHref: $subjectHref
+          )
+        }`,
         {
           title: `Re-verify: ${fact.claim}`,
           kind: "factcheck",
           kindLabel: "Fact check",
           assignee: fact.owner || "Daniel H.",
+          subjectType: "fact",
+          subjectId: String(fact.id),
+          subjectTitle: fact.claim,
+          subjectHref: `/facts?fact=${fact.id}`,
         },
       );
     },

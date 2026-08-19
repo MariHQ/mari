@@ -31,8 +31,14 @@ type ImpactRes = {
 
 const START_SCAN = `mutation { startDecisionScan }`;
 
-const CREATE_TASK = `mutation CreateTask($title: String!, $kind: String!, $kindLabel: String!) {
-  createTask(title: $title, kind: $kind, kindLabel: $kindLabel)
+const CREATE_TASK = `mutation CreateTask(
+  $title: String!, $kind: String!, $kindLabel: String!,
+  $subjectType: String!, $subjectId: String!, $subjectTitle: String!, $subjectHref: String!
+) {
+  createTask(
+    title: $title, kind: $kind, kindLabel: $kindLabel,
+    subjectType: $subjectType, subjectId: $subjectId, subjectTitle: $subjectTitle, subjectHref: $subjectHref
+  )
 }`;
 
 const RUN_QUERY = `query($id: Int!) {
@@ -117,6 +123,10 @@ export function decisionsActions(): DecisionsActions {
           title: `${doc.title}: ${doc.reason || `affected by "${statement}"`}`,
           kind: "approval",
           kindLabel: "Approval",
+          subjectType: "decision",
+          subjectId: String(id),
+          subjectTitle: statement,
+          subjectHref: `/decisions?decision=${id}`,
         });
       }
       // The board and the ledger both moved.
