@@ -10,12 +10,14 @@ from __future__ import annotations
 import base64
 import contextvars
 import json
+import time
 import typing as t
 import urllib.error
 import urllib.parse
 import urllib.request
 
 import config
+from connectors._protocol import call_with_retry
 
 API = "https://api.github.com"
 _TOKEN_OVERRIDE: contextvars.ContextVar[str] = contextvars.ContextVar(
@@ -24,9 +26,10 @@ _TOKEN_OVERRIDE: contextvars.ContextVar[str] = contextvars.ContextVar(
 
 
 class GithubError(Exception):
-    def __init__(self, message: str, status: int = 0):
+    def __init__(self, message: str, status: int = 0, retry_after: float | None = None):
         super().__init__(message)
         self.status = status
+        self.retry_after = retry_after
 
 
 def token() -> str:
@@ -42,7 +45,7 @@ def pop_token(state) -> None:
     _TOKEN_OVERRIDE.reset(state)
 
 
-def _request(path: str, params: dict | None = None) -> tuple[t.Any, dict]:
+def _request_once(path: str, params: dict | None = None) -> tuple[t.Any, dict]:
     """GET a GitHub API path; returns (parsed json, response headers)."""
     tok = token()
     if not tok:
@@ -61,10 +64,24 @@ def _request(path: str, params: dict | None = None) -> tuple[t.Any, dict]:
             return json.loads(resp.read()), dict(resp.headers)
     except urllib.error.HTTPError as e:
         if e.code == 403 and e.headers.get("X-RateLimit-Remaining") == "0":
-            raise GithubError(f"GitHub rate limit exhausted (resets at {e.headers.get('X-RateLimit-Reset', '?')})", 403) from None
+            reset = e.headers.get("X-RateLimit-Reset")
+            retry_after = max(0.0, float(reset) - time.time()) if reset else None
+            raise GithubError("GitHub rate limit exhausted", 403, retry_after) from None
+        retry_after = e.headers.get("Retry-After")
+        delay = float(retry_after) if retry_after and retry_after.isdigit() else None
+        if e.code == 429:
+            raise GithubError(f"GitHub API {e.code} on {path}: rate limit", e.code, delay) from None
         raise GithubError(f"GitHub API {e.code} on {path}", e.code) from None
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as e:
         raise GithubError(f"GitHub unreachable: {getattr(e, 'reason', e).__class__.__name__}", 0) from None
+
+
+_RETRY_SLEEP = time.sleep
+
+
+def _request(path: str, params: dict | None = None) -> tuple[t.Any, dict]:
+    """GET with the connector-wide bounded retry policy."""
+    return call_with_retry(lambda: _request_once(path, params), sleep=_RETRY_SLEEP)
 
 
 def _paginate(path: str, params: dict, max_pages: int = 10) -> tuple[list[dict], bool]:
@@ -108,10 +125,38 @@ def team(org: str, slug: str) -> dict:
     return data
 
 
-def get_tree(repo: str, ref: str) -> list[dict]:
-    """Recursive tree at ref: [{path, sha, type, size}, …] (blobs only)."""
+class TreeListing(list):
+    """List-compatible tree result carrying whether enumeration was complete."""
+
+    def __init__(self, values=(), *, complete: bool = True):
+        super().__init__(values)
+        self.complete = complete
+
+
+def get_tree(repo: str, ref: str, request_cap: int = 2000,
+             entry_cap: int = 250_000) -> TreeListing:
+    """Enumerate a tree without trusting GitHub's truncated recursive result."""
     data, _ = _request(f"/repos/{repo}/git/trees/{urllib.parse.quote(ref)}", {"recursive": "1"})
-    return [n for n in data.get("tree", []) if n.get("type") == "blob"]
+    if not data.get("truncated"):
+        return TreeListing((n for n in data.get("tree", []) if n.get("type") == "blob"))
+
+    blobs: list[dict] = []
+    stack = [(ref, "")]
+    requests = 0
+    while stack and requests < request_cap and len(blobs) < entry_cap:
+        sha, prefix = stack.pop()
+        page, _ = _request(f"/repos/{repo}/git/trees/{urllib.parse.quote(sha)}")
+        requests += 1
+        if page.get("truncated"):
+            return TreeListing(blobs, complete=False)
+        for node in page.get("tree", []):
+            path = f"{prefix}/{node.get('path', '')}".strip("/")
+            normalized = {**node, "path": path}
+            if node.get("type") == "blob":
+                blobs.append(normalized)
+            elif node.get("type") == "tree" and node.get("sha"):
+                stack.append((node["sha"], path))
+    return TreeListing(blobs, complete=not stack and len(blobs) < entry_cap)
 
 
 def get_blob(repo: str, sha: str) -> str:

@@ -11,6 +11,7 @@ import json
 import urllib.parse
 
 from . import _net
+from ._protocol import ACLMetadata, PollResult, call_with_retry
 
 API = "https://api.trello.com/1"
 
@@ -36,6 +37,12 @@ PROVIDER = {
     ],
     "docs_url": "https://developer.atlassian.com/cloud/trello/guides/rest-api/api-introduction/",
 }
+
+
+class TrelloError(RuntimeError):
+    def __init__(self, message, status=0):
+        super().__init__(message)
+        self.status = status
 
 
 def _http(method, url, headers=None, body=None, timeout=30):
@@ -65,10 +72,13 @@ def _vendor_error(status, raw):
 
 
 def _get_json(config, path, **params):
-    status, raw = _http("GET", _url(config, path, **params))
-    if status != 200:
-        raise RuntimeError(_vendor_error(status, raw))
-    return json.loads(raw.decode("utf-8"))
+    def request():
+        status, raw = _http("GET", _url(config, path, **params))
+        if status != 200:
+            raise TrelloError(_vendor_error(status, raw), status)
+        return json.loads(raw.decode("utf-8"))
+
+    return call_with_retry(request)
 
 
 def validate(config):
@@ -76,10 +86,19 @@ def validate(config):
         return "API key is required."
     if not (config.get("token") or "").strip():
         return "Token is required."
-    status, raw = _http("GET", _url(config, "/members/me", fields="id,username"))
-    if status == 200:
+    def request():
+        status, raw = _http(
+            "GET", _url(config, "/members/me", fields="id,username"),
+        )
+        if status != 200:
+            raise TrelloError(_vendor_error(status, raw), status)
+
+    try:
+        call_with_retry(request)
+    except (TrelloError, ConnectionError) as error:
+        return str(error)
+    else:
         return None
-    return _vendor_error(status, raw)
 
 
 def _render_board(board, lists, cards):
@@ -97,7 +116,7 @@ def _render_board(board, lists, cards):
     return "\n".join(lines).rstrip() + "\n"
 
 
-def list_items(config, cursor):
+def list_items(config, cursor) -> PollResult:
     """cursor = ISO timestamp of the newest board dateLastActivity seen so far."""
     boards = _get_json(config, "/members/me/boards",
                        fields="name,dateLastActivity,closed", filter="open")
@@ -117,5 +136,8 @@ def list_items(config, cursor):
             "body": _render_board(b, lists, cards),
             "updated_at": last,
             "hash_hint": last or None,
+            "acl": ACLMetadata(visibility="connector_scope"),
         })
-    return items, newest
+    # Trello's member-board endpoint exposes current state, not a deletion
+    # feed.  Closed/deleted boards therefore must not be emitted as tombstones.
+    return PollResult(items, newest, snapshot_complete=True)

@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 
 from . import _net
+from ._protocol import ACLMetadata, PollResult
 
 PROVIDER = {
     "key": "linear",
@@ -153,7 +154,7 @@ def _issue_to_item(node: dict) -> dict:
     }
 
 
-def list_items(config: dict, cursor: str | None) -> tuple[list[dict], str | None]:
+def list_items(config: dict, cursor: str | None) -> PollResult:
     """List issues ordered by updatedAt. Cursor = max updatedAt ISO timestamp
     seen; incremental runs filter server-side with updatedAt > cursor. Within
     one call, GraphQL pageInfo.endCursor pages through the result set."""
@@ -162,6 +163,8 @@ def list_items(config: dict, cursor: str | None) -> tuple[list[dict], str | None
         variables["filter"] = {"updatedAt": {"gt": cursor}}
     items: list[dict] = []
     max_seen = cursor or ""
+    snapshot_complete = False
+    end_cursor = None
     for _ in range(MAX_PAGES):
         data = _graphql(config, _ISSUES_QUERY, variables)
         conn = data.get("issues") or {}
@@ -172,6 +175,11 @@ def list_items(config: dict, cursor: str | None) -> tuple[list[dict], str | None
             items.append(item)
         page = conn.get("pageInfo") or {}
         if not page.get("hasNextPage") or not page.get("endCursor"):
+            snapshot_complete = True
             break
-        variables["after"] = page["endCursor"]
-    return items, (max_seen or None)
+        end_cursor = page["endCursor"]
+        variables["after"] = end_cursor
+    for item in items:
+        item["acl"] = ACLMetadata(visibility="connector_scope")
+    return PollResult(items, (max_seen or None) if snapshot_complete else cursor,
+                      snapshot_complete=snapshot_complete)

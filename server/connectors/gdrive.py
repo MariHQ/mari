@@ -38,6 +38,12 @@ PROVIDER = {
                 "→ authorize → Exchange for tokens. Expires in ~1 hour."
             ),
         },
+        {"key": "refresh_token", "label": "OAuth2 refresh token (optional)", "secret": True,
+         "placeholder": "1//…", "help": "Keeps polling after the access token expires."},
+        {"key": "client_id", "label": "OAuth client ID (for refresh)", "secret": False,
+         "placeholder": "…apps.googleusercontent.com"},
+        {"key": "client_secret", "label": "OAuth client secret (for refresh)", "secret": True,
+         "placeholder": "GOCSPX-…"},
         {
             "key": "folder_id",
             "label": "Folder ID (optional)",
@@ -52,6 +58,8 @@ PROVIDER = {
 _DOC_MIME = "application/vnd.google-apps.document"
 _TEXT_MIMES = ("text/plain", "text/markdown")
 _PAGE_SIZE = 100
+_MAX_PAGES = 20
+_TOKEN_API = "https://oauth2.googleapis.com/token"
 
 
 def _http(method, url, headers=None, body=None, timeout=30):
@@ -70,8 +78,33 @@ def _http(method, url, headers=None, body=None, timeout=30):
         raise ConnectionError(f"Google Drive: network error: {e}") from None
 
 
+def _refresh(config):
+    if not all((config.get("refresh_token"), config.get("client_id"), config.get("client_secret"))):
+        return False
+    body = urllib.parse.urlencode({"grant_type": "refresh_token", "refresh_token": config["refresh_token"],
+                                  "client_id": config["client_id"], "client_secret": config["client_secret"]}).encode()
+    status, raw = _http("POST", _TOKEN_API, headers={"Content-Type": "application/x-www-form-urlencoded"}, body=body)
+    try:
+        token = json.loads(raw).get("access_token") if status == 200 else None
+    except json.JSONDecodeError:
+        token = None
+    if token:
+        config["access_token"] = token
+        return True
+    return False
+
+
 def _headers(config):
+    if not (config.get("access_token") or "").strip():
+        _refresh(config)
     return {"Authorization": f"Bearer {config.get('access_token', '')}"}
+
+
+def _request(config, method, url, body=None):
+    status, raw = _http(method, url, headers=_headers(config), body=body)
+    if status == 401 and config.get("refresh_token") and _refresh(config):
+        status, raw = _http(method, url, headers=_headers(config), body=body)
+    return status, raw
 
 
 def _q_literal(value):
@@ -94,9 +127,9 @@ def _vendor_error(status, raw):
 
 
 def validate(config):
-    if not (config.get("access_token") or "").strip():
-        return "Access token is required."
-    status, raw = _http("GET", f"{API}/about?fields=user", headers=_headers(config))
+    if not (config.get("access_token") or "").strip() and not config.get("refresh_token"):
+        return "Access token or refresh-token credentials are required."
+    status, raw = _request(config, "GET", f"{API}/about?fields=user")
     if status == 200:
         return None
     return _vendor_error(status, raw)
@@ -108,7 +141,7 @@ def _fetch_body(config, f):
         url = f"{API}/files/{fid}/export?mimeType=text%2Fplain"
     else:
         url = f"{API}/files/{fid}?alt=media"
-    status, raw = _http("GET", url, headers=_headers(config))
+    status, raw = _request(config, "GET", url)
     if status != 200:
         raise RuntimeError(_vendor_error(status, raw))
     return raw.decode("utf-8", "replace")
@@ -116,6 +149,37 @@ def _fetch_body(config, f):
 
 def list_items(config, cursor):
     """cursor = ISO timestamp of the newest modifiedTime seen so far."""
+    if cursor and str(cursor).startswith("changes:"):
+        token = str(cursor)[8:]
+        items, tombstones, complete = [], [], False
+        next_token = token
+        for _ in range(_MAX_PAGES):
+            params = {"pageToken": next_token, "pageSize": str(_PAGE_SIZE),
+                      "fields": "nextPageToken,newStartPageToken,changes(fileId,removed,file(id,name,mimeType,modifiedTime,md5Checksum,trashed))"}
+            status, raw = _request(config, "GET", f"{API}/changes?{urllib.parse.urlencode(params)}")
+            if status != 200:
+                raise RuntimeError(_vendor_error(status, raw))
+            data = json.loads(raw)
+            for change in data.get("changes", []):
+                f = change.get("file") or {}
+                fid = str(change.get("fileId") or f.get("id") or "")
+                if fid and (change.get("removed") or f.get("trashed")):
+                    tombstones.append(fid)
+                elif f.get("mimeType") in (_DOC_MIME, *_TEXT_MIMES):
+                    items.append({"path": fid, "title": f.get("name", fid), "body": _fetch_body(config, f),
+                                  "updated_at": f.get("modifiedTime", ""),
+                                  "hash_hint": f.get("md5Checksum") or f.get("modifiedTime") or None,
+                                  "acl": ACLMetadata(visibility="connector_scope")})
+            if data.get("nextPageToken"):
+                next_token = data["nextPageToken"]
+                continue
+            next_token = data.get("newStartPageToken") or next_token
+            complete = True
+            break
+        durable = f"changes:{next_token}"
+        return PollResult(items, durable if complete else cursor, snapshot_complete=complete,
+                          tombstones=tombstones, checkpoint=durable if not complete else None)
+
     q_parts = [
         "trashed = false",
         f"(mimeType = '{_DOC_MIME}' or mimeType = '{_TEXT_MIMES[0]}' or mimeType = '{_TEXT_MIMES[1]}')",
@@ -127,8 +191,14 @@ def list_items(config, cursor):
         q_parts.append(f"modifiedTime > '{_q_literal(cursor)}'")
     q = " and ".join(q_parts)
 
-    files, page_token = [], None
-    while True:
+    start_token = None
+    try:
+        status, raw = _request(config, "GET", f"{API}/changes/startPageToken")
+        start_token = json.loads(raw).get("startPageToken") if status == 200 else None
+    except (json.JSONDecodeError, AttributeError):
+        pass
+    files, page_token, complete = [], None, False
+    for _ in range(_MAX_PAGES):
         params = {
             "q": q,
             "pageSize": str(_PAGE_SIZE),
@@ -137,13 +207,14 @@ def list_items(config, cursor):
         if page_token:
             params["pageToken"] = page_token
         url = f"{API}/files?{urllib.parse.urlencode(params)}"
-        status, raw = _http("GET", url, headers=_headers(config))
+        status, raw = _request(config, "GET", url)
         if status != 200:
             raise RuntimeError(_vendor_error(status, raw))
         data = json.loads(raw.decode("utf-8"))
         files.extend(data.get("files", []))
         page_token = data.get("nextPageToken")
         if not page_token:
+            complete = True
             break
 
     items, newest = [], cursor
@@ -159,4 +230,5 @@ def list_items(config, cursor):
             "hash_hint": f.get("md5Checksum") or mod or None,
             "acl": ACLMetadata(visibility="connector_scope"),
         })
-    return PollResult(items, newest, snapshot_complete=True)
+    new_cursor = f"changes:{start_token}" if complete and start_token else newest
+    return PollResult(items, new_cursor if complete else cursor, snapshot_complete=complete)

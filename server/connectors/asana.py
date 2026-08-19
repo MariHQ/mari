@@ -11,6 +11,7 @@ import json
 import urllib.parse
 
 from . import _net
+from ._protocol import ACLMetadata, PollResult, call_with_retry
 
 API = "https://app.asana.com/api/1.0"
 
@@ -39,6 +40,20 @@ PROVIDER = {
 
 _TASK_FIELDS = "name,notes,completed,modified_at"
 _PAGE_LIMIT = 100
+_MAX_PAGES = 100
+
+
+class AsanaError(RuntimeError):
+    def __init__(self, message, status=0):
+        super().__init__(message)
+        self.status = status
+
+
+class _PagedList(list):
+    def __init__(self, values=(), *, complete=True, checkpoint=None):
+        super().__init__(values)
+        self.complete = complete
+        self.checkpoint = checkpoint
 
 
 def _http(method, url, headers=None, body=None, timeout=30):
@@ -76,28 +91,39 @@ def _vendor_error(status, raw):
 def _get_paginated(config, path, params):
     """Follow Asana offset pagination; returns list of data dicts."""
     out, offset = [], None
-    while True:
+    for _ in range(_MAX_PAGES):
         p = dict(params, limit=str(_PAGE_LIMIT))
         if offset:
             p["offset"] = offset
         url = f"{API}{path}?{urllib.parse.urlencode(p)}"
-        status, raw = _http("GET", url, headers=_headers(config))
-        if status != 200:
-            raise RuntimeError(_vendor_error(status, raw))
-        data = json.loads(raw.decode("utf-8"))
+        def request():
+            status, raw = _http("GET", url, headers=_headers(config))
+            if status != 200:
+                raise AsanaError(_vendor_error(status, raw), status)
+            return json.loads(raw.decode("utf-8"))
+
+        data = call_with_retry(request)
         out.extend(data.get("data", []))
         offset = (data.get("next_page") or {}).get("offset")
         if not offset:
-            return out
+            return _PagedList(out, complete=True)
+    return _PagedList(out, complete=False, checkpoint=offset)
 
 
 def validate(config):
     if not (config.get("pat") or "").strip():
         return "Personal access token is required."
-    status, raw = _http("GET", f"{API}/users/me", headers=_headers(config))
-    if status == 200:
+    def request():
+        status, raw = _http("GET", f"{API}/users/me", headers=_headers(config))
+        if status != 200:
+            raise AsanaError(_vendor_error(status, raw), status)
+
+    try:
+        call_with_retry(request)
+    except (AsanaError, ConnectionError) as error:
+        return str(error)
+    else:
         return None
-    return _vendor_error(status, raw)
 
 
 def _render_project(project, tasks):
@@ -114,7 +140,7 @@ def _render_project(project, tasks):
     return "\n".join(lines).rstrip() + "\n"
 
 
-def list_items(config, cursor):
+def list_items(config, cursor) -> PollResult:
     """cursor = ISO timestamp of the newest task modified_at seen so far."""
     proj_params = {"opt_fields": "name,notes,modified_at"}
     workspace = (config.get("workspace") or "").strip()
@@ -123,14 +149,20 @@ def list_items(config, cursor):
     projects = _get_paginated(config, "/projects", proj_params)
 
     items, newest = [], cursor
+    snapshot_complete = getattr(projects, "complete", True)
+    checkpoint = getattr(projects, "checkpoint", None)
     for p in projects:
         gid = p["gid"]
         task_params = {"project": gid, "opt_fields": _TASK_FIELDS}
         if cursor:
             probe = _get_paginated(config, "/tasks", dict(task_params, modified_since=cursor))
+            snapshot_complete = snapshot_complete and getattr(probe, "complete", True)
+            checkpoint = checkpoint or getattr(probe, "checkpoint", None)
             if not probe and (p.get("modified_at") or "") <= cursor:
                 continue  # unchanged project on incremental sync
         tasks = _get_paginated(config, "/tasks", task_params)
+        snapshot_complete = snapshot_complete and getattr(tasks, "complete", True)
+        checkpoint = checkpoint or getattr(tasks, "checkpoint", None)
 
         latest = p.get("modified_at") or ""
         for t in tasks:
@@ -146,5 +178,7 @@ def list_items(config, cursor):
             "body": _render_project(p, tasks),
             "updated_at": latest,
             "hash_hint": latest or None,
+            "acl": ACLMetadata(visibility="connector_scope"),
         })
-    return items, newest
+    return PollResult(items, newest if snapshot_complete else cursor,
+                      snapshot_complete=snapshot_complete, checkpoint=checkpoint)

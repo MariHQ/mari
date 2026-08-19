@@ -25,10 +25,12 @@ from connectors._protocol import (
 )
 import flowengine
 import ingest
+import access
 import links
 
 # internal config keys the worker owns (never provider credential fields)
-INTERNAL_KEYS = ("provider_key", "cursor", "item_hashes", "last_sync_at", "last_error")
+INTERNAL_KEYS = ("provider_key", "cursor", "item_hashes", "last_sync_at", "last_error",
+                 "full_snapshot_pending", "full_snapshot_seen_paths")
 
 # secret-ish config keys masked even when a provider module is unavailable
 FALLBACK_SECRET_KEYS = {"token", "api_token", "api_key", "apikey", "secret",
@@ -56,7 +58,7 @@ def masked_config(provider: str, cfg: dict) -> dict:
     secrets = secret_fields(key) | FALLBACK_SECRET_KEYS
     out = {}
     for k, v in cfg.items():
-        if k in ("item_hashes", "shas"):
+        if k in ("item_hashes", "shas", "full_snapshot_seen_paths"):
             continue
         out[k] = MASK if (k in secrets and v) else v
     return out
@@ -114,7 +116,8 @@ def _sync_worker(source_id: int, full: bool) -> dict:
     cfg: dict = {}
 
     with ingest._conn() as conn:
-        src = conn.execute("SELECT * FROM sources WHERE id = %s", (source_id,)).fetchone()
+        src = conn.execute("SELECT * FROM sources WHERE id = %s AND project_id = %s",
+                           (source_id, access.require_current_access().project_id)).fetchone()
     if not src or src.get("kind") != "connector":
         # ingest._run_guarded releases the _RUNNING slot for every exit path
         ingest._set(source_id, state="error", phase="", error="not a connector source")
@@ -136,6 +139,8 @@ def _sync_worker(source_id: int, full: bool) -> dict:
         stored_cursor = cfg.get("cursor") or None
         hashes = dict(stored_hashes)
         cursor = stored_cursor
+        authoritative_full = full or bool(cfg.get("full_snapshot_pending"))
+        snapshot_seen_paths = (set() if full else set(cfg.get("full_snapshot_seen_paths") or []))
 
         if full:
             # A rebuild is prepared in memory and becomes authoritative only
@@ -162,8 +167,10 @@ def _sync_worker(source_id: int, full: bool) -> dict:
         # —— list ——
         poll = adapt_poll_result(call_with_retry(lambda: entry["list_items"](cfg, cursor)))
         items = [item.as_dict() if isinstance(item, PollItem) else item for item in poll.items]
-        new_cursor = poll.cursor if poll.snapshot_complete else stored_cursor
-        if full and not poll.snapshot_complete:
+        # An incomplete poll may expose a provider-native, resumable checkpoint.
+        # Without one we hold the previous durable cursor and safely replay.
+        new_cursor = poll.cursor if poll.snapshot_complete else (poll.checkpoint or stored_cursor)
+        if authoritative_full and not poll.snapshot_complete:
             # Retain prior coverage while merging any safely refreshed items.
             hashes = {**stored_hashes, **hashes}
         total = len(items)
@@ -186,6 +193,8 @@ def _sync_worker(source_id: int, full: bool) -> dict:
                     done += 1
                     continue
                 seen_paths.add(path)
+                if authoritative_full:
+                    snapshot_seen_paths.add(path)
                 title = (item.get("title") or path).strip() or path
                 body = item.get("body") or ""
                 hint = item.get("hash_hint")
@@ -225,20 +234,24 @@ def _sync_worker(source_id: int, full: bool) -> dict:
             ingest._set(source_id, phase="indexing")
             rows = conn.execute(
                 "SELECT id, source_path FROM documents WHERE source_id = %s", (source_id,)).fetchall()
-            gone = deletion_ids(rows, key, seen_paths, tombstones, full=full,
+            deletion_seen = snapshot_seen_paths if authoritative_full else seen_paths
+            gone = deletion_ids(rows, key, deletion_seen, tombstones, full=authoritative_full,
                                 snapshot_complete=poll.snapshot_complete)
             if tombstones:
                 for path in tombstones:
                     hashes.pop(path, None)
-            if full and poll.snapshot_complete:
-                hashes = {p: hv for p, hv in hashes.items() if p in seen_paths}
+            if authoritative_full and poll.snapshot_complete:
+                hashes = {p: hv for p, hv in hashes.items() if p in snapshot_seen_paths}
             if gone:
                 ingest._delete_documents(conn, gone)
                 stats["files_deleted"] = len(gone)
 
             # —— persist cursor + hash map, stamp truth ——
             cfg.update({"provider_key": key, "cursor": new_cursor or "", "item_hashes": hashes,
-                        "last_sync_at": sync_start_iso, "last_error": ""})
+                        "last_sync_at": sync_start_iso, "last_error": "",
+                        "full_snapshot_pending": bool(authoritative_full and not poll.snapshot_complete),
+                        "full_snapshot_seen_paths": (sorted(snapshot_seen_paths)
+                                                     if authoritative_full and not poll.snapshot_complete else [])})
             doc_count = conn.execute("SELECT count(*) AS n FROM documents WHERE source_id = %s",
                                      (source_id,)).fetchone()["n"]
             conn.execute("""UPDATE sources SET config = %s, last_sync_at = now(), docs_count = %s,

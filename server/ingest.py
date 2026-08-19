@@ -28,6 +28,7 @@ import github
 import links
 import llm
 import retrieval
+import access
 from excerpt import excerpt
 
 DB_URL_REF: dict = {"url": "postgresql://localhost/mari_cloud"}
@@ -121,17 +122,19 @@ def _upsert_document(conn, source_id: int, external_id: str, title: str, body: s
     brand-new row, False for an update (xmax = 0 only on fresh inserts).
     `source`/`initials` default to github; connect_sync passes the provider key."""
     snippet = excerpt(body, title)
+    project_id = access.require_current_access().project_id
     row = conn.execute("""
-        INSERT INTO documents (source, external_id, title, snippet, body, author, author_initials,
+        INSERT INTO documents (project_id, source, external_id, title, snippet, body, author, author_initials,
                                kind, updated_src, created_src, content_hash, source_path, source_id)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, CURRENT_DATE, CURRENT_DATE, %s, %s, %s)
-        ON CONFLICT (source, external_id) DO UPDATE SET
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_DATE, CURRENT_DATE, %s, %s, %s)
+        ON CONFLICT (project_id, source, external_id) DO UPDATE SET
           title = EXCLUDED.title, snippet = EXCLUDED.snippet, body = EXCLUDED.body,
           author = EXCLUDED.author, kind = EXCLUDED.kind, updated_src = CURRENT_DATE,
           content_hash = EXCLUDED.content_hash, source_path = EXCLUDED.source_path,
           source_id = EXCLUDED.source_id
         RETURNING id, (xmax = 0) AS inserted""",
-        (source, external_id, title, snippet, body, author, initials, kind, content_hash, source_path, source_id)
+        (project_id, source, external_id, title, snippet, body, author, initials, kind,
+         content_hash, source_path, source_id)
     ).fetchone()
     conn.commit()
     return row["id"], bool(row["inserted"])
@@ -141,8 +144,10 @@ def _sync_chunks(conn, doc_id: int, title: str, body: str,
                  max_tokens: int, overlap: int) -> tuple[int, int]:
     """Chunk + hash + embed-only-changed. Returns (chunks, newly_embedded)."""
     pieces = chunk_text(f"{title}\n\n{body}", max_tokens, overlap)
+    project_id = access.require_current_access().project_id
     existing = {r["idx"]: r["content_hash"] for r in conn.execute(
-        "SELECT idx, content_hash FROM chunks WHERE document_id = %s", (doc_id,)).fetchall()}
+        "SELECT idx, content_hash FROM chunks WHERE project_id = %s AND document_id = %s",
+        (project_id, doc_id)).fetchall()}
     embedded = 0
     for idx, piece in enumerate(pieces):
         h = _sha(piece)
@@ -152,21 +157,24 @@ def _sync_chunks(conn, doc_id: int, title: str, body: str,
         if vec:
             embedded += 1
         conn.execute("""
-            INSERT INTO chunks (document_id, idx, content, content_hash, embedding)
-            VALUES (%s, %s, %s, %s, %s::vector)
+            INSERT INTO chunks (project_id, document_id, idx, content, content_hash, embedding)
+            VALUES (%s, %s, %s, %s, %s, %s::vector)
             ON CONFLICT (document_id, idx) DO UPDATE SET
               content = EXCLUDED.content, content_hash = EXCLUDED.content_hash,
               embedding = EXCLUDED.embedding""",
-            (doc_id, idx, piece, h, str(vec) if vec else None))
-    conn.execute("DELETE FROM chunks WHERE document_id = %s AND idx >= %s", (doc_id, len(pieces)))
+            (project_id, doc_id, idx, piece, h, str(vec) if vec else None))
+    conn.execute("DELETE FROM chunks WHERE project_id = %s AND document_id = %s AND idx >= %s",
+                 (project_id, doc_id, len(pieces)))
     # doc-level embedding = mean of chunk embeddings (keeps existing doc search working)
     vecs = [r["embedding"] for r in conn.execute(
-        "SELECT embedding::text AS embedding FROM chunks WHERE document_id = %s AND embedding IS NOT NULL",
-        (doc_id,)).fetchall()]
+        """SELECT embedding::text AS embedding FROM chunks
+           WHERE project_id = %s AND document_id = %s AND embedding IS NOT NULL""",
+        (project_id, doc_id)).fetchall()]
     if vecs:
         parsed = [json.loads(v) for v in vecs]
         mean = [statistics.fmean(col) for col in zip(*parsed)]
-        conn.execute("UPDATE documents SET embedding = %s::vector WHERE id = %s", (str(mean), doc_id))
+        conn.execute("""UPDATE documents SET embedding = %s::vector
+                        WHERE id = %s AND project_id = %s""", (str(mean), doc_id, project_id))
     conn.commit()
     # Chunk vectors are derived and intentionally live outside canonical
     # storage. A burst of changed documents produces one atomic MUVERA /
@@ -199,7 +207,8 @@ def _sync_worker(source_id: int, full: bool) -> dict:
     added_doc_ids: list[int] = []    # brand-new documents this batch
     changed_doc_ids: list[int] = []  # updated documents this batch
     with _conn() as conn:
-        src = conn.execute("SELECT * FROM sources WHERE id = %s", (source_id,)).fetchone()
+        src = conn.execute("SELECT * FROM sources WHERE id = %s AND project_id = %s",
+                           (source_id, access.require_current_access().project_id)).fetchone()
     if not src or src.get("kind") != "github":
         _set(source_id, state="error", phase="", error="not a github source")
         return {**stats, "error": "not a github source"}
@@ -223,27 +232,19 @@ def _sync_worker(source_id: int, full: bool) -> dict:
     token_state = github.push_token(str(cfg.get("token") or ""))
     try:
         max_tokens, overlap = _chunk_settings()
-        if full:
-            cfg["shas"], cfg["cursor"], cfg["items_since"] = {}, "", ""
-            with _conn() as conn:
-                conn.execute("""DELETE FROM chunks WHERE document_id IN
-                                (SELECT id FROM documents WHERE source_id = %s)""", (source_id,))
-                conn.execute("UPDATE documents SET content_hash = '' WHERE source_id = %s", (source_id,))
-                # persist the cleared cursor immediately so an interrupted rebuild
-                # resumes as a full pass instead of a bogus "unchanged" diff
-                conn.execute("UPDATE sources SET config = %s WHERE id = %s", (json.dumps(cfg), source_id))
-                conn.commit()
-
         # —— phase: listing ——
         _set(source_id, state="running", phase="listing", done=0, total=0, error="")
         branch = cfg.get("branch") or github.default_branch(repo)
         cfg["branch"] = branch
         head = github.head_sha(repo, branch)
         tree = github.get_tree(repo, head)
+        tree_complete = bool(getattr(tree, "complete", True))
         wanted = {n["path"]: n["sha"] for n in tree if _match(n["path"], patterns)}
-        stored: dict = cfg.get("shas") or {}
-        changed = [p for p, sha in wanted.items() if stored.get(p) != sha]
-        removed = [p for p in stored if p not in wanted]
+        prior_stored: dict = dict(cfg.get("shas") or {})
+        stored: dict = dict(prior_stored)
+        comparison = {} if full else prior_stored
+        changed = [p for p, sha in wanted.items() if comparison.get(p) != sha]
+        removed = [p for p in prior_stored if p not in wanted] if tree_complete else []
 
         # —— items: issues / PRs (incremental via since) + commits ——
         items_since = cfg.get("items_since", "")
@@ -374,23 +375,17 @@ def _sync_worker(source_id: int, full: bool) -> dict:
                     stored.pop(p, None)
 
             # —— advance cursor, stamp truth ——
-            # If pagination hit the safety cap, hold items_since at the newest
-            # item actually fetched so the next sync resumes past the cap
-            # instead of silently skipping everything beyond it.
-            next_since = sync_start_iso
+            # Timestamp cursors cannot represent a capped page boundary safely;
+            # hold the old cursor so equal timestamps/unseen pages are retried.
+            next_since = items_since if (issues_trunc or commits_trunc) else sync_start_iso
             trunc_notes = []
             if issues_trunc and issues_raw:
-                newest = max(i.get("updated_at") or "" for i in issues_raw)
-                if newest:
-                    next_since = min(next_since, newest)
                 trunc_notes.append(f"issues/PRs hit the page cap ({len(issues_raw)} fetched)")
             if commits_trunc and commits_raw:
-                newest = max(((c.get("commit") or {}).get("committer") or {}).get("date", "")
-                             for c in commits_raw)
-                if newest:
-                    next_since = min(next_since, newest)
                 trunc_notes.append(f"commits hit the page cap ({len(commits_raw)} fetched)")
-            cfg.update({"shas": stored, "cursor": head, "items_since": next_since,
+            if not tree_complete:
+                trunc_notes.append("repository tree exceeded the traversal safety cap")
+            cfg.update({"shas": stored, "cursor": head if tree_complete else cfg.get("cursor", ""), "items_since": next_since,
                         "last_sync_at": sync_start_iso, "last_error": ""})
             doc_count = conn.execute("SELECT count(*) AS n FROM documents WHERE source_id = %s",
                                      (source_id,)).fetchone()["n"]
@@ -477,19 +472,23 @@ def _worker_for(source_id: int):
     module's status registry and _RUNNING guard, so syncStatus/syncSource/
     resyncSource and flow sync_source steps work unchanged for either kind."""
     with _conn() as conn:
-        row = conn.execute("SELECT kind FROM sources WHERE id = %s", (source_id,)).fetchone()
+        row = conn.execute("SELECT kind FROM sources WHERE id = %s AND project_id = %s",
+                           (source_id, access.require_current_access().project_id)).fetchone()
     if row and row.get("kind") == "connector":
         import connect_sync  # late import — connect_sync imports ingest
         return connect_sync._sync_worker
     return _sync_worker
 
 
-def _run_guarded(source_id: int, full: bool) -> dict:
+def _run_guarded(source_id: int, full: bool, project_access=None) -> dict:
     """Dispatch + run one sync with the _RUNNING slot released no matter how
     the worker exits — early returns, dispatch errors, and crashes included.
     This is the ONLY place the slot is released; workers never touch it."""
     try:
-        return _worker_for(source_id)(source_id, full)
+        if project_access is None:
+            project_access = access.require_current_access()
+        with access.use_access(project_access):
+            return _worker_for(source_id)(source_id, full)
     finally:
         with _LOCK:
             _RUNNING.discard(source_id)
@@ -497,6 +496,7 @@ def _run_guarded(source_id: int, full: bool) -> dict:
 
 def start_sync(source_id: int, full: bool = False) -> bool:
     """Kick off a background sync; returns False if one is already running."""
+    project_access = access.require_current_access()
     with _LOCK:
         if source_id in _RUNNING:
             return False
@@ -504,7 +504,7 @@ def start_sync(source_id: int, full: bool = False) -> bool:
     # mark running synchronously so a syncStatus poll right after the mutation
     # never sees a stale 'idle'
     _set(source_id, state="running", phase="listing", done=0, total=0, error="")
-    threading.Thread(target=_run_guarded, args=(source_id, full), daemon=True).start()
+    threading.Thread(target=_run_guarded, args=(source_id, full, project_access), daemon=True).start()
     return True
 
 
@@ -567,3 +567,9 @@ def start_poller() -> None:
     except Exception:  # noqa: BLE001 — never block startup on seeding
         pass
     flowengine.start_scheduler()
+
+
+def stop_poller() -> None:
+    """Release startup-owned background services during ASGI shutdown."""
+    flowengine.stop_scheduler()
+    _POLLER["started"] = False

@@ -102,10 +102,10 @@ def classify_error(error: BaseException) -> ErrorKind:
     textual_status = re.search(r"(?:http|status)[^0-9]{0,8}([45][0-9]{2})", text)
     if not status and textual_status:
         status = int(textual_status.group(1))
-    if status in (401, 403) or any(x in text for x in ("unauthorized", "forbidden", "invalid token")):
-        return ErrorKind.AUTH
     if status == 429 or "rate limit" in text or "ratelimited" in text:
         return ErrorKind.RATE_LIMIT
+    if status in (401, 403) or any(x in text for x in ("unauthorized", "forbidden", "invalid token")):
+        return ErrorKind.AUTH
     if status in (408, 425) or status >= 500 or isinstance(error, (ConnectionError, TimeoutError)):
         return ErrorKind.TRANSIENT
     if any(x in text for x in ("timeout", "timed out", "unreachable", "network error", "temporarily unavailable")):

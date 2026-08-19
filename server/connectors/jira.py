@@ -13,6 +13,7 @@ import re
 import urllib.parse
 
 from . import _net
+from ._protocol import ACLMetadata, PollResult
 
 PROVIDER = {
     "key": "jira",
@@ -236,7 +237,7 @@ def _issue_to_item(issue: dict) -> dict:
     }
 
 
-def list_items(config: dict, cursor: str | None) -> tuple[list[dict], str | None]:
+def list_items(config: dict, cursor: str | None) -> PollResult:
     """Search issues via JQL. Cursor = max `updated` ISO timestamp seen; on
     incremental runs `updated > cursor` is ANDed into the JQL server-side
     (minute precision — same-minute re-syncs may repeat an issue, which the
@@ -245,6 +246,7 @@ def list_items(config: dict, cursor: str | None) -> tuple[list[dict], str | None
     items: list[dict] = []
     max_seen = cursor or ""
     start = 0
+    snapshot_complete = False
     for _ in range(MAX_PAGES):
         data = _get(config, "/rest/api/3/search", {
             "jql": jql,
@@ -261,5 +263,9 @@ def list_items(config: dict, cursor: str | None) -> tuple[list[dict], str | None
         start += len(issues)
         total = data.get("total")
         if not issues or (isinstance(total, int) and start >= total):
+            snapshot_complete = True
             break
-    return items, (max_seen or None)
+    for item in items:
+        item["acl"] = ACLMetadata(visibility="connector_scope")
+    return PollResult(items, (max_seen or None) if snapshot_complete else cursor,
+                      snapshot_complete=snapshot_complete)

@@ -11,9 +11,9 @@ All HTTP goes through _api so tests can monkeypatch it.
 from __future__ import annotations
 
 import json
-import time
 
 from . import _net
+from ._protocol import ACLMetadata, PollResult, call_with_retry
 
 PROVIDER = {
     "key": "notion",
@@ -38,13 +38,15 @@ CHILD_PAGE_SIZE = 100
 
 
 class NotionError(Exception):
-    def __init__(self, message: str, status: int = 0):
+    def __init__(self, message: str, status: int = 0,
+                 retry_after: float | None = None):
         super().__init__(message)
         self.status = status
+        self.retry_after = retry_after
 
 
 def _api(method: str, path: str, token: str, body: dict | None = None) -> dict:
-    """One Notion API call. Retries once on 429 (Retry-After)."""
+    """One Notion API call with shared bounded transient/rate-limit retry."""
     data = json.dumps(body).encode() if body is not None else None
     headers = {
         "Authorization": f"Bearer {token}",
@@ -52,7 +54,7 @@ def _api(method: str, path: str, token: str, body: dict | None = None) -> dict:
         "Content-Type": "application/json",
         "User-Agent": UA,
     }
-    for attempt in (0, 1):
+    def request() -> dict:
         # Through the shared SSRF guard (AUTH-11), like every connector.
         try:
             resp = _net.fetch(f"{API}{path}", method=method, data=data,
@@ -61,25 +63,26 @@ def _api(method: str, path: str, token: str, body: dict | None = None) -> dict:
             raise NotionError(f"Notion: refused to fetch {API}{path} — {e}", 0) from None
         except _net.NetworkError as e:
             raise NotionError(f"Notion unreachable: {e}", 0) from None
-        if resp.status == 429 and attempt == 0:
+        retry_after = None
+        if resp.status == 429:
             try:
-                wait = min(float(_net.header(resp.headers, "Retry-After") or 1), 30.0)
+                retry_after = min(float(_net.header(resp.headers, "Retry-After") or 1), 30.0)
             except ValueError:
-                wait = 1.0
-            time.sleep(wait)
-            continue
+                retry_after = 1.0
         if resp.status >= 400:
             try:
                 payload = json.loads(resp.body)
                 msg = payload.get("message") or payload.get("code") or f"HTTP {resp.status}"
             except (json.JSONDecodeError, ValueError, AttributeError):
                 msg = f"HTTP {resp.status}"
-            raise NotionError(f"Notion API error on {path}: {msg}", resp.status)
+            raise NotionError(f"Notion API error on {path}: {msg}", resp.status,
+                              retry_after=retry_after)
         try:
             return json.loads(resp.body)
         except json.JSONDecodeError:
             raise NotionError(f"Notion: non-JSON response on {path}", resp.status) from None
-    raise NotionError(f"Notion rate limited on {path} (retried once)", 429)
+
+    return call_with_retry(request)
 
 
 # ————— contract surface —————
@@ -166,7 +169,7 @@ def _page_title(page: dict) -> str:
     return "Untitled"
 
 
-def list_items(config: dict, cursor: str | None) -> tuple[list[dict], str | None]:
+def list_items(config: dict, cursor: str | None) -> PollResult:
     token = (config.get("token") or "").strip()
     if not token:
         raise NotionError("token is required")
@@ -175,6 +178,7 @@ def list_items(config: dict, cursor: str | None) -> tuple[list[dict], str | None
     max_edited = cursor or ""
     start: str | None = None
     done = False
+    exhausted = False
 
     while not done and len(items) < MAX_PAGES_PER_SYNC:
         body: dict = {
@@ -200,6 +204,7 @@ def list_items(config: dict, cursor: str | None) -> tuple[list[dict], str | None
                 "body": "\n\n".join(lines),
                 "updated_at": edited,
                 "hash_hint": edited or None,
+                "acl": ACLMetadata(visibility="connector_scope"),
             })
             if edited > max_edited:
                 max_edited = edited
@@ -207,6 +212,12 @@ def list_items(config: dict, cursor: str | None) -> tuple[list[dict], str | None
                 break
         start = data.get("next_cursor")
         if not data.get("has_more") or not start:
+            exhausted = True
             break
 
-    return items, (max_edited or None)
+    snapshot_complete = done or exhausted
+    # Never advance a high-water cursor past pages we did not enumerate. Doing
+    # so would make capped older pages permanently unreachable on the next run.
+    safe_cursor = (max_edited or None) if snapshot_complete else cursor
+    return PollResult(items, safe_cursor, snapshot_complete=snapshot_complete,
+                      checkpoint=start)

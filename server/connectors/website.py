@@ -31,6 +31,7 @@ import re
 import urllib.parse
 
 from . import _net
+from ._protocol import ACLMetadata, PollResult
 
 PROVIDER = {
     "key": "website",
@@ -192,8 +193,8 @@ def _norm_start(url: str) -> str:
 
 # ————— sitemap —————
 
-def _sitemap_urls(start_url: str) -> list[str]:
-    """URLs from sitemap.xml (start dir first, then origin root); [] if none."""
+def _sitemap_urls(start_url: str) -> tuple[list[str], bool]:
+    """(URLs, complete); completeness is false when any sitemap is capped."""
     p = urllib.parse.urlparse(start_url)
     candidates = [urllib.parse.urljoin(start_url if start_url.endswith("/") else start_url + "/",
                                        "sitemap.xml"),
@@ -213,6 +214,7 @@ def _sitemap_urls(start_url: str) -> list[str]:
             continue
         if re.search(r"<sitemapindex", xml, re.I):  # sitemap index → fetch children
             urls: list[str] = []
+            child_complete = len(locs) <= 5
             for child in locs[:5]:
                 cres = _fetch(child)
                 if isinstance(cres, str) or cres[0] != 200:
@@ -221,10 +223,12 @@ def _sitemap_urls(start_url: str) -> list[str]:
                 urls += [html_mod.unescape(l.strip())
                          for l in re.findall(r"<loc>\s*(.*?)\s*</loc>", cxml, re.I | re.S)]
             locs = urls
+        else:
+            child_complete = True
         same = [u for u in locs if _same_origin(u, start_url)]
         if same:
-            return same[:MAX_PAGES]
-    return []
+            return same[:MAX_PAGES], child_complete and len(same) <= MAX_PAGES
+    return [], True
 
 
 # ————— contract surface —————
@@ -246,7 +250,7 @@ def validate(config: dict) -> str | None:
     return None
 
 
-def list_items(config: dict, cursor: str | None) -> tuple[list[dict], str | None]:
+def list_items(config: dict, cursor: str | None) -> PollResult:
     start_url = _norm_start(config.get("start_url", ""))
     if not start_url:
         raise WebsiteError("start_url is required")
@@ -266,11 +270,12 @@ def list_items(config: dict, cursor: str | None) -> tuple[list[dict], str | None
     crawl_started = datetime.datetime.now(datetime.timezone.utc)\
         .replace(microsecond=0).isoformat()
 
-    sitemap = _sitemap_urls(start_url)
+    sitemap, sitemap_complete = _sitemap_urls(start_url)
     queue: list[str] = sitemap if sitemap else [start_url]
     use_bfs = not sitemap
     visited: set[str] = set()
     items: list[dict] = []
+    fetch_failed = False
 
     while queue and len(items) < MAX_PAGES:
         url = queue.pop(0)
@@ -287,9 +292,11 @@ def list_items(config: dict, cursor: str | None) -> tuple[list[dict], str | None
         # hash_hint still lets the sync worker skip unchanged pages.
         res = _fetch(url, extra_headers=None if use_bfs else cond_headers)
         if isinstance(res, str):
+            fetch_failed = True
             continue  # skip unreachable/refused pages, keep crawling
         status, body, headers, final_url = res
         if not _same_origin(final_url, start_url):
+            fetch_failed = True
             continue  # redirected off-origin
         path = urllib.parse.urlparse(final_url).path or "/"
         etag = _hget(headers, "ETag")
@@ -322,4 +329,8 @@ def list_items(config: dict, cursor: str | None) -> tuple[list[dict], str | None
                 if link not in visited and _same_origin(link, start_url):
                     queue.append(link)
 
-    return items, crawl_started
+    for item in items:
+        item["acl"] = ACLMetadata(visibility="public")
+    snapshot_complete = not queue and sitemap_complete and not fetch_failed
+    return PollResult(items, crawl_started if snapshot_complete else cursor,
+                      snapshot_complete=snapshot_complete)

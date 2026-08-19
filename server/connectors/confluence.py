@@ -238,8 +238,17 @@ def list_items(config: dict, cursor: str | None) -> PollResult:
     seen; on incremental runs only pages with lastUpdated > cursor are returned
     (the content API can't server-filter by date, so we filter client-side)."""
     items: list[dict] = []
-    max_seen = cursor or ""
     start = 0
+    raw_cursor = cursor or ""
+    if raw_cursor.startswith("page:"):
+        page_part, _, raw_cursor = raw_cursor.partition("|")
+        try:
+            start = max(0, int(page_part[5:]))
+        except ValueError:
+            start = 0
+    cursor_time, _, cursor_id = raw_cursor.partition("|")
+    max_seen = cursor_time
+    last_key = (cursor_time, cursor_id)
     snapshot_complete = False
     for _ in range(MAX_PAGES):
         params = {
@@ -247,19 +256,23 @@ def list_items(config: dict, cursor: str | None) -> PollResult:
             "expand": "body.storage,version,history.lastUpdated",
             "limit": PAGE_SIZE,
             "start": start,
+            "orderby": "history.lastUpdated asc",
         }
         space = (config.get("space_key") or "").strip()
         if space:
             params["spaceKey"] = space
         data = _get(config, "/wiki/rest/api/content", params)
-        results = data.get("results") or []
+        results = sorted(data.get("results") or [], key=lambda page: (
+            _page_to_item(page)["updated_at"], str(page.get("id") or "")))
         for page in results:
             item = _page_to_item(page)
+            item_key = (item["updated_at"], item["path"])
             if item["updated_at"] > max_seen:
                 max_seen = item["updated_at"]
-            if cursor and item["updated_at"] and item["updated_at"] <= cursor:
+            if cursor and item_key <= (cursor_time, cursor_id):
                 continue  # unchanged since last sync
             items.append(item)
+            last_key = max(last_key, item_key)
         size = data.get("size", len(results))
         if not results or size < PAGE_SIZE:
             snapshot_complete = True
@@ -267,4 +280,8 @@ def list_items(config: dict, cursor: str | None) -> PollResult:
         start += size
     for item in items:
         item["acl"] = ACLMetadata(visibility="connector_scope")
-    return PollResult(items, max_seen or None, snapshot_complete=snapshot_complete)
+    checkpoint = (f"page:{start}|{last_key[0]}|{last_key[1]}"
+                  if not snapshot_complete and last_key[0] else None)
+    return PollResult(items, (max_seen or None) if snapshot_complete else cursor,
+                      snapshot_complete=snapshot_complete,
+                      checkpoint=checkpoint)

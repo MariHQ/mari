@@ -13,6 +13,38 @@ import github
 
 
 class GitHubPollingTests(unittest.TestCase):
+    def test_transient_requests_retry_but_auth_does_not(self) -> None:
+        sleeps = []
+        with patch.object(github, "_request_once",
+                          side_effect=[github.GithubError("HTTP 503", 503), ({"ok": True}, {})]) as req, \
+             patch.object(github, "_RETRY_SLEEP", side_effect=sleeps.append):
+            self.assertEqual(github._request("/x")[0], {"ok": True})
+        self.assertEqual(req.call_count, 2)
+        self.assertEqual(sleeps, [1])
+
+        with patch.object(github, "_request_once",
+                          side_effect=github.GithubError("bad token", 401)) as req:
+            with self.assertRaises(github.GithubError):
+                github._request("/x")
+        self.assertEqual(req.call_count, 1)
+
+    def test_truncated_recursive_tree_is_walked_without_losing_paths(self) -> None:
+        recursive = ({"truncated": True, "tree": []}, {})
+        root = ({"tree": [{"path": "README.md", "type": "blob", "sha": "b1"},
+                            {"path": "docs", "type": "tree", "sha": "t1"}]}, {})
+        docs = ({"tree": [{"path": "guide.md", "type": "blob", "sha": "b2"}]}, {})
+        with patch.object(github, "_request", side_effect=[recursive, root, docs]):
+            tree = github.get_tree("acme/docs", "head")
+        self.assertTrue(tree.complete)
+        self.assertEqual({node["path"] for node in tree}, {"README.md", "docs/guide.md"})
+
+    def test_tree_traversal_cap_is_explicitly_incomplete(self) -> None:
+        recursive = ({"truncated": True, "tree": []}, {})
+        root = ({"tree": [{"path": "docs", "type": "tree", "sha": "t1"}]}, {})
+        with patch.object(github, "_request", side_effect=[recursive, root]):
+            tree = github.get_tree("acme/docs", "head", request_cap=1)
+        self.assertFalse(tree.complete)
+
     def test_paginate_stops_on_short_page_and_reports_safety_cap(self) -> None:
         with patch.object(github, "_request", side_effect=[([{"id": i} for i in range(100)], {}), ([{"id": 101}], {})]) as req:
             rows, truncated = github._paginate("/repos/acme/docs/issues", {"since": "cursor"}, max_pages=3)
@@ -62,7 +94,7 @@ class SlackBotTests(unittest.TestCase):
         docs = [{"title": "Deploy", "source": "github", "body": "Run make deploy", "snippet": ""}]
         with patch.object(bots.llm, "embed", return_value=None), \
              patch.object(bots, "hybrid_search", return_value=docs), \
-             patch.object(bots, "q", return_value=[]), \
+             patch.object(bots, "pq", return_value=[]), \
              patch.object(bots.llm, "generate", return_value="Follow the deploy runbook [1].") as generate:
             out = bots.answer_question("How do I deploy?")
         self.assertIn("Follow the deploy runbook", out)

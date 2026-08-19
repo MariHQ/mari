@@ -44,6 +44,7 @@ UA = "mari-cloud-sync"
 HISTORY_PAGE = 200
 MAX_HISTORY_PAGES = 10   # per channel per sync
 MAX_LIST_PAGES = 10
+EDIT_LOOKBACK_DAYS = 7
 
 
 class _PagedList(list):
@@ -191,6 +192,35 @@ def _channel_messages(token: str, channel_id: str, oldest: str | None) -> list[d
     return _PagedList(msgs, complete=complete)
 
 
+def _thread_replies(token: str, channel_id: str, thread_ts: str) -> _PagedList:
+    replies: list[dict] = []
+    cursor = ""
+    complete = False
+    for _ in range(MAX_HISTORY_PAGES):
+        params = {"channel": channel_id, "ts": thread_ts, "limit": HISTORY_PAGE}
+        if cursor:
+            params["cursor"] = cursor
+        data = _call("conversations.replies", token, params)
+        rows = data.get("messages") or []
+        replies.extend(rows[1:] if not cursor else rows)  # omit repeated root
+        cursor = (data.get("response_metadata") or {}).get("next_cursor") or ""
+        if not data.get("has_more") or not cursor:
+            complete = not data.get("has_more")
+            break
+    return _PagedList(replies, complete=complete)
+
+
+def _effective_ts(message: dict) -> float:
+    values = [message.get("ts"), (message.get("edited") or {}).get("ts"), message.get("latest_reply")]
+    parsed = []
+    for value in values:
+        try:
+            parsed.append(float(value))
+        except (TypeError, ValueError):
+            pass
+    return max(parsed) if parsed else 0.0
+
+
 def list_items(config: dict, cursor: str | None) -> PollResult:
     token = (config.get("bot_token") or "").strip()
     if not token:
@@ -200,6 +230,7 @@ def list_items(config: dict, cursor: str | None) -> PollResult:
 
     users = _user_map(token)
     items: list[dict] = []
+    tombstones: list[str] = []
     cursor_ts = float(cursor) if cursor else 0.0
     max_ts = cursor_ts
 
@@ -209,7 +240,7 @@ def list_items(config: dict, cursor: str | None) -> PollResult:
     oldest = None
     if cursor:
         day_start = datetime.datetime.fromtimestamp(cursor_ts, tz=datetime.timezone.utc)\
-            .replace(hour=0, minute=0, second=0, microsecond=0)
+            .replace(hour=0, minute=0, second=0, microsecond=0) - datetime.timedelta(days=EDIT_LOOKBACK_DAYS)
         oldest = f"{day_start.timestamp():.6f}"
 
     channels = _channels(token)
@@ -222,37 +253,55 @@ def list_items(config: dict, cursor: str | None) -> PollResult:
             continue
         msgs = _channel_messages(token, ch["id"], oldest)
         snapshot_complete = snapshot_complete and getattr(msgs, "complete", True)
+        expanded = list(msgs)
+        for message in list(msgs):
+            if message.get("reply_count") and message.get("ts"):
+                replies = _thread_replies(token, ch["id"], message["ts"])
+                snapshot_complete = snapshot_complete and replies.complete
+                expanded.extend(replies)
         # keep plain user messages only (no bot/system subtypes)
         keep = []
-        for m in msgs:
+        changed_days: set[str] = set()
+        for m in expanded:
+            if m.get("subtype") == "message_deleted" and m.get("deleted_ts"):
+                try:
+                    deleted_ts = float(m["deleted_ts"])
+                    changed_days.add(datetime.datetime.fromtimestamp(
+                        deleted_ts, tz=datetime.timezone.utc).strftime("%Y-%m-%d"))
+                    max_ts = max(max_ts, _effective_ts(m), deleted_ts)
+                except (TypeError, ValueError):
+                    pass
+                continue
             if m.get("type") != "message" or m.get("subtype") or m.get("bot_id"):
                 continue
             if not (m.get("text") or "").strip():
                 continue
             try:
                 ts = float(m["ts"])
-            except (KeyError, ValueError):
+            except (KeyError, TypeError, ValueError):
                 continue
-            keep.append((ts, m))
+            effective = _effective_ts(m) or ts
+            keep.append((ts, effective, m))
         keep.sort(key=lambda p: p[0])
 
-        by_day: dict[str, list[tuple[float, dict]]] = {}
-        for ts, m in keep:
+        by_day: dict[str, list[tuple[float, float, dict]]] = {}
+        for ts, effective, m in keep:
             day = datetime.datetime.fromtimestamp(ts, tz=datetime.timezone.utc)\
                 .strftime("%Y-%m-%d")
-            by_day.setdefault(day, []).append((ts, m))
-            max_ts = max(max_ts, ts)
+            by_day.setdefault(day, []).append((ts, effective, m))
+            max_ts = max(max_ts, effective)
 
         for day, pairs in sorted(by_day.items()):
-            if cursor and max(ts for ts, _ in pairs) <= cursor_ts:
+            if cursor and max(effective for _, effective, _ in pairs) <= cursor_ts and day not in changed_days:
                 continue  # day unchanged since last sync — nothing to re-emit
             lines = []
-            for ts, m in pairs:
+            for ts, _effective, m in pairs:
                 dt = datetime.datetime.fromtimestamp(ts, tz=datetime.timezone.utc)
                 who = users.get(m.get("user", ""), m.get("user", "unknown"))
-                lines.append(f"{dt.strftime('%H:%M')} @{who}: {_clean_text(m.get('text', ''), users)}")
+                prefix = "  ↳ " if m.get("thread_ts") and m.get("thread_ts") != m.get("ts") else ""
+                lines.append(f"{prefix}{dt.strftime('%H:%M')} @{who}: {_clean_text(m.get('text', ''), users)}")
             day_dt = datetime.datetime.strptime(day, "%Y-%m-%d")
-            latest = max(ts for ts, _ in pairs)
+            latest = max(effective for _, effective, _ in pairs)
             items.append({
                 "path": f"slack/{name}/{day}",
                 "title": f"#{name} — {day_dt.strftime('%b %d')}",
@@ -260,8 +309,14 @@ def list_items(config: dict, cursor: str | None) -> PollResult:
                 "updated_at": datetime.datetime.fromtimestamp(
                     latest, tz=datetime.timezone.utc).isoformat(),
                 "hash_hint": f"{latest:.6f}",
-                "acl": ACLMetadata(visibility="connector_scope"),
+                "acl": ACLMetadata(visibility="restricted", principals=(f"channel:{ch['id']}",)),
             })
 
+        for day in changed_days - set(by_day):
+            # History was rebuilt from the cursor-day lookback. If the deleted
+            # message was the day's last remaining message, delete that day doc.
+            tombstones.append(f"slack/{name}/{day}")
+
     new_cursor = f"{max_ts:.6f}" if max_ts else cursor
-    return PollResult(items, new_cursor, snapshot_complete=snapshot_complete)
+    return PollResult(items, new_cursor if snapshot_complete else cursor,
+                      snapshot_complete=snapshot_complete, tombstones=tombstones)

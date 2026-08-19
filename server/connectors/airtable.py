@@ -14,6 +14,7 @@ import json
 import urllib.parse
 
 from . import _net
+from ._protocol import ACLMetadata, PollResult, call_with_retry
 
 API = "https://api.airtable.com/v0"
 
@@ -42,6 +43,13 @@ PROVIDER = {
 
 _MAX_RECORDS = 200
 _PAGE_SIZE = 100
+_MAX_TABLES = 500
+
+
+class AirtableError(RuntimeError):
+    def __init__(self, message, status=0):
+        super().__init__(message)
+        self.status = status
 
 
 def _http(method, url, headers=None, body=None, timeout=30):
@@ -74,10 +82,13 @@ def _vendor_error(status, raw):
 
 
 def _get_json(config, url):
-    status, raw = _http("GET", url, headers=_headers(config))
-    if status != 200:
-        raise RuntimeError(_vendor_error(status, raw))
-    return json.loads(raw.decode("utf-8"))
+    def request():
+        status, raw = _http("GET", url, headers=_headers(config))
+        if status != 200:
+            raise AirtableError(_vendor_error(status, raw), status)
+        return json.loads(raw.decode("utf-8"))
+
+    return call_with_retry(request)
 
 
 def validate(config):
@@ -86,11 +97,20 @@ def validate(config):
     base = (config.get("base_id") or "").strip()
     if not base:
         return "Base ID is required."
-    status, raw = _http("GET", f"{API}/meta/bases/{urllib.parse.quote(base)}/tables",
-                        headers=_headers(config))
-    if status == 200:
+    def request():
+        status, raw = _http(
+            "GET", f"{API}/meta/bases/{urllib.parse.quote(base)}/tables",
+            headers=_headers(config),
+        )
+        if status != 200:
+            raise AirtableError(_vendor_error(status, raw), status)
+
+    try:
+        call_with_retry(request)
+    except (AirtableError, ConnectionError) as error:
+        return str(error)
+    else:
         return None
-    return _vendor_error(status, raw)
 
 
 def _fmt_value(v):
@@ -130,17 +150,36 @@ def _fetch_records(config, base, table_id):
         offset = data.get("offset")
         if not offset:
             break
-    return records[:_MAX_RECORDS]
+    # An offset after reaching the local safety cap means this is not a full
+    # table snapshot.  The caller must not reconcile missing rows as deletes.
+    return records[:_MAX_RECORDS], not bool(offset)
 
 
-def list_items(config, cursor):
+def _fetch_tables(config, base):
+    tables, offset = [], None
+    while len(tables) < _MAX_TABLES:
+        params = {"offset": offset} if offset else {}
+        suffix = f"?{urllib.parse.urlencode(params)}" if params else ""
+        data = _get_json(
+            config,
+            f"{API}/meta/bases/{urllib.parse.quote(base)}/tables{suffix}",
+        )
+        tables.extend(data.get("tables", []))
+        offset = data.get("offset")
+        if not offset:
+            break
+    return tables[:_MAX_TABLES], not bool(offset), offset
+
+
+def list_items(config, cursor) -> PollResult:
     """No provider-native change feed: cursor unused, always returns None."""
     base = (config.get("base_id") or "").strip()
-    schema = _get_json(config, f"{API}/meta/bases/{urllib.parse.quote(base)}/tables")
+    tables, snapshot_complete, checkpoint = _fetch_tables(config, base)
     items = []
-    for table in schema.get("tables", []):
+    for table in tables:
         tid = table["id"]
-        records = _fetch_records(config, base, tid)
+        records, table_complete = _fetch_records(config, base, tid)
+        snapshot_complete = snapshot_complete and table_complete
         body = _render_table(table, records)
         updated = ""
         for r in records:
@@ -153,5 +192,7 @@ def list_items(config, cursor):
             "body": body,
             "updated_at": updated,
             "hash_hint": hashlib.sha256(body.encode("utf-8")).hexdigest(),
+            "acl": ACLMetadata(visibility="connector_scope"),
         })
-    return items, None
+    return PollResult(items, None, snapshot_complete=snapshot_complete,
+                      checkpoint=checkpoint)

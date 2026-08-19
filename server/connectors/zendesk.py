@@ -17,6 +17,7 @@ import urllib.parse
 from html.parser import HTMLParser
 
 from . import _net
+from ._protocol import ACLMetadata, PollResult
 
 PROVIDER = {
     "key": "zendesk",
@@ -191,7 +192,7 @@ def _article_to_item(a: dict) -> dict:
     }
 
 
-def list_items(config: dict, cursor: str | None) -> tuple[list[dict], str | None]:
+def list_items(config: dict, cursor: str | None) -> PollResult:
     """List Help Center articles sorted by updated_at ascending. Cursor = max
     updated_at ISO timestamp seen; incremental runs skip articles with
     updated_at <= cursor (filtered client-side; the list API has no since
@@ -207,6 +208,8 @@ def list_items(config: dict, cursor: str | None) -> tuple[list[dict], str | None
            }))
     items: list[dict] = []
     max_seen = cursor or ""
+    snapshot_complete = False
+    next_page = None
     for _ in range(MAX_PAGES):
         data = _get(config, url)
         for a in data.get("articles") or []:
@@ -218,6 +221,11 @@ def list_items(config: dict, cursor: str | None) -> tuple[list[dict], str | None
             items.append(item)
         nxt = data.get("next_page")
         if not nxt:
+            snapshot_complete = True
             break
-        url = nxt
-    return items, (max_seen or None)
+        next_page = str(nxt)
+        url = next_page
+    for item in items:
+        item["acl"] = ACLMetadata(visibility="connector_scope")
+    return PollResult(items, (max_seen or None) if snapshot_complete else cursor,
+                      snapshot_complete=snapshot_complete)
