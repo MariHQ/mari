@@ -27,6 +27,7 @@ import flowengine
 import github
 import links
 import llm
+import retrieval
 from excerpt import excerpt
 
 DB_URL_REF: dict = {"url": "postgresql://localhost/mari_cloud"}
@@ -167,6 +168,11 @@ def _sync_chunks(conn, doc_id: int, title: str, body: str,
         mean = [statistics.fmean(col) for col in zip(*parsed)]
         conn.execute("UPDATE documents SET embedding = %s::vector WHERE id = %s", (str(mean), doc_id))
     conn.commit()
+    # Chunk vectors are derived and intentionally live outside canonical
+    # storage. A burst of changed documents produces one atomic MUVERA /
+    # PolarQuant snapshot instead of rewriting an index per document.
+    if embedded:
+        retrieval.schedule_rebuild()
     return len(pieces), embedded
 
 

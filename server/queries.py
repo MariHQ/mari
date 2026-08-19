@@ -14,12 +14,14 @@ import threading
 import time
 
 import strawberry
+import numpy as np
 from strawberry.scalars import JSON
 
 import config
 import github
 import ingest
 import llm
+import retrieval
 from db import actor_name, exec_, jload, q, q1
 from excerpt import excerpt
 from gqltypes import (
@@ -318,15 +320,117 @@ def _hybrid_args(query: str, k: int = 10, offset: int = 0) -> dict:
 
 
 def hybrid_search(query: str, k: int = 10, offset: int = 0) -> list[dict]:
-    return q(HYBRID_SQL, _hybrid_args(query, k, offset))
+    rows = _rank_hybrid(query)
+    start = max(0, int(offset))
+    stop = start + max(1, min(int(k), MAX_K))
+    return rows[start:stop]
 
 
 def hybrid_count(query: str) -> int:
     """How many documents this query matches, corpus-wide — not how many were
     returned. The console says "showing N of M" and M has to be the corpus's
     answer, or the sentence is a claim nobody can trace."""
-    row = q1(HYBRID_COUNT_SQL, _hybrid_args(query))
-    return int(row["n"]) if row else 0
+    return len(_rank_hybrid(query))
+
+
+# MUVERA/PolarQuant replaces the pgvector ANN half of the old CTE above. The
+# keyword half remains canonical-content SQL during the Iceberg migration;
+# both result lists are fused and cached together so `search` and
+# `searchTotal` still describe exactly the same approximate candidate set.
+_RANK_TTL_SECONDS = 120.0
+_rank_cache: dict[str, tuple[float, list[dict]]] = {}
+_rank_lock = threading.Lock()
+
+
+def _keyword_score(row: dict, terms: list[str]) -> float:
+    if not terms:
+        return 1.0
+    title = str(row.get("title") or "").lower()
+    text = f"{row.get('snippet') or ''} {row.get('body') or ''}".lower()
+    hits = sum(2 * title.count(term) + min(3, text.count(term)) for term in terms)
+    return min(1.0, hits / max(1.0, len(terms) * 2.0))
+
+
+def _rank_hybrid(query: str) -> list[dict]:
+    now = time.monotonic()
+    with _rank_lock:
+        hit = _rank_cache.get(query)
+        if hit and now - hit[0] < _RANK_TTL_SECONDS:
+            return hit[1]
+
+    pattern = like_pattern(query.strip())
+    if query.strip():
+        keyword_rows = q("""
+          SELECT d.id, d.source, d.title, d.snippet, d.body, d.author, d.author_initials,
+                 d.updated_src, d.kind, array_remove(array_agg(t.tag), NULL) AS tags,
+                 coalesce(max(td.search_weight), 1.0) AS boost
+            FROM documents d
+            LEFT JOIN tags t ON t.document_id = d.id
+            LEFT JOIN tag_definitions td ON td.tag = t.tag
+           WHERE d.title ILIKE %s OR d.snippet ILIKE %s OR d.body ILIKE %s
+           GROUP BY d.id
+           ORDER BY d.updated_src DESC NULLS LAST, d.id DESC
+           LIMIT %s""", (pattern, pattern, pattern, MAX_K * 2))
+    else:
+        keyword_rows = q("""
+          SELECT d.id, d.source, d.title, d.snippet, d.body, d.author, d.author_initials,
+                 d.updated_src, d.kind, array_remove(array_agg(t.tag), NULL) AS tags,
+                 coalesce(max(td.search_weight), 1.0) AS boost
+            FROM documents d
+            LEFT JOIN tags t ON t.document_id = d.id
+            LEFT JOIN tag_definitions td ON td.tag = t.tag
+           GROUP BY d.id
+           ORDER BY d.updated_src DESC NULLS LAST, d.id DESC
+           LIMIT %s""", (MAX_K * 2,))
+
+    semantic: dict[int, float] = {}
+    vec = query_vector(query) if query.strip() else None
+    if vec is not None:
+        try:
+            if retrieval.ensure_index():
+                semantic = {h["document_id"]: h["score"] for h in retrieval.INDEX.search(
+                    np.asarray([vec], np.float32), k=ANN_CANDIDATES, candidate_k=1000)}
+        except (OSError, ValueError):
+            semantic = {}
+
+    keyword_ids = {int(row["id"]) for row in keyword_rows}
+    rows_by_id = {int(row["id"]): row for row in keyword_rows}
+    missing = [doc_id for doc_id, score in semantic.items()
+               if score > SIM_FLOOR and doc_id not in rows_by_id]
+    if missing:
+        for row in q("""
+          SELECT d.id, d.source, d.title, d.snippet, d.body, d.author, d.author_initials,
+                 d.updated_src, d.kind, array_remove(array_agg(t.tag), NULL) AS tags,
+                 coalesce(max(td.search_weight), 1.0) AS boost
+            FROM documents d
+            LEFT JOIN tags t ON t.document_id = d.id
+            LEFT JOIN tag_definitions td ON td.tag = t.tag
+           WHERE d.id = ANY(%s) GROUP BY d.id""", (missing,)):
+            rows_by_id[int(row["id"])] = row
+
+    terms = [word for word in re.findall(r"[a-z0-9][a-z0-9_-]*", query.lower()) if len(word) > 1]
+    ranked = []
+    for doc_id, row in rows_by_id.items():
+        kw = _keyword_score(row, terms)
+        sim = semantic.get(doc_id, 0.0)
+        # Keyword candidates remain eligible even when the tokenizer produced
+        # no useful term; semantic-only candidates must clear the shared floor.
+        if doc_id not in keyword_ids and sim <= SIM_FLOOR:
+            continue
+        boost = float(row.get("boost", 1.0) or 1.0)
+        row.pop("boost", None)
+        row["score"] = (kw * 2.0 + max(sim - SIM_FLOOR, 0.0) * 3.0) * boost
+        ranked.append(row)
+    ranked.sort(key=lambda row: (
+        -float(row["score"]),
+        -(row.get("updated_src") or dt.date.min).toordinal(),
+        -int(row["id"]),
+    ))
+    with _rank_lock:
+        if len(_rank_cache) >= _VEC_CACHE_MAX:
+            _rank_cache.pop(next(iter(_rank_cache)), None)
+        _rank_cache[query] = (now, ranked)
+    return ranked
 
 
 # ————————————————— search telemetry (SRCH-4) —————————————————
