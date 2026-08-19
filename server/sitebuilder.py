@@ -882,6 +882,19 @@ def build_mari_site(site: dict, docs: list[dict]) -> str:
         (out / "index.html").write_text(render(index, pages[0]["slug"], base_url))
     else:
         (out / "index.html").write_text(render({"slug": "index", "title": display_name(site), "body": "No documents matched this site's sources yet."}, "index", base_url))
+
+    # sitemap.xml next to the pages, one <loc> per canonical URL: the site
+    # root (which also stands for the first page) and every other page. The
+    # landing site's robots.txt lists it as a second sitemap, so search
+    # engines find the docs pages instead of only the site root. Skipped for
+    # a site with no domain: there is nothing absolute to put in it.
+    if base_url:
+        locs = [base_url] + [f"{base_url}{p['slug']}.html" for p in pages[1:]]
+        (out / "sitemap.xml").write_text(
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
+            + "".join(f"  <url><loc>{html_mod.escape(u)}</loc></url>\n" for u in locs)
+            + "</urlset>\n")
     return str(out)
 
 
