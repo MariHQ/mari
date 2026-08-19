@@ -26,6 +26,9 @@ const CREATE_ASSIGNED = `mutation CreateTask($title: String!, $kind: String!, $k
 }`;
 
 const CLEAR_DONE = `mutation ClearDoneTasks { clearDoneTasks }`;
+const EVALUATE = `mutation EvaluateReview($reviewId: String!, $dryRun: Boolean!) {
+  evaluateReviewItem(reviewId: $reviewId, dryRun: $dryRun) { reviewId outcome explanation replayed dryRun }
+}`;
 
 export function tasksActions({ navigate }: ActionContext): TasksActions {
   return {
@@ -50,6 +53,11 @@ export function tasksActions({ navigate }: ActionContext): TasksActions {
     },
 
     clearDone: async () => { await mutate(CLEAR_DONE); },
+
+    evaluate: async ({ id, dryRun = false }) => {
+      const data = await mutate(EVALUATE, { reviewId: id, dryRun });
+      return data.evaluateReviewItem;
+    },
 
     // New rows carry their own stable in-app address. `openDoc` remains for
     // rows produced before typed subjects existed and for older API servers.

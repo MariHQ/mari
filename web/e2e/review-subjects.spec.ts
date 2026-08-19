@@ -12,7 +12,7 @@ test("a review item opens the exact evidence recorded by its typed subject", asy
       && call.query.includes("subjectHref"),
   )).toBeTruthy();
 
-  await page.getByText("Retention runbook", { exact: true }).click();
+  await page.getByRole("button", { name: "Open document: Retention runbook" }).first().click();
   await expect(page).toHaveURL(/\/knowledge\/doc\?id=1$/);
   await expect(page.getByText("Retention runbook", { exact: true }).first()).toBeVisible();
 });

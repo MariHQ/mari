@@ -25,6 +25,19 @@ function initialData() {
       subjectType: "document", subjectId: "1", subjectTitle: "Retention runbook",
       subjectHref: "/knowledge/doc?id=1",
     }],
+    reviewItems: {
+      items: [
+        { id: "task:1", kind: "task", title: "Verify retention policy", status: "pending", source: "github", assignee: "Dana Rodriguez", due: "2026-08-25", subjectType: "document", subjectId: "1", subjectTitle: "Retention runbook", subjectHref: "/knowledge/doc?id=1", confidence: 0, evidenceCount: 0, trustedSource: false },
+        { id: "fact:2", kind: "fact", title: "Retention is 10 days", status: "pending", source: "Old handbook", assignee: "Dana Rodriguez", due: "", subjectType: "fact", subjectId: "2", subjectTitle: "Retention is 10 days", subjectHref: "/facts?fact=2", confidence: 0.71, evidenceCount: 1, trustedSource: false },
+        { id: "decision:3", kind: "decision", title: "Move derived vectors to object storage", status: "pending", source: "ADR draft", assignee: "Lee Chen", due: "", subjectType: "decision", subjectId: "3", subjectTitle: "Object storage decision", subjectHref: "/decisions?decision=3", confidence: 0.95, evidenceCount: 3, trustedSource: true },
+        { id: "answer:4", kind: "answer", title: "What is the deletion SLA?", status: "pending", source: "support", assignee: "Dana Rodriguez", due: "", subjectType: "answer", subjectId: "4", subjectTitle: "Deletion SLA answer", subjectHref: "/answers?answer=4", confidence: 0.92, evidenceCount: 2, trustedSource: true },
+        { id: "finding:5", kind: "finding", title: "Conflicting retention duration", status: "pending", source: "github", assignee: "", due: "", subjectType: "document", subjectId: "1", subjectTitle: "Retention runbook", subjectHref: "/knowledge/doc?id=1&pane=findings", confidence: 0, evidenceCount: 1, trustedSource: false },
+        { id: "change:6", kind: "change", title: "Replace 10 days with 30 days", status: "pending", source: "github", assignee: "", due: "", subjectType: "document", subjectId: "1", subjectTitle: "Retention runbook", subjectHref: "/knowledge/doc?id=1&tab=changes", confidence: 1, evidenceCount: 1, trustedSource: false },
+        { id: "workflow:7", kind: "workflow", title: "Fact review approval", status: "waiting", source: "automation", assignee: "Dana Rodriguez", due: "", subjectType: "workflow", subjectId: "1", subjectTitle: "Fact review", subjectHref: "/flows?run=1", confidence: 1, evidenceCount: 1, trustedSource: true },
+      ],
+      totalCount: 7,
+      pageInfo: { endCursor: "Nw", hasNextPage: false },
+    },
     tasksSummary: { title: "Review queue", tags: ["Fact check"], people: ["DR"], statValue: "1", statLabel: "open" },
     digest: [{ title: "Policy updated", summary: "Retention documentation changed.", where: [{ source: "github", label: "Retention runbook" }], impact: [{ name: "Support", tone: "info" }] }],
     activityFeed: [{ id: 1, kind: "run", actor: "Mari", text: "synced", target: "Retention runbook", secondsAgo: 30 }],
@@ -121,17 +134,27 @@ function initialData() {
   } as Record<string, any>;
 }
 
-export async function installMockApi(page: Page, options: { signedIn?: boolean; needsSetup?: boolean } = {}): Promise<MockApi> {
+export async function installMockApi(page: Page, options: {
+  signedIn?: boolean; needsSetup?: boolean;
+  projects?: { id: number; slug: string; name: string; role: string; capabilities: string[] }[];
+} = {}): Promise<MockApi> {
   const state = initialData();
   const calls: Call[] = [];
   const restCalls: { path: string; body: any }[] = [];
   let signedIn = options.signedIn ?? true;
   let failure: { pattern: RegExp; message: string } | null = null;
 
-  await page.route("**/auth/me", (route) => route.fulfill({ json: {
-    user: signedIn ? USER : null, needsSetup: Boolean(options.needsSetup), bypassEnabled: false,
-    oauth: { github: true, google: true },
-  } }));
+  const projects = options.projects ?? [{ id: 1, slug: "default", name: "Mari", role: "admin", capabilities: ["knowledge.read"] }];
+  await page.route("**/auth/me", (route) => {
+    const requested = route.request().headers()["x-mari-project"];
+    const activeProject = projects.find((project) => String(project.id) === requested || project.slug === requested)
+      ?? (projects.length === 1 ? projects[0] : null);
+    return route.fulfill({ json: {
+      user: signedIn ? USER : null, needsSetup: Boolean(options.needsSetup), bypassEnabled: false,
+      oauth: { github: true, google: true }, projects, activeProject,
+      capabilities: activeProject?.capabilities ?? [],
+    } });
+  });
   await page.route("**/auth/logout", (route) => { signedIn = false; return route.fulfill({ json: { ok: true } }); });
   await page.route("**/auth/preferences", (route) => route.fulfill({ json: {
     name: USER.name,
@@ -199,6 +222,9 @@ export async function installMockApi(page: Page, options: { signedIn?: boolean; 
       data = { updateSetting: true };
     } else if (/createTask/.test(query)) {
       data = { createTask: true };
+    } else if (/evaluateReviewItem/.test(query)) {
+      data = { evaluateReviewItem: { reviewId: variables.reviewId, outcome: "manual",
+        explanation: "More evidence is required.", replayed: false, dryRun: variables.dryRun } };
     } else if (/createApiKey/.test(query)) {
       data = { createApiKey: "mari_browser_secret_once" };
     } else if (/revokeApiKey/.test(query)) {
