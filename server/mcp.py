@@ -9,13 +9,15 @@ bounded read tools.
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 from typing import Any
 
 from fastapi import APIRouter, Header, HTTPException, Request, Response
 
 import bots
-from db import q, q1
+import access
+from db import pq, q1
 from queries import hybrid_search
 
 router = APIRouter(prefix="/mcp")
@@ -81,22 +83,28 @@ def call_tool(server: dict, name: str, args: dict) -> dict:
         if status and status not in ("Verified", "Needs review"):
             raise ValueError("status must be Verified or Needs review")
         sql = "SELECT id, claim, source, status FROM facts"
-        rows = q(sql + (" WHERE status = %s" if status else "") + " ORDER BY id LIMIT 200",
-                 (status,) if status else ())
+        rows = pq(sql + (" WHERE project_id = %s AND status = %s" if status
+                         else " WHERE project_id = %s") + " ORDER BY id LIMIT 200",
+                  (status,) if status else ())
         return _result(rows)
     if name == "list_glossary":
-        return _result(q("SELECT id, term, definition FROM glossary WHERE NOT candidate ORDER BY term LIMIT 200"))
+        return _result(pq("""SELECT id, term, definition FROM glossary
+                             WHERE project_id = %s AND NOT candidate ORDER BY term LIMIT 200"""))
     if name == "list_answers":
-        return _result(q("SELECT id, question, answer FROM approved_answers WHERE status = 'approved' ORDER BY id LIMIT 200"))
+        return _result(pq("""SELECT id, question, answer FROM approved_answers
+                             WHERE project_id = %s AND status = 'approved' ORDER BY id LIMIT 200"""))
     if name == "document_lineage":
         doc_id = int(args.get("document_id") or 0)
         if doc_id < 1:
             raise ValueError("document_id is required")
-        return _result(q("""SELECT e.id, e.rel, f.id AS from_id, f.title AS from_title,
+        return _result(pq("""SELECT e.id, e.rel, f.id AS from_id, f.title AS from_title,
                                    t.id AS to_id, t.title AS to_title
                             FROM edges e JOIN documents f ON f.id = e.from_doc
                             JOIN documents t ON t.id = e.to_doc
-                            WHERE e.from_doc = %s OR e.to_doc = %s ORDER BY e.id LIMIT 200""",
+                            WHERE e.project_id = %s AND f.project_id = e.project_id
+                              AND t.project_id = e.project_id
+                              AND (e.from_doc = %s OR e.to_doc = %s)
+                            ORDER BY e.id LIMIT 200""",
                          (doc_id, doc_id)))
     if name == "ask_knowledge":
         question = str(args.get("question") or "").strip()
@@ -139,7 +147,14 @@ async def mcp_endpoint(slug: str, request: Request,
     scheme, _, token = authorization.partition(" ")
     if scheme.lower() != "bearer" or not token:
         raise HTTPException(401, "Bearer token required")
-    server = q1("SELECT id, name, config FROM mcp_servers WHERE token = %s", (token,))
+    # Token lookup is the bootstrap boundary: after it succeeds every tool
+    # executes with the server's immutable project context.
+    server = q1("""SELECT m.id, m.name, m.config, m.project_id,
+                          p.slug AS project_slug, p.name AS project_name
+                     FROM mcp_servers m JOIN projects p ON p.id = m.project_id
+                    WHERE (m.token_hash = %s OR (m.token <> '' AND m.token = %s))
+                      AND m.status = 'connected'
+                      AND p.status = 'active'""", (hashlib.sha256(token.encode()).hexdigest(), token))
     if not server or _slug(server["name"]) != slug:
         raise HTTPException(401, "Invalid MCP server or token")
     try:
@@ -148,5 +163,9 @@ async def mcp_endpoint(slug: str, request: Request,
         raise HTTPException(400, "Invalid JSON-RPC payload") from None
     if not isinstance(message, dict) or message.get("jsonrpc") != "2.0":
         raise HTTPException(400, "Expected a JSON-RPC 2.0 object")
-    response = dispatch(server, message)
+    context = access.external_access(
+        server["project_id"], server["project_slug"], server["project_name"],
+        "mcp", str(server["id"]), frozenset({"knowledge.read"}))
+    with access.use_access(context):
+        response = dispatch(server, message)
     return Response(status_code=202) if response is None else response

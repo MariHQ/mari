@@ -27,13 +27,14 @@ import re
 import typing as t
 
 import psycopg
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 import ingest
 import llm
 import trajectory
+import access
 from db import DB_URL, audit, exec_, log_usage, q, q1
 from mutations_knowledge import MutKnowledge
 from mutations_publish import MutPublish
@@ -330,10 +331,14 @@ def _fallback_answer(message: str) -> tuple[list[dict], t.Iterator[str]]:
     return trace, _token_chunks(answer)
 
 
-def agent_events(session_id: int, message: str) -> t.Iterator[str]:
+def agent_events(session_id: int, message: str, project_access=None) -> t.Iterator[str]:
+    if project_access is not None:
+        access.set_access(project_access)
+    project_id = access.require_current_access().project_id
     yield _sse("meta", {"session_id": session_id})
-    history = q("SELECT role, content FROM chat_messages WHERE session_id = %s ORDER BY id DESC LIMIT 12",
-                (session_id,))
+    history = q("""SELECT role, content FROM chat_messages
+                   WHERE project_id = %s AND session_id = %s ORDER BY id DESC LIMIT 12""",
+                (project_id, session_id))
     convo = "\n".join(f"{m['role']}: {m['content'][:600]}" for m in reversed(history))
 
     trace: list[dict] = []      # persisted to chat_messages.sources
@@ -439,8 +444,9 @@ def agent_events(session_id: int, message: str) -> t.Iterator[str]:
     answer = "".join(answer_parts)
 
     try:
-        exec_("INSERT INTO chat_messages (session_id, role, content, sources) VALUES (%s, 'assistant', %s, %s)",
-              (session_id, answer, json.dumps(trace)))
+        exec_("""INSERT INTO chat_messages (project_id, session_id, role, content, sources)
+                 VALUES (%s, %s, 'assistant', %s, %s)""",
+              (project_id, session_id, answer, json.dumps(trace)))
     except Exception:  # noqa: BLE001
         pass
     try:
@@ -456,11 +462,21 @@ def agent_events(session_id: int, message: str) -> t.Iterator[str]:
 
 @router.post("/agent/chat")
 def agent_chat(body: AgentChatIn):
+    project_access = access.require_current_access()
     message = body.message.strip()[:8000]
     session_id = body.session_id
     if not session_id:
         with psycopg.connect(DB_URL) as conn:
-            session_id = conn.execute("INSERT INTO chat_sessions (title) VALUES (%s) RETURNING id",
-                                      (message[:60] or "Agent chat",)).fetchone()[0]
-    exec_("INSERT INTO chat_messages (session_id, role, content) VALUES (%s, 'user', %s)", (session_id, message))
-    return StreamingResponse(agent_events(session_id, message), media_type="text/event-stream")
+            session_id = conn.execute("""INSERT INTO chat_sessions (project_id, owner_user_id, title)
+                                         VALUES (%s, %s, %s) RETURNING id""",
+                                      (project_access.project_id, project_access.user_id or None,
+                                       message[:60] or "Agent chat")).fetchone()[0]
+    else:
+        owned = q1("""SELECT id FROM chat_sessions WHERE id = %s AND project_id = %s
+                      AND (owner_user_id = %s OR owner_user_id IS NULL)""",
+                   (session_id, project_access.project_id, project_access.user_id))
+        if not owned:
+            raise HTTPException(404, "Chat session not found.")
+    exec_("""INSERT INTO chat_messages (project_id, session_id, role, content)
+             VALUES (%s, %s, 'user', %s)""", (project_access.project_id, session_id, message))
+    return StreamingResponse(agent_events(session_id, message, project_access), media_type="text/event-stream")

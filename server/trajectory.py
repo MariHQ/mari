@@ -15,6 +15,7 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 
 import llm
+import access
 from db import exec_, q, q1
 
 _WORKERS = ThreadPoolExecutor(max_workers=2, thread_name_prefix="trajectory-harvest")
@@ -116,6 +117,7 @@ def _json(prompt: str) -> dict:
 
 
 def analyze(trajectory_id: int, prompt: str, steps: list[dict]) -> None:
+    project_id = access.require_current_access().project_id
     phases = segment_phases(steps)
     telemetry = _telemetry_text(steps)
     fallback1 = "; ".join(f"{p['name']} ({p['steps']} steps)" for p in phases) or "No tool actions"
@@ -130,7 +132,9 @@ def analyze(trajectory_id: int, prompt: str, steps: list[dict]) -> None:
             'Return JSON {"activity": "one sentence"}.\n\nWorkflow:\n' + layer1)
         layer2 = str(layer2_data.get("activity") or fallback1)[:600]
         existing = [r["category"] for r in q(
-            "SELECT category FROM trajectories WHERE category <> 'Unclassified' GROUP BY category ORDER BY count(*) DESC LIMIT 20")]
+            """SELECT category FROM trajectories WHERE project_id = %s
+               AND category <> 'Unclassified' GROUP BY category ORDER BY count(*) DESC LIMIT 20""",
+            (project_id,))]
         tax = _json(
             "Assign this activity to a stable workflow taxonomy. Prefer an existing category when it fits. "
             "Otherwise create a short category of at most five words. "
@@ -142,29 +146,37 @@ def analyze(trajectory_id: int, prompt: str, steps: list[dict]) -> None:
         macro_intent = str(macro.get("intent") or category)[:120]
         exec_("""UPDATE trajectories SET status = 'ready', layer1 = %s, layer2 = %s,
                     category = %s, macro_intent = %s, phases = %s, completed_at = now()
-                  WHERE id = %s""",
-              (layer1, layer2, category, macro_intent, json.dumps(phases), trajectory_id))
+                  WHERE id = %s AND project_id = %s""",
+              (layer1, layer2, category, macro_intent, json.dumps(phases), trajectory_id, project_id))
     except Exception as error:  # noqa: BLE001 -- keep grounded fallback available
         exec_("""UPDATE trajectories SET status = 'fallback', layer1 = %s, layer2 = %s,
                     category = %s, macro_intent = %s, phases = %s, completed_at = now()
-                  WHERE id = %s""",
+                  WHERE id = %s AND project_id = %s""",
               (fallback1, fallback1, phases[0]["name"] if phases else "Unclassified",
-               "Unavailable", json.dumps(phases), trajectory_id))
+               "Unavailable", json.dumps(phases), trajectory_id, project_id))
 
 
 def harvest(session_id: int, prompt: str, trace: list[dict], model: str) -> int:
+    project_access = access.require_current_access()
     steps = normalize_steps(trace)
     row = q1("""INSERT INTO trajectories
-                  (session_id, prompt, status, model, step_count, failure_count, rework_count, phases)
-                VALUES (%s, %s, 'processing', %s, %s, %s, %s, %s) RETURNING id""",
-             (session_id, prompt[:8000], model[:100], len(steps),
-              sum(not s["ok"] for s in steps), rework_count(steps), json.dumps(segment_phases(steps))))
+                  (project_id, session_id, prompt, status, model, step_count, failure_count, rework_count, phases)
+                SELECT %s, s.id, %s, 'processing', %s, %s, %s, %s, %s
+                  FROM chat_sessions s WHERE s.id = %s AND s.project_id = %s RETURNING id""",
+             (project_access.project_id, prompt[:8000], model[:100], len(steps),
+              sum(not s["ok"] for s in steps), rework_count(steps), json.dumps(segment_phases(steps)),
+              session_id, project_access.project_id))
+    if not row:
+        raise ValueError("Chat session does not belong to the active project")
     trajectory_id = int(row["id"])
     for step in steps:
         exec_("""INSERT INTO trajectory_steps
-                   (trajectory_id, ordinal, tool, action_family, args, summary, ok)
-                 VALUES (%s, %s, %s, %s, %s, %s, %s)""",
-              (trajectory_id, step["ordinal"], step["tool"], step["action_family"],
+                   (project_id, trajectory_id, ordinal, tool, action_family, args, summary, ok)
+                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
+              (project_access.project_id, trajectory_id, step["ordinal"], step["tool"], step["action_family"],
                json.dumps(step["args"]), step["summary"], step["ok"]))
-    _WORKERS.submit(analyze, trajectory_id, prompt, steps)
+    def run() -> None:
+        with access.use_access(project_access):
+            analyze(trajectory_id, prompt, steps)
+    _WORKERS.submit(run)
     return trajectory_id

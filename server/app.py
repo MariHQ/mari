@@ -16,14 +16,17 @@ root, merged below via inheritance). This file wires the app together.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import pathlib
+import time
 import typing as t
+from contextlib import asynccontextmanager
 
 import psycopg
 import strawberry
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from strawberry.fastapi import GraphQLRouter
@@ -33,12 +36,15 @@ import ingest
 import llm
 import sitebuilder
 import agentchat
+import access as access_module
 import auth as auth_module
 import bots
 import mcp
 import connectors_api
 import onboard
 import repoaudit
+import observability
+import enterprise_identity
 
 from db import DB_URL, ensure_schema, exec_, q, q1
 from queries import Query, hybrid_search
@@ -62,10 +68,32 @@ def graphql_context(request: Request) -> dict[str, t.Any]:
     user = auth_module.current_user(request)
     if not user:
         raise HTTPException(401, "Authentication required.")
-    return {"user": user, "request": request}
+    access = auth_module.require_project(request)
+    return {"user": user, "access": access, "request": request}
 
 
-app = FastAPI(title="Mari API")
+@asynccontextmanager
+async def lifespan(application: FastAPI):
+    """Own schema initialization and background services for this ASGI process."""
+    observability.configure_logging(os.environ.get("MARI_LOG_LEVEL", "INFO"))
+    application.state.ready = False
+    application.state.started_at = time.time()
+    try:
+        ensure_schema()
+        auth_module.ensure_schema()
+        repoaudit.ensure_schema()
+        auth_module.first_run_check()
+        ingest.start_poller()
+        application.state.ready = True
+        logging.getLogger("mari.lifecycle").info("application ready")
+        yield
+    finally:
+        application.state.ready = False
+        ingest.stop_poller()
+        logging.getLogger("mari.lifecycle").info("application stopped")
+
+
+app = FastAPI(title="Mari API", lifespan=lifespan)
 # Resolve who is calling once, for the whole request, so every write can record
 # the real actor (AUTH-5) instead of a hardcoded name. Added before CORS so it
 # sits INSIDE it (Starlette makes the last-added middleware outermost) — a CORS
@@ -73,24 +101,23 @@ app = FastAPI(title="Mari API")
 app.add_middleware(auth_module.CallerMiddleware)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=list(config.get("server", "cors_origins") or ["http://localhost:5173"]),
     allow_methods=["*"],
     allow_headers=["*"],
     allow_credentials=True,
 )
-_authed = [Depends(auth_module.require_user)]
+# Added last so telemetry is the outermost layer: preflights, auth failures,
+# and handler exceptions all receive correlation headers and contribute metrics.
+app.add_middleware(observability.RequestTelemetryMiddleware)
+_authed = [Depends(auth_module.require_project)]
 app.include_router(GraphQLRouter(schema, context_getter=graphql_context), prefix="/graphql")
 app.include_router(auth_module.router)
+app.include_router(enterprise_identity.router)
 app.include_router(bots.router)  # setup endpoints guard themselves; webhooks stay signature-verified
 app.include_router(mcp.router)  # published MCP servers authenticate with their own bearer tokens
 app.include_router(connectors_api.router, dependencies=_authed)
 app.include_router(agentchat.router, dependencies=_authed)
 app.include_router(onboard.router, dependencies=_authed)
-ensure_schema()  # complete app schema + demo seed (init.sql, idempotent)
-auth_module.ensure_schema()
-repoaudit.ensure_schema()
-auth_module.first_run_check()
-ingest.start_poller()
 
 from fastapi.staticfiles import StaticFiles  # noqa: E402
 
@@ -127,15 +154,24 @@ CHAT_SYSTEM = (
 
 
 @app.post("/chat")
-def chat(body: ChatIn, user: dict = Depends(auth_module.require_user)):
+def chat(body: ChatIn, access: t.Any = Depends(auth_module.require_project)):
+    project_id = access.project_id
     session_id = body.session_id
     if not session_id:
         with psycopg.connect(DB_URL) as conn:
             session_id = conn.execute(
-                "INSERT INTO chat_sessions (title) VALUES (%s) RETURNING id",
-                (body.message[:60],)
+                """INSERT INTO chat_sessions (project_id, owner_user_id, title)
+                   VALUES (%s, %s, %s) RETURNING id""",
+                (project_id, access.user_id or None, body.message[:60])
             ).fetchone()[0]
-    exec_("INSERT INTO chat_messages (session_id, role, content) VALUES (%s, 'user', %s)", (session_id, body.message))
+    else:
+        owned = q1("""SELECT id FROM chat_sessions WHERE id = %s AND project_id = %s
+                      AND (owner_user_id = %s OR owner_user_id IS NULL)""",
+                   (session_id, project_id, access.user_id))
+        if not owned:
+            raise HTTPException(404, "Chat session not found.")
+    exec_("""INSERT INTO chat_messages (project_id, session_id, role, content)
+             VALUES (%s, %s, 'user', %s)""", (project_id, session_id, body.message))
 
     # Approved answers first (DESIGN.md canon: curated answers beat generation).
     qvec = llm.embed(body.message)
@@ -144,19 +180,21 @@ def chat(body: ChatIn, user: dict = Depends(auth_module.require_user)):
         approved = q1("""
           SELECT id, question, answer, 1 - (embedding <=> %s::vector) AS sim
           FROM approved_answers
-          WHERE status = 'approved' AND embedding IS NOT NULL
+          WHERE project_id = %s AND status = 'approved' AND embedding IS NOT NULL
           ORDER BY embedding <=> %s::vector LIMIT 1
-        """, (str(qvec), str(qvec)))
+        """, (str(qvec), project_id, str(qvec)))
         if approved and approved["sim"] < 0.62:
             approved = None
     if not approved:
         hit = q1("""SELECT id, question, answer, 1.0 AS sim FROM approved_answers
-                    WHERE status = 'approved' AND (question ILIKE %s OR %s ILIKE '%%' || question || '%%')
-                    LIMIT 1""", (f"%{body.message[:60]}%", body.message))
+                    WHERE project_id = %s AND status = 'approved'
+                      AND (question ILIKE %s OR %s ILIKE '%%' || question || '%%')
+                    LIMIT 1""", (project_id, f"%{body.message[:60]}%", body.message))
         approved = hit
 
     if approved:
-        exec_("UPDATE approved_answers SET served = served + 1 WHERE id = %s", (approved["id"],))
+        exec_("""UPDATE approved_answers SET served = served + 1
+                 WHERE id = %s AND project_id = %s""", (approved["id"], project_id))
         sources = [{"n": 1, "source": "approved", "title": approved["question"],
                     "meta": "Approved answer · served verbatim"}]
         text = approved["answer"]
@@ -164,8 +202,9 @@ def chat(body: ChatIn, user: dict = Depends(auth_module.require_user)):
         def stream_approved():
             yield f"event: meta\ndata: {json.dumps({'session_id': session_id, 'sources': sources, 'approved': True})}\n\n"
             yield f"data: {json.dumps({'token': text})}\n\n"
-            exec_("INSERT INTO chat_messages (session_id, role, content, sources) VALUES (%s, 'assistant', %s, %s)",
-                  (session_id, text, json.dumps(sources)))
+            exec_("""INSERT INTO chat_messages (project_id, session_id, role, content, sources)
+                     VALUES (%s, %s, 'assistant', %s, %s)""",
+                  (project_id, session_id, text, json.dumps(sources)))
             _log_chat_usage("web")
             yield "event: done\ndata: {}\n\n"
 
@@ -174,12 +213,14 @@ def chat(body: ChatIn, user: dict = Depends(auth_module.require_user)):
     docs = hybrid_search(body.message, 4)
     context = "\n\n".join(
         f"[{i + 1}] {d['title']} ({d['source']})\n{d['body'] or d['snippet']}" for i, d in enumerate(docs))
-    facts = q("SELECT claim FROM facts WHERE status = 'Verified' LIMIT 8")
+    facts = q("SELECT claim FROM facts WHERE project_id = %s AND status = 'Verified' LIMIT 8", (project_id,))
     context += "\n\nVerified facts:\n" + "\n".join(f"- {f['claim']}" for f in facts)
     sources = [{"n": i + 1, "source": d["source"], "title": d["title"],
                 "meta": d["snippet"][:110]} for i, d in enumerate(docs)]
 
-    history = q("SELECT role, content FROM chat_messages WHERE session_id = %s ORDER BY id DESC LIMIT 10", (session_id,))
+    history = q("""SELECT role, content FROM chat_messages
+                   WHERE project_id = %s AND session_id = %s ORDER BY id DESC LIMIT 10""",
+                (project_id, session_id))
     messages = [{"role": m["role"], "content": m["content"]} for m in reversed(history)]
     messages[-1]["content"] = f"Context:\n{context}\n\nQuestion: {body.message}"
 
@@ -194,8 +235,9 @@ def chat(body: ChatIn, user: dict = Depends(auth_module.require_user)):
                         + "; ".join(d["title"] for d in docs) + ".")
             answer.append(fallback)
             yield f"data: {json.dumps({'token': fallback})}\n\n"
-        exec_("INSERT INTO chat_messages (session_id, role, content, sources) VALUES (%s, 'assistant', %s, %s)",
-              (session_id, "".join(answer), json.dumps(sources)))
+        exec_("""INSERT INTO chat_messages (project_id, session_id, role, content, sources)
+                 VALUES (%s, %s, 'assistant', %s, %s)""",
+              (project_id, session_id, "".join(answer), json.dumps(sources)))
         _log_chat_usage("web")
         yield "event: done\ndata: {}\n\n"
 
@@ -208,45 +250,75 @@ def chat(body: ChatIn, user: dict = Depends(auth_module.require_user)):
 @app.post("/webhooks/github")
 async def github_webhook(request: "Request"):
     raw = await request.body()
-    # Either the env/config secret or the self-serve settings.github_bot secret
-    # validates (BOTS-CONTRACT §B — the UI saves its own generated secret).
-    secrets = [
-        s for s in (
-            (config.get("github", "webhook_secret") or "").strip(),
-            (bots.get_setting("github_bot").get("webhook_secret") or "").strip(),
-        ) if s
-    ]
-    # AUTH-10: no secret used to mean no verification, which made this an
-    # unauthenticated endpoint anyone could use to drive syncs. No secret now
-    # means no deliveries — the same verdict bots.py gives Slack.
-    if not secrets:
-        raise HTTPException(
-            401, "This webhook has no secret configured, so no delivery can be verified. "
-                 "Set MARI_GITHUB_WEBHOOK_SECRET, or generate one in Settings → Bots.")
-    sig = request.headers.get("X-Hub-Signature-256", "")
-    if not bots.verify_github_signature(raw, sig, secrets):
-        # A loud 401 so GitHub's delivery log surfaces the misconfiguration.
-        raise HTTPException(401, "bad signature")
     try:
         payload = json.loads(raw or b"{}")
     except json.JSONDecodeError:
         return {"ok": False, "error": "bad payload"}
-    bots.merge_setting("github_bot", {"last_delivery_at": bots._now_iso()})
+    installation_id = str((payload.get("installation") or {}).get("id") or "")
+    installation = q1("""SELECT b.*, p.slug AS project_slug, p.name AS project_name
+                           FROM bot_installations b JOIN projects p ON p.id = b.project_id
+                          WHERE b.provider = 'github' AND b.external_installation_id = %s
+                            AND b.status = 'connected' AND p.status = 'active'""", (installation_id,))
+    if not installation:
+        raise HTTPException(401, "unknown GitHub installation")
+    bot_config = installation.get("config") or {}
+    if isinstance(bot_config, str):
+        bot_config = json.loads(bot_config)
+    if not bots.verify_github_signature(
+            raw, request.headers.get("X-Hub-Signature-256", ""),
+            [str(bot_config.get("webhook_secret") or "")]):
+        raise HTTPException(401, "bad signature")
+    exec_("""UPDATE bot_installations SET config = config || %s, updated_at = now()
+             WHERE id = %s""", (json.dumps({"last_delivery_at": bots._now_iso()}), installation["id"]))
     full_name = (payload.get("repository") or {}).get("full_name", "")
     if not full_name:
         return {"ok": True, "synced": False}
-    src = q1("SELECT id FROM sources WHERE kind = 'github' AND config->>'repo' = %s", (full_name,))
-    if not src:
-        return {"ok": True, "synced": False, "reason": "repo not connected"}
-    started = ingest.start_sync(src["id"])
+    project_access = access_module.external_access(
+        installation["project_id"], installation["project_slug"], installation["project_name"],
+        "github", str(installation["id"]), frozenset({"source.sync"}))
+    with access_module.use_access(project_access):
+        src = q1("""SELECT id FROM sources WHERE project_id = %s AND kind = 'github'
+                    AND config->>'repo' = %s""", (installation["project_id"], full_name))
+        if not src:
+            return {"ok": True, "synced": False, "reason": "repo not connected"}
+        started = ingest.start_sync(src["id"])
     return {"ok": True, "synced": started, "source_id": src["id"]}
 
 
-@app.get("/healthz")
-def healthz() -> dict[str, t.Any]:
-    docs = q("SELECT count(*) AS n FROM documents")[0]["n"]
-    embedded = q("SELECT count(*) AS n FROM documents WHERE embedding IS NOT NULL")[0]["n"]
-    return {"ok": True, "service": "mari-api", "documents": docs, "embedded": embedded}
+@app.get("/livez", include_in_schema=False)
+def livez() -> dict[str, t.Any]:
+    return {"ok": True, "service": "mari-api"}
+
+
+@app.get("/readyz", include_in_schema=False)
+def readyz(request: Request) -> dict[str, t.Any]:
+    if not getattr(request.app.state, "ready", False):
+        raise HTTPException(503, "Application startup is not complete.")
+    try:
+        q1("SELECT 1 AS ok")
+    except Exception as exc:  # noqa: BLE001 — readiness reports dependency failure
+        logging.getLogger("mari.health").warning("database readiness check failed", exc_info=exc)
+        raise HTTPException(503, "Database is unavailable.") from exc
+    return {"ok": True, "service": "mari-api", "dependencies": {"database": "ok"}}
+
+
+@app.get("/healthz", include_in_schema=False)
+def healthz(request: Request) -> dict[str, t.Any]:
+    """Compatibility alias for orchestration that predates /readyz."""
+    return readyz(request)
+
+
+@app.get("/metrics", response_class=PlainTextResponse, include_in_schema=False)
+def metrics() -> str:
+    # Connector lag is a gauge, refreshed on scrape so idle connectors still age.
+    try:
+        for row in q("""SELECT provider, extract(epoch FROM (now() - last_sync_at)) AS lag
+                        FROM sources WHERE last_sync_at IS NOT NULL"""):
+            provider = str(row["provider"] or "unknown").split(":", 1)[0]
+            observability.observe_connector_lag(provider, float(row["lag"] or 0))
+    except Exception:  # noqa: BLE001 — metrics remain available during DB incidents
+        observability.METRICS.inc("mari_metrics_dependency_errors_total", dependency="database")
+    return observability.METRICS.render()
 
 
 # In the Lambda container the API also serves the compiled React application.

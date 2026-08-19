@@ -152,6 +152,10 @@ Everything is env-driven (`.env.example` documents the full list; env overrides 
 | `MARI_GOOGLE_CLIENT_ID` / `_SECRET` | Google OAuth sign-in |
 | `MARI_GITHUB_WEBHOOK_SECRET` | Webhook HMAC verification |
 | `MARI_OLLAMA_HOST` | ollama endpoint |
+| `MARI_LLM_GATEWAY_URL` / `_TOKEN` | OpenAI-compatible enterprise gateway endpoint and Secret-backed credential |
+| `MARI_LLM_GATEWAY_HEADERS` / `_METADATA` | Optional JSON routing headers and request metadata for the gateway |
+| `MARI_LLM_GATEWAY_MODEL_HEADER` | Optional header name that receives the selected model ID |
+| `MARI_LLM_GATEWAY_RETRIES` | Bounded retry count for gateway 429/5xx/timeouts (0–5, default 2) |
 | `MARI_VECTOR_URI` | Rebuildable MUVERA/PolarQuant vector snapshots; local path or `s3://bucket/prefix` |
 | `MARI_VECTOR_FLUSH_SECONDS` | Debounce interval for flushing changed derived vectors (default 30 seconds) |
 | `MARI_ICEBERG_WAREHOUSE` | Iceberg warehouse location; local filesystem by default, S3 in production |
@@ -159,7 +163,7 @@ Everything is env-driven (`.env.example` documents the full list; env overrides 
 | `MARI_S3_BUCKET` | S3 site publishing |
 | `MARI_AUTH_BYPASS` | One-click demo login, off unless you set it to `true`. It signs anyone who can reach the port in as the workspace admin, with no credential — turn it on only for throwaway demo instances. The server logs a warning at startup while it is on |
 | `MARI_AUTH_REGISTRATION` | Open sign-up (default off — the workspace is invite-only). Invited people can always register whether or not this is set |
-| `MARI_SESSION_SECRET` | Switches session cookies to HMAC-signed tokens verified against this secret, for deployments whose instances don't share a database (the Lambda demo). Leave unset anywhere with a shared database — row-backed sessions can actually be revoked |
+| `MARI_CONTROL_DB` | SQLite path for revocable, ephemeral control state such as login sessions (default `.mari/control.sqlite3`) |
 | `MARI_CRAWL_ALLOW_LOOPBACK` | Allow the website connector to crawl localhost (dev only) |
 
 ### Desktop app

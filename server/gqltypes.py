@@ -210,6 +210,47 @@ class TaskSummary:
 
 
 @strawberry.type
+class ReviewItem:
+    id: str
+    kind: str
+    title: str
+    status: str
+    source: str
+    assignee: str
+    due: str
+    subject_type: str
+    subject_id: str
+    subject_title: str
+    subject_href: str
+    confidence: float
+    evidence_count: int
+    trusted_source: bool
+
+
+@strawberry.type
+class ReviewPageInfo:
+    end_cursor: str
+    has_next_page: bool
+
+
+@strawberry.type
+class ReviewConnection:
+    items: list[ReviewItem]
+    total_count: int
+    page_info: ReviewPageInfo
+
+
+@strawberry.type
+class ReviewPolicyDecision:
+    review_id: str
+    outcome: str
+    explanation: str
+    policy_version: str
+    replayed: bool
+    dry_run: bool
+
+
+@strawberry.type
 class DigestWhere:
     source: str
     label: str

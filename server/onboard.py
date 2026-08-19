@@ -23,6 +23,7 @@ from psycopg.rows import dict_row
 from pydantic import BaseModel
 
 import llm
+import access
 # Reuse the real GitHub ingestion pipeline pieces (chunk + content-hash + embed +
 # mean-pooled doc embedding). ingest._upsert_document is github-specific
 # (hardcodes source='github'), so the document upsert lives here instead.
@@ -49,10 +50,10 @@ def _conn():
 def _upload_source(conn) -> int:
     """Create or reuse the single 'upload' source (sources.provider is UNIQUE)."""
     row = conn.execute("""
-        INSERT INTO sources (provider, display_name, kind, stat_unit, status, health)
-        VALUES ('upload', 'Uploads', 'upload', 'docs', 'active', 'Healthy')
-        ON CONFLICT (provider) DO UPDATE SET kind = 'upload', display_name = 'Uploads'
-        RETURNING id""").fetchone()
+        INSERT INTO sources (project_id, provider, display_name, kind, stat_unit, status, health)
+        VALUES (%s, 'upload', 'Uploads', 'upload', 'docs', 'active', 'Healthy')
+        ON CONFLICT (project_id, provider) DO UPDATE SET kind = 'upload', display_name = 'Uploads'
+        RETURNING id""", (access.require_current_access().project_id,)).fetchone()
     conn.commit()
     return row["id"]
 
@@ -62,15 +63,15 @@ def _upsert_upload_document(conn, source_id: int, filename: str, text: str) -> i
     title = _title_of(text, filename)
     snippet = excerpt(text, title)
     row = conn.execute("""
-        INSERT INTO documents (source, external_id, title, snippet, body, author, author_initials,
+        INSERT INTO documents (project_id, source, external_id, title, snippet, body, author, author_initials,
                                kind, updated_src, created_src, content_hash, source_path, source_id)
-        VALUES ('upload', %s, %s, %s, %s, %s, 'UP', 'page', CURRENT_DATE, CURRENT_DATE, %s, %s, %s)
-        ON CONFLICT (source, external_id) DO UPDATE SET
+        VALUES (%s, 'upload', %s, %s, %s, %s, %s, 'UP', 'page', CURRENT_DATE, CURRENT_DATE, %s, %s, %s)
+        ON CONFLICT (project_id, source, external_id) DO UPDATE SET
           title = EXCLUDED.title, snippet = EXCLUDED.snippet, body = EXCLUDED.body,
           updated_src = CURRENT_DATE, content_hash = EXCLUDED.content_hash,
           source_path = EXCLUDED.source_path, source_id = EXCLUDED.source_id
         RETURNING id""",
-        (f"upload:{filename}", title, snippet, text, ACTOR, _sha(text),
+        (access.require_current_access().project_id, f"upload:{filename}", title, snippet, text, ACTOR, _sha(text),
          f"upload/{filename}", source_id)).fetchone()
     conn.commit()
     return row["id"]

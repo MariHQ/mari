@@ -5,6 +5,7 @@ import unittest
 from unittest.mock import patch
 
 import trajectory
+import access
 
 
 class TrajectoryHarvestTests(unittest.TestCase):
@@ -45,7 +46,9 @@ class TrajectoryHarvestTests(unittest.TestCase):
             {"name": "read_document", "args": {"id": 4}, "summary": "read", "ok": True},
             {"name": "tag_document", "args": {"id": 4}, "summary": "updated", "ok": True},
         ])
-        with patch.object(trajectory.llm, "generate_json", side_effect=lambda _: next(answers)), \
+        project = access.AccessContext(1, 7, "acme", "Acme", "admin", access.CAPABILITIES)
+        with access.use_access(project), \
+             patch.object(trajectory.llm, "generate_json", side_effect=lambda _: next(answers)), \
              patch.object(trajectory, "q", return_value=[{"category": "Incident response"}]), \
              patch.object(trajectory, "exec_", side_effect=lambda sql, args=(): updates.append((sql, args))):
             trajectory.analyze(9, "Fix the auth documentation", steps)

@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import contextvars
 import hashlib
-import hmac
 import json
 import logging
 import os
@@ -28,6 +27,8 @@ from psycopg.rows import dict_row
 from pydantic import BaseModel
 
 import config
+import access as access_module
+import control_store
 
 log = logging.getLogger("mari.auth")
 router = APIRouter(prefix="/auth")
@@ -139,6 +140,7 @@ def _verify(password: str, stored: str) -> bool:
 
 
 def ensure_schema() -> None:
+    control_store.ensure_schema()
     with _conn() as conn:
         conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash text NOT NULL DEFAULT ''")
         conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS github_id text NOT NULL DEFAULT ''")
@@ -147,19 +149,17 @@ def ensure_schema() -> None:
         # POST /auth/register. See init.sql for why credential-less is not
         # sufficient on its own.
         conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS invited_by text NOT NULL DEFAULT ''")
-        conn.execute("""CREATE TABLE IF NOT EXISTS sessions (
-            token text PRIMARY KEY, user_id int NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-            created_at timestamptz NOT NULL DEFAULT now())""")
-        # AUTH-3: sessions used to live forever server-side; the cookie's
-        # max_age was a client hint a stolen token could simply ignore.
-        # Existing rows get an expiry derived from when they were created, so
-        # the migration does not silently extend anything.
-        conn.execute("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS expires_at timestamptz")
-        conn.execute("""UPDATE sessions SET expires_at = created_at + (%s || ' days')::interval
-                        WHERE expires_at IS NULL""", (int(config.get("auth", "session_days", 14)),))
-        conn.execute("ALTER TABLE sessions ALTER COLUMN expires_at SET NOT NULL")
-        conn.execute("CREATE INDEX IF NOT EXISTS sessions_expires_idx ON sessions (expires_at)")
-        conn.execute("DELETE FROM sessions WHERE expires_at <= now()")
+        # Keep legacy provider columns readable during migration while making
+        # the provider subject a first-class identity rather than a user
+        # attribute. init.sql owns creation of this table.
+        conn.execute("""INSERT INTO external_identities (user_id, provider, subject, email)
+                        SELECT id, 'github', github_id, email FROM users WHERE github_id <> ''
+                        ON CONFLICT (user_id, provider) DO UPDATE
+                          SET subject = EXCLUDED.subject, email = EXCLUDED.email, updated_at = now()""")
+        conn.execute("""INSERT INTO external_identities (user_id, provider, subject, email)
+                        SELECT id, 'google', google_id, email FROM users WHERE google_id <> ''
+                        ON CONFLICT (user_id, provider) DO UPDATE
+                          SET subject = EXCLUDED.subject, email = EXCLUDED.email, updated_at = now()""")
 
 
 def first_run_check() -> None:
@@ -201,6 +201,9 @@ def _warn_if_bypass_enabled() -> None:
     POST becomes a workspace-admin session. If it is on, say so at startup
     rather than letting a deployment inherit it quietly."""
     if not config.get("auth", "bypass_enabled", False):
+        return
+    if not config.get("auth", "bypass_dev_mode", False):
+        log.warning("auth.bypass_enabled was requested but bypass_dev_mode is OFF; bypass remains closed")
         return
     message = (
         "auth.bypass_enabled is ON: POST /auth/bypass signs anyone in as the "
@@ -252,59 +255,19 @@ def _client_detail(request: Request | None) -> list[dict]:
             {"label": "User agent", "value": (request.headers.get("User-Agent") or "unknown")[:200]}]
 
 
-# ————— stateless signed sessions —————
-#
-# deploy/lambda runs one embedded Postgres per execution environment, restored
-# from a dump, so a session ROW minted by one instance does not exist for the
-# next. When auth.session_secret is set, the cookie value is instead an
-# HMAC-signed statement — "user <id> until <expiry>" — that any instance
-# holding the same secret verifies without a lookup. The trade is revocation:
-# signing out clears the browser's cookie, but a copied token stays valid
-# until it expires. Deployments whose instances share a database should leave
-# the secret unset and keep row-backed sessions, which revoke for real.
-
-def _session_secret() -> str:
-    return str(config.get("auth", "session_secret", "") or "")
-
-
-def _signed_token(user_id: int, ttl_seconds: int) -> str:
-    payload = f"s1.{user_id}.{int(time.time()) + ttl_seconds}"
-    sig = hmac.new(_session_secret().encode(), payload.encode(), hashlib.sha256).hexdigest()
-    return f"{payload}.{sig}"
-
-
-def _signed_token_user_id(token: str) -> int | None:
-    """The user id a valid, unexpired signed token names — None for anything
-    else, including every token when no secret is configured."""
-    secret = _session_secret()
-    parts = token.split(".")
-    if not secret or len(parts) != 4 or parts[0] != "s1":
-        return None
-    payload = ".".join(parts[:3])
-    expected = hmac.new(secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(expected, parts[3]):
-        return None
-    try:
-        uid, expires = int(parts[1]), int(parts[2])
-    except ValueError:
-        return None
-    return uid if time.time() < expires else None
-
-
 def _create_session(user_id: int, response: Response, request: Request | None = None,
                     ttl_seconds: int | None = None, verb: str = "signed in") -> str:
     """Mint one session. EVERY authenticated path goes through here — the
-    server accepts no token it did not generate and store, or (with
-    auth.session_secret set) generate and sign. The row is written either way:
-    it is what the access log and same-instance logout act on."""
+    server accepts no token it did not generate and store. Sessions are
+    revocable SQLite control state, separate from durable knowledge data."""
     ttl = ttl_seconds if ttl_seconds is not None else int(config.get("auth", "session_days", 14)) * 86400
-    token = _signed_token(user_id, ttl) if _session_secret() else secrets.token_urlsafe(32)
+    token = secrets.token_urlsafe(32)
+    control_store.put_session(
+        token, user_id, ttl,
+        client_ip=_client_ip(request),
+        user_agent=(request.headers.get("User-Agent", "") if request else ""),
+    )
     with _conn() as conn:
-        conn.execute("""INSERT INTO sessions (token, user_id, expires_at)
-                        VALUES (%s, %s, now() + (%s || ' seconds')::interval)""",
-                     (token, user_id, ttl))
-        # Cheap opportunistic GC: expired rows are unusable, so they are litter.
-        conn.execute("DELETE FROM sessions WHERE expires_at <= now()")
         # Every sign-in path funnels through here, so the access log records
         # them all — with the client detail the expanded row shows.
         conn.execute("""INSERT INTO events (actor, verb, target, detail)
@@ -329,36 +292,10 @@ def current_user(request: Request) -> dict | None:
     token = request.cookies.get(COOKIE)
     user = None
     if token:
-        # A signed token authenticates by its signature, not by a row this
-        # instance may never have seen; anything else is looked up as the row
-        # it claims to be.
-        signed_uid = _signed_token_user_id(token)
-        with _conn() as conn:
-            if signed_uid is not None:
-                user = conn.execute("SELECT * FROM users WHERE id = %s", (signed_uid,)).fetchone()
-            else:
-                user = conn.execute("""SELECT u.* FROM sessions s JOIN users u ON u.id = s.user_id
-                                       WHERE s.token = %s AND s.expires_at > now()""", (token,)).fetchone()
-    # On a bypass server, a PRESENTED cookie whose row is missing still
-    # resolves to the workspace admin — but only a presented one.
-    #
-    # The cookie-tolerance exists because deploy/lambda runs an embedded
-    # Postgres per execution environment: under any concurrency a session
-    # minted by one instance does not exist for the next, and requiring the
-    # row made the demo 401 at random. A caller holding our cookie on a
-    # bypass server was already let in once, so honouring it grants nothing
-    # POST /auth/bypass would not hand out anyway. The cookie's value is not
-    # a credential here; its presence is the record that this browser chose
-    # to enter.
-    #
-    # A caller with NO cookie stays unauthenticated even with the bypass on.
-    # That is what makes the sign-in screen real on a demo: a fresh visitor
-    # sees the wall (with its one-click demo button), and signing out — which
-    # clears the cookie — actually signs you out, instead of the very next
-    # request quietly resolving you back to admin.
-    if user is None and token and config.get("auth", "bypass_enabled", False):
-        with _conn() as conn:
-            user = _bypass_target(conn)
+        session = control_store.session(token)
+        if session:
+            with _conn() as conn:
+                user = conn.execute("SELECT * FROM users WHERE id = %s", (session["user_id"],)).fetchone()
     if isinstance(scope, dict):
         scope["mari_user"] = user
     set_caller(user)
@@ -382,6 +319,7 @@ class CallerMiddleware:
     async def __call__(self, scope, receive, send):
         if scope.get("type") != "http":
             return await self.app(scope, receive, send)
+        access_module.set_access(None)
         try:
             current_user(Request(scope, receive))
         except Exception:  # noqa: BLE001 — identifying the caller must never
@@ -408,6 +346,12 @@ def require_admin(request: Request) -> dict:
     return require_role(request, "admin")
 
 
+# Project-aware REST dependencies live in access.py, but are re-exported here
+# for callers that already treat auth.py as the dependency surface.
+require_project = access_module.require_project
+require_capability = access_module.require_capability
+
+
 class Credentials(BaseModel):
     email: str
     password: str
@@ -427,10 +371,42 @@ def _user_out(u: dict) -> dict:
             "initials": u["initials"], "tint": u["tint"], "provider": u["provider"]}
 
 
+def _join_single_project(conn, user_id: int, role: str = "member") -> None:
+    """Backwards-compatible enrollment for the single-project product mode.
+
+    New identities are never attached when more than one project exists; an
+    administrator must choose the target explicitly in that mode.
+    """
+    projects = conn.execute("SELECT id FROM projects WHERE status = 'active' ORDER BY id").fetchall()
+    if len(projects) == 1:
+        conn.execute("""INSERT INTO project_members (project_id, user_id, role, status)
+                        VALUES (%s, %s, %s, 'active')
+                        ON CONFLICT (project_id, user_id) DO NOTHING""",
+                     (projects[0]["id"], user_id, role))
+
+
 def _bypass_target(conn) -> dict | None:
-    return conn.execute("""SELECT * FROM users
-                           ORDER BY (role = 'admin') DESC, id ASC
+    return conn.execute("""SELECT u.* FROM users u
+                           JOIN project_members pm ON pm.user_id = u.id AND pm.status = 'active'
+                           JOIN projects p ON p.id = pm.project_id AND p.status = 'active'
+                           WHERE pm.role IN ('owner', 'admin')
+                           ORDER BY (pm.role = 'owner') DESC, u.id ASC
                            LIMIT 1""").fetchone()
+
+
+def _bypass_allowed(conn) -> bool:
+    """The unauthenticated bypass requires two deliberate constraints.
+
+    Merely setting the historic bypass flag is no longer enough. Operators
+    must explicitly mark this a development instance, and the database must
+    contain exactly one active project. That makes a stale production flag or
+    a future multi-project deployment fail closed.
+    """
+    if not (config.get("auth", "bypass_enabled", False)
+            and config.get("auth", "bypass_dev_mode", False)):
+        return False
+    row = conn.execute("SELECT count(*) AS n FROM projects WHERE status = 'active'").fetchone()
+    return bool(row and int(row["n"]) == 1)
 
 
 @router.get("/me")
@@ -452,7 +428,7 @@ def me(request: Request, response: Response):
         # posts to /auth/bypass regardless — and it would hide the button from
         # the demo it exists for. The honest fix is the default (off), not the
         # secrecy.
-        bypass = bool(config.get("auth", "bypass_enabled", False)) and _bypass_target(conn) is not None
+        bypass = _bypass_allowed(conn) and _bypass_target(conn) is not None
     oauth = {"github": bool(config.get("auth", "github_client_id")),
              "google": bool(config.get("auth", "google_client_id"))}
     # The sign-in screen names the workspace before anyone is authenticated, so
@@ -461,8 +437,16 @@ def me(request: Request, response: Response):
     value = ws["value"] if ws else {}
     if not isinstance(value, dict):
         value = json.loads(value or "{}")
+    active = None
+    memberships = []
+    if u:
+        active, memberships = access_module.resolve_access(
+            u, request.headers.get("X-Mari-Project"), _conn, required=False)
     return {"user": _user_out(u) if u else None, "needsSetup": needs_setup, "oauth": oauth,
             "workspace": {"name": str(value.get("name") or "")},
+            "projects": [membership.as_dict() for membership in memberships],
+            "activeProject": active.project_dict() if active else None,
+            "capabilities": sorted(active.capabilities) if active else [],
             "registrationEnabled": bool(config.get("auth", "registration_enabled", False)),
             "bypassEnabled": bypass}
 
@@ -476,6 +460,8 @@ def bypass(request: Request, response: Response):
         raise HTTPException(404, "Login bypass is not enabled.")
     _rate_limit("bypass", _client_ip(request), 20, 300)
     with _conn() as conn:
+        if not _bypass_allowed(conn):
+            raise HTTPException(404, "Login bypass is not enabled for this project mode.")
         user = _bypass_target(conn)
     if not user:
         raise HTTPException(503, "No workspace user is available for login bypass.")
@@ -538,9 +524,13 @@ def setup(body: SetupIn, request: Request, response: Response):
             conn.execute("""INSERT INTO settings (key, value) VALUES ('workspace', %s)
                             ON CONFLICT (key) DO UPDATE SET value = settings.value || EXCLUDED.value""",
                          (json.dumps({"name": body.workspace}),))
+            conn.execute("""UPDATE projects SET name = %s
+                            WHERE id = (SELECT id FROM projects ORDER BY id LIMIT 1)
+                              AND (SELECT count(*) FROM projects) = 1""", (body.workspace,))
         conn.execute("INSERT INTO settings (key, value) VALUES ('setup_complete', 'true') ON CONFLICT DO NOTHING")
         conn.execute("DELETE FROM settings WHERE key = 'setup_token'")
         user = conn.execute("SELECT * FROM users WHERE email = %s", (body.email,)).fetchone()
+        _join_single_project(conn, user["id"], "owner")
         conn.execute("INSERT INTO events (actor, verb, target) VALUES (%s, 'completed first-run setup', %s)",
                      (body.name, body.workspace or "workspace"))
     _rate_clear("setup", _client_ip(request))
@@ -607,6 +597,7 @@ def register(body: Credentials, request: Request, response: Response):
                             VALUES (%s, %s, %s, %s, 'user', 'manual', %s)""",
                          (body.name, initials, (hash(body.name) % 4) + 1, email, _hash(body.password)))
             user = conn.execute("SELECT * FROM users WHERE lower(email) = lower(%s)", (email,)).fetchone()
+        _join_single_project(conn, user["id"], "member")
     _rate_clear("register", _client_ip(request))
     _create_session(user["id"], response, request)
     return {"user": _user_out(user)}
@@ -632,8 +623,7 @@ def login(body: Credentials, request: Request, response: Response):
 def logout(request: Request, response: Response):
     token = request.cookies.get(COOKIE)
     if token:
-        with _conn() as conn:
-            conn.execute("DELETE FROM sessions WHERE token = %s", (token,))
+        control_store.revoke_session(token)
     set_caller(None)
     _clear_session_cookie(response, request)
     return {"ok": True}
@@ -677,27 +667,39 @@ def _link_or_create_oauth_user(provider: str, ext_id: str, name: str, email: str
     name collision we create a fresh 'user'-role row with a deduplicated name."""
     column = OAUTH_ID_COLUMN[provider]
     with _conn() as conn:
-        user = conn.execute(f"SELECT * FROM users WHERE {column} = %s", (ext_id,)).fetchone()
+        user = conn.execute("""SELECT u.* FROM external_identities ei
+                               JOIN users u ON u.id = ei.user_id
+                               WHERE ei.provider = %s AND ei.subject = %s""",
+                            (provider, ext_id)).fetchone()
+        user = user or conn.execute(f"SELECT * FROM users WHERE {column} = %s", (ext_id,)).fetchone()
         if user:
-            return user
-        if email:
+            pass
+        elif email:
             existing = conn.execute("SELECT * FROM users WHERE email = %s", (email,)).fetchone()
             if existing:
                 conn.execute(f"UPDATE users SET {column} = %s WHERE id = %s", (ext_id, existing["id"]))
-                return conn.execute("SELECT * FROM users WHERE id = %s", (existing["id"],)).fetchone()
-        initials = "".join(w[0].upper() for w in name.split()[:2]) or "??"
-        candidate = name
-        for n in range(2, 50):
-            if not conn.execute("SELECT 1 FROM users WHERE name = %s", (candidate,)).fetchone():
-                break
-            candidate = f"{name} ({n})"
-        row = conn.execute(f"""INSERT INTO users (name, initials, tint, email, role, provider, {column})
-                               VALUES (%s, %s, %s, %s, 'user', %s, %s)
-                               ON CONFLICT (name) DO NOTHING RETURNING id""",
-                           (candidate, initials, (hash(name) % 4) + 1, email, provider, ext_id)).fetchone()
-        if not row:  # lost a concurrent race on the deduped name — very unlikely
-            raise HTTPException(409, "Could not create an account for this OAuth identity — try again.")
-        return conn.execute("SELECT * FROM users WHERE id = %s", (row["id"],)).fetchone()
+                user = conn.execute("SELECT * FROM users WHERE id = %s", (existing["id"],)).fetchone()
+        if not user:
+            initials = "".join(w[0].upper() for w in name.split()[:2]) or "??"
+            candidate = name
+            for n in range(2, 50):
+                if not conn.execute("SELECT 1 FROM users WHERE name = %s", (candidate,)).fetchone():
+                    break
+                candidate = f"{name} ({n})"
+            row = conn.execute(f"""INSERT INTO users (name, initials, tint, email, role, provider, {column})
+                                   VALUES (%s, %s, %s, %s, 'user', %s, %s)
+                                   ON CONFLICT (name) DO NOTHING RETURNING id""",
+                               (candidate, initials, (hash(name) % 4) + 1, email, provider, ext_id)).fetchone()
+            if not row:  # lost a concurrent race on the deduped name — very unlikely
+                raise HTTPException(409, "Could not create an account for this OAuth identity — try again.")
+            user = conn.execute("SELECT * FROM users WHERE id = %s", (row["id"],)).fetchone()
+        conn.execute("""INSERT INTO external_identities (user_id, provider, subject, email)
+                        VALUES (%s, %s, %s, %s)
+                        ON CONFLICT (user_id, provider) DO UPDATE
+                          SET subject = EXCLUDED.subject, email = EXCLUDED.email, updated_at = now()""",
+                     (user["id"], provider, ext_id, email))
+        _join_single_project(conn, user["id"], "member")
+        return user
 
 
 @router.get("/oauth/{provider}")
@@ -925,8 +927,7 @@ def change_password(body: PasswordIn, request: Request):
         # password change is what you do when you think someone else has it,
         # so those sessions end here; this one is kept so the page does not
         # log you out for succeeding.
-        conn.execute("DELETE FROM sessions WHERE user_id = %s AND token <> %s",
-                     (u["id"], request.cookies.get(COOKIE, "")))
+    control_store.revoke_other_user_sessions(u["id"], request.cookies.get(COOKIE, ""))
     return {"ok": True}
 
 

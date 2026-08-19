@@ -521,6 +521,32 @@ ALTER TABLE tasks ADD COLUMN IF NOT EXISTS subject_id text NOT NULL DEFAULT '';
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS subject_title text NOT NULL DEFAULT '';
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS subject_href text NOT NULL DEFAULT '';
 
+-- Immutable, idempotent outcomes from the deterministic Review policy. Source
+-- rows remain in their native tables; this records only the decision applied
+-- to the stable projection id and policy version.
+CREATE TABLE IF NOT EXISTS review_decisions (
+  id serial PRIMARY KEY,
+  review_id text NOT NULL,
+  policy_version text NOT NULL,
+  outcome text NOT NULL,
+  explanation text NOT NULL,
+  reviewer text NOT NULL,
+  subject_fingerprint text NOT NULL,
+  decided_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (review_id, policy_version, subject_fingerprint)
+);
+
+-- Explicit signals supplied by deterministic detectors or trusted ingestion
+-- rules. Missing signals remain zero/false and therefore require a person.
+CREATE TABLE IF NOT EXISTS review_signals (
+  review_id text PRIMARY KEY,
+  confidence real NOT NULL DEFAULT 0,
+  evidence_count int NOT NULL DEFAULT 0,
+  trusted_source boolean NOT NULL DEFAULT false,
+  proposer text NOT NULL DEFAULT '',
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
 -- facts.verified_at — the verification date as a DATE. facts.verified is a
 -- pre-formatted display string ('Jul 08, 2026', or '—' for never), which the
 -- console can neither re-format nor sort on; verified_at is what the API
@@ -762,43 +788,6 @@ CREATE INDEX IF NOT EXISTS facts_document_id_idx ON facts (document_id) WHERE do
 
 
 -- ═══════════════════════════════════════════════════════════════════════
--- ▼ sessions expire (AUTH-3)
--- ═══════════════════════════════════════════════════════════════════════
-
--- Cookie sessions. Created here so a fresh database has the table with its
--- expiry column from the start; server/auth.py:ensure_schema() runs the same
--- migration for databases that already had the two-column version.
---
--- `expires_at` is the fix: created_at was recorded and never consulted, so the
--- cookie's max_age was the only lifetime and it is a client-side hint. A
--- stolen token stayed valid forever. current_user() now joins on
--- `expires_at > now()`, logout deletes the row, and changing a password
--- deletes every other row for that user — three ways to end a session that all
--- agree, instead of one that only asked the browser nicely.
-CREATE TABLE IF NOT EXISTS sessions (
-  token      text PRIMARY KEY,
-  user_id    int NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  created_at timestamptz NOT NULL DEFAULT now(),
-  expires_at timestamptz NOT NULL DEFAULT now() + interval '14 days'
-);
-
--- Pre-existing installs: add the column, give rows an expiry derived from when
--- they were actually created (never a fresh 14 days — that would extend every
--- live session as a side effect of deploying the fix), then enforce it.
-ALTER TABLE sessions ADD COLUMN IF NOT EXISTS expires_at timestamptz;
-UPDATE sessions SET expires_at = created_at + interval '14 days' WHERE expires_at IS NULL;
-ALTER TABLE sessions ALTER COLUMN expires_at SET NOT NULL;
-ALTER TABLE sessions ALTER COLUMN expires_at SET DEFAULT now() + interval '14 days';
-CREATE INDEX IF NOT EXISTS sessions_expires_idx ON sessions (expires_at);
-DELETE FROM sessions WHERE expires_at <= now();
-
--- The static bypass cookie ("mari-bypass") was accepted as a session value and
--- resolved to the workspace admin. It is no longer accepted anywhere; this
--- clears any row a previous version may have written under it.
-DELETE FROM sessions WHERE token = 'mari-bypass';
-
-
--- ═══════════════════════════════════════════════════════════════════════
 -- ▼ invitations (AUTH-2)
 -- ═══════════════════════════════════════════════════════════════════════
 
@@ -814,6 +803,101 @@ DELETE FROM sessions WHERE token = 'mari-bypass';
 -- to re-issue it. Failing closed is the right side to be wrong on: the other
 -- direction hands an account to whoever appears in a git log.
 ALTER TABLE users ADD COLUMN IF NOT EXISTS invited_by text NOT NULL DEFAULT '';
+
+-- ── Project identity boundary ───────────────────────────────────────────────
+-- Users are global identities. Authorization belongs to a live membership in
+-- a project and is resolved for every request; no project role is copied into
+-- a session. Existing single-workspace installs receive one default project
+-- and one membership per existing user. All statements are safe to re-run.
+CREATE TABLE IF NOT EXISTS projects (
+  id         serial PRIMARY KEY,
+  slug       text NOT NULL UNIQUE,
+  name       text NOT NULL,
+  status     text NOT NULL DEFAULT 'active'
+             CHECK (status IN ('active', 'disabled')),
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS project_members (
+  project_id int NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  user_id    int NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  role       text NOT NULL DEFAULT 'member'
+             CHECK (role IN ('owner', 'admin', 'manager', 'member', 'user', 'viewer')),
+  status     text NOT NULL DEFAULT 'active'
+             CHECK (status IN ('active', 'invited', 'disabled')),
+  invited_by_user_id int REFERENCES users(id) ON DELETE SET NULL,
+  joined_at  timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (project_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS project_members_user_idx
+  ON project_members (user_id, status, project_id);
+
+CREATE TABLE IF NOT EXISTS external_identities (
+  id         serial PRIMARY KEY,
+  user_id    int NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  provider   text NOT NULL,
+  subject    text NOT NULL,
+  email      text NOT NULL DEFAULT '',
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (provider, subject),
+  UNIQUE (user_id, provider)
+);
+
+-- Enterprise-managed group resources and memberships. Provider subjects and
+-- SCIM externalIds are immutable identifiers; display names may change.
+CREATE TABLE IF NOT EXISTS enterprise_groups (
+  id serial PRIMARY KEY,
+  external_id text NOT NULL UNIQUE,
+  display_name text NOT NULL,
+  project_id int REFERENCES projects(id) ON DELETE SET NULL,
+  role text NOT NULL DEFAULT 'member',
+  active boolean NOT NULL DEFAULT true,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS enterprise_group_members (
+  group_id int NOT NULL REFERENCES enterprise_groups(id) ON DELETE CASCADE,
+  user_id int NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  PRIMARY KEY (group_id, user_id)
+);
+CREATE TABLE IF NOT EXISTS enterprise_managed_memberships (
+  project_id int NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  user_id int NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  origin text NOT NULL,
+  PRIMARY KEY (project_id, user_id, origin)
+);
+
+DO $$
+DECLARE
+  default_project_id int;
+  project_count int;
+  workspace_name text;
+BEGIN
+  SELECT count(*) INTO project_count FROM projects;
+  IF project_count = 0 THEN
+    SELECT COALESCE(value->>'name', 'Mari') INTO workspace_name
+      FROM settings WHERE key = 'workspace';
+    INSERT INTO projects (slug, name)
+      VALUES ('default', COALESCE(NULLIF(workspace_name, ''), 'Mari'))
+      RETURNING id INTO default_project_id;
+  ELSIF project_count = 1 THEN
+    SELECT id INTO default_project_id FROM projects LIMIT 1;
+  END IF;
+
+  -- Only infer legacy membership when the database is unambiguously a
+  -- single-project install. Never attach identities to an arbitrary tenant.
+  IF default_project_id IS NOT NULL THEN
+    INSERT INTO project_members (project_id, user_id, role, status)
+      SELECT default_project_id, u.id,
+             CASE u.role WHEN 'admin' THEN 'owner'
+                         WHEN 'manager' THEN 'manager'
+                         ELSE 'member' END,
+             CASE WHEN u.status = 'active' THEN 'active' ELSE 'disabled' END
+        FROM users u
+      ON CONFLICT (project_id, user_id) DO NOTHING;
+  END IF;
+END $$;
 
 -- `ask_answers` is gone: nothing ever wrote it, and the resolver that read
 -- it could only raise on an empty table. The live question-and-answer surface
@@ -981,3 +1065,107 @@ CREATE TABLE IF NOT EXISTS trajectory_steps (
 
 CREATE INDEX IF NOT EXISTS trajectories_started_idx ON trajectories (started_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS trajectory_steps_trajectory_idx ON trajectory_steps (trajectory_id, ordinal);
+
+-- ── Project-scoped operational data ────────────────────────────────────────
+-- Legacy rows are attached only when exactly one project exists. In an
+-- ambiguous database NULL fails closed in all scoped request paths until an
+-- operator assigns the row deliberately.
+ALTER TABLE sources ADD COLUMN IF NOT EXISTS project_id int REFERENCES projects(id);
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS project_id int REFERENCES projects(id);
+ALTER TABLE tags ADD COLUMN IF NOT EXISTS project_id int REFERENCES projects(id);
+ALTER TABLE edges ADD COLUMN IF NOT EXISTS project_id int REFERENCES projects(id);
+ALTER TABLE chunks ADD COLUMN IF NOT EXISTS project_id int REFERENCES projects(id);
+ALTER TABLE facts ADD COLUMN IF NOT EXISTS project_id int REFERENCES projects(id);
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS project_id int REFERENCES projects(id);
+ALTER TABLE approved_answers ADD COLUMN IF NOT EXISTS project_id int REFERENCES projects(id);
+ALTER TABLE decisions ADD COLUMN IF NOT EXISTS project_id int REFERENCES projects(id);
+ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS project_id int REFERENCES projects(id);
+ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS owner_user_id int REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS project_id int REFERENCES projects(id);
+ALTER TABLE trajectories ADD COLUMN IF NOT EXISTS project_id int REFERENCES projects(id);
+ALTER TABLE trajectory_steps ADD COLUMN IF NOT EXISTS project_id int REFERENCES projects(id);
+ALTER TABLE mcp_servers ADD COLUMN IF NOT EXISTS project_id int REFERENCES projects(id);
+ALTER TABLE mcp_servers ADD COLUMN IF NOT EXISTS token_hash text NOT NULL DEFAULT '';
+ALTER TABLE glossary ADD COLUMN IF NOT EXISTS project_id int REFERENCES projects(id);
+ALTER TABLE events ADD COLUMN IF NOT EXISTS project_id int REFERENCES projects(id);
+ALTER TABLE workflows ADD COLUMN IF NOT EXISTS project_id int REFERENCES projects(id);
+ALTER TABLE workflow_runs ADD COLUMN IF NOT EXISTS project_id int REFERENCES projects(id);
+
+DO $$
+DECLARE only_project int;
+BEGIN
+  IF (SELECT count(*) FROM projects) = 1 THEN
+    SELECT id INTO only_project FROM projects LIMIT 1;
+    UPDATE sources SET project_id = only_project WHERE project_id IS NULL;
+    UPDATE documents SET project_id = only_project WHERE project_id IS NULL;
+    UPDATE tags t SET project_id = COALESCE(d.project_id, only_project)
+      FROM documents d WHERE t.document_id = d.id AND t.project_id IS NULL;
+    UPDATE edges e SET project_id = COALESCE(d.project_id, only_project)
+      FROM documents d WHERE e.from_doc = d.id AND e.project_id IS NULL;
+    UPDATE chunks c SET project_id = COALESCE(d.project_id, only_project)
+      FROM documents d WHERE c.document_id = d.id AND c.project_id IS NULL;
+    UPDATE facts SET project_id = only_project WHERE project_id IS NULL;
+    UPDATE tasks SET project_id = only_project WHERE project_id IS NULL;
+    UPDATE approved_answers SET project_id = only_project WHERE project_id IS NULL;
+    UPDATE decisions SET project_id = only_project WHERE project_id IS NULL;
+    UPDATE chat_sessions SET project_id = only_project WHERE project_id IS NULL;
+    UPDATE chat_messages m SET project_id = COALESCE(s.project_id, only_project)
+      FROM chat_sessions s WHERE m.session_id = s.id AND m.project_id IS NULL;
+    UPDATE trajectories SET project_id = only_project WHERE project_id IS NULL;
+    UPDATE trajectory_steps s SET project_id = COALESCE(t.project_id, only_project)
+      FROM trajectories t WHERE s.trajectory_id = t.id AND s.project_id IS NULL;
+    UPDATE mcp_servers SET project_id = only_project WHERE project_id IS NULL;
+    UPDATE glossary SET project_id = only_project WHERE project_id IS NULL;
+    UPDATE events SET project_id = only_project WHERE project_id IS NULL;
+    UPDATE workflows SET project_id = only_project WHERE project_id IS NULL;
+    UPDATE workflow_runs r SET project_id = COALESCE(w.project_id, only_project)
+      FROM workflows w WHERE r.workflow_id = w.id AND r.project_id IS NULL;
+  END IF;
+END $$;
+
+ALTER TABLE sources DROP CONSTRAINT IF EXISTS sources_provider_key;
+ALTER TABLE documents DROP CONSTRAINT IF EXISTS documents_source_external_id_key;
+ALTER TABLE facts DROP CONSTRAINT IF EXISTS facts_claim_key;
+ALTER TABLE tasks DROP CONSTRAINT IF EXISTS tasks_title_key;
+ALTER TABLE approved_answers DROP CONSTRAINT IF EXISTS approved_answers_question_key;
+ALTER TABLE decisions DROP CONSTRAINT IF EXISTS decisions_statement_key;
+ALTER TABLE mcp_servers DROP CONSTRAINT IF EXISTS mcp_servers_name_key;
+ALTER TABLE glossary DROP CONSTRAINT IF EXISTS glossary_term_key;
+CREATE UNIQUE INDEX IF NOT EXISTS sources_project_provider_uidx ON sources(project_id, provider);
+CREATE UNIQUE INDEX IF NOT EXISTS documents_project_external_uidx ON documents(project_id, source, external_id);
+CREATE UNIQUE INDEX IF NOT EXISTS facts_project_claim_uidx ON facts(project_id, claim);
+CREATE UNIQUE INDEX IF NOT EXISTS tasks_project_title_uidx ON tasks(project_id, title);
+CREATE UNIQUE INDEX IF NOT EXISTS answers_project_question_uidx ON approved_answers(project_id, question);
+CREATE UNIQUE INDEX IF NOT EXISTS decisions_project_statement_uidx ON decisions(project_id, statement);
+CREATE UNIQUE INDEX IF NOT EXISTS mcp_project_name_uidx ON mcp_servers(project_id, name);
+CREATE UNIQUE INDEX IF NOT EXISTS glossary_project_term_uidx ON glossary(project_id, term);
+CREATE INDEX IF NOT EXISTS documents_project_updated_idx ON documents(project_id, updated_src DESC);
+CREATE INDEX IF NOT EXISTS chunks_project_document_idx ON chunks(project_id, document_id);
+CREATE INDEX IF NOT EXISTS tags_project_document_idx ON tags(project_id, document_id);
+CREATE INDEX IF NOT EXISTS edges_project_from_idx ON edges(project_id, from_doc);
+CREATE INDEX IF NOT EXISTS edges_project_to_idx ON edges(project_id, to_doc);
+CREATE INDEX IF NOT EXISTS facts_project_status_idx ON facts(project_id, status);
+CREATE INDEX IF NOT EXISTS tasks_project_done_idx ON tasks(project_id, done, id);
+CREATE INDEX IF NOT EXISTS chat_sessions_project_owner_idx ON chat_sessions(project_id, owner_user_id, id);
+CREATE INDEX IF NOT EXISTS chat_messages_project_session_idx ON chat_messages(project_id, session_id, id);
+CREATE INDEX IF NOT EXISTS trajectories_project_started_idx ON trajectories(project_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS trajectory_steps_project_idx ON trajectory_steps(project_id, trajectory_id, ordinal);
+CREATE INDEX IF NOT EXISTS mcp_servers_project_idx ON mcp_servers(project_id, id);
+CREATE INDEX IF NOT EXISTS events_project_time_idx ON events(project_id, occurred_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS workflows_project_idx ON workflows(project_id, id);
+CREATE INDEX IF NOT EXISTS workflow_runs_project_idx ON workflow_runs(project_id, workflow_id, id);
+
+CREATE TABLE IF NOT EXISTS bot_installations (
+  id             serial PRIMARY KEY,
+  project_id     int NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  provider       text NOT NULL CHECK (provider IN ('slack', 'github')),
+  external_team_id text NOT NULL DEFAULT '',
+  external_installation_id text NOT NULL DEFAULT '',
+  config         jsonb NOT NULL DEFAULT '{}'::jsonb,
+  status         text NOT NULL DEFAULT 'connected',
+  created_at     timestamptz NOT NULL DEFAULT now(),
+  updated_at     timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (provider, external_team_id, external_installation_id),
+  UNIQUE (project_id, provider, external_team_id, external_installation_id)
+);
+CREATE INDEX IF NOT EXISTS bot_installations_project_idx ON bot_installations(project_id, provider);

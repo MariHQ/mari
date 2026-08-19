@@ -14,8 +14,9 @@ import strawberry
 
 import flowengine
 import llm
+import review
 from db import actor_name, audit, exec_, jload, q, q1
-from gqltypes import AnswerCandidate, ImpactDoc, ImpactResult
+from gqltypes import AnswerCandidate, ImpactDoc, ImpactResult, ReviewPolicyDecision
 from queries import hybrid_search
 
 
@@ -322,6 +323,34 @@ def scan_facts_for(doc_ids: list[int] | None = None,
 
 @strawberry.type
 class MutKnowledge:
+    @strawberry.mutation
+    def evaluate_review_item(self, review_id: str, dry_run: bool = True) -> ReviewPolicyDecision:
+        item = review.find_item(review_id)
+        if not item:
+            raise ValueError("Review item not found")
+        reviewer = actor_name()
+
+        def permitted(actor: str, candidate: review.ReviewRecord) -> bool:
+            member = q1("SELECT role FROM users WHERE name = %s AND status = 'active'", (actor,))
+            return bool(member and (member["role"] in ("admin", "manager") or
+                                    candidate.assignee.casefold() == actor.casefold()))
+
+        result = review.decide(item, reviewer, dry_run=dry_run, permission=permitted)
+        return ReviewPolicyDecision(**result.__dict__)
+
+    @strawberry.mutation
+    def automate_review(self, first: int = 100, dry_run: bool = True) -> list[ReviewPolicyDecision]:
+        """Evaluate a bounded batch; only deterministic `allow` rows mutate."""
+        reviewer = actor_name()
+        rows = review.filter_items(review.project_items(), statuses=["pending"])[:min(max(first, 1), 100)]
+
+        def permitted(actor: str, candidate: review.ReviewRecord) -> bool:
+            member = q1("SELECT role FROM users WHERE name = %s AND status = 'active'", (actor,))
+            return bool(member and member["role"] in ("admin", "manager"))
+
+        return [ReviewPolicyDecision(**review.decide(
+            item, reviewer, dry_run=dry_run, permission=permitted).__dict__) for item in rows]
+
     @strawberry.mutation
     def set_task_done(self, id: int, done: bool) -> bool:
         exec_("UPDATE tasks SET done = %s WHERE id = %s", (done, id))

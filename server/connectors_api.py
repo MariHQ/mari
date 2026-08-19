@@ -20,6 +20,7 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
 import auth
+import access
 import connect_sync
 import connectors
 import flowengine
@@ -88,7 +89,8 @@ def _connected_map() -> dict[str, int]:
     """provider key → newest live source id."""
     out: dict[str, int] = {}
     for r in q("""SELECT id, kind, provider, config FROM sources
-                  WHERE kind IN ('github', 'upload', 'connector') ORDER BY id"""):
+                  WHERE project_id = %s AND kind IN ('github', 'upload', 'connector') ORDER BY id""",
+               (access.require_current_access().project_id,)):
         cfg = r["config"] if isinstance(r["config"], dict) else json.loads(r["config"] or "{}")
         if r["kind"] == "connector":
             out[connect_sync.provider_key_of(r["provider"], cfg)] = r["id"]
@@ -226,17 +228,18 @@ def connect(body: ProviderIn) -> dict:
     qual = _qualifier(prov, body.config or {})
     provider_col = f"{key}:{qual}" if qual else key
     display = f"{prov.get('name', key)} — {qual}" if qual else prov.get("name", key)
-    if q1("SELECT id FROM sources WHERE kind = 'connector' AND provider = %s", (provider_col,)):
+    project_id = access.require_current_access().project_id
+    if q1("SELECT id FROM sources WHERE project_id = %s AND kind = 'connector' AND provider = %s", (project_id, provider_col)):
         return {"error": f"{display} is already connected"}
 
     cfg = dict(body.config or {})
     cfg.update({"provider_key": key, "cursor": "", "item_hashes": {},
                 "last_sync_at": "", "last_error": ""})
-    exec_("""INSERT INTO sources (provider, display_name, kind, status, stat_num, stat_unit,
+    exec_("""INSERT INTO sources (project_id, provider, display_name, kind, status, stat_num, stat_unit,
                                   bars, config, docs_count, health)
-             VALUES (%s, %s, 'connector', 'active', '0', 'docs', '{}', %s, 0, 'Syncing')""",
-          (provider_col, display, json.dumps(cfg)))
-    source_id = q1("SELECT id FROM sources WHERE provider = %s", (provider_col,))["id"]
+             VALUES (%s, %s, %s, 'connector', 'active', '0', 'docs', '{}', %s, 0, 'Syncing')""",
+          (project_id, provider_col, display, json.dumps(cfg)))
+    source_id = q1("SELECT id FROM sources WHERE project_id = %s AND provider = %s", (project_id, provider_col))["id"]
     exec_("""INSERT INTO sync_events (provider, event, detail, at_label)
              VALUES (%s, %s, '', to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))""",
           (provider_col, f"connected: {display}"))

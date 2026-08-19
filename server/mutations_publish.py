@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 
 import strawberry
@@ -438,19 +439,23 @@ class MutPublish:
         import re as _re
         import secrets
         actor = _require_admin(info)
+        project = info.context.get("access")
+        if project is None or not project.allows("destination.manage"):
+            raise PermissionError("This action requires destination.manage.")
         slug = _re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "server"
         token = "mari_mcp_" + secrets.token_hex(12)
         caps = [c for c in (capabilities or []) if isinstance(c, str)]
         tools = {"search": 1, "facts": 1, "glossary": 1, "chat": 1, "lineage": 1, "answers": 1}
         n_tools = sum(tools.get(c, 0) for c in caps) or 1
         base = str(config.get("auth", "oauth_redirect_base") or "http://localhost:8000").rstrip("/")
-        exec_("""INSERT INTO mcp_servers (name, url, scope, status, tools, config, token)
-                 VALUES (%s, %s, %s, 'connected', %s, %s, %s)
-                 ON CONFLICT (name) DO UPDATE SET url = EXCLUDED.url, scope = EXCLUDED.scope,
+        token_hash = hashlib.sha256(token.encode()).hexdigest()
+        exec_("""INSERT INTO mcp_servers (project_id, name, url, scope, status, tools, config, token, token_hash)
+                 VALUES (%s, %s, %s, %s, 'connected', %s, %s, '', %s)
+                 ON CONFLICT (project_id, name) DO UPDATE SET url = EXCLUDED.url, scope = EXCLUDED.scope,
                    status = EXCLUDED.status, config = EXCLUDED.config, tools = EXCLUDED.tools,
-                   token = EXCLUDED.token""",
-              (name, f"{base}/mcp/{slug}", scope, n_tools,
-               json.dumps({"capabilities": caps}), token))
+                   token = '', token_hash = EXCLUDED.token_hash""",
+              (project.project_id, name, f"{base}/mcp/{slug}", scope, n_tools,
+               json.dumps({"capabilities": caps}), token_hash))
         audit("created MCP server", name, actor["name"],
               detail=[("Scope", scope), ("Capabilities", ", ".join(caps) or "(none)")])
         return token
@@ -459,43 +464,49 @@ class MutPublish:
     def update_mcp_server(self, info: strawberry.Info, id: int, scope: str | None = None,
                           capabilities: JSON = None) -> bool:
         _require_admin(info)
+        project = info.context.get("access")
+        if project is None: raise PermissionError("Choose a project.")
         if scope:
-            exec_("UPDATE mcp_servers SET scope = %s WHERE id = %s", (scope, id))
+            exec_("UPDATE mcp_servers SET scope = %s WHERE project_id = %s AND id = %s", (scope, project.project_id, id))
         if capabilities is not None:
             caps = [c for c in capabilities if isinstance(c, str)]
             tools = {"search": 1, "facts": 1, "glossary": 1, "chat": 1, "lineage": 1, "answers": 1}
-            exec_("UPDATE mcp_servers SET config = jsonb_set(config, '{capabilities}', %s), tools = %s WHERE id = %s",
-                  (json.dumps(caps), sum(tools.get(c, 0) for c in caps) or 1, id))
-        exec_("INSERT INTO events (actor, verb, target) SELECT %s, 'updated MCP server', name FROM mcp_servers WHERE id = %s", (actor_name(), id))
+            exec_("UPDATE mcp_servers SET config = jsonb_set(config, '{capabilities}', %s), tools = %s WHERE project_id = %s AND id = %s",
+                  (json.dumps(caps), sum(tools.get(c, 0) for c in caps) or 1, project.project_id, id))
+        exec_("INSERT INTO events (actor, verb, target, project_id) SELECT %s, 'updated MCP server', name, project_id FROM mcp_servers WHERE project_id = %s AND id = %s", (actor_name(), project.project_id, id))
         return True
 
     @strawberry.mutation
     def delete_mcp_server(self, info: strawberry.Info, id: int) -> bool:
         _require_admin(info)
-        exec_("INSERT INTO events (actor, verb, target) SELECT %s, 'deleted MCP server', name FROM mcp_servers WHERE id = %s", (actor_name(), id))
-        exec_("DELETE FROM mcp_servers WHERE id = %s", (id,))
+        project = info.context.get("access")
+        if project is None: raise PermissionError("Choose a project.")
+        exec_("INSERT INTO events (actor, verb, target, project_id) SELECT %s, 'deleted MCP server', name, project_id FROM mcp_servers WHERE project_id = %s AND id = %s", (actor_name(), project.project_id, id))
+        exec_("DELETE FROM mcp_servers WHERE project_id = %s AND id = %s", (project.project_id, id))
         return True
 
     @strawberry.mutation
-    def test_mcp_server(self, id: int) -> JSON:
+    def test_mcp_server(self, info: strawberry.Info, id: int) -> JSON:
         """Connection test — resolves against the local knowledge base (the demo
         MCP host IS this API), reporting per-capability tool availability."""
-        row = q1("SELECT * FROM mcp_servers WHERE id = %s", (id,))
+        project = info.context.get("access")
+        if project is None: return {"ok": False, "error": "project required"}
+        row = q1("SELECT * FROM mcp_servers WHERE project_id = %s AND id = %s", (project.project_id, id))
         if not row:
             return {"ok": False, "error": "not found"}
         caps = (jload(row["config"]) or {}).get("capabilities", ["search"])
         checks = {}
         if "search" in caps:
-            checks["search"] = q1("SELECT count(*) AS n FROM documents")["n"]
+            checks["search"] = q1("SELECT count(*) AS n FROM documents WHERE project_id = %s", (project.project_id,))["n"]
         if "facts" in caps:
-            checks["facts"] = q1("SELECT count(*) AS n FROM facts")["n"]
+            checks["facts"] = q1("SELECT count(*) AS n FROM facts WHERE project_id = %s", (project.project_id,))["n"]
         if "glossary" in caps:
-            checks["glossary"] = q1("SELECT count(*) AS n FROM glossary WHERE NOT candidate")["n"]
+            checks["glossary"] = q1("SELECT count(*) AS n FROM glossary WHERE project_id = %s AND NOT candidate", (project.project_id,))["n"]
         if "answers" in caps:
-            checks["answers"] = q1("SELECT count(*) AS n FROM approved_answers WHERE status = 'approved'")["n"]
+            checks["answers"] = q1("SELECT count(*) AS n FROM approved_answers WHERE project_id = %s AND status = 'approved'", (project.project_id,))["n"]
         if "lineage" in caps:
-            checks["lineage"] = q1("SELECT count(*) AS n FROM edges")["n"]
+            checks["lineage"] = q1("SELECT count(*) AS n FROM edges WHERE project_id = %s", (project.project_id,))["n"]
         if "chat" in caps:
             checks["chat"] = 1
-        exec_("UPDATE mcp_servers SET status = 'connected' WHERE id = %s", (id,))
+        exec_("UPDATE mcp_servers SET status = 'connected' WHERE project_id = %s AND id = %s", (project.project_id, id))
         return {"ok": True, "latency_ms": 12, "checks": {k: int(v) for k, v in checks.items()}}

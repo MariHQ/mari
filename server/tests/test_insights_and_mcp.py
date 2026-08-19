@@ -57,7 +57,8 @@ class FactInsightTests(unittest.TestCase):
 class McpLifecycleTests(unittest.TestCase):
     def test_create_mints_one_time_bearer_and_capability_count(self) -> None:
         writes = []
-        info = SimpleNamespace(context={"user": {"name": "Admin", "role": "admin"}})
+        project = SimpleNamespace(project_id=7, allows=lambda capability: capability == "destination.manage")
+        info = SimpleNamespace(context={"user": {"name": "Admin", "role": "admin"}, "access": project})
         with patch.object(mutations_publish, "_require_admin", return_value={"name": "Admin"}), \
              patch.object(mutations_publish.config, "get", return_value="https://cloud.example.test"), \
              patch.object(mutations_publish, "exec_", side_effect=lambda sql, args=(): writes.append((sql, args))), \
@@ -65,11 +66,12 @@ class McpLifecycleTests(unittest.TestCase):
             token = mutations_publish.MutPublish().create_mcp_server(info, "Support KB", "workspace", ["search", "facts"])
         self.assertTrue(token.startswith("mari_mcp_"))
         inserted = writes[0][1]
-        self.assertEqual(inserted[0], "Support KB")
-        self.assertEqual(inserted[1], "https://cloud.example.test/mcp/support-kb")
-        self.assertEqual(inserted[3], 2)
-        self.assertEqual(json.loads(inserted[4]), {"capabilities": ["search", "facts"]})
-        self.assertEqual(inserted[5], token)
+        self.assertEqual(inserted[0], 7)
+        self.assertEqual(inserted[1], "Support KB")
+        self.assertEqual(inserted[2], "https://cloud.example.test/mcp/support-kb")
+        self.assertEqual(inserted[4], 2)
+        self.assertEqual(json.loads(inserted[5]), {"capabilities": ["search", "facts"]})
+        self.assertNotEqual(inserted[6], token)
 
     def test_connection_test_exercises_each_enabled_capability(self) -> None:
         counts = {"documents": 8, "facts": 3, "glossary": 2, "approved_answers": 4, "edges": 5}
@@ -78,7 +80,8 @@ class McpLifecycleTests(unittest.TestCase):
                 return {"config": {"capabilities": ["search", "facts", "glossary", "answers", "lineage", "chat"]}}
             return {"n": next(v for table, v in counts.items() if f"FROM {table}" in sql)}
         with patch.object(mutations_publish, "q1", side_effect=q1), patch.object(mutations_publish, "exec_"):
-            result = mutations_publish.MutPublish().test_mcp_server(1)
+            info = SimpleNamespace(context={"access": SimpleNamespace(project_id=7)})
+            result = mutations_publish.MutPublish().test_mcp_server(info, 1)
         self.assertTrue(result["ok"])
         self.assertEqual(result["checks"], {"search": 8, "facts": 3, "glossary": 2, "answers": 4, "lineage": 5, "chat": 1})
 
@@ -107,7 +110,9 @@ class McpProtocolTests(unittest.TestCase):
         class Request:
             async def body(self):
                 return b'{"jsonrpc":"2.0","id":1,"method":"ping"}'
-        with patch.object(mcp, "q1", return_value={"name": "Support KB", "config": {"capabilities": ["search"]}}):
+        server = {"id": 4, "name": "Support KB", "config": {"capabilities": ["search"]},
+                  "project_id": 7, "project_slug": "acme", "project_name": "Acme"}
+        with patch.object(mcp, "q1", return_value=server):
             out = asyncio.run(mcp.mcp_endpoint("support-kb", Request(), "Bearer mari_mcp_token"))
         self.assertEqual(out["result"], {})
         with self.assertRaises(Exception) as denied:

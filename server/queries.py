@@ -18,10 +18,12 @@ import numpy as np
 from strawberry.scalars import JSON
 
 import config
+import access
 import github
 import ingest
 import llm
 import retrieval
+import review
 from db import actor_name, exec_, jload, q, q1
 from excerpt import excerpt
 from gqltypes import (
@@ -33,7 +35,8 @@ from gqltypes import (
     GraphStats, GraphView, InsightStats, LineageEdge, LineageNode, McpServer,
     Member, Notification, Provisioning, ReadabilityRow, RelatedDoc, Release, Setting, Site,
     SiteFeature, SiteThemePreset, SourcePulse, StyleGuide, StyleRule, SyncEvent,
-    SyncStatus, TagDef, Task, TaskSummary, TopCited, UploadFile, UploadManifest,
+    SyncStatus, TagDef, Task, TaskSummary, ReviewConnection, ReviewItem, ReviewPageInfo,
+    TopCited, UploadFile, UploadManifest,
     Trajectory, TrajectoryStep, VoiceLayer, Workflow, WorkflowRun, Workspace,
 )
 
@@ -286,7 +289,7 @@ HYBRID_COUNT_SQL = SCORED_CTE + """
 # The TTL keeps a transient ollama outage from being remembered all day.
 _VEC_TTL_SECONDS = 120.0
 _VEC_CACHE_MAX = 128
-_vec_cache: dict[str, tuple[float, list[float] | None]] = {}
+_vec_cache: dict[tuple[int, str], tuple[float, list[float] | None]] = {}
 _vec_lock = threading.Lock()
 
 
@@ -294,9 +297,10 @@ def query_vector(query: str) -> list[float] | None:
     """The embedding for this query text — computed once, then reused for the
     short window in which a page and its count are fetched. None means the
     embedder had nothing to say, and every caller in that window agrees."""
+    cache_key = (access.require_current_access().project_id, query)
     now = time.monotonic()
     with _vec_lock:
-        hit = _vec_cache.get(query)
+        hit = _vec_cache.get(cache_key)
         if hit and now - hit[0] < _VEC_TTL_SECONDS:
             return hit[1]
     vec = llm.embed(query)
@@ -305,7 +309,7 @@ def query_vector(query: str) -> list[float] | None:
             for stale in [k for k, (at, _) in _vec_cache.items()
                           if now - at >= _VEC_TTL_SECONDS] or [next(iter(_vec_cache))]:
                 _vec_cache.pop(stale, None)
-        _vec_cache[query] = (now, vec)
+        _vec_cache[cache_key] = (now, vec)
     return vec
 
 
@@ -338,7 +342,7 @@ def hybrid_count(query: str) -> int:
 # both result lists are fused and cached together so `search` and
 # `searchTotal` still describe exactly the same approximate candidate set.
 _RANK_TTL_SECONDS = 120.0
-_rank_cache: dict[str, tuple[float, list[dict]]] = {}
+_rank_cache: dict[tuple[int, str], tuple[float, list[dict]]] = {}
 _rank_lock = threading.Lock()
 
 
@@ -352,9 +356,11 @@ def _keyword_score(row: dict, terms: list[str]) -> float:
 
 
 def _rank_hybrid(query: str) -> list[dict]:
+    project_id = access.require_current_access().project_id
+    cache_key = (project_id, query)
     now = time.monotonic()
     with _rank_lock:
-        hit = _rank_cache.get(query)
+        hit = _rank_cache.get(cache_key)
         if hit and now - hit[0] < _RANK_TTL_SECONDS:
             return hit[1]
 
@@ -365,30 +371,32 @@ def _rank_hybrid(query: str) -> list[dict]:
                  d.updated_src, d.kind, array_remove(array_agg(t.tag), NULL) AS tags,
                  coalesce(max(td.search_weight), 1.0) AS boost
             FROM documents d
-            LEFT JOIN tags t ON t.document_id = d.id
+            LEFT JOIN tags t ON t.document_id = d.id AND t.project_id = d.project_id
             LEFT JOIN tag_definitions td ON td.tag = t.tag
-           WHERE d.title ILIKE %s OR d.snippet ILIKE %s OR d.body ILIKE %s
+           WHERE d.project_id = %s
+             AND (d.title ILIKE %s OR d.snippet ILIKE %s OR d.body ILIKE %s)
            GROUP BY d.id
            ORDER BY d.updated_src DESC NULLS LAST, d.id DESC
-           LIMIT %s""", (pattern, pattern, pattern, MAX_K * 2))
+           LIMIT %s""", (project_id, pattern, pattern, pattern, MAX_K * 2))
     else:
         keyword_rows = q("""
           SELECT d.id, d.source, d.title, d.snippet, d.body, d.author, d.author_initials,
                  d.updated_src, d.kind, array_remove(array_agg(t.tag), NULL) AS tags,
                  coalesce(max(td.search_weight), 1.0) AS boost
             FROM documents d
-            LEFT JOIN tags t ON t.document_id = d.id
+            LEFT JOIN tags t ON t.document_id = d.id AND t.project_id = d.project_id
             LEFT JOIN tag_definitions td ON td.tag = t.tag
+           WHERE d.project_id = %s
            GROUP BY d.id
            ORDER BY d.updated_src DESC NULLS LAST, d.id DESC
-           LIMIT %s""", (MAX_K * 2,))
+           LIMIT %s""", (project_id, MAX_K * 2))
 
     semantic: dict[int, float] = {}
     vec = query_vector(query) if query.strip() else None
     if vec is not None:
         try:
             if retrieval.ensure_index():
-                semantic = {h["document_id"]: h["score"] for h in retrieval.INDEX.search(
+                semantic = {h["document_id"]: h["score"] for h in retrieval.index_for(project_id).search(
                     np.asarray([vec], np.float32), k=ANN_CANDIDATES, candidate_k=1000)}
         except (OSError, ValueError):
             semantic = {}
@@ -403,9 +411,9 @@ def _rank_hybrid(query: str) -> list[dict]:
                  d.updated_src, d.kind, array_remove(array_agg(t.tag), NULL) AS tags,
                  coalesce(max(td.search_weight), 1.0) AS boost
             FROM documents d
-            LEFT JOIN tags t ON t.document_id = d.id
+            LEFT JOIN tags t ON t.document_id = d.id AND t.project_id = d.project_id
             LEFT JOIN tag_definitions td ON td.tag = t.tag
-           WHERE d.id = ANY(%s) GROUP BY d.id""", (missing,)):
+           WHERE d.project_id = %s AND d.id = ANY(%s) GROUP BY d.id""", (project_id, missing)):
             rows_by_id[int(row["id"])] = row
 
     terms = [word for word in re.findall(r"[a-z0-9][a-z0-9_-]*", query.lower()) if len(word) > 1]
@@ -429,7 +437,7 @@ def _rank_hybrid(query: str) -> list[dict]:
     with _rank_lock:
         if len(_rank_cache) >= _VEC_CACHE_MAX:
             _rank_cache.pop(next(iter(_rank_cache)), None)
-        _rank_cache[query] = (now, ranked)
+        _rank_cache[cache_key] = (now, ranked)
     return ranked
 
 
@@ -579,6 +587,9 @@ def _mask_setting(key: str, value):
         # so that is all this returns.
         value = dict(value)
         value["keys"] = {k: _mask_secret(v) for k, v in value["keys"].items()}
+    if key == "llm" and isinstance(value, dict) and isinstance(value.get("gateway"), dict):
+        value = dict(value)
+        value["gateway"] = llm.mask_gateway_secrets(value["gateway"], _mask_secret)
     fields = _SECRET_SETTING_FIELDS.get(key)
     if not fields or not isinstance(value, dict):
         return value
@@ -1017,6 +1028,30 @@ class Query:
                 for r in rows]
 
     @strawberry.field
+    def review_items(self, first: int = 50, after: str = "", kinds: list[str] | None = None,
+                     statuses: list[str] | None = None, sources: list[str] | None = None,
+                     assignees: list[str] | None = None, due: str = "") -> ReviewConnection:
+        """A bounded, stable projection over every product object requiring review."""
+        limit = min(max(first, 1), 100)
+        offset = review.decode_cursor(after)
+        filtered = review.filter_items(review.project_items(), kinds=kinds, statuses=statuses,
+                                       sources=sources, assignees=assignees, due=due)
+        page = filtered[offset:offset + limit]
+        return ReviewConnection(
+            items=[ReviewItem(
+                id=x.id, kind=x.kind, title=x.title, status=x.status, source=x.source,
+                assignee=x.assignee, due=x.due, subject_type=x.subject_type,
+                subject_id=x.subject_id, subject_title=x.subject_title,
+                subject_href=x.subject_href, confidence=x.confidence,
+                evidence_count=x.evidence_count, trusted_source=x.trusted_source,
+            ) for x in page],
+            total_count=len(filtered),
+            page_info=ReviewPageInfo(
+                end_cursor=review.encode_cursor(offset + len(page)),
+                has_next_page=offset + len(page) < len(filtered)),
+        )
+
+    @strawberry.field
     def tasks_summary(self) -> TaskSummary | None:
         """The strip above the board: counts and rosters rolled up off the same
         rows `tasks` returns. None on an empty inbox — there is nothing to
@@ -1212,8 +1247,9 @@ class Query:
         # token is shown once at creation (createMcpServer) — never re-served here.
         return [McpServer(id=r["id"], name=r["name"], url=r["url"], scope=r["scope"],
                           status=r["status"], tools=r["tools"], config=jload(r["config"]),
-                          token=_mask_secret(r["token"]))
-                for r in q("SELECT * FROM mcp_servers ORDER BY id")]
+                          token="")
+                for r in q("SELECT * FROM mcp_servers WHERE project_id = %s ORDER BY id",
+                           (access.require_current_access().project_id,))]
 
     @strawberry.field
     def checkpoints(self) -> list[Checkpoint]:
@@ -1235,10 +1271,11 @@ class Query:
         any window the console can hold, so the filter has to reach the whole
         table rather than narrowing the page already fetched."""
         where, args = _audit_where(query, date_from, date_to)
+        project_id = access.require_current_access().project_id
         return [AuditEvent(id=r["id"], actor=r["actor"], verb=r["verb"], target=r["target"],
                            at=r["occurred_at"].isoformat(), detail=_details(r))
-                for r in q(f"SELECT * FROM events WHERE {where} ORDER BY occurred_at DESC, id DESC LIMIT %s",
-                           args + (limit,))]
+                for r in q(f"SELECT * FROM events WHERE project_id = %s AND {where} ORDER BY occurred_at DESC, id DESC LIMIT %s",
+                           (project_id,) + args + (limit,))]
 
     @strawberry.field
     def audit_log_total(self, query: str = "",
@@ -1247,7 +1284,8 @@ class Query:
         is a window onto instead of comparing a filtered view against the
         window's own size. No filter = the whole log."""
         where, args = _audit_where(query, date_from, date_to)
-        return int(q1(f"SELECT count(*) AS n FROM events WHERE {where}", args)["n"])
+        return int(q1(f"SELECT count(*) AS n FROM events WHERE project_id = %s AND {where}",
+                      (access.require_current_access().project_id,) + args)["n"])
 
     @strawberry.field
     def activity_feed(self, limit: int = 12) -> list[ActivityItem]:
@@ -1269,8 +1307,8 @@ class Query:
                    WHEN verb LIKE '%%link%%' OR verb LIKE 'derived%%' THEN 'link'
                    ELSE 'edit'
                  END AS kind
-          FROM events ORDER BY occurred_at DESC, id DESC LIMIT %s
-        """, (limit,))
+          FROM events WHERE project_id = %s ORDER BY occurred_at DESC, id DESC LIMIT %s
+        """, (access.require_current_access().project_id, limit))
         return [ActivityItem(id=r["id"], kind=r["kind"], actor=r["actor"],
                              text=r["verb"], target=r["target"], at=r["at"],
                              seconds_ago=int(r["seconds_ago"])) for r in rows]

@@ -317,10 +317,26 @@ class DerivedVectorIndex:
         return self._load() is not None
 
 
-INDEX = DerivedVectorIndex()
+_INDEXES: dict[int, DerivedVectorIndex] = {}
+_INDEXES_LOCK = threading.Lock()
+
+
+def _project_uri(base: str, project_id: int) -> str:
+    return f"{base.rstrip('/')}/projects/{int(project_id)}"
+
+
+def index_for(project_id: int) -> DerivedVectorIndex:
+    """One derived artifact namespace per project, locally and in S3."""
+    project_id = int(project_id)
+    with _INDEXES_LOCK:
+        if project_id not in _INDEXES:
+            default_path = pathlib.Path(__file__).resolve().parent.parent / ".mari" / "vectors"
+            base = os.environ.get("MARI_VECTOR_URI", str(default_path))
+            _INDEXES[project_id] = DerivedVectorIndex(_project_uri(base, project_id))
+        return _INDEXES[project_id]
 
 _REBUILD_LOCK = threading.Lock()
-_REBUILD_TIMER: threading.Timer | None = None
+_REBUILD_TIMERS: dict[int, threading.Timer] = {}
 
 
 def _parse_vector(value: t.Any) -> np.ndarray | None:
@@ -340,9 +356,12 @@ def _parse_vector(value: t.Any) -> np.ndarray | None:
 
 def rebuild_from_database() -> dict | None:
     """Snapshot canonical chunk vectors. Imported lazily to avoid db cycles."""
-    from db import q
-    rows = q("""SELECT document_id, content_hash, embedding::text AS embedding
-                FROM chunks WHERE embedding IS NOT NULL ORDER BY document_id, idx""")
+    import access
+    from db import pq
+    context = access.require_current_access()
+    rows = pq("""SELECT document_id, content_hash, embedding::text AS embedding
+                 FROM chunks WHERE project_id = %s AND embedding IS NOT NULL
+                 ORDER BY document_id, idx""")
     grouped: dict[int, list[np.ndarray]] = defaultdict(list)
     hashes: dict[int, list[str]] = defaultdict(list)
     for row in rows:
@@ -354,34 +373,40 @@ def rebuild_from_database() -> dict | None:
         return None
     matrices = {doc_id: np.stack(vectors) for doc_id, vectors in grouped.items()}
     hash_rows = {doc_id: "|".join(values) for doc_id, values in hashes.items()}
-    return INDEX.build(matrices, hash_rows)
+    return index_for(context.project_id).build(matrices, hash_rows)
 
 
 def ensure_index() -> bool:
-    if INDEX.available:
+    import access
+    index = index_for(access.require_current_access().project_id)
+    if index.available:
         return True
     with _REBUILD_LOCK:
-        if INDEX.available:
+        if index.available:
             return True
         return rebuild_from_database() is not None
 
 
 def schedule_rebuild(delay: float | None = None) -> None:
     """Debounce ingestion bursts into one periodic atomic vector flush."""
-    global _REBUILD_TIMER
+    import access
+    context = access.require_current_access()
+    project_id = context.project_id
     seconds = float(delay if delay is not None else os.environ.get("MARI_VECTOR_FLUSH_SECONDS", "30"))
     with _REBUILD_LOCK:
-        if _REBUILD_TIMER is not None:
-            _REBUILD_TIMER.cancel()
+        existing = _REBUILD_TIMERS.get(project_id)
+        if existing is not None:
+            existing.cancel()
 
         def run() -> None:
-            global _REBUILD_TIMER
             try:
-                rebuild_from_database()
+                with access.use_access(context):
+                    rebuild_from_database()
             finally:
                 with _REBUILD_LOCK:
-                    _REBUILD_TIMER = None
+                    _REBUILD_TIMERS.pop(project_id, None)
 
-        _REBUILD_TIMER = threading.Timer(max(0.0, seconds), run)
-        _REBUILD_TIMER.daemon = True
-        _REBUILD_TIMER.start()
+        timer = threading.Timer(max(0.0, seconds), run)
+        timer.daemon = True
+        _REBUILD_TIMERS[project_id] = timer
+        timer.start()

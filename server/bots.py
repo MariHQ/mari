@@ -28,9 +28,10 @@ from fastapi import APIRouter, Depends, Request, Response
 from fastapi.responses import PlainTextResponse
 
 import auth
+import access
 import config
 import llm
-from db import exec_, q, q1
+from db import exec_, pq, pq1, q, q1
 from queries import hybrid_search
 
 router = APIRouter()
@@ -116,9 +117,9 @@ def answer_question(question: str) -> str:
         approved = q1(
             """SELECT question, answer, 1 - (embedding <=> %s::vector) AS sim
                FROM approved_answers
-               WHERE status = 'approved' AND embedding IS NOT NULL
+               WHERE project_id = %s AND status = 'approved' AND embedding IS NOT NULL
                ORDER BY embedding <=> %s::vector LIMIT 1""",
-            (str(qvec), str(qvec)),
+            (str(qvec), access.require_current_access().project_id, str(qvec)),
         )
         if approved and approved["sim"] >= 0.62:
             return f"{approved['answer']}\n\n_Approved answer · served verbatim_"
@@ -128,7 +129,7 @@ def answer_question(question: str) -> str:
         f"[{i + 1}] {d['title']} ({d['source']})\n{d['body'] or d['snippet']}"
         for i, d in enumerate(docs)
     )
-    facts = q("SELECT claim FROM facts WHERE status = 'Verified' LIMIT 8")
+    facts = pq("SELECT claim FROM facts WHERE project_id = %s AND status = 'Verified' LIMIT 8")
     if facts:
         context += "\n\nVerified facts:\n" + "\n".join(f"- {f['claim']}" for f in facts)
 
@@ -216,7 +217,8 @@ def verify_github_signature(raw: bytes, signature: str, secrets: list[str]) -> b
     )
 
 
-def _handle_slack_event(event: dict, token: str) -> None:
+def _handle_slack_event(event: dict, token: str, project_access=None,
+                        installation_id: int | None = None) -> None:
     """Background worker: answer the question and post back into Slack."""
     error = ""
     try:
@@ -231,7 +233,11 @@ def _handle_slack_event(event: dict, token: str) -> None:
         if not text:
             text = "What can you help with?"
 
-        answer = answer_question(text)
+        if project_access is None:
+            answer = answer_question(text)
+        else:
+            with access.use_access(project_access):
+                answer = answer_question(text)
         _log_usage("chat_answer", "slack")
 
         out = slack_call("chat.postMessage", token, {
@@ -245,7 +251,12 @@ def _handle_slack_event(event: dict, token: str) -> None:
             error = f"chat.postMessage: {out.get('error', 'unknown error')}"
     except Exception as e:  # noqa: BLE001 — record, never crash the thread
         error = f"{type(e).__name__}: {e}"
-    merge_setting("slack_bot", {"last_event_at": _now_iso(), "last_error": error})
+    patch = {"last_event_at": _now_iso(), "last_error": error}
+    if installation_id is None:  # compatibility for direct/internal callers
+        merge_setting("slack_bot", patch)
+    else:
+        exec_("""UPDATE bot_installations SET config = config || %s, updated_at = now()
+                 WHERE id = %s""", (json.dumps(patch), installation_id))
 
 
 @router.post("/webhooks/slack")
@@ -260,7 +271,16 @@ async def slack_webhook(request: Request):
     if payload.get("type") == "url_verification":
         return {"challenge": payload.get("challenge", "")}
 
-    cfg = get_setting("slack_bot")
+    team_id = str(payload.get("team_id") or (payload.get("team") or {}).get("id") or "")
+    installation = q1("""SELECT b.*, p.slug AS project_slug, p.name AS project_name
+                           FROM bot_installations b JOIN projects p ON p.id = b.project_id
+                          WHERE b.provider = 'slack' AND b.external_team_id = %s
+                            AND b.status = 'connected' AND p.status = 'active'""", (team_id,))
+    if not installation:
+        return Response(status_code=401, content="unknown Slack team")
+    cfg = installation.get("config") or {}
+    if isinstance(cfg, str):
+        cfg = json.loads(cfg)
     secret = (cfg.get("signing_secret") or "").strip()
     if not verify_slack_signature(
         raw,
@@ -278,9 +298,11 @@ async def slack_webhook(request: Request):
         # Skip our own echoes and edits/joins (message_changed etc.).
         if (is_mention or is_dm) and not event.get("bot_id") and not event.get("subtype"):
             token = (cfg.get("bot_token") or "").strip()
-            threading.Thread(
-                target=_handle_slack_event, args=(event, token), daemon=True
-            ).start()
+            project_access = access.external_access(
+                installation["project_id"], installation["project_slug"], installation["project_name"],
+                "slack", str(installation["id"]), frozenset({"knowledge.read"}))
+            threading.Thread(target=_handle_slack_event,
+                             args=(event, token, project_access, installation["id"]), daemon=True).start()
 
     return {"ok": True}  # ack within 3s; work continues on the thread
 
@@ -288,14 +310,20 @@ async def slack_webhook(request: Request):
 # ————————————————— GET /bots/status —————————————————
 
 
-@router.get("/bots/status", dependencies=[Depends(auth.require_user)])
+@router.get("/bots/status", dependencies=[Depends(auth.require_project)])
 def bots_status() -> dict:
-    slack = get_setting("slack_bot")
-    gh = get_setting("github_bot")
+    slack_row = pq1("""SELECT config FROM bot_installations
+                       WHERE project_id = %s AND provider = 'slack' AND status = 'connected'
+                       ORDER BY id LIMIT 1""")
+    gh_row = pq1("""SELECT config FROM bot_installations
+                    WHERE project_id = %s AND provider = 'github' AND status = 'connected'
+                    ORDER BY id LIMIT 1""")
+    slack = (slack_row or {}).get("config") or {}
+    gh = (gh_row or {}).get("config") or {}
     env_secret = (config.get("github", "webhook_secret") or "").strip()
-    repos = q(
+    repos = pq(
         "SELECT id, config->>'repo' AS repo FROM sources "
-        "WHERE kind = 'github' AND config->>'repo' IS NOT NULL ORDER BY id"
+        "WHERE project_id = %s AND kind = 'github' AND config->>'repo' IS NOT NULL ORDER BY id"
     )
     return {
         "slack": {
@@ -315,13 +343,20 @@ def bots_status() -> dict:
 # ————————————————— POST /bots/slack/test —————————————————
 
 
-@router.post("/bots/slack/test", dependencies=[Depends(auth.require_user)])
+@router.post("/bots/slack/test", dependencies=[Depends(auth.require_project)])
 def slack_test() -> dict:
-    token = (get_setting("slack_bot").get("bot_token") or "").strip()
+    row = pq1("""SELECT id, config FROM bot_installations
+                 WHERE project_id = %s AND provider = 'slack' AND status = 'connected'
+                 ORDER BY id LIMIT 1""")
+    cfg = (row or {}).get("config") or {}
+    token = (cfg.get("bot_token") or "").strip()
     if not token:
         return {"ok": False, "error": "no bot token configured"}
     out = slack_call("auth.test", token)
     if not out.get("ok"):
         return {"ok": False, "error": out.get("error", "unknown error")}
-    merge_setting("slack_bot", {"team_name": out.get("team", ""), "connected_at": _now_iso()})
+    exec_("""UPDATE bot_installations SET config = config || %s, updated_at = now()
+             WHERE id = %s AND project_id = %s""",
+          (json.dumps({"team_name": out.get("team", ""), "connected_at": _now_iso()}),
+           row["id"], access.require_current_access().project_id))
     return {"ok": True, "team": out.get("team", ""), "botUser": out.get("user", "")}

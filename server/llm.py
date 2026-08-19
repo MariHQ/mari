@@ -39,6 +39,8 @@ making the call more correct.
 from __future__ import annotations
 
 import json
+import email.utils
+import socket
 import threading
 import time
 import typing as t
@@ -47,6 +49,7 @@ import urllib.parse
 import urllib.request
 
 import config
+import observability
 
 # Shipped defaults — the last resort, after settings and after mari.toml.
 DEFAULT_OLLAMA = "http://localhost:11434"
@@ -120,6 +123,30 @@ def reload_settings() -> None:
         _settings_cache["at"] = 0.0
 
 
+def preserve_masked(existing: t.Any, incoming: t.Any) -> t.Any:
+    """Masked GraphQL reads are placeholders, never replacement secrets."""
+    if isinstance(incoming, str) and "•" in incoming:
+        return existing
+    if isinstance(existing, dict) and isinstance(incoming, dict):
+        return {k: preserve_masked(existing.get(k), value) for k, value in incoming.items()}
+    return incoming
+
+
+def mask_gateway_secrets(gateway: dict, masker: t.Callable[[t.Any], str]) -> dict:
+    """Copy gateway settings while masking token-like values."""
+    out = dict(gateway)
+    if "token" in out:
+        out["token"] = masker(out["token"])
+    if isinstance(out.get("headers"), dict):
+        out["headers"] = {
+            name: (masker(value)
+                   if any(part in name.lower() for part in ("auth", "token", "key", "secret"))
+                   else value)
+            for name, value in out["headers"].items()
+        }
+    return out
+
+
 def _split_ref(ref: str) -> tuple[str, str]:
     """'openai:text-embedding-3-small' -> ('openai', 'text-embedding-3-small').
     The console's `options` lists use this shape; a bare name is a model with
@@ -148,6 +175,63 @@ def _api_key(provider: str) -> str:
     return str(keys.get(provider) or "").strip() if isinstance(keys, dict) else ""
 
 
+def gateway_config() -> dict[str, t.Any]:
+    """Merged deployment/workspace gateway config, with bounded retry policy."""
+    llm_cfg, _ = _settings()
+    stored = llm_cfg.get("gateway") if isinstance(llm_cfg.get("gateway"), dict) else {}
+    cfg: dict[str, t.Any] = {
+        "base_url": config.get("llm_gateway", "base_url") or "",
+        "token": config.get("llm_gateway", "token") or _api_key("gateway"),
+        "headers": config.get("llm_gateway", "headers") or {},
+        "metadata": config.get("llm_gateway", "metadata") or {},
+        "model_header": config.get("llm_gateway", "model_header") or "",
+        "max_retries": config.get("llm_gateway", "max_retries", 2),
+    }
+    cfg.update(stored)
+    cfg["base_url"] = str(cfg.get("base_url") or "").rstrip("/")
+    cfg["token"] = str(cfg.get("token") or _api_key("gateway") or "")
+    cfg["headers"] = cfg.get("headers") if isinstance(cfg.get("headers"), dict) else {}
+    cfg["metadata"] = cfg.get("metadata") if isinstance(cfg.get("metadata"), dict) else {}
+    try:
+        cfg["max_retries"] = min(5, max(0, int(cfg.get("max_retries", 2))))
+    except (TypeError, ValueError):
+        cfg["max_retries"] = 2
+    return cfg
+
+
+def _gateway_headers(cfg: dict[str, t.Any], model: str) -> dict[str, str]:
+    headers = {str(k): str(v).replace("{model}", model)
+               for k, v in cfg["headers"].items()
+               if str(k).lower() not in {"host", "content-length"}}
+    token = cfg.get("token") or ""
+    if token:
+        auth_header = str(cfg.get("auth_header") or "Authorization")
+        auth_scheme = str(cfg.get("auth_scheme") or "Bearer").strip()
+        headers[auth_header] = f"{auth_scheme} {token}".strip()
+    model_header = str(cfg.get("model_header") or "").strip()
+    if model_header:
+        headers[model_header] = model
+    request_id, correlation_id = observability.request_context()
+    headers["X-Request-ID"] = request_id
+    headers["X-Correlation-ID"] = correlation_id
+    return headers
+
+
+def _gateway_payload(payload: dict, cfg: dict[str, t.Any]) -> dict:
+    metadata = cfg.get("metadata") or {}
+    return {**payload, **({"metadata": metadata} if metadata else {})}
+
+
+def _gateway_config_error(cfg: dict[str, t.Any]) -> str:
+    base = str(cfg.get("base_url") or "")
+    if not base:
+        return "LLM gateway base URL is not configured"
+    parsed = urllib.parse.urlsplit(base)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc or parsed.username or parsed.password:
+        return "LLM gateway base URL must be an http(s) URL without embedded credentials"
+    return ""
+
+
 def ollama_host() -> str:
     """The ollama daemon's base URL: mari.toml / MARI_OLLAMA_HOST, then the
     default. This is the read that makes MARI_OLLAMA_HOST mean something."""
@@ -169,49 +253,138 @@ def generation_model() -> tuple[str, str]:
 # ————————————————— HTTP —————————————————
 
 
-def _post(url: str, payload: dict, headers: dict | None = None,
-          timeout: float = 120.0) -> dict | None:
-    req = urllib.request.Request(
-        url, data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json", **(headers or {})})
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            out = json.loads(resp.read())
-        _ok()
-        return out
-    except urllib.error.HTTPError as e:
-        # The provider said why. Quote it — a status code alone sends whoever
-        # reads the log to the wrong place.
+def _retry_delay(headers: t.Any, attempt: int) -> float:
+    raw = headers.get("Retry-After") if headers else None
+    if raw:
         try:
-            detail = e.read().decode("utf-8", "replace")[:400]
-        except Exception:  # noqa: BLE001
-            detail = ""
-        _fail(f"{urllib.parse.urlsplit(url).netloc} returned HTTP {e.code}: {detail or e.reason}")
-    except urllib.error.URLError as e:
-        _fail(f"cannot reach {urllib.parse.urlsplit(url).netloc}: {e.reason}")
-    except TimeoutError:
-        _fail(f"{urllib.parse.urlsplit(url).netloc} did not answer within {timeout:.0f}s")
-    except json.JSONDecodeError as e:
-        _fail(f"{urllib.parse.urlsplit(url).netloc} returned something that is not JSON: {e}")
+            return min(30.0, max(0.0, float(raw)))
+        except (TypeError, ValueError):
+            try:
+                target = email.utils.parsedate_to_datetime(str(raw)).timestamp()
+                return min(30.0, max(0.0, target - time.time()))
+            except (TypeError, ValueError, OverflowError):
+                pass
+    return min(4.0, 0.25 * (2 ** attempt))
+
+
+def _error_detail(host: str, code: int, reason: object, *, gateway: bool) -> str:
+    # Provider bodies can echo prompts, request headers, or tokens. The status
+    # class is actionable without reflecting any untrusted body into UI/logs.
+    if code in (401, 403):
+        detail = "authentication or authorization failed"
+    elif code == 429:
+        detail = "rate limited"
+    elif code >= 500:
+        detail = "upstream service unavailable"
+    elif gateway:
+        detail = "request rejected"
+    else:
+        detail = str(reason or "request rejected")[:120]
+    prefix = "LLM gateway" if gateway else host
+    return f"{prefix} returned HTTP {code}: {detail}"
+
+
+def _record_response_usage(out: t.Any, provider: str, model: str) -> None:
+    if not isinstance(out, dict):
+        return
+    usage = out.get("usage") if isinstance(out.get("usage"), dict) else {}
+    cost = out.get("cost", usage.get("cost"))
+    observability.record_llm_usage(provider, model, usage, cost)
+
+
+def _post(url: str, payload: dict | None, headers: dict | None = None,
+          timeout: float = 120.0, *, provider_name: str = "",
+          max_retries: int = 0, method: str = "POST") -> dict | None:
+    started = time.perf_counter()
+    host = urllib.parse.urlsplit(url).netloc
+    provider = provider_name or ("openai" if "openai" in host else "anthropic" if "anthropic" in host else "ollama")
+    operation = urllib.parse.urlsplit(url).path.rsplit("/", 1)[-1] or "request"
+    success = False
+    try:
+        for attempt in range(max_retries + 1):
+            try:
+                req = urllib.request.Request(
+                    url, data=json.dumps(payload).encode() if payload is not None else None,
+                    headers={"Content-Type": "application/json", **(headers or {})}, method=method)
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    out = json.loads(resp.read())
+                _ok()
+                success = True
+                return out
+            except urllib.error.HTTPError as e:
+                retryable = e.code == 429 or e.code >= 500
+                if retryable and attempt < max_retries:
+                    e.close()
+                    time.sleep(_retry_delay(e.headers, attempt))
+                    continue
+                _fail(_error_detail(host, e.code, e.reason, gateway=provider == "gateway"))
+                e.close()
+                return None
+            except (urllib.error.URLError, TimeoutError, socket.timeout) as e:
+                if attempt < max_retries:
+                    time.sleep(_retry_delay(None, attempt))
+                    continue
+                reason = getattr(e, "reason", e)
+                prefix = "LLM gateway" if provider == "gateway" else host
+                _fail(f"cannot reach {prefix}: {type(reason).__name__}")
+                return None
+            except json.JSONDecodeError:
+                prefix = "LLM gateway" if provider == "gateway" else host
+                _fail(f"{prefix} returned an invalid JSON response")
+                return None
+            except (TypeError, ValueError):
+                _fail("LLM provider endpoint or request configuration is invalid")
+                return None
+    finally:
+        observability.record_llm(operation, provider, success, time.perf_counter() - started)
     return None
 
 
 def _stream(url: str, payload: dict, headers: dict | None = None,
-            timeout: float = 180.0) -> t.Iterator[str]:
+            timeout: float = 180.0, *, provider_name: str = "",
+            max_retries: int = 0) -> t.Iterator[str]:
     """Yield raw response lines. Yields nothing when the endpoint is down —
     every caller of chat_stream already renders "no model available" for an
     empty stream."""
-    req = urllib.request.Request(
-        url, data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json", **(headers or {})})
+    started = time.perf_counter()
+    host = urllib.parse.urlsplit(url).netloc
+    provider = provider_name or ("openai" if "openai" in host else "anthropic" if "anthropic" in host else "ollama")
+    operation = urllib.parse.urlsplit(url).path.rsplit("/", 1)[-1] or "stream"
+    success = False
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            for line in resp:
-                yield line.decode("utf-8", "replace")
-        _ok()
-    except (urllib.error.URLError, TimeoutError) as e:
-        _fail(f"cannot stream from {urllib.parse.urlsplit(url).netloc}: {e}")
-        return
+        for attempt in range(max_retries + 1):
+            yielded = False
+            try:
+                req = urllib.request.Request(
+                    url, data=json.dumps(payload).encode(),
+                    headers={"Content-Type": "application/json", **(headers or {})})
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    for line in resp:
+                        yielded = True
+                        yield line.decode("utf-8", "replace")
+                _ok()
+                success = True
+                return
+            except urllib.error.HTTPError as e:
+                if not yielded and (e.code == 429 or e.code >= 500) and attempt < max_retries:
+                    e.close()
+                    time.sleep(_retry_delay(e.headers, attempt))
+                    continue
+                _fail(_error_detail(host, e.code, e.reason, gateway=provider == "gateway"))
+                e.close()
+                return
+            except (urllib.error.URLError, TimeoutError, socket.timeout) as e:
+                if not yielded and attempt < max_retries:
+                    time.sleep(_retry_delay(None, attempt))
+                    continue
+                prefix = "LLM gateway" if provider == "gateway" else host
+                _fail(f"cannot stream from {prefix}: {type(getattr(e, 'reason', e)).__name__}")
+                return
+            except (TypeError, ValueError):
+                _fail("LLM provider endpoint or request configuration is invalid")
+                return
+    finally:
+        observability.record_llm(operation, provider, success, time.perf_counter() - started)
 
 
 # ————————————————— embeddings —————————————————
@@ -231,24 +404,32 @@ def embed(text: str) -> list[float] | None:
         out = _post(f"{ollama_host()}/api/embeddings",
                     {"model": model, "prompt": body}, timeout=30.0)
         vec = out.get("embedding") if out else None
-    elif provider == "openai":
-        key = _api_key("openai")
-        if not key:
-            _fail("settings.embedding names the openai provider but no OpenAI API key "
-                  "is set (Settings → Models)")
+    elif provider in ("openai", "gateway"):
+        gateway = gateway_config() if provider == "gateway" else None
+        key = (gateway or {}).get("token") or _api_key("openai")
+        if provider == "openai" and not key:
+            _fail(f"settings.embedding names the {provider} provider but no credential is set")
             return None
         payload: dict = {"model": model, "input": body}
         if model.startswith("text-embedding-3"):
             # These models serve a requested width directly, which is the only
             # reason an OpenAI embedding can fit a vector(768) column at all.
             payload["dimensions"] = EMBED_DIMS
-        out = _post(f"{OPENAI_BASE}/embeddings", payload,
-                    {"Authorization": f"Bearer {key}"}, timeout=30.0)
+        base = gateway["base_url"] if gateway else OPENAI_BASE
+        if gateway and (config_error := _gateway_config_error(gateway)):
+            _fail(config_error)
+            return None
+        headers = _gateway_headers(gateway, model) if gateway else {"Authorization": f"Bearer {key}"}
+        if gateway:
+            payload = _gateway_payload(payload, gateway)
+        out = _post(f"{base}/embeddings", payload, headers, timeout=30.0,
+                    provider_name=provider, max_retries=gateway["max_retries"] if gateway else 0)
+        _record_response_usage(out, provider, model)
         data = (out or {}).get("data") or []
         vec = data[0].get("embedding") if data else None
     else:
         _fail(f"settings.embedding names provider {provider!r}, which has no embedding "
-              f"endpoint here (supported: ollama, local, openai)")
+              f"endpoint here (supported: ollama, local, openai, gateway)")
         return None
 
     if not vec:
@@ -277,17 +458,25 @@ def generate(prompt: str, system: str = "", timeout: float = 120.0) -> str | Non
                     timeout=timeout)
         return out.get("response", "").strip() if out else None
 
-    if provider == "openai":
-        key = _api_key("openai")
-        if not key:
-            _fail("settings.llm names the openai provider but no OpenAI API key is set "
-                  "(Settings → Models)")
+    if provider in ("openai", "gateway"):
+        gateway = gateway_config() if provider == "gateway" else None
+        key = (gateway or {}).get("token") or _api_key("openai")
+        if provider == "openai" and not key:
+            _fail("settings.llm names the openai provider but no OpenAI API key is set")
             return None
         messages = ([{"role": "system", "content": system}] if system else []) + \
                    [{"role": "user", "content": prompt}]
-        out = _post(f"{OPENAI_BASE}/chat/completions",
-                    {"model": model, "messages": messages, "max_completion_tokens": 700},
-                    {"Authorization": f"Bearer {key}"}, timeout=timeout)
+        base = gateway["base_url"] if gateway else OPENAI_BASE
+        if gateway and (config_error := _gateway_config_error(gateway)):
+            _fail(config_error)
+            return None
+        payload = {"model": model, "messages": messages, "max_completion_tokens": 700}
+        headers = _gateway_headers(gateway, model) if gateway else {"Authorization": f"Bearer {key}"}
+        if gateway:
+            payload = _gateway_payload(payload, gateway)
+        out = _post(f"{base}/chat/completions", payload, headers, timeout=timeout,
+                    provider_name=provider, max_retries=gateway["max_retries"] if gateway else 0)
+        _record_response_usage(out, provider, model)
         choices = (out or {}).get("choices") or []
         text = (choices[0].get("message") or {}).get("content") if choices else None
         return text.strip() if text else None
@@ -315,7 +504,7 @@ def generate(prompt: str, system: str = "", timeout: float = 120.0) -> str | Non
         return text.strip() or None
 
     _fail(f"settings.llm names provider {provider!r}, which is not one this server can "
-          f"call (supported: ollama, local, openai, anthropic)")
+          f"call (supported: ollama, local, openai, anthropic, gateway)")
     return None
 
 
@@ -367,15 +556,25 @@ def chat_stream(messages: list[dict], system: str = "") -> t.Iterator[str]:
                 return
         return
 
-    if provider == "openai":
-        key = _api_key("openai")
-        if not key:
+    if provider in ("openai", "gateway"):
+        gateway = gateway_config() if provider == "gateway" else None
+        key = (gateway or {}).get("token") or _api_key("openai")
+        if provider == "openai" and not key:
             _fail("settings.llm names the openai provider but no OpenAI API key is set")
             return
         payload = {"model": model, "stream": True, "max_completion_tokens": 800,
                    "messages": ([{"role": "system", "content": system}] if system else []) + messages}
-        for line in _stream(f"{OPENAI_BASE}/chat/completions", payload,
-                            {"Authorization": f"Bearer {key}"}):
+        base = gateway["base_url"] if gateway else OPENAI_BASE
+        if gateway and (config_error := _gateway_config_error(gateway)):
+            _fail(config_error)
+            return
+        headers = _gateway_headers(gateway, model) if gateway else {"Authorization": f"Bearer {key}"}
+        if gateway:
+            payload = _gateway_payload(payload, gateway)
+            payload["stream_options"] = {"include_usage": True}
+        for line in _stream(f"{base}/chat/completions", payload, headers,
+                            provider_name=provider,
+                            max_retries=gateway["max_retries"] if gateway else 0):
             if not line.startswith("data:"):
                 continue
             data = line[5:].strip()
@@ -385,6 +584,7 @@ def chat_stream(messages: list[dict], system: str = "") -> t.Iterator[str]:
                 chunk = json.loads(data)
             except json.JSONDecodeError:
                 continue
+            _record_response_usage(chunk, provider, model)
             for choice in chunk.get("choices") or []:
                 token = (choice.get("delta") or {}).get("content")
                 if token:
@@ -417,3 +617,20 @@ def chat_stream(messages: list[dict], system: str = "") -> t.Iterator[str]:
         return
 
     _fail(f"settings.llm names provider {provider!r}, which is not one this server can call")
+
+
+def gateway_health(timeout: float = 10.0) -> dict[str, t.Any]:
+    """Credentialed, prompt-free gateway test against the OpenAI models API."""
+    cfg = gateway_config()
+    if config_error := _gateway_config_error(cfg):
+        return {"ok": False, "detail": config_error, "models": 0}
+    started = time.perf_counter()
+    out = _post(f"{cfg['base_url']}/models", None, _gateway_headers(cfg, "health-check"),
+                timeout=timeout, provider_name="gateway", max_retries=cfg["max_retries"], method="GET")
+    if out is None:
+        return {"ok": False, "detail": last_error() or "LLM gateway health check failed", "models": 0,
+                "latency_ms": round((time.perf_counter() - started) * 1000)}
+    models = out.get("data") if isinstance(out, dict) else []
+    return {"ok": True, "detail": "LLM gateway is reachable and authenticated",
+            "models": len(models) if isinstance(models, list) else 0,
+            "latency_ms": round((time.perf_counter() - started) * 1000)}

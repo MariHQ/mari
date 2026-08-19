@@ -7,6 +7,7 @@ import json
 import strawberry
 from strawberry.scalars import JSON
 
+import access
 import flowengine
 import github
 import ingest
@@ -73,10 +74,11 @@ class MutAdmin:
         connection — no fabricated backfill progress, sparkline, or checkpoint
         theater. Real connectors plug in behind this seam (DESIGN.md §7)."""
         actor = _require_admin(info)
-        exec_("""INSERT INTO sources (provider, display_name, status, stat_num, stat_unit, bars, config, docs_count, health)
-                 VALUES (%s, %s, 'active', '0', 'items', '{}', %s, 0, 'Never synced')
-                 ON CONFLICT (provider) DO UPDATE SET config = sources.config || EXCLUDED.config, status = 'active'""",
-              (provider, display_name, json.dumps(config)))
+        project_id = access.require_current_access().project_id
+        exec_("""INSERT INTO sources (project_id, provider, display_name, status, stat_num, stat_unit, bars, config, docs_count, health)
+                 VALUES (%s, %s, %s, 'active', '0', 'items', '{}', %s, 0, 'Never synced')
+                 ON CONFLICT (project_id, provider) DO UPDATE SET config = sources.config || EXCLUDED.config, status = 'active'""",
+              (project_id, provider, display_name, json.dumps(config)))
         exec_("""INSERT INTO sync_events (provider, event, detail, at_label)
                  VALUES (%s, %s, '', to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))""",
               (provider, f"connected: {display_name}"))
@@ -87,7 +89,8 @@ class MutAdmin:
     @strawberry.mutation
     def disconnect_source(self, info: strawberry.Info, provider: str) -> bool:
         actor = _require_admin(info)
-        exec_("UPDATE sources SET status = 'paused', health = 'Paused' WHERE provider = %s", (provider,))
+        project_id = access.require_current_access().project_id
+        exec_("UPDATE sources SET status = 'paused', health = 'Paused' WHERE project_id = %s AND provider = %s", (project_id, provider))
         exec_("UPDATE ingest_checkpoints SET status = 'paused' WHERE provider = %s AND status = 'running'", (provider,))
         exec_("""INSERT INTO sync_events (provider, event, detail, at_label)
                  VALUES (%s, 'disconnected', 'Paused by admin', to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))""",
@@ -176,6 +179,15 @@ class MutAdmin:
     @strawberry.mutation
     def update_setting(self, info: strawberry.Info, key: str, value: JSON) -> bool:
         actor = _require_admin(info)
+        if key == "llm" and isinstance(value, dict):
+            before = q1("SELECT value FROM settings WHERE key = 'llm'")
+            existing = (before or {}).get("value") or {}
+            if isinstance(existing, str):
+                try:
+                    existing = json.loads(existing)
+                except json.JSONDecodeError:
+                    existing = {}
+            value = llm.preserve_masked(existing, value)
         exec_("""INSERT INTO settings (key, value) VALUES (%s, %s)
                  ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value""", (key, json.dumps(value)))
         audit("updated setting", key, actor["name"],
@@ -186,6 +198,11 @@ class MutAdmin:
         if key in ("llm", "embedding"):
             llm.reload_settings()
         return True
+
+    @strawberry.mutation
+    def test_llm_gateway(self, info: strawberry.Info) -> JSON:
+        _require_admin(info)
+        return llm.gateway_health()
 
     # ——— workspace identity & member provisioning ———
     @strawberry.mutation
@@ -243,7 +260,7 @@ class MutAdmin:
         requested_token = (token or "").strip()
         if not requested_token and not github.token():
             raise ValueError("No GitHub token configured (github.token / MARI_GITHUB_TOKEN)")
-        if q1("SELECT id FROM sources WHERE kind = 'github' AND config->>'repo' = %s", (repo,)):
+        if q1("SELECT id FROM sources WHERE project_id = %s AND kind = 'github' AND config->>'repo' = %s", (project_id, repo)):
             raise ValueError(f"Repository {repo} is already connected")
         token_state = github.push_token(requested_token)
         try:
@@ -253,11 +270,11 @@ class MutAdmin:
         cfg = {"repo": repo, "branch": branch, "paths": paths or "",
                "token": requested_token, "cursor": "", "last_sync_at": "",
                "last_error": "", "shas": {}}
-        exec_("""INSERT INTO sources (provider, display_name, kind, status, stat_num, stat_unit, bars,
+        exec_("""INSERT INTO sources (project_id, provider, display_name, kind, status, stat_num, stat_unit, bars,
                                       config, docs_count, health)
-                 VALUES (%s, %s, 'github', 'active', '0', 'docs', '{}', %s, 0, 'Syncing')""",
-              (f"github:{repo}", repo, json.dumps(cfg)))
-        source_id = q1("SELECT id FROM sources WHERE provider = %s", (f"github:{repo}",))["id"]
+                 VALUES (%s, %s, %s, 'github', 'active', '0', 'docs', '{}', %s, 0, 'Syncing')""",
+              (project_id, f"github:{repo}", repo, json.dumps(cfg)))
+        source_id = q1("SELECT id FROM sources WHERE project_id = %s AND provider = %s", (project_id, f"github:{repo}"))["id"]
         audit("connected GitHub repo", repo, actor["name"],
               detail=[("Branch", branch), ("Paths", paths or "(whole repository)")])
         # every github source gets a scheduled sync flow (Flows UI owns cadence)
@@ -296,7 +313,8 @@ class MutAdmin:
         # (ingest.start_sync dispatches by kind); anything else has no sync
         # implementation, so we say so instead of faking progress.
         _require_manager(info)
-        src = q1("SELECT id, kind FROM sources WHERE provider = %s", (provider,))
+        project_id = access.require_current_access().project_id
+        src = q1("SELECT id, kind FROM sources WHERE project_id = %s AND provider = %s", (project_id, provider))
         if src and src.get("kind") in ("github", "connector"):
             ingest.start_sync(src["id"])
             audit("triggered sync", provider)
@@ -309,9 +327,10 @@ class MutAdmin:
     @strawberry.mutation
     def update_source_config(self, info: strawberry.Info, provider: str, config: JSON) -> bool:
         actor = _require_admin(info)
+        project_id = access.require_current_access().project_id
         if not isinstance(config, dict):
             raise ValueError("config must be an object")
-        before = q1("SELECT config FROM sources WHERE provider = %s", (provider,))
+        before = q1("SELECT config FROM sources WHERE project_id = %s AND provider = %s", (project_id, provider))
         if not before:
             raise ValueError(f"No source '{provider}' to configure")
         current = before["config"] if isinstance(before["config"], dict) else json.loads(before["config"] or "{}")
@@ -320,7 +339,7 @@ class MutAdmin:
                 raise ValueError(
                     f"'{key}' identifies this source and cannot be changed here — "
                     "connect the new target as its own source instead.")
-        exec_("UPDATE sources SET config = config || %s::jsonb WHERE provider = %s", (json.dumps(config), provider))
+        exec_("UPDATE sources SET config = config || %s::jsonb WHERE project_id = %s AND provider = %s", (json.dumps(config), project_id, provider))
         audit("updated source config", provider, actor["name"],
               detail=[("Fields", ", ".join(sorted(config)) or "(none)")])
         return True
