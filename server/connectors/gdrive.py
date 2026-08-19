@@ -14,6 +14,7 @@ import json
 import urllib.parse
 
 from . import _net
+from ._protocol import ACLMetadata, PollResult
 
 API = "https://www.googleapis.com/drive/v3"
 
@@ -156,5 +157,6 @@ def list_items(config, cursor):
             "body": _fetch_body(config, f),
             "updated_at": mod,
             "hash_hint": f.get("md5Checksum") or mod or None,
+            "acl": ACLMetadata(visibility="connector_scope"),
         })
-    return items, newest
+    return PollResult(items, newest, snapshot_complete=True)

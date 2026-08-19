@@ -20,6 +20,9 @@ import json
 import time
 
 import connectors
+from connectors._protocol import (
+    ConnectorCallError, ErrorKind, PollItem, adapt_poll_result, call_with_retry,
+)
 import flowengine
 import ingest
 import links
@@ -79,6 +82,26 @@ def _checkpoint(conn, provider: str, item: str, stage: str, done: int, total: in
          time.strftime("%H:%M:%S", time.gmtime(time.time() - started)), status))
 
 
+def deletion_ids(rows: list[dict], provider_key: str, seen_paths: set[str],
+                 tombstones: set[str], *, full: bool,
+                 snapshot_complete: bool) -> list[int]:
+    """Select safe deletes without coupling connector semantics to the DB.
+
+    Explicit tombstones are authoritative on incremental polls. Missing paths
+    are authoritative only when a full poll declares its snapshot complete.
+    """
+    gone: list[int] = []
+    for row in rows:
+        source_path = row["source_path"] or ""
+        relative = (source_path[len(provider_key) + 1:]
+                    if source_path.startswith(f"{provider_key}/") else None)
+        if relative in tombstones or (
+                full and snapshot_complete and
+                (relative is None or relative not in seen_paths)):
+            gone.append(row["id"])
+    return gone
+
+
 def _sync_worker(source_id: int, full: bool) -> dict:
     """Run one connector sync. Returns honest stats (plus 'error' on failure) —
     the same shape flowengine's sync_source step reads from ingest.run_sync."""
@@ -109,28 +132,40 @@ def _sync_worker(source_id: int, full: bool) -> dict:
             raise RuntimeError((entry or {}).get("error") or f"unknown connector provider '{key}'")
 
         max_tokens, overlap = ingest._chunk_settings()
-        hashes: dict = dict(cfg.get("item_hashes") or {})
-        cursor = cfg.get("cursor") or None
+        stored_hashes: dict = dict(cfg.get("item_hashes") or {})
+        stored_cursor = cfg.get("cursor") or None
+        hashes = dict(stored_hashes)
+        cursor = stored_cursor
 
         if full:
+            # A rebuild is prepared in memory and becomes authoritative only
+            # after a complete listing succeeds. Clearing chunks/cursors first
+            # made a transient provider failure destroy the working index.
             cursor, hashes = None, {}
-            cfg["cursor"], cfg["item_hashes"] = "", {}
-            with ingest._conn() as conn:
-                conn.execute("""DELETE FROM chunks WHERE document_id IN
-                                (SELECT id FROM documents WHERE source_id = %s)""", (source_id,))
-                conn.execute("UPDATE documents SET content_hash = '' WHERE source_id = %s", (source_id,))
-                # persist the cleared cursor so an interrupted rebuild resumes full
-                conn.execute("UPDATE sources SET config = %s WHERE id = %s", (json.dumps(cfg), source_id))
-                conn.commit()
 
         # —— validate (cheap, honest) ——
         ingest._set(source_id, state="running", phase="listing", done=0, total=0, error="")
-        verr = entry["validate"](cfg)
-        if verr:
-            raise RuntimeError(str(verr))
+        def validate_once() -> None:
+            verr = entry["validate"](cfg)
+            if not verr:
+                return
+            text = str(verr)
+            low = text.lower()
+            kind = (ErrorKind.RATE_LIMIT if "rate limit" in low or "ratelimited" in low
+                    else ErrorKind.TRANSIENT if any(x in low for x in
+                        ("unreachable", "network error", "timeout", "temporarily unavailable"))
+                    else ErrorKind.PERMANENT)
+            raise ConnectorCallError(text, kind)
+
+        call_with_retry(validate_once)
 
         # —— list ——
-        items, new_cursor = entry["list_items"](cfg, cursor)
+        poll = adapt_poll_result(call_with_retry(lambda: entry["list_items"](cfg, cursor)))
+        items = [item.as_dict() if isinstance(item, PollItem) else item for item in poll.items]
+        new_cursor = poll.cursor if poll.snapshot_complete else stored_cursor
+        if full and not poll.snapshot_complete:
+            # Retain prior coverage while merging any safely refreshed items.
+            hashes = {**stored_hashes, **hashes}
         total = len(items)
         ingest._set(source_id, total=total)
         with ingest._conn() as conn:
@@ -140,13 +175,14 @@ def _sync_worker(source_id: int, full: bool) -> dict:
 
         done = 0
         seen_paths: set[str] = set()
+        tombstones = {str(path) for path in poll.tombstones if str(path)}
         initials = (key[:2] or "??").upper()
         author = entry["provider"].get("name", key)
 
         with ingest._conn() as conn:
             for item in items:
                 path = str(item.get("path") or "")
-                if not path:
+                if not path or path in tombstones:
                     done += 1
                     continue
                 seen_paths.add(path)
@@ -159,17 +195,20 @@ def _sync_worker(source_id: int, full: bool) -> dict:
                     stats["skipped"] += 1  # hash_hint / body hash unchanged — no re-embed
                     ingest._set(source_id, phase="fetching", done=done)
                     continue
-                if not body.strip():
-                    hashes[path] = h
-                    ingest._set(source_id, done=done)
-                    continue
                 ingest._set(source_id, phase="chunking", done=done)
                 doc_id, inserted = ingest._upsert_document(
                     conn, source_id, f"{key}:{source_id}:{path}", title, body,
                     f"{key}/{path}", "page", h, author, source=key, initials=initials)
                 (added_doc_ids if inserted else changed_doc_ids).append(doc_id)
                 ingest._set(source_id, phase="embedding")
-                n, e = ingest._sync_chunks(conn, doc_id, title, body, max_tokens, overlap)
+                if body.strip():
+                    n, e = ingest._sync_chunks(conn, doc_id, title, body, max_tokens, overlap)
+                else:
+                    # Empty content is still a real update: retain its document
+                    # identity while removing stale derived search material.
+                    conn.execute("DELETE FROM chunks WHERE document_id = %s", (doc_id,))
+                    conn.execute("UPDATE documents SET embedding = NULL WHERE id = %s", (doc_id,))
+                    n, e = 0, 0
                 stats["items_changed"] += 1
                 stats["chunks"] += n
                 stats["embedded"] += e
@@ -180,21 +219,22 @@ def _sync_worker(source_id: int, full: bool) -> dict:
                                 new_cursor or "", "running", started)
                     conn.commit()
 
-            # —— deletes: on a full resync, docs whose items vanished ——
+            # —— deletes: explicit incremental tombstones, plus absence only
+            # for a complete full snapshot. A safety-capped listing is never
+            # authoritative evidence that everything after the cap vanished.
             ingest._set(source_id, phase="indexing")
-            if full:
-                rows = conn.execute(
-                    "SELECT id, source_path FROM documents WHERE source_id = %s", (source_id,)).fetchall()
-                gone = []
-                for r in rows:
-                    sp = r["source_path"] or ""
-                    rel = sp[len(key) + 1:] if sp.startswith(f"{key}/") else None
-                    if rel is None or rel not in seen_paths:
-                        gone.append(r["id"])
-                if gone:
-                    ingest._delete_documents(conn, gone)
-                    stats["files_deleted"] = len(gone)
+            rows = conn.execute(
+                "SELECT id, source_path FROM documents WHERE source_id = %s", (source_id,)).fetchall()
+            gone = deletion_ids(rows, key, seen_paths, tombstones, full=full,
+                                snapshot_complete=poll.snapshot_complete)
+            if tombstones:
+                for path in tombstones:
+                    hashes.pop(path, None)
+            if full and poll.snapshot_complete:
                 hashes = {p: hv for p, hv in hashes.items() if p in seen_paths}
+            if gone:
+                ingest._delete_documents(conn, gone)
+                stats["files_deleted"] = len(gone)
 
             # —— persist cursor + hash map, stamp truth ——
             cfg.update({"provider_key": key, "cursor": new_cursor or "", "item_hashes": hashes,
@@ -207,7 +247,9 @@ def _sync_worker(source_id: int, full: bool) -> dict:
                          (json.dumps(cfg), doc_count, str(doc_count), source_id))
             detail = (f"{stats['items_changed']} items changed · {stats['files_deleted']} removed · "
                       f"{stats['chunks']} chunks · {stats['embedded']} embedded · "
-                      f"{stats['skipped']} unchanged (hash skip)")
+                      f"{stats['skipped']} unchanged (hash skip)" +
+                      (" · snapshot incomplete (cursor held; absence not reconciled)"
+                       if not poll.snapshot_complete else ""))
             _event(conn, provider_col, f"sync: {display}", detail)
             conn.execute("INSERT INTO events (actor, verb, target) VALUES (%s, %s, %s)",
                          (f"{author} sync", f"synced {stats['items_changed']} items", display))

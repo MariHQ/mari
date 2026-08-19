@@ -20,6 +20,7 @@ import time
 import urllib.parse
 
 from . import _net
+from ._protocol import ACLMetadata, PollResult
 
 PROVIDER = {
     "key": "slack",
@@ -43,6 +44,14 @@ UA = "mari-cloud-sync"
 HISTORY_PAGE = 200
 MAX_HISTORY_PAGES = 10   # per channel per sync
 MAX_LIST_PAGES = 10
+
+
+class _PagedList(list):
+    """List-compatible page result carrying whether a provider cap was hit."""
+
+    def __init__(self, values=(), *, complete: bool = True):
+        super().__init__(values)
+        self.complete = complete
 
 
 class SlackError(Exception):
@@ -149,7 +158,7 @@ def _channels(token: str) -> list[dict]:
         cursor = (data.get("response_metadata") or {}).get("next_cursor") or ""
         if not cursor:
             break
-    return out
+    return _PagedList(out, complete=not bool(cursor))
 
 
 _MENTION_RE = re.compile(r"<@([A-Z0-9]+)(?:\|[^>]*)?>")
@@ -166,6 +175,7 @@ def _clean_text(text: str, users: dict[str, str]) -> str:
 def _channel_messages(token: str, channel_id: str, oldest: str | None) -> list[dict]:
     msgs: list[dict] = []
     cursor = ""
+    complete = False
     for _ in range(MAX_HISTORY_PAGES):
         params: dict = {"channel": channel_id, "limit": HISTORY_PAGE}
         if oldest:
@@ -176,11 +186,12 @@ def _channel_messages(token: str, channel_id: str, oldest: str | None) -> list[d
         msgs.extend(data.get("messages", []))
         cursor = (data.get("response_metadata") or {}).get("next_cursor") or ""
         if not data.get("has_more") or not cursor:
+            complete = not data.get("has_more")
             break
-    return msgs
+    return _PagedList(msgs, complete=complete)
 
 
-def list_items(config: dict, cursor: str | None) -> tuple[list[dict], str | None]:
+def list_items(config: dict, cursor: str | None) -> PollResult:
     token = (config.get("bot_token") or "").strip()
     if not token:
         raise SlackError("bot token is required")
@@ -201,13 +212,16 @@ def list_items(config: dict, cursor: str | None) -> tuple[list[dict], str | None
             .replace(hour=0, minute=0, second=0, microsecond=0)
         oldest = f"{day_start.timestamp():.6f}"
 
-    for ch in _channels(token):
+    channels = _channels(token)
+    snapshot_complete = getattr(channels, "complete", True)
+    for ch in channels:
         name = ch.get("name", "")
         if not ch.get("is_member"):
             continue
         if wanted and name.lower() not in wanted:
             continue
         msgs = _channel_messages(token, ch["id"], oldest)
+        snapshot_complete = snapshot_complete and getattr(msgs, "complete", True)
         # keep plain user messages only (no bot/system subtypes)
         keep = []
         for m in msgs:
@@ -246,7 +260,8 @@ def list_items(config: dict, cursor: str | None) -> tuple[list[dict], str | None
                 "updated_at": datetime.datetime.fromtimestamp(
                     latest, tz=datetime.timezone.utc).isoformat(),
                 "hash_hint": f"{latest:.6f}",
+                "acl": ACLMetadata(visibility="connector_scope"),
             })
 
     new_cursor = f"{max_ts:.6f}" if max_ts else cursor
-    return items, new_cursor
+    return PollResult(items, new_cursor, snapshot_complete=snapshot_complete)

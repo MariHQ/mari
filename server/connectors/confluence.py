@@ -15,6 +15,7 @@ import urllib.parse
 from html.parser import HTMLParser
 
 from . import _net
+from ._protocol import ACLMetadata, PollResult
 
 PROVIDER = {
     "key": "confluence",
@@ -232,13 +233,14 @@ def _page_to_item(page: dict) -> dict:
     }
 
 
-def list_items(config: dict, cursor: str | None) -> tuple[list[dict], str | None]:
+def list_items(config: dict, cursor: str | None) -> PollResult:
     """List pages (optionally one space). Cursor = max lastUpdated ISO timestamp
     seen; on incremental runs only pages with lastUpdated > cursor are returned
     (the content API can't server-filter by date, so we filter client-side)."""
     items: list[dict] = []
     max_seen = cursor or ""
     start = 0
+    snapshot_complete = False
     for _ in range(MAX_PAGES):
         params = {
             "type": "page",
@@ -260,6 +262,9 @@ def list_items(config: dict, cursor: str | None) -> tuple[list[dict], str | None
             items.append(item)
         size = data.get("size", len(results))
         if not results or size < PAGE_SIZE:
+            snapshot_complete = True
             break
         start += size
-    return items, (max_seen or None)
+    for item in items:
+        item["acl"] = ACLMetadata(visibility="connector_scope")
+    return PollResult(items, max_seen or None, snapshot_complete=snapshot_complete)

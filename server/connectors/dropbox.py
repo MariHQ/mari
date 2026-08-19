@@ -10,6 +10,7 @@ Standalone-importable; all raw HTTP goes through _http() (patchable in tests).
 import json
 
 from . import _net
+from ._protocol import ACLMetadata, PollResult
 
 API = "https://api.dropboxapi.com/2"
 CONTENT_API = "https://content.dropboxapi.com/2"
@@ -125,9 +126,15 @@ def list_items(config, cursor):
     next_cursor = data.get("cursor")
 
     items = []
+    tombstones = []
     for e in entries:
+        if e.get(".tag") == "deleted":
+            path = e.get("path_lower") or ""
+            if path:
+                tombstones.append(path.lstrip("/"))
+            continue
         if not _wanted(e):
-            continue  # skips folders, deleted markers, non-text, oversized
+            continue  # skips folders, non-text, oversized
         path = e.get("path_lower") or e["id"]
         items.append({
             "path": path.lstrip("/"),
@@ -135,5 +142,7 @@ def list_items(config, cursor):
             "body": _download(config, path),
             "updated_at": e.get("server_modified", ""),
             "hash_hint": e.get("content_hash") or e.get("rev") or None,
+            "acl": ACLMetadata(visibility="connector_scope"),
         })
-    return items, next_cursor
+    return PollResult(items, next_cursor, snapshot_complete=True,
+                      tombstones=tombstones)

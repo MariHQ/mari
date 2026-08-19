@@ -25,7 +25,7 @@ warning rather than breaking the registry.
 ```python
 PROVIDER   # dict, described below
 def validate(config: dict) -> str | None: ...
-def list_items(config: dict, cursor: str | None) -> tuple[list[dict], str | None]: ...
+def list_items(config: dict, cursor: str | None) -> PollResult: ...
 ```
 
 ## `PROVIDER`
@@ -78,7 +78,7 @@ Check for missing required fields first, then make one cheap authenticated call
 (fetch the current user, list one page). Do not raise for an expected auth
 failure: return the message.
 
-## `list_items(config, cursor) -> (items, new_cursor)`
+## `list_items(config, cursor) -> PollResult`
 
 Lists the documents to ingest. This is where incremental sync lives.
 
@@ -86,10 +86,25 @@ Lists the documents to ingest. This is where incremental sync lives.
 `None` on the first run and on a full resync. Use it to skip work the vendor tells
 you is unchanged (a high-water timestamp, an opaque delta token, a page marker).
 
-Return a tuple of:
+Return `connectors._protocol.PollResult`. The worker continues to accept the old
+`(items, new_cursor)` tuple while existing connectors migrate, and `PollResult`
+itself can still be unpacked as two values by older tests/callers.
 
-1. `items`: a list of dicts, one per document, in the shape below.
-2. `new_cursor`: the cursor to persist for next time (a string, or `None`).
+```python
+PollResult(
+    items=[...],                 # documents in the shape below
+    cursor="opaque-or-time",     # cursor to persist after a complete poll
+    snapshot_complete=True,      # False when a page/safety cap was reached
+    tombstones=["stable/path"],  # explicit deletes from an incremental feed
+    checkpoint=None,             # optional provider checkpoint for observability
+)
+```
+
+When `snapshot_complete` is false the worker ingests returned changes but holds
+the previous cursor and never infers deletion from absence. This prevents a
+provider safety cap or interrupted listing from deleting valid documents or
+skipping the unvisited tail. Native delta feeds should return deleted paths as
+`tombstones`; these are authoritative even on an incremental run.
 
 Each item:
 
@@ -103,6 +118,10 @@ Each item:
                                       # is recorded but never chunked or embedded.
     "updated_at": "2026-08-01T…Z",    # optional; for display
     "hash_hint":  "2026-08-01T…Z",    # optional; see below
+    "acl": ACLMetadata(               # optional; omitted never means public
+        visibility="connector_scope",
+        principals=("group:engineering",),
+    ),
 }
 ```
 
@@ -122,11 +141,21 @@ Prefer `hash_hint` whenever the vendor gives you a cheap change signal. Either
 way, unchanged content is never re-embedded. Keeping ingestion incremental is a
 project-wide rule, not a per-connector nicety.
 
-### Deletes
+### Deletes and incomplete snapshots
 
 On a full resync (`cursor` arrives as `None`), return the connector's complete
 current set. The worker deletes any previously ingested document whose `path` is
-no longer present. On an incremental run you only need to return what changed.
+no longer present only if `snapshot_complete=True`. If the provider's page cap
+is reached, return `snapshot_complete=False`. On an incremental run, return
+explicit deletion markers in `tombstones`; absence is never deletion.
+
+## Errors and retries
+
+The worker centrally classifies connector exceptions as auth, rate-limit,
+transient, or permanent failures. It retries only rate-limit and transient
+failures, with a bounded delay. Exceptions should expose an integer `status`
+when the provider supplies an HTTP status. A connector may raise
+`ConnectorCallError` when it needs to state the class or `retry_after` directly.
 
 ## Networking: use the shared guard, always
 
@@ -163,9 +192,13 @@ prefixed with the bare `key`.
       honest `help` text. Secret fields marked `"secret": True`.
 - [ ] `validate` makes one cheap authenticated call and returns `None` or a
       user-facing message.
-- [ ] `list_items` returns `(items, new_cursor)` with stable `path`s, uses
+- [ ] `list_items` returns `PollResult` (legacy tuples remain accepted) with stable `path`s, uses
       `cursor` to skip unchanged work, and sets `hash_hint` when the vendor offers
       a cheap change signal.
+- [ ] Page/safety caps set `snapshot_complete=False`; native deleted entries
+      become `tombstones`.
+- [ ] ACL metadata is supplied when the provider exposes it. Missing ACL data is
+      connector-scoped, never implicitly public.
 - [ ] All HTTP goes through `_net.fetch`.
 - [ ] The module is importable on its own (`python -c "import connectors.yours"`),
       so it does not import server internals at module top level beyond `_net`.
