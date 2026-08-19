@@ -1,16 +1,14 @@
 /* Sources & connectors adapter.
  *
- * Three backends meet here, and two of them only existed over REST before this
- * page: `connectorCatalog` and `botsStatus` are new GraphQL fields that call
- * the very same `/connectors/catalog` and `/bots/status` functions, so the
- * console and the REST surface can never disagree about what is wired up. */
+ * `connectorCatalog` exposes the same catalog as the REST connector endpoint,
+ * so the console and ingestion surface cannot disagree about what is wired.
+ * Bot delivery belongs to Destinations and is deliberately not queried here. */
 
 import type {
   Connector, FirstSync, SourcesData,
 } from "@mari-design/components/pages/SourcesPage";
 import type { Source, SyncState, Tier } from "@mari-design/components/features/SourcesConnectorCard";
 import type { WizardProviderSpec } from "@mari-design/components/features/SourcesConnectorWizard";
-import type { GithubStatus, SlackStatus } from "@mari-design/components/features/SourcesBots";
 import type { PropertyItem } from "@mari-design/components";
 import { useQuery } from "../lib/api";
 import type { PageData } from "./types";
@@ -23,7 +21,6 @@ const QUERY = `{
     syncIntervalMinutes syncFlowId
   }
   connectorCatalog
-  botsStatus
 }`;
 
 type Res = {
@@ -36,10 +33,6 @@ type Res = {
     key: string; name: string; blurb: string; docsUrl?: string; connected?: boolean;
     fields: { key: string; label: string; secret?: boolean; placeholder?: string; help?: string; multiline?: boolean; required?: boolean }[];
   }[];
-  botsStatus: {
-    slack: { configured: boolean; teamName: string; lastEventAt: string | null; lastError: string | null };
-    github: { webhookConfigured: boolean; lastDeliveryAt: string | null; sources: { id: number; repo: string }[] };
-  } | null;
 };
 
 /* ── mapping helpers ────────────────────────────────────────────────────── */
@@ -110,23 +103,6 @@ export function mapCatalog(res: Res): WizardProviderSpec[] {
   }));
 }
 
-export function mapBots(res: Res): { slack: SlackStatus; github: GithubStatus } {
-  const b = res.botsStatus;
-  return {
-    slack: {
-      configured: Boolean(b?.slack?.configured),
-      teamName: b?.slack?.teamName || undefined,
-      lastEventAt: b?.slack?.lastEventAt || undefined,
-      lastError: b?.slack?.lastError || undefined,
-    },
-    github: {
-      webhookConfigured: Boolean(b?.github?.webhookConfigured),
-      lastDeliveryAt: b?.github?.lastDeliveryAt || undefined,
-      repos: (b?.github?.sources ?? []).map((s) => s.repo).filter(Boolean),
-    },
-  };
-}
-
 /** The standalone first-sync panel reports on one source a connect flow just
  *  created. Nothing has been connected during a page load, so it reports on
  *  nothing — every counter zero, no provider, no error. */
@@ -140,7 +116,6 @@ const NO_FIRST_SYNC: FirstSync = {
 export const EMPTY: SourcesData = {
   view: "grid", sources: [], catalog: [], connector: null, connectPhase: "configure",
   uploadFiles: [], syncPhase: "queued", firstSync: NO_FIRST_SYNC,
-  slack: { configured: false }, github: { webhookConfigured: false, repos: [] },
   summary: [],
 };
 
@@ -148,7 +123,6 @@ export const EMPTY: SourcesData = {
 export function buildSources(res: Res | null): SourcesData {
   if (!res) return EMPTY;
   const sources = mapSources(res);
-  const bots = mapBots(res);
   const catalog = mapCatalog(res);
 
   // Rail facts, counted off the same rows the grid draws.
@@ -172,8 +146,6 @@ export function buildSources(res: Res | null): SourcesData {
     uploadFiles: [],
     syncPhase: "queued",
     firstSync: NO_FIRST_SYNC,
-    slack: bots.slack,
-    github: bots.github,
     summary,
   };
 }

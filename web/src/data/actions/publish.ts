@@ -20,6 +20,7 @@
 import type { PublishActions } from "@mari-design/components/pages/PublishPage";
 import { gql } from "../../lib/api";
 import { mutate, type ActionContext } from "./index";
+import { botActions } from "./bots";
 
 const SITES = `{ sites { id name status theme } }`;
 const RELEASES = `{ releases { id siteId version } }`;
@@ -59,11 +60,12 @@ async function currentSite(): Promise<SiteRow> {
 
 export function publishActions({ navigate }: ActionContext): PublishActions {
   return {
+    ...botActions(),
     /* The top-level tab goes in the URL, so a Publish tab survives a reload
        and can be linked — `web/src/data/publish.ts` reads `?tab` straight back
        out. Switching to MCP leaves whichever site was open, because the MCP
        half is not about a site. */
-    openSection: (section) => navigate(section === "mcp" ? "/publish?tab=mcp" : "/publish"),
+    openSection: (section) => navigate(section === "sites" ? "/publish" : `/publish?tab=${section}`),
     // "All sites" is the Publish page with no site selected.
     openSites: () => navigate("/publish"),
     openSite: (id: number) => navigate(`/publish?site=${id}`),

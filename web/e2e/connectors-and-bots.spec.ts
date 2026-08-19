@@ -4,9 +4,18 @@ import { installMockApi, type MockApi } from "./fixtures/mock-api";
 let api: MockApi;
 test.beforeEach(async ({ page }) => {
   api = await installMockApi(page);
+});
+
+async function openSources(page: import("@playwright/test").Page) {
   await page.goto("/sources");
   await expect(page.getByRole("heading", { name: "Sources" })).toBeVisible();
-});
+}
+
+async function openBotsDestination(page: import("@playwright/test").Page) {
+  await page.goto("/publish?tab=bots");
+  await expect(page.getByRole("heading", { name: "Destinations" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Bots", exact: true })).toHaveAttribute("aria-pressed", "true");
+}
 
 const connectors = [
   { name: "Confluence", fields: { "Site URL": "https://acme.atlassian.test", "Atlassian account email": "docs@example.test", "API token": "atl-secret" }, transport: "rest" },
@@ -17,6 +26,7 @@ const connectors = [
 
 for (const connector of connectors) {
   test(`${connector.name} credentials validate and start polling from the browser`, async ({ page }) => {
+    await openSources(page);
     await page.getByRole("button", { name: "Add source" }).click();
     const dialog = page.getByRole("dialog", { name: /Connect/ });
     await dialog.getByRole("button", { name: new RegExp(connector.name) }).click();
@@ -41,6 +51,7 @@ for (const connector of connectors) {
 }
 
 test("connected sources can request incremental and full polls", async ({ page }) => {
+  await openSources(page);
   await page.getByRole("button", { name: "Actions for acme/handbook" }).click();
   await page.getByRole("menuitem", { name: "Sync now" }).click();
   await expect.poll(() => api.calls.some((c) => c.query.includes("syncSource"))).toBeTruthy();
@@ -49,8 +60,15 @@ test("connected sources can request incremental and full polls", async ({ page }
   await expect.poll(() => api.calls.some((c) => c.query.includes("resyncSource"))).toBeTruthy();
 });
 
+test("Sources exposes connector ingestion without a Bots tab", async ({ page }) => {
+  await openSources(page);
+  await expect(page.getByRole("button", { name: "Add source" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Bots", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Connectors", exact: true })).toHaveCount(0);
+});
+
 test("Slack bot setup saves secrets, calls auth.test, and never renders the token", async ({ page }) => {
-  await page.getByRole("button", { name: "Bots" }).click();
+  await openBotsDestination(page);
   await page.getByRole("button", { name: "Manage setup" }).first().click();
   const drawer = page.getByRole("dialog", { name: "Set up Slack bot" });
   await drawer.getByRole("button", { name: "Next" }).click();
@@ -67,7 +85,7 @@ test("Slack bot setup saves secrets, calls auth.test, and never renders the toke
 });
 
 test("GitHub webhook setup persists a generated signing secret and observes delivery", async ({ page }) => {
-  await page.getByRole("button", { name: "Bots" }).click();
+  await openBotsDestination(page);
   await page.getByRole("button", { name: "Manage setup" }).nth(1).click();
   const drawer = page.getByRole("dialog", { name: "Set up GitHub webhook" });
   await expect(drawer.getByText(/webhooks\/github/)).toBeVisible();

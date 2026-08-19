@@ -102,27 +102,6 @@ export async function testAny(provider: string, config: Record<string, string>):
   return { ok: r.ok, error: r.error };
 }
 
-/* ── bot credentials ────────────────────────────────────────────────────── */
-
-const UPDATE_SETTING = `mutation($key: String!, $value: JSON!) { updateSetting(key: $key, value: $value) }`;
-
-/** Everything in a bot's settings row EXCEPT its secrets, which the read side
- *  masks. `updateSetting` replaces a row wholesale, so what the form does not
- *  touch — the team name, the last event, the last error — has to be carried
- *  across or saving a token would silently erase the wiring around it. The
- *  masked read's derived `*_set` / `*_hint` keys are dropped: they describe
- *  the row rather than belonging to it, and writing them back would leave the
- *  webhook handler reading fields it does not know. */
-async function botRow(key: "slack_bot" | "github_bot"): Promise<Record<string, unknown>> {
-  const res = await gqlResult<{ settings: { key: string; value: unknown }[] }>(`{ settings { key value } }`);
-  if (!res.ok) throw new Error(res.error);
-  const row = (res.data?.settings ?? []).find((s) => s.key === key)?.value;
-  if (!row || typeof row !== "object") return {};
-  return Object.fromEntries(
-    Object.entries(row as Record<string, unknown>).filter(([k]) => !k.endsWith("_set") && !k.endsWith("_hint")),
-  );
-}
-
 /* ── factory ────────────────────────────────────────────────────────────── */
 
 /** The numeric source id the sync mutations take. The card carries it as a
@@ -190,31 +169,6 @@ export function sourcesActions(): SourcesActions {
         `mutation($id: Int!, $trigger: String!) { setWorkflowTrigger(workflowId: $id, trigger: $trigger) }`,
         { id: flowId, trigger });
       if (d?.setWorkflowTrigger === false) throw new Error("That sync flow is no longer in this workspace.");
-    },
-
-    /* ── bots ─────────────────────────────────────────────────────────────*/
-
-    /* The bot credentials live in the `slack_bot` / `github_bot` settings rows
-       — the very rows `/bots/status` reports off and the webhook handlers
-       verify against — so writing them there is what makes a saved token one
-       the product will actually use. */
-    saveSlackCredentials: async ({ botToken, signingSecret }) => {
-      await mutate(UPDATE_SETTING, {
-        key: "slack_bot",
-        value: { ...(await botRow("slack_bot")), bot_token: botToken, signing_secret: signingSecret.trim() },
-      });
-    },
-    // Slack's own `auth.test`, run by the server that holds the token. "Not
-    // ok" is a normal outcome of a test, so this answers rather than throwing.
-    testSlackConnection: async () => {
-      const r = await postJson<{ ok: boolean; team?: string; error?: string }>("/bots/slack/test", {});
-      return { ok: r.ok, teamName: r.team || undefined, error: r.error };
-    },
-    saveGithubWebhookSecret: async (secret: string) => {
-      await mutate(UPDATE_SETTING, {
-        key: "github_bot",
-        value: { ...(await botRow("github_bot")), webhook_secret: secret.trim() },
-      });
     },
   };
 }

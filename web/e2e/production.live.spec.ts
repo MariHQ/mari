@@ -65,7 +65,8 @@ test("LIVE Slack bot token reaches Slack auth.test", async ({ page }) => {
   test.skip(!mutations, "Set MARI_E2E_MUTATIONS=1 to allow sandbox bot configuration.");
   test.skip(!env.MARI_E2E_SLACK_BOT_TOKEN || !env.MARI_E2E_SLACK_SIGNING_SECRET, "Missing Slack bot credentials.");
   await signIn(page);
-  await page.getByRole("button", { name: "Bots" }).click();
+  await page.goto("/publish?tab=bots");
+  await expect(page.getByRole("button", { name: "Bots", exact: true })).toHaveAttribute("aria-pressed", "true");
   await page.getByRole("button", { name: "Manage setup" }).first().click();
   const drawer = page.getByRole("dialog", { name: "Set up Slack bot" });
   await drawer.getByRole("button", { name: "Next" }).click();

@@ -701,6 +701,10 @@ const PUBLISH_RES: any = {
     { key: "slate", name: "Slate", accent: "#3d5a80", bg: "#f4f6f8" },
   ],
   settings: [{ key: "deploy", value: { bucket: "acme-docs-prod", region: "us-east-1" } }],
+  botsStatus: {
+    slack: { configured: true, teamName: "Acme", lastEventAt: "2026-07-21T13:00:00", lastError: null },
+    github: { webhookConfigured: false, lastDeliveryAt: null, sources: [{ id: 1, repo: "acme/handbook" }] },
+  },
 };
 const PUBLISH_FEATURES: any[] = [
   { key: "search", label: "Search", hint: "Client-side index.", on: true },
@@ -728,6 +732,8 @@ check("publish: gates carry their real outcome",
 check("publish: the deploy target comes off the settings row",
   publishData.site?.bucket === "acme-docs-prod");
 check("publish: a live site is published, not a draft", publishData.phase === "published");
+check("publish: bot destinations report the repositories their webhook covers",
+  publishData.github.repos.join() === "acme/handbook");
 check("publish: no sites means nothing to publish", buildPublish({
   sites: [], releases: [], mcpServers: [], siteThemePresets: [], settings: [],
 } as any, 1).site === null);
@@ -781,8 +787,6 @@ check("sources: a schedule is reported only where a sync flow owns the source",
   && sourcesData.sources[2].syncIntervalMinutes === undefined);
 check("sources: the catalog carries specs, never values",
   sourcesData.catalog[1].fields[0].secret === true);
-check("sources: the bots tab reads the repos the webhook covers",
-  sourcesData.github.repos.join() === "acme/handbook");
 check("sources: rail counts come off the grid",
   sourcesData.summary.find((s) => s.label === "Failing")?.value === "1");
 check("sources: renders the grid",

@@ -22,6 +22,7 @@ import type {
 import type { McpServer } from "@mari-design/components/features/PublishMcpServers";
 import { useQuery } from "../lib/api";
 import type { PageData } from "./types";
+import { EMPTY_BOTS, mapBots, type BotsStatusResponse } from "./bots";
 
 /* ── query ──────────────────────────────────────────────────────────────── */
 
@@ -32,6 +33,7 @@ const QUERY = `{
   siteThemePresets { key name accent bg }
   settings { key value }
   tagDefs { tag }
+  botsStatus
 }`;
 
 /* The generator's switches resolve per site: the shipped default overlaid with
@@ -43,7 +45,7 @@ const FEATURES_QUERY = `query($siteId: Int) {
   siteFeatures(siteId: $siteId) { key label hint on }
 }`;
 
-type Res = {
+type Res = BotsStatusResponse & {
   sites: {
     id: number; name: string; domain: string; status: string;
     theme: Record<string, unknown> | null;
@@ -171,6 +173,7 @@ export const EMPTY: PublishData = {
   view: "site-list", editorTab: "content", phase: "draft",
   sites: [], tagOptions: [], site: null, servers: [], serverCount: 0,
   draft: NO_DRAFT, created: NO_CREATED,
+  slack: EMPTY_BOTS.slack, github: EMPTY_BOTS.github,
 };
 
 /** Pure: the whole response → everything Publish renders. `features` comes
@@ -183,9 +186,11 @@ export function buildPublish(
   /* `?tab=mcp` is the MCP half whatever else the route says, so the tab the
      reader clicked is the tab a reload comes back to. */
   const opening = (site: DocSite | null): PublishData["view"] =>
-    section === "mcp" ? "mcp-list" : site ? "site-editor" : creating ? "site-new" : "site-list";
+    section === "bots" ? "bots" : section === "mcp" ? "mcp-list"
+      : site ? "site-editor" : creating ? "site-new" : "site-list";
   if (!res) return { ...EMPTY, view: opening(null) };
   const servers = mapServers(res);
+  const bots = mapBots(res);
   const site = mapSite(res, siteId, features);
   const row = pickSiteRow(res, siteId);
   return {
@@ -207,6 +212,8 @@ export function buildPublish(
     serverCount: servers.length,
     draft: NO_DRAFT,
     created: NO_CREATED,
+    slack: bots.slack,
+    github: bots.github,
   };
 }
 
@@ -219,7 +226,8 @@ export function usePublish(): PageData<PublishData> {
   const creating = params.get("new") !== null;
   // Which top-level tab the reader is on. Anything but the MCP half is the
   // doc sites half, which is also what a URL with no `tab` at all means.
-  const section: PublishSection = params.get("tab") === "mcp" ? "mcp" : "sites";
+  const tab = params.get("tab");
+  const section: PublishSection = tab === "mcp" || tab === "bots" ? tab : "sites";
   const q = useQuery<Res>(QUERY, { map: (d: Res) => d });
 
 /* The route names the subject; the query behind it takes no variables, so
