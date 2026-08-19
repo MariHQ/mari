@@ -1,5 +1,5 @@
 import type { SourcesBotsActions } from "@mari-design/components/features/SourcesBots";
-import { gqlResult } from "../../lib/api";
+import { gqlResult, projectHeaders } from "../../lib/api";
 import { mutate } from "./index";
 
 const UPDATE_SETTING = `mutation($key: String!, $value: JSON!) { updateSetting(key: $key, value: $value) }`;
@@ -21,7 +21,7 @@ async function botRow(key: "slack_bot" | "github_bot"): Promise<Record<string, u
 async function postBot<T>(path: string): Promise<T> {
   const res = await fetch(path, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...projectHeaders() },
     body: "{}",
   });
   const json = await res.json().catch(() => ({}));

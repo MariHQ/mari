@@ -19,7 +19,7 @@ import type { DigestTopic } from "@mari-design/components/features/OverviewDiges
 import type { DateRange } from "@mari-design/components/data-display/DateRangePicker";
 import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { useQuery } from "../lib/api";
+import { projectHeaders, useQuery } from "../lib/api";
 import { useAuth } from "../lib/auth";
 import { rangeFromParams, rangeVars } from "./range";
 import type { PageData } from "./types";
@@ -191,7 +191,7 @@ function useTimeZone(signedIn: boolean): string {
     let live = true;
     void (async () => {
       try {
-        const res = await fetch("/auth/preferences");
+        const res = await fetch("/auth/preferences", { headers: projectHeaders() });
         if (!res.ok) return;
         const body = (await res.json()) as { timezone?: string };
         if (live) setZone(String(body.timezone ?? ""));

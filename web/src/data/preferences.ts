@@ -7,6 +7,7 @@
  */
 
 import { useCallback, useEffect, useState } from "react";
+import { projectHeaders } from "../lib/api";
 import type { PreferencesData, AuthProvider } from "@mari-design/components/pages/PreferencesPage";
 import type { PropertyItem } from "@mari-design/components/data-display/PropertyList";
 import { fmtDate } from "@mari-design/components/tokens/format";
@@ -78,7 +79,7 @@ export function usePreferences(): PageData<PreferencesData> {
 
   const load = useCallback(async () => {
     try {
-      const res = await fetch("/auth/preferences");
+      const res = await fetch("/auth/preferences", { headers: projectHeaders() });
       if (!res.ok) throw new Error(`The API answered ${res.status}.`);
       setData(buildPreferences(await res.json()));
       setError(null);

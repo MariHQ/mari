@@ -20,7 +20,7 @@
 
 import type { SourcesActions } from "@mari-design/components/pages/SourcesPage";
 import type { Source } from "@mari-design/components/features/SourcesConnectorCard";
-import { clearQueryCache, gqlResult } from "../../lib/api";
+import { clearQueryCache, gqlResult, projectHeaders } from "../../lib/api";
 import { mutate } from "./index";
 
 /* ── REST helpers (shared with the welcome/onboarding actions) ───────────── */
@@ -30,7 +30,7 @@ import { mutate } from "./index";
 export async function postJson<T = any>(path: string, body: unknown): Promise<T> {
   const res = await fetch(path, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...projectHeaders() },
     body: JSON.stringify(body),
   });
   const json = await res.json().catch(() => ({}));
@@ -52,7 +52,7 @@ export async function uploadDocuments(files: File[]): Promise<void> {
   if (files.length === 0) return;
   const form = new FormData();
   for (const f of files) form.append("files", f, f.name);
-  const res = await fetch("/onboard/upload", { method: "POST", body: form });
+  const res = await fetch("/onboard/upload", { method: "POST", headers: projectHeaders(), body: form });
   const json = await res.json().catch(() => ({}));
   if (!res.ok) {
     throw new Error(typeof (json as any)?.detail === "string" ? (json as any).detail : `Upload failed with HTTP ${res.status}.`);

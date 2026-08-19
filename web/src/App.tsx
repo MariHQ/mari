@@ -44,7 +44,7 @@ const APP_PAGES = PAGES.filter((p) => !LIBRARY_ONLY.has(p.id));
  *  search, notifications. One hook, so the not-found page below is framed by
  *  the same console as everything else rather than a bare white box. */
 function useShellChrome(): ShellChrome {
-  const { user, logout } = useAuth();
+  const { user, logout, projects, activeProject, selectProject } = useAuth();
   const navigate = useNavigate();
   // The bell and the search overlay are the same on every page, so they are
   // fetched here rather than by 25 page adapters.
@@ -56,6 +56,12 @@ function useShellChrome(): ShellChrome {
       ? { name: user.name, initials: user.initials, detail: user.role === "admin" ? "Admin" : user.role }
       : undefined,
     onSignOut: logout,
+    projects: projects.map((project) => ({ id: project.id, name: project.name, detail: project.role })),
+    activeProjectId: activeProject?.id,
+    onSelectProject: (project) => {
+      const selected = projects.find((candidate) => String(candidate.id) === String(project.id));
+      if (selected) void selectProject(selected);
+    },
     // The sidebar emits a NAV id, which is not always a page id: five
     // Settings pages share the "settings" nav item, so looking the nav id up
     // directly found nothing and Settings went nowhere. The library resolves
@@ -77,7 +83,7 @@ function useShellChrome(): ShellChrome {
     // page and the search overlay's "recent" list permanently empty.
     notifications,
     recentSearches,
-  }), [user, logout, navigate, notifications, recentSearches]);
+  }), [user, logout, projects, activeProject, selectProject, navigate, notifications, recentSearches]);
 }
 
 

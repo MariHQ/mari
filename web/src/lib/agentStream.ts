@@ -4,6 +4,8 @@
 // as components/chat/stream.ts — the contract on the server side
 // (server/agentchat.py) is unchanged.
 
+import { projectHeaders } from "./api";
+
 type AgentToolStart = { name: string; args: Record<string, unknown> };
 type AgentToolResult = { name: string; summary: string; ok: boolean };
 
@@ -28,7 +30,7 @@ export async function agentChatStream(
   try {
     const res = await fetch("/agent/chat", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...projectHeaders() },
       body: JSON.stringify({ session_id: sessionId, message }),
       signal,
     });

@@ -4,6 +4,18 @@
 
 import { useCallback, useEffect, useState } from "react";
 
+let activeProject = "";
+
+/** Project scope is an explicit request header, never mutable session state. */
+export function setActiveProject(project: string | number | null) {
+  activeProject = project == null ? "" : String(project);
+  clearQueryCache();
+}
+
+export function projectHeaders(): Record<string, string> {
+  return activeProject ? { "X-Mari-Project": activeProject } : {};
+}
+
 type GqlResult<T> = { ok: true; data: T } | { ok: false; error: string };
 
 /* ── session recovery ─────────────────────────────────────────────────────
@@ -60,7 +72,7 @@ export async function gqlResult<T = any>(query: string, variables?: Record<strin
   try {
     const res = await fetch("/graphql", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...projectHeaders() },
       body: JSON.stringify({ query, variables }),
     });
     // Rejected session: re-establish it once and ask again. If that is not
