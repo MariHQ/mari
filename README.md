@@ -41,7 +41,7 @@ Everything runs on your infrastructure: Postgres + pgvector for storage and sear
 - Honest telemetry: usage counters ("searches", "answers served") count real events, from the day counting started.
 
 ### 🤖 The Mari agent
-- A **Claude-Code-style agent dock** on every page (floating launcher, bottom right): compact stream, visible tool calls with expandable results, streaming tokens.
+- An **agent dock** on every page (floating launcher, bottom right): compact stream, visible tool calls with expandable results, streaming tokens.
 - It can do what you can do: search, read **and edit** documents, tag, approve answers, sync sources, run flows, create tasks — and **navigate the app** while the conversation stays open.
 - Safety rails: edits require the agent to read the document first in the same turn; navigation is whitelist-validated; every action lands in the audit trail.
 
@@ -126,6 +126,19 @@ The setup token is good for **24 hours**; if it expires, restart the API for a n
 After that the workspace is **invite-only**: admins invite members from Settings → Members, and only an invited address can register.
 
 **Optional — local LLM features** (chat, refine, fact-check, digest, brand import): run [ollama](https://ollama.com) with `nomic-embed-text` and `gemma3:4b` pulled. Without it, search falls back to keyword ranking and LLM features degrade to deterministic fallbacks — the product stays functional.
+
+### Testing
+
+```sh
+npm --prefix web install
+(cd web && npx playwright install chromium)
+make test                    # server, web contract/smoke, and Playwright
+make test-live-ollama        # real local Ollama generation + embedding
+```
+
+Credential-gated sandbox connector and bot checks are documented in
+[`docs/workflow-test-matrix.md`](docs/workflow-test-matrix.md). They are never
+run implicitly because they create sources and workflow runs.
 
 ### Configuration
 

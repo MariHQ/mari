@@ -1,4 +1,5 @@
 node_modules/
+.artifacts/
 dist/
 desktop/release/
 desktop/vendor/

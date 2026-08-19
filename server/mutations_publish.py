@@ -9,6 +9,7 @@ import strawberry
 from strawberry.scalars import JSON
 
 import brandimport
+import config
 import flowengine
 import llm
 import sitebuilder
@@ -440,12 +441,15 @@ class MutPublish:
         slug = _re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "server"
         token = "mari_mcp_" + secrets.token_hex(12)
         caps = [c for c in (capabilities or []) if isinstance(c, str)]
-        tools = {"search": 3, "facts": 4, "glossary": 2, "chat": 1, "lineage": 2, "answers": 2}
+        tools = {"search": 1, "facts": 1, "glossary": 1, "chat": 1, "lineage": 1, "answers": 1}
         n_tools = sum(tools.get(c, 0) for c in caps) or 1
+        base = str(config.get("auth", "oauth_redirect_base") or "http://localhost:8000").rstrip("/")
         exec_("""INSERT INTO mcp_servers (name, url, scope, status, tools, config, token)
                  VALUES (%s, %s, %s, 'connected', %s, %s, %s)
-                 ON CONFLICT (name) DO UPDATE SET config = EXCLUDED.config, tools = EXCLUDED.tools""",
-              (name, f"https://mcp.mari.cloud/{slug}", scope, n_tools,
+                 ON CONFLICT (name) DO UPDATE SET url = EXCLUDED.url, scope = EXCLUDED.scope,
+                   status = EXCLUDED.status, config = EXCLUDED.config, tools = EXCLUDED.tools,
+                   token = EXCLUDED.token""",
+              (name, f"{base}/mcp/{slug}", scope, n_tools,
                json.dumps({"capabilities": caps}), token))
         audit("created MCP server", name, actor["name"],
               detail=[("Scope", scope), ("Capabilities", ", ".join(caps) or "(none)")])
@@ -459,7 +463,7 @@ class MutPublish:
             exec_("UPDATE mcp_servers SET scope = %s WHERE id = %s", (scope, id))
         if capabilities is not None:
             caps = [c for c in capabilities if isinstance(c, str)]
-            tools = {"search": 3, "facts": 4, "glossary": 2, "chat": 1, "lineage": 2, "answers": 2}
+            tools = {"search": 1, "facts": 1, "glossary": 1, "chat": 1, "lineage": 1, "answers": 1}
             exec_("UPDATE mcp_servers SET config = jsonb_set(config, '{capabilities}', %s), tools = %s WHERE id = %s",
                   (json.dumps(caps), sum(tools.get(c, 0) for c in caps) or 1, id))
         exec_("INSERT INTO events (actor, verb, target) SELECT %s, 'updated MCP server', name FROM mcp_servers WHERE id = %s", (actor_name(), id))

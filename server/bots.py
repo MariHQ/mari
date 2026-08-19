@@ -205,6 +205,17 @@ def verify_slack_signature(raw: bytes, timestamp: str, signature: str, secret: s
     return hmac.compare_digest(expect, signature)
 
 
+def verify_github_signature(raw: bytes, signature: str, secrets: list[str]) -> bool:
+    """Accept a GitHub sha256 delivery signed by any configured webhook secret."""
+    return bool(secrets) and any(
+        hmac.compare_digest(
+            signature,
+            "sha256=" + hmac.new(secret.encode(), raw, hashlib.sha256).hexdigest(),
+        )
+        for secret in secrets if secret
+    )
+
+
 def _handle_slack_event(event: dict, token: str) -> None:
     """Background worker: answer the question and post back into Slack."""
     error = ""

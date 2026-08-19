@@ -35,6 +35,7 @@ import sitebuilder
 import agentchat
 import auth as auth_module
 import bots
+import mcp
 import connectors_api
 import onboard
 import repoaudit
@@ -81,6 +82,7 @@ _authed = [Depends(auth_module.require_user)]
 app.include_router(GraphQLRouter(schema, context_getter=graphql_context), prefix="/graphql")
 app.include_router(auth_module.router)
 app.include_router(bots.router)  # setup endpoints guard themselves; webhooks stay signature-verified
+app.include_router(mcp.router)  # published MCP servers authenticate with their own bearer tokens
 app.include_router(connectors_api.router, dependencies=_authed)
 app.include_router(agentchat.router, dependencies=_authed)
 app.include_router(onboard.router, dependencies=_authed)
@@ -205,9 +207,6 @@ def chat(body: ChatIn, user: dict = Depends(auth_module.require_user)):
 
 @app.post("/webhooks/github")
 async def github_webhook(request: "Request"):
-    import hashlib
-    import hmac
-
     raw = await request.body()
     # Either the env/config secret or the self-serve settings.github_bot secret
     # validates (BOTS-CONTRACT §B — the UI saves its own generated secret).
@@ -225,10 +224,7 @@ async def github_webhook(request: "Request"):
             401, "This webhook has no secret configured, so no delivery can be verified. "
                  "Set MARI_GITHUB_WEBHOOK_SECRET, or generate one in Settings → Bots.")
     sig = request.headers.get("X-Hub-Signature-256", "")
-    if not any(
-        hmac.compare_digest(sig, "sha256=" + hmac.new(s.encode(), raw, hashlib.sha256).hexdigest())
-        for s in secrets
-    ):
+    if not bots.verify_github_signature(raw, sig, secrets):
         # A loud 401 so GitHub's delivery log surfaces the misconfiguration.
         raise HTTPException(401, "bad signature")
     try:
