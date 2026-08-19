@@ -90,3 +90,54 @@ test("Ollama embedding and generation settings save without cloud keys", async (
   expect(api.calls.some((c) => c.variables.key === "embedding" && (c.variables.value as any).provider === "ollama")).toBeTruthy();
   expect(api.calls.some((c) => c.variables.key === "llm" && (c.variables.value as any).provider === "ollama")).toBeTruthy();
 });
+
+test("enterprise gateway validates, saves masked credentials, and runs prompt-free health", async ({ page }) => {
+  await page.goto("/settings/models");
+  await expect(page.getByText("Enterprise LLM gateway", { exact: true })).toBeVisible();
+  await expect(page.getByText(/Ollama remains the open-source default/)).toBeVisible();
+  await expect(page.getByText(/Claude plugin/i)).toHaveCount(0);
+  await expect(page.getByRole("option", { name: /Enterprise gateway/ })).toHaveCount(2);
+
+  await page.getByLabel("Generation model").fill("rippling-chat");
+  await page.getByLabel("Embedding model").fill("rippling-embed");
+  await page.getByLabel("Routing headers (JSON)").fill("not-json");
+  await page.getByRole("button", { name: "Save gateway" }).click();
+  await expect(page.getByText("Routing headers must be valid JSON.")).toBeVisible();
+  expect(api.calls.filter((call) => call.query.includes("updateSetting"))).toHaveLength(0);
+
+  await page.getByLabel("Gateway base URL").fill("https://corp-gateway.example/v1");
+  await page.getByLabel("Routing headers (JSON)").fill('{"X-Tenant":"rippling"}');
+  await page.getByLabel("Request metadata (JSON)").fill('{"application":"mari-browser"}');
+  await page.getByLabel("Model routing header").fill("X-Model-ID");
+  await page.getByLabel("Retry count").fill("3");
+  await page.getByRole("button", { name: "Save gateway" }).click();
+  await expect.poll(() => api.calls.filter((call) => call.query.includes("updateSetting")).length).toBe(2);
+  const llmSave = api.calls.find((call) => call.query.includes("updateSetting") && call.variables.key === "llm");
+  const embedSave = api.calls.find((call) => call.query.includes("updateSetting") && call.variables.key === "embedding");
+  expect((llmSave?.variables.value as any).provider).toBe("gateway");
+  expect((llmSave?.variables.value as any).model).toBe("rippling-chat");
+  expect((llmSave?.variables.value as any).gateway.token).toBe("••••…oken");
+  expect((llmSave?.variables.value as any).gateway.headers).toEqual({ "X-Tenant": "rippling" });
+  expect((embedSave?.variables.value as any).provider).toBe("gateway");
+  expect((embedSave?.variables.value as any).model).toBe("rippling-embed");
+
+  await page.getByRole("button", { name: "Test gateway" }).click();
+  await expect(page.getByText("Gateway healthy", { exact: true })).toBeVisible();
+  await expect(page.getByText("LLM gateway is reachable and authenticated", { exact: true })).toBeVisible();
+  expect(api.calls.some((call) => call.query.includes("testLlmGateway"))).toBeTruthy();
+  await page.reload();
+  await expect(page.getByRole("textbox", { name: "Gateway token" })).toHaveValue("••••…oken");
+});
+
+test("enterprise gateway form remains usable on mobile", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/settings/models");
+  await expect(page.getByText("Enterprise LLM gateway", { exact: true })).toBeVisible();
+  await page.getByLabel("Gateway base URL").fill("https://mobile-gateway.example/v1");
+  await page.getByLabel("Generation model").fill("mobile-chat");
+  await page.getByLabel("Embedding model").fill("mobile-embed");
+  await page.getByRole("button", { name: "Save gateway" }).click();
+  await expect.poll(() => api.calls.some((call) => call.variables.key === "llm" && (call.variables.value as any).model === "mobile-chat")).toBeTruthy();
+  const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+  expect(overflow).toBeLessThanOrEqual(1);
+});

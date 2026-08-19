@@ -95,7 +95,7 @@ function initialData() {
     settings: [
       { key: "deploy", value: { bucket: "acme-docs", region: "us-west-2" } },
       { key: "embedding", value: { provider: "ollama", model: "nomic-embed-text", dims: 768, options: ["ollama:nomic-embed-text", "ollama:mxbai-embed-large"] } },
-      { key: "llm", value: { provider: "ollama", model: "gemma3:4b", options: ["ollama:gemma3:4b", "ollama:llama3.2"], keys: {} } },
+      { key: "llm", value: { provider: "ollama", model: "gemma3:4b", options: ["ollama:gemma3:4b", "ollama:llama3.2"], keys: {}, gateway: { base_url: "https://gateway.example.test/v1", token: "••••…oken", headers: { "X-Tenant": "acme" }, metadata: { application: "mari" }, model_header: "X-Model-ID", max_retries: 2 } } },
       { key: "chunking", value: { default: { strategy: "heading", max_tokens: 512, overlap: 64 } } },
       { key: "branding", value: { name: "Acme", primary: "#b04e2c" } },
     ],
@@ -215,6 +215,8 @@ export async function installMockApi(page: Page, options: {
       data = { updateMcpServer: true };
     } else if (/syncSource|resyncSource/.test(query)) {
       data = { syncSource: true, resyncSource: true };
+    } else if (/testLlmGateway/.test(query)) {
+      data = { testLlmGateway: { ok: true, detail: "LLM gateway is reachable and authenticated", models: 4, latency_ms: 12 } };
     } else if (/updateSetting/.test(query)) {
       const existing = state.settings.find((row: any) => row.key === variables.key);
       if (existing) existing.value = variables.value;
