@@ -53,7 +53,7 @@ export const EMPTY: SettingsGeneralData = {
   section: "workspace",
   name: "", slug: "", plan: "", timezone: "", language: "",
   save: "clean", slugError: null, summary: [], danger: false,
-  lineage: { maxNodes: 16, hopDepth: 1 },
+  lineage: { maxNodes: 16, hopDepth: 1, minConfidence: 0.8 },
 };
 
 /** Pure: the whole response → everything the page renders. */
@@ -109,8 +109,9 @@ export function buildSettingsGeneral(res: Res | null): SettingsGeneralData {
     // check yet, so they stay off rather than being offered to everyone.
     danger: false,
     lineage: {
-      maxNodes: Math.max(8, Math.min(35, Number(lineage.max_nodes) || 16)),
-      hopDepth: Math.max(1, Math.min(3, Number(lineage.hop_depth) || 1)),
+      maxNodes: Math.round(Math.max(8, Math.min(35, Number(lineage.max_nodes) || 16))),
+      hopDepth: Math.round(Math.max(1, Math.min(3, Number(lineage.hop_depth) || 1))),
+      minConfidence: Math.max(0.5, Math.min(1, Number(lineage.min_confidence) || 0.8)),
     },
   };
 }

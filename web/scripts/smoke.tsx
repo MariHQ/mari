@@ -536,7 +536,7 @@ const LINEAGE_RES: any = {
       staleDays: 0, orphan: true, inbound: 0, outbound: 0, docKind: "wormhole", group: "" },
   ],
   lineageEdges: [
-    { id: 1, fromId: "gh:c1", toId: "doc:pricing", kind: "references", date: "2026-07-19", meta: { derived: "llm" } },
+    { id: 1, fromId: "gh:c1", toId: "doc:pricing", kind: "references", date: "2026-07-19", meta: { derived: "llm", confidence: 0.9 } },
     { id: 2, fromId: "gh:c1", toId: "doc:pricing", kind: "similar", date: "2026-07-19", meta: null },
     { id: 3, fromId: "gh:c1", toId: "gone", kind: "references", date: "2026-07-19", meta: null },
     { id: 4, fromId: "doc:pricing", toId: "gh:c1", kind: "from_a_newer_linker", date: "2026-07-19", meta: null },

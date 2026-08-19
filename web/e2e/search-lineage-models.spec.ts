@@ -40,6 +40,7 @@ test("provenance and impact exclude symmetric context links", async ({ page }) =
     { id: 1, fromId: "dependent", toId: "source", kind: "references", date: "2026-08-19", meta: null },
     { id: 2, fromId: "dependent", toId: "neighbor", kind: "similar", date: "2026-08-19", meta: { sim: 0.94 } },
     { id: 3, fromId: "neighbor", toId: "source", kind: "contradicts", date: "2026-08-19", meta: null },
+    { id: 4, fromId: "neighbor", toId: "source", kind: "derived", date: "2026-08-19", meta: { derived: "llm", confidence: 0.7 } },
   ]);
 
   await page.goto("/lineage?mode=provenance&focal=dependent");
@@ -59,17 +60,21 @@ test("workspace lineage defaults persist and drive focused graph depth", async (
   await page.goto("/settings/general");
   await page.getByLabel("Maximum visible lineage nodes").selectOption("24");
   await page.getByLabel("Lineage dependency depth").selectOption("2");
+  await page.getByLabel("Minimum lineage confidence").selectOption("0.9");
   await page.getByRole("button", { name: "Save lineage defaults" }).click();
   await expect.poll(() => api.calls.some((call) =>
     call.query.includes("updateSetting") && call.variables.key === "lineage" &&
-    (call.variables.value as any).max_nodes === 24 && (call.variables.value as any).hop_depth === 2,
+    (call.variables.value as any).max_nodes === 24 && (call.variables.value as any).hop_depth === 2 &&
+    (call.variables.value as any).min_confidence === 0.9,
   )).toBeTruthy();
 
   await page.reload();
   await expect(page.getByLabel("Maximum visible lineage nodes")).toHaveValue("24");
   await expect(page.getByLabel("Lineage dependency depth")).toHaveValue("2");
+  await expect(page.getByLabel("Minimum lineage confidence")).toHaveValue("0.9");
   await page.goto("/lineage?mode=provenance&focal=github%3A1");
   await expect(page.getByText(/Showing 2 dependency hops/i)).toBeVisible();
+  await expect(page.getByText(/below 90% confidence/i)).toBeVisible();
 });
 
 test("Ollama embedding and generation settings save without cloud keys", async ({ page }) => {

@@ -40,7 +40,7 @@ export function settingsGeneralActions(): SettingsGeneralActions {
     saveLineageTuning: async (tuning: LineageTuning) => {
       await mutate(UPDATE_SETTING, {
         key: "lineage",
-        value: { max_nodes: tuning.maxNodes, hop_depth: tuning.hopDepth },
+        value: { max_nodes: tuning.maxNodes, hop_depth: tuning.hopDepth, min_confidence: tuning.minConfidence },
       });
     },
     // No handler for the danger zone: transferring or deleting a workspace has

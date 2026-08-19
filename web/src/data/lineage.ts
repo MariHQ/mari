@@ -33,7 +33,7 @@ type Res = {
   }[];
   lineageEdges: {
     id: number; fromId: string; toId: string; kind: string; date: string;
-    meta: { derived?: string; note?: string; evidence?: string; status?: string } | null;
+    meta: { derived?: string; confidence?: number; note?: string; evidence?: string; status?: string } | null;
   }[];
   graphStats: { activity: { date: string; count: number }[] } | null;
   graphViews: { id: number; name: string; state: string }[];
@@ -202,7 +202,7 @@ export function mapEdges(res: Res, nodes: LNode[]): LEdge[] {
 /** A workspace with no graph at all. Every drawer closed, the scrubber live. */
 export const EMPTY: LineageData = {
   nodes: [], edges: [], dates: [], activity: [], views: [],
-  lens: "source", layout: "flow", mode: "overview", tuning: { maxNodes: 16, hopDepth: 1 },
+  lens: "source", layout: "flow", mode: "overview", tuning: { maxNodes: 16, hopDepth: 1, minConfidence: 0.8 },
   focalId: null, trace: null, asOf: null, search: null, drawer: null,
   crumbs: null, extras: null, action: null,
 };
@@ -227,8 +227,9 @@ export function buildLineage(res: Res | null, view: LineageView = LIVE): Lineage
   const traced = view.trace && nodes.some((n) => n.id === view.trace!.originId) ? view.trace : null;
   const tuningRow = (res.settings ?? []).find((setting) => setting.key === "lineage")?.value;
   const tuning = tuningRow && typeof tuningRow === "object" ? tuningRow as Record<string, unknown> : {};
-  const maxNodes = Math.max(8, Math.min(35, Number(tuning.max_nodes) || 16));
-  const hopDepth = Math.max(1, Math.min(3, Number(tuning.hop_depth) || 1));
+  const maxNodes = Math.round(Math.max(8, Math.min(35, Number(tuning.max_nodes) || 16)));
+  const hopDepth = Math.round(Math.max(1, Math.min(3, Number(tuning.hop_depth) || 1)));
+  const minConfidence = Math.max(0.5, Math.min(1, Number(tuning.min_confidence) || 0.8));
   return {
     nodes,
     edges,
@@ -240,7 +241,7 @@ export function buildLineage(res: Res | null, view: LineageView = LIVE): Lineage
     lens: view.lens,
     layout: view.layout,
     mode: view.mode,
-    tuning: { maxNodes, hopDepth },
+    tuning: { maxNodes, hopDepth, minConfidence },
     focalId: focal?.id ?? null,
     trace: traced,
     asOf: asOfIndex(dates, view.asOf),
