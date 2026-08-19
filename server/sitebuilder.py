@@ -812,7 +812,16 @@ def build_mari_site(site: dict, docs: list[dict]) -> str:
     if changelog_slug:
         header_nav += f'<a href="{changelog_slug}.html">Changelog</a>'
 
-    def render(page: dict, active: str) -> str:
+    # Every page names its own URL. Without a canonical, Search Console filed
+    # the published pages as "duplicate without user-selected canonical"
+    # (2026-08-18): index.html is a copy of the first page, and the site is
+    # reachable both as /docs/canon/ and /docs/canon/index.html. The domain is
+    # host plus path (e.g. "mari.guru/docs/canon"), so the base is https://
+    # domain with one trailing slash; a site with no domain gets no canonical.
+    domain = str(site.get("domain") or "").strip().strip("/")
+    base_url = f"https://{domain}/" if domain else ""
+
+    def render(page: dict, active: str, canonical: str = "") -> str:
         body_md = _rewrite_doc_links(page["body"], page.get("source_path") or "", link_index,
                                       lambda slug, frag: f"{slug}.html" + (f"#{frag}" if frag else ""))
         body_html = _sanitize_html(markdown.markdown(body_md, extensions=["tables", "fenced_code"]))
@@ -837,10 +846,17 @@ def build_mari_site(site: dict, docs: list[dict]) -> str:
                   ('<script src="customize.js"></script>' if feat["customizer"] else "")
         site_id_js = (f"<script>window.__MARI_SITE_ID__ = {int(site['id'])};</script>"
                       if feat["customizer"] else "")
+        # First paragraph of the body, tags stripped, as the description.
+        text = _html_to_text(body_html).strip()
+        desc = re.split(r"(?<=[.!?])\s+", text, maxsplit=1)[0][:160] if text else ""
+        desc_tag = (f'<meta name="description" content="{html_mod.escape(desc, quote=True)}">\n'
+                    if desc else "")
+        canonical_tag = (f'<link rel="canonical" href="{html_mod.escape(canonical, quote=True)}">\n'
+                         if canonical else "")
         return f"""<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{title_esc} · {name_esc}</title>
-<link rel="icon" type="image/svg+xml" href="{FAVICON_HREF}">
+{desc_tag}{canonical_tag}<link rel="icon" type="image/svg+xml" href="{FAVICON_HREF}">
 <link rel="stylesheet" href="{FONTS}"><link rel="stylesheet" href="style.css">
 {site_id_js}</head>
 <body class="{html_mod.escape(body_class, quote=True)}" data-density="{html_mod.escape(density, quote=True)}">
@@ -852,17 +868,20 @@ def build_mari_site(site: dict, docs: list[dict]) -> str:
 {footer}
 </div>{scripts}</body></html>"""
 
-    for p in pages:
+    for i, p in enumerate(pages):
         # strip the duplicate leading h1 (we render the title ourselves)
         p2 = dict(p)
         p2["body"] = re.sub(r"^#\s+.*\n", "", p["body"], count=1)
-        (out / f"{p['slug']}.html").write_text(render(p2, p["slug"]))
+        # The first page is also index.html, so both copies claim the site
+        # root; every other page claims itself.
+        canonical = base_url if i == 0 else (f"{base_url}{p['slug']}.html" if base_url else "")
+        (out / f"{p['slug']}.html").write_text(render(p2, p["slug"], canonical))
     if pages:
         index = dict(pages[0])
         index["body"] = re.sub(r"^#\s+.*\n", "", index["body"], count=1)
-        (out / "index.html").write_text(render(index, pages[0]["slug"]))
+        (out / "index.html").write_text(render(index, pages[0]["slug"], base_url))
     else:
-        (out / "index.html").write_text(render({"slug": "index", "title": display_name(site), "body": "No documents matched this site's sources yet."}, "index"))
+        (out / "index.html").write_text(render({"slug": "index", "title": display_name(site), "body": "No documents matched this site's sources yet."}, "index", base_url))
     return str(out)
 
 
