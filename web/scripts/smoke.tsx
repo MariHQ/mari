@@ -49,6 +49,7 @@ import { EMPTY, mapOverview } from "../src/data/overview";
 import { buildApiKeys, buildMembers, mapApiKeys, mapGithubTeam, mapMembers } from "../src/data/settings";
 import { buildTasks, mapAssignees, mapStrip, mapTasks } from "../src/data/tasks";
 import { buildTrajectories, EMPTY as TRAJECTORIES_EMPTY } from "../src/data/trajectories";
+import { buildFocusedGraph, buildOverviewGraph } from "@mari-design/components/features/LineageDataModel";
 
 /* This file used to install a DOM shim so `DocReviewOutlinePanel` could be
    server-rendered: it derived its outline through `document.createElement`
@@ -557,11 +558,20 @@ check("lineage: the scrubber snaps to the dates things happened on",
   lineageData.dates.join() === "2026-07-19,2026-07-20");
 check("lineage: a saved view is read back, not just written",
   lineageData.views?.length === 1 && lineageData.views?.[0].name === "Canonical only");
+const lineageOverview = buildOverviewGraph(lineageData.nodes, lineageData.edges);
+check("lineage: overview rolls documents up before drawing",
+  lineageOverview.nodes.length === 2 && lineageOverview.nodes.every((node) => node.macro));
+check("lineage: overview omits similarity noise",
+  lineageOverview.edges.every((edge) => edge.rel !== "similar"));
+check("lineage: provenance follows dependent to source and ignores similarity",
+  buildFocusedGraph(lineageData.nodes, lineageData.edges, "gh:c1", "provenance", 1).nodes.length === 2);
+check("lineage: impact walks dependencies in reverse",
+  buildFocusedGraph(lineageData.nodes, lineageData.edges, "doc:pricing", "impact", 1).nodes.some((node) => node.id === "gh:c1"));
 /* The Views menu itself is a closed dropdown at render time (its content is
    unmounted until it is opened), so the assertion that it can list the view is
    that the view reached the page at all. */
 check("lineage: renders the graph",
-  render(lineage, { data: lineageData, loading: false, error: null }).includes("Pricing FAQ"));
+  render(lineage, { data: lineageData, loading: false, error: null }).includes("Notion · 1 document"));
 states(lineage, LINEAGE_EMPTY);
 
 /* ── Flows ──────────────────────────────────────────────────────────────── */

@@ -23,6 +23,12 @@ export function lineageActions({ navigate }: ActionContext): LineageActions {
       params.set("focal", nodeId);
       navigate(`/lineage?${params.toString()}`);
     },
+    setMode: (mode, focalId) => {
+      const params = new URLSearchParams(window.location.search);
+      params.set("mode", mode);
+      if (focalId) params.set("focal", focalId);
+      navigate(`/lineage?${params.toString()}`);
+    },
     // x/y are 0..1 fractions of the canvas, which is exactly what `documents.
     // graph_x`/`graph_y` store and what the lineage query reads back.
     pinNode: async ({ docId, x, y }) => {

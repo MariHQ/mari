@@ -54,7 +54,7 @@ test("a 5,000-row trajectory archive renders only one bounded page", async ({ pa
   expect(await page.locator("article").count()).toBeLessThanOrEqual(25);
 });
 
-test("large lineage renders a ranked 35-node viewport and reports what it omitted", async ({ page }) => {
+test("large lineage opens as a comprehensible aggregate instead of a 35-node hairball", async ({ page }) => {
   const count = 2000;
   const nodes = Array.from({ length: count }, (_, index) => ({
     id: `doc-${index + 1}`, docId: index + 1, title: `Document ${index + 1}`, source: index % 2 ? "github" : "docs",
@@ -72,8 +72,9 @@ test("large lineage renders a ranked 35-node viewport and reports what it omitte
   api.setData("graphStats", { docs: count, edges: edges.length, sources: 2, people: 50,
     activity: [{ date: "2026-08-19", count }] });
   await page.goto("/lineage");
-  await expect(page.getByText(/showing 35 of 2000 nodes/i)).toBeVisible();
-  await expect(page.getByRole("group", { name: /Documents\. Use the arrow keys/ }).getByRole("button")).toHaveCount(35);
+  await expect(page.getByText(/2 groups · 2,000 documents, rolled up/i)).toBeVisible();
+  await expect(page.getByRole("group", { name: /Documents\. Use the arrow keys/ }).getByRole("button")).toHaveCount(2);
+  await expect(page.getByText("Document 1", { exact: true })).toHaveCount(0);
   const horizontalOverflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
   expect(horizontalOverflow).toBeLessThanOrEqual(2);
 });
