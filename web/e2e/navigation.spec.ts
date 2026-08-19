@@ -2,17 +2,34 @@ import { expect, test } from "@playwright/test";
 import { installMockApi } from "./fixtures/mock-api";
 
 const ROUTES = [
-  ["/", "Overview"], ["/tasks", "Tasks"], ["/facts", "Facts"],
-  ["/decisions", "Decisions"], ["/knowledge", "Knowledge"],
-  ["/knowledge/doc?id=1", "Retention runbook"], ["/answers", "Approved answers"],
-  ["/insights", "Insights"], ["/audit", "Repository audit"], ["/lineage", "Lineage"],
-  ["/flows", "Flows"], ["/library", "Library"], ["/publish", "Publish"],
-  ["/trajectories", "Agent trajectories"],
-  ["/sources", "Sources"], ["/settings/general", "General"],
-  ["/settings/models", "Models"], ["/settings/design", "Design & brand"],
-  ["/settings/members", "Members"], ["/settings/api-keys", "API keys"],
-  ["/settings/audit", "Audit log"], ["/preferences", "Preferences"], ["/welcome", "Welcome"],
+  ["/", null, "Home"], ["/tasks", "Review", "Review"], ["/facts", "Facts", "Knowledge"],
+  ["/decisions", "Decisions", "Knowledge"], ["/knowledge", "Knowledge", "Knowledge"],
+  ["/knowledge/doc?id=1", "Retention runbook", "Knowledge"], ["/answers", "Approved answers", "Knowledge"],
+  ["/insights", "Insights", "Analytics"], ["/audit", "Repository audit", "Review"], ["/lineage", "Lineage", "Knowledge"],
+  ["/flows", "Automations", "Automations"], ["/library", "Library", "Knowledge"], ["/publish", "Destinations", "Destinations"],
+  ["/trajectories", "Agent trajectories", "Analytics"],
+  ["/sources", "Sources", "Sources"], ["/settings/general", "General", "Settings"],
+  ["/settings/models", "Models", "Settings"], ["/settings/design", "Design & brand", "Settings"],
+  ["/settings/members", "Members", "Settings"], ["/settings/api-keys", "API keys", "Settings"],
+  ["/settings/audit", "Audit log", "Settings"], ["/preferences", "Preferences", null], ["/welcome", "Welcome", null],
 ] as const;
+
+const PRIMARY_DESTINATIONS = [
+  "Home", "Knowledge", "Review", "Automations", "Destinations", "Analytics", "Sources", "Settings",
+] as const;
+
+const LEGACY_PRIMARY_LABELS = [
+  "Overview", "Tasks", "Answers", "Decisions", "Library", "Lineage", "Facts",
+  "Repository audit", "Flows", "Publish", "Insights", "Agent trajectories",
+] as const;
+
+async function primaryNavigation(page: import("@playwright/test").Page) {
+  const menu = page.getByRole("button", { name: "Menu" });
+  if (await menu.isVisible().catch(() => false)) await menu.click();
+  const navigation = page.getByRole("navigation", { name: "Primary" });
+  await expect(navigation).toBeVisible();
+  return navigation;
+}
 
 async function expectUiContract(page: import("@playwright/test").Page) {
   await expect(page.locator("#main-content")).toHaveCount(1);
@@ -48,21 +65,37 @@ async function expectUiContract(page: import("@playwright/test").Page) {
 
 test.beforeEach(async ({ page }) => { await installMockApi(page); });
 
-for (const [path, title] of ROUTES) {
+for (const [path, title, parent] of ROUTES) {
   test(`${path} renders its browser route`, async ({ page }) => {
     const errors: string[] = [];
     page.on("pageerror", (e) => errors.push(e.message));
     await page.goto(path);
-    await expect(page.getByText(title, { exact: true }).first()).toBeVisible();
+    if (title) await expect(page.getByText(title, { exact: true }).first()).toBeVisible();
     await expectUiContract(page);
+    if (parent) {
+      const navigation = await primaryNavigation(page);
+      await expect(navigation.locator('[aria-current="page"]')).toHaveText(parent);
+    }
     expect(errors).toEqual([]);
   });
 }
 
+test("primary navigation exposes only the consolidated information architecture", async ({ page }) => {
+  await page.goto("/");
+  const navigation = await primaryNavigation(page);
+  for (const label of PRIMARY_DESTINATIONS) {
+    await expect(navigation.getByRole("button", { name: label, exact: true })).toBeVisible();
+  }
+  for (const label of LEGACY_PRIMARY_LABELS) {
+    await expect(navigation.getByRole("button", { name: label, exact: true })).toHaveCount(0);
+  }
+});
+
 test("unknown routes recover to the authenticated overview", async ({ page }) => {
   await page.goto("/does-not-exist");
   await expect(page).toHaveURL(/\/$/);
-  await expect(page.getByText("Overview", { exact: true }).first()).toBeVisible();
+  const navigation = await primaryNavigation(page);
+  await expect(navigation.locator('[aria-current="page"]')).toHaveText("Home");
 });
 
 test("signed-out protected routes redirect to login", async ({ page }) => {
