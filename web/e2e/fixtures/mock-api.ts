@@ -210,6 +210,20 @@ export async function installMockApi(page: Page, options: {
       const limit = Number(variables.limit || 25);
       data = { trajectories: matching.slice(offset, offset + limit), trajectoryTotal: matching.length,
         trajectoryCategories: state.trajectoryCategories };
+    } else if (/inviteMember/.test(query)) {
+      state.members.push({
+        id: state.members.length + 1,
+        name: variables.name,
+        email: variables.email,
+        role: variables.role,
+        initials: String(variables.name || "").split(/\s+/).map((word: string) => word[0]).slice(0, 2).join("").toUpperCase(),
+        tint: 2,
+        status: "invited",
+        joined: "2026-08-20",
+        lastActive: "",
+        provider: "invite",
+      });
+      data = { inviteMember: true };
     } else if (/verifyFact/.test(query)) {
       const fact = state.facts.find((f: any) => f.id === variables.id);
       if (fact) { fact.status = "Verified"; fact.verified = "2026-08-19"; }
