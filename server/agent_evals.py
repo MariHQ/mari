@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 import typing as t
+from mari_components.agents import OutcomeEvalCase, evaluate_outcome
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,15 +137,16 @@ TOOL_CASES = (
 
 def score_tool(case: AgentToolEvalCase, chunks: t.Iterable[str]) -> dict[str, t.Any]:
     events = parse_events(chunks)
-    successful = [data.get("name") for event, data in events
-                  if event == "tool_result" and data.get("ok")]
     answer = "".join(str(data.get("token", "")) for event, data in events if event == "token").lower()
-    checks = {
-        "completed": any(event == "done" for event, _data in events),
-        "used_expected_tool": successful == [case.expected_tool],
-        "grounded_answer": all(term in answer for term in case.answer_terms),
-    }
-    return {"case": case.name, "passed": all(checks.values()), "checks": checks, "answer": answer}
+    result = evaluate_outcome(
+        OutcomeEvalCase(case.name, case.answer_terms, expected_tools=(case.expected_tool,)),
+        answer,
+        tool_results=((str(data.get("name") or ""), bool(data.get("ok")))
+                      for event, data in events if event == "tool_result"),
+        completed=any(event == "done" for event, _data in events),
+    )
+    return {"case": case.name, "passed": result.passed, "checks": result.checks,
+            "answer": answer}
 
 
 def parse_events(chunks: t.Iterable[str]) -> list[tuple[str, dict]]:
@@ -168,17 +170,18 @@ def score(case: AgentEvalCase, chunks: t.Iterable[str]) -> dict[str, t.Any]:
     answer = "".join(
         str(data.get("token", "")) for event, data in events if event == "token"
     ).lower()
-    failed_tools = [data for event, data in events if event == "tool_result" and not data.get("ok")]
-    checks = {
-        "completed": any(event == "done" for event, _data in events),
-        "navigated": case.expected_path in paths,
-        "actionable": all(term in answer for term in case.required_terms),
-        "tools_succeeded": not failed_tools,
-    }
+    result = evaluate_outcome(
+        OutcomeEvalCase(case.name, case.required_terms, (case.expected_path,)),
+        answer,
+        paths=(str(path) for path in paths if path),
+        tool_results=((str(data.get("name") or ""), bool(data.get("ok")))
+                      for event, data in events if event == "tool_result"),
+        completed=any(event == "done" for event, _data in events),
+    )
     return {
         "case": case.name,
-        "passed": all(checks.values()),
-        "checks": checks,
+        "passed": result.passed,
+        "checks": result.checks,
         "answer": answer,
         "paths": paths,
     }
