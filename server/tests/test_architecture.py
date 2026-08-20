@@ -4,20 +4,14 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
+import sys
 import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1] / "mari_server"
 
-DOMAIN_FORBIDDEN = {
-    "access", "config", "db", "fastapi", "llm", "psycopg", "strawberry",
-    "mari_server.application", "mari_server.infrastructure", "mari_server.api",
-}
-APPLICATION_FORBIDDEN = {
-    "access", "config", "db", "fastapi", "llm", "psycopg", "strawberry",
-    "mari_server.infrastructure", "mari_server.api",
-}
 INFRASTRUCTURE_FORBIDDEN = {"fastapi", "strawberry", "mari_server.api"}
+API_FORBIDDEN = {"db", "llm", "psycopg", "sitebuilder"}
 
 
 def imports(path: Path) -> set[str]:
@@ -45,13 +39,42 @@ class ArchitectureTests(unittest.TestCase):
         self.assertEqual(failures, [], "invalid outward dependencies:\n" + "\n".join(failures))
 
     def test_domain_is_pure(self) -> None:
-        self.assert_layer("domain", DOMAIN_FORBIDDEN)
+        failures = []
+        for path in sorted((ROOT / "domain").glob("*.py")):
+            bad = sorted(name for name in imports(path)
+                         if name.split(".")[0] not in sys.stdlib_module_names
+                         and not name.startswith("mari_server.domain"))
+            if bad:
+                failures.append(f"{path.relative_to(ROOT)}: {', '.join(bad)}")
+        self.assertEqual(failures, [], "domain must be standard-library-only:\n" + "\n".join(failures))
 
     def test_application_depends_only_inward(self) -> None:
-        self.assert_layer("application", APPLICATION_FORBIDDEN)
+        failures = []
+        allowed = ("mari_components", "mari_server.domain", "mari_server.application")
+        for path in sorted((ROOT / "application").glob("*.py")):
+            bad = sorted(name for name in imports(path)
+                         if name.split(".")[0] not in sys.stdlib_module_names
+                         and not any(name == prefix or name.startswith(prefix + ".")
+                                     for prefix in allowed))
+            if bad:
+                failures.append(f"{path.relative_to(ROOT)}: {', '.join(bad)}")
+        self.assertEqual(failures, [], "application imports must use inward ports:\n" + "\n".join(failures))
 
     def test_infrastructure_does_not_own_transports(self) -> None:
         self.assert_layer("infrastructure", INFRASTRUCTURE_FORBIDDEN)
+
+    def test_api_is_transport_only(self) -> None:
+        self.assert_layer("api", API_FORBIDDEN)
+        sql_tokens = ("SELECT ", "INSERT ", "UPDATE ", "DELETE ")
+        offenders = []
+        for path in sorted((ROOT / "api").glob("*.py")):
+            tree = ast.parse(path.read_text(), filename=str(path))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                    if any(token in node.value.upper() for token in sql_tokens):
+                        offenders.append(str(path.relative_to(ROOT)))
+                        break
+        self.assertEqual(offenders, [], "API modules may not contain SQL")
 
     def test_new_layers_do_not_depend_on_legacy_agent_facade(self) -> None:
         offenders = [
