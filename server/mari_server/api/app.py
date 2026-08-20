@@ -48,7 +48,7 @@ from mari_server import observability
 from mari_server.api import enterprise_identity
 from mari_server.api import gdrive_events
 
-from mari_server.repositories.database import close_pool, ensure_schema, exec_, open_pool, q, q1
+from mari_server.repositories.database import close_pool, ensure_schema, open_pool
 from mari_server.api.graphql_queries import Query
 from mari_server.api.graphql_knowledge import MutKnowledge
 from mari_server.api.graphql_admin import MutAdmin
@@ -144,10 +144,8 @@ def api_search(body: ApiSearchIn, authorization: str = Header(default="")) -> di
     scheme, _, token = authorization.partition(" ")
     if scheme.lower() != "bearer" or not token:
         raise HTTPException(401, "Bearer API key required.")
-    row = q1("""SELECT k.id, k.project_id, k.scopes, p.slug, p.name AS project_name
-                  FROM api_keys k JOIN projects p ON p.id = k.project_id
-                 WHERE k.token_hash = %s AND NOT k.revoked AND p.status = 'active'""",
-             (hashlib.sha256(token.encode()).hexdigest(),))
+    from mari_server.repositories import identity
+    row = identity.authenticate_api_key(hashlib.sha256(token.encode()).hexdigest())
     if not row:
         raise HTTPException(401, "Invalid or revoked API key.")
     scopes = {value.strip() for value in str(row["scopes"] or "").split(",")}
@@ -159,8 +157,7 @@ def api_search(body: ApiSearchIn, authorization: str = Header(default="")) -> di
     )
     with access_module.use_access(ctx):
         rows = hybrid_search(body.query.strip(), max(1, min(body.limit, 50)))
-    exec_("UPDATE api_keys SET last_used = to_char(now(), 'YYYY-MM-DD HH24:MI:SS') WHERE id = %s",
-          (row["id"],))
+    identity.touch_api_key(row["id"])
     return {"results": [{"id": item["id"], "title": item["title"],
                           "source": item["source"], "snippet": item["snippet"],
                           "score": item.get("score", 0)} for item in rows]}
@@ -176,7 +173,8 @@ def readyz(request: Request) -> dict[str, t.Any]:
     if not getattr(request.app.state, "ready", False):
         raise HTTPException(503, "Application startup is not complete.")
     try:
-        q1("SELECT 1 AS ok")
+        from mari_server.repositories import system
+        system.ready()
     except Exception as exc:  # noqa: BLE001 — readiness reports dependency failure
         logging.getLogger("mari.health").warning("database readiness check failed", exc_info=exc)
         raise HTTPException(503, "Database is unavailable.") from exc
@@ -193,8 +191,8 @@ def healthz(request: Request) -> dict[str, t.Any]:
 def metrics() -> str:
     # Connector lag is a gauge, refreshed on scrape so idle connectors still age.
     try:
-        for row in q("""SELECT provider, extract(epoch FROM (now() - last_sync_at)) AS lag
-                        FROM sources WHERE last_sync_at IS NOT NULL"""):
+        from mari_server.repositories import system
+        for row in system.connector_lag():
             provider = str(row["provider"] or "unknown").split(":", 1)[0]
             observability.observe_connector_lag(provider, float(row["lag"] or 0))
     except Exception:  # noqa: BLE001 — metrics remain available during DB incidents

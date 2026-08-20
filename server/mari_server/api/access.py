@@ -15,23 +15,11 @@ from mari_server.domain.access import (
     AccessContext, CAPABILITIES, ProjectMembership, capabilities_for_role,
     current_access, external_access, require_current_access, set_access, use_access,
 )
-
-
-def _memberships(conn, user_id: int) -> list[ProjectMembership]:
-    rows = conn.execute(
-        """SELECT p.id AS project_id, p.slug AS project_slug,
-                  p.name AS project_name, pm.role, pm.status
-             FROM project_members pm
-             JOIN projects p ON p.id = pm.project_id
-            WHERE pm.user_id = %s AND pm.status = 'active'
-              AND p.status = 'active'
-            ORDER BY p.id""", (user_id,)).fetchall()
-    return [ProjectMembership(**dict(row)) for row in rows]
+from mari_server.repositories import identity
 
 
 def memberships_for_user(user_id: int, conn_factory: Callable) -> list[ProjectMembership]:
-    with conn_factory() as conn:
-        return _memberships(conn, user_id)
+    return [ProjectMembership(**dict(row)) for row in identity.memberships(user_id)]
 
 
 def select_membership(memberships: list[ProjectMembership], requested: str | None,
