@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 import mutations_knowledge
 import mutations_publish
+from mari_server.infrastructure import mcp_repository
 import mcp
 
 
@@ -67,8 +68,9 @@ class McpLifecycleTests(unittest.TestCase):
         info = SimpleNamespace(context={"user": {"name": "Admin", "role": "admin"}, "access": project})
         with patch.object(mutations_publish, "_require_admin", return_value={"name": "Admin"}), \
              patch.object(mutations_publish.config, "get", return_value="https://cloud.example.test"), \
-             patch.object(mutations_publish, "exec_", side_effect=lambda sql, args=(): writes.append((sql, args))), \
-             patch.object(mutations_publish, "audit"):
+             patch.object(mcp_repository, "q1", return_value=None), \
+             patch.object(mcp_repository, "exec_", side_effect=lambda sql, args=(): writes.append((sql, args))), \
+             patch.object(mcp_repository, "audit"):
             token = mutations_publish.MutPublish().create_mcp_server(info, "Support KB", "workspace", ["search", "facts"])
         self.assertTrue(token.startswith("mari_mcp_"))
         inserted = writes[0][1]
@@ -85,7 +87,7 @@ class McpLifecycleTests(unittest.TestCase):
             if "FROM mcp_servers" in sql:
                 return {"config": {"capabilities": ["search", "facts", "glossary", "answers", "lineage", "chat"]}}
             return {"n": next(v for table, v in counts.items() if f"FROM {table}" in sql)}
-        with patch.object(mutations_publish, "q1", side_effect=q1), patch.object(mutations_publish, "exec_"):
+        with patch.object(mcp_repository, "q1", side_effect=q1), patch.object(mcp_repository, "exec_"):
             info = SimpleNamespace(context={"access": SimpleNamespace(project_id=7)})
             result = mutations_publish.MutPublish().test_mcp_server(info, 1)
         self.assertTrue(result["ok"])

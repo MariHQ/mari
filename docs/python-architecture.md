@@ -73,6 +73,18 @@ one transaction. Full-snapshot absence deletion is planned only by
 GraphQL resolvers translate these values at the boundary. They do not own the
 policy or reach through a flat Review service.
 
+## MCP destinations
+
+- `domain/mcp.py`: destination spec, capability vocabulary, and validation.
+- `application/mcp.py`: create/update/delete/test lifecycle through explicit
+  token, persistence, diagnostics, and audit ports.
+- `infrastructure/mcp_repository.py`: hashed-token Postgres records and
+  capability-specific health counts.
+
+The Strawberry mutation only resolves the authorized project and translates
+the application result. Duplicate creation fails rather than rotating a token
+or mutating an existing destination implicitly.
+
 ## Migration rules
 
 1. Migrate one complete vertical workflow at a time, with its tests.
