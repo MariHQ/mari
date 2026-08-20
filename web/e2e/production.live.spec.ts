@@ -3,6 +3,29 @@ import { expect, test, type Page } from "@playwright/test";
 
 const env = process.env;
 const mutations = env.MARI_E2E_MUTATIONS === "1";
+const expectedSource = env.MARI_E2E_EXPECTED_SOURCE || "";
+
+function observeRuntimeFailures(page: Page) {
+  const failures: string[] = [];
+  page.on("pageerror", (error) => failures.push(`pageerror: ${error.message}`));
+  page.on("requestfailed", (request) =>
+    failures.push(`requestfailed: ${request.method()} ${request.url()} ${request.failure()?.errorText ?? "failed"}`));
+  page.on("response", (response) => {
+    if (response.status() >= 500) failures.push(`response: ${response.status()} ${response.url()}`);
+  });
+  return failures;
+}
+
+async function graphql<T>(page: Page, query: string, variables: Record<string, unknown> = {}): Promise<T> {
+  const response = await page.request.post("/graphql", {
+    headers: { "Content-Type": "application/json" },
+    data: { query, variables },
+  });
+  expect(response.ok(), `GraphQL HTTP ${response.status()}`).toBeTruthy();
+  const body = await response.json();
+  expect(body.errors, body.errors?.map((error: { message?: string }) => error.message).join("; ")).toBeUndefined();
+  return body.data as T;
+}
 
 async function signIn(page: Page) {
   await page.goto("/login");
@@ -15,14 +38,24 @@ async function signIn(page: Page) {
   if (env.MARI_E2E_EMAIL && env.MARI_E2E_PASSWORD) {
     await page.getByLabel("Email or username").fill(env.MARI_E2E_EMAIL);
     await page.getByLabel("Password").fill(env.MARI_E2E_PASSWORD);
+    const login = page.waitForResponse((response) =>
+      response.url().endsWith("/auth/login") && response.request().method() === "POST");
     await page.getByRole("button", { name: /^Sign in/ }).click();
+    const response = await login;
+    expect(response.ok(), `Login failed: ${await response.text()}`).toBeTruthy();
+    await expect(page).toHaveURL(/\/$/);
   } else if (await page.getByRole("button", { name: /Continue as workspace admin/ }).isVisible().catch(() => false)) {
+    const bypass = page.waitForResponse((response) =>
+      response.url().endsWith("/auth/bypass") && response.request().method() === "POST");
     await page.getByRole("button", { name: /Continue as workspace admin/ }).click();
+    expect((await bypass).ok()).toBeTruthy();
+    await expect(page).toHaveURL(/\/$/);
   } else {
     throw new Error("Live app requires MARI_E2E_EMAIL and MARI_E2E_PASSWORD (or auth bypass).");
   }
   await page.goto("/sources");
   await expect(page).toHaveURL(/\/sources$/);
+  await expect(page.getByRole("button", { name: /Account:/ })).toBeVisible();
 }
 
 const connectors = [
@@ -64,21 +97,111 @@ const productRoutes = [
 
 test("LIVE every authenticated product route renders without browser or server failures", async ({ page }) => {
   await signIn(page);
-  const pageErrors: string[] = [];
-  const serverErrors: string[] = [];
-  page.on("pageerror", (error) => pageErrors.push(error.message));
-  page.on("response", (response) => {
-    if (response.status() >= 500) serverErrors.push(`${response.status()} ${response.url()}`);
-  });
+  const failures = observeRuntimeFailures(page);
   for (const route of productRoutes) {
+    failures.length = 0;
     await page.goto(route, { waitUntil: "domcontentloaded" });
     expect(new URL(page.url()).pathname, `${route} must not redirect`).toBe(new URL(route, "https://mari.test").pathname);
-    await expect(page.getByRole("main", { name: "Main content" })).toBeVisible();
+    const main = page.getByRole("main", { name: "Main content" });
+    await expect(main).toBeVisible();
+    await expect(main).not.toContainText(/Service unavailable|temporarily unreachable|Could not load/i);
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1);
     expect(overflow, `${route} must not overflow horizontally`).toBe(false);
+    expect(failures, `runtime failures while rendering ${route}`).toEqual([]);
   }
-  expect(pageErrors).toEqual([]);
-  expect(serverErrors).toEqual([]);
+});
+
+test("LIVE login establishes a real project session", async ({ page }) => {
+  await signIn(page);
+  const response = await page.request.get("/auth/me");
+  expect(response.ok()).toBeTruthy();
+  const body = await response.json();
+  expect(body.user?.name).toBeTruthy();
+  expect(body.activeProject?.id).toBeTruthy();
+  expect(body.capabilities).toContain("knowledge.read");
+  await expect(page.getByRole("button", { name: new RegExp(`Account: ${body.user.name}`, "i") })).toBeVisible();
+});
+
+test("LIVE primary navigation and destination tabs perform real SPA transitions", async ({ page }) => {
+  await signIn(page);
+  const destinations: [string, RegExp][] = [
+    ["Home", /\/$/], ["Knowledge", /\/knowledge$/], ["Lineage", /\/lineage$/],
+    ["Review", /\/tasks$/], ["Automations", /\/flows$/], ["Destinations", /\/publish/],
+    ["Analytics", /\/insights$/], ["Sources", /\/sources$/], ["Settings", /\/settings\/general$/],
+  ];
+  for (const [name, url] of destinations) {
+    await page.getByRole("button", { name, exact: true }).first().click();
+    await expect(page).toHaveURL(url);
+    await expect(page.getByRole("main", { name: "Main content" })).toBeFocused();
+  }
+  await page.goto("/publish");
+  for (const name of ["Knowledge chat", "MCP servers", "Bots"]) {
+    const tab = page.getByRole("button", { name, exact: true }).first();
+    await tab.click();
+    await expect(tab).toHaveAttribute("aria-pressed", "true");
+  }
+});
+
+test("LIVE ingested source is searchable, inspectable, and represented in lineage", async ({ page }) => {
+  test.skip(!expectedSource, "Set MARI_E2E_EXPECTED_SOURCE to the live canary source name.");
+  await signIn(page);
+  const data = await graphql<{ sourcePulse: { id: number; name: string; provider: string; docsCount: number; health: string }[] }>(
+    page,
+    `{ sourcePulse { id name provider docsCount health } }`,
+  );
+  const source = data.sourcePulse.find((row) => row.name.toLowerCase() === expectedSource.toLowerCase());
+  expect(source, `Expected live source ${expectedSource}`).toBeTruthy();
+  expect(source!.provider.toLowerCase()).toContain("github");
+  expect(source!.docsCount).toBeGreaterThan(0);
+  expect(source!.health.toLowerCase()).not.toMatch(/failed|error/);
+
+  await page.goto("/knowledge");
+  const main = page.getByRole("main", { name: "Main content" });
+  await expect(main).toContainText(/\d+\s*documents match/, { timeout: 30_000 });
+  const firstDocument = main.getByRole("heading", { level: 3 }).first().getByRole("link");
+  const title = (await firstDocument.textContent())?.trim();
+  expect(title).toBeTruthy();
+  await firstDocument.click();
+  await expect(page).toHaveURL(/\/knowledge\/doc\?id=\d+/);
+  await expect(main).toContainText(title!);
+  await expect(main).toContainText(/Read-only source record/i);
+
+  await page.goto("/lineage");
+  await expect(main).toContainText(new RegExp(`${source!.docsCount}\\s*documents`, "i"), { timeout: 30_000 });
+  await expect(main).not.toContainText(/Service unavailable|temporarily unreachable/i);
+});
+
+test("LIVE agent searches indexed knowledge before streaming a grounded answer", async ({ page }) => {
+  test.skip(env.MARI_E2E_AGENT === "0", "Live LLM canary explicitly disabled.");
+  test.setTimeout(120_000);
+  await signIn(page);
+  await page.goto("/");
+  await page.getByRole("button", { name: "Open the Mari agent" }).click();
+  const dock = page.getByRole("complementary", { name: "Mari agent" });
+  await dock.getByPlaceholder("Ask Mari…").fill("What is Mari? Answer briefly and cite the knowledge you used.");
+  await dock.getByRole("button", { name: /Send/ }).click();
+  await expect(dock.getByRole("button", { name: "Stop" })).toHaveCount(0, { timeout: 90_000 });
+  await expect(dock).toContainText(/search/i);
+  await expect(dock).toContainText(/GitHub|README|document|source/i);
+  await expect(dock).not.toContainText(/Agent execution stopped|MalformedModelOutput|PermanentFailure|can't reach|could not be persisted/i);
+});
+
+test("LIVE deployed knowledge chat answers from indexed sources", async ({ page }) => {
+  test.skip(env.MARI_E2E_AGENT === "0", "Live LLM canary explicitly disabled.");
+  test.setTimeout(120_000);
+  await signIn(page);
+  const data = await graphql<{ knowledgeChatDestinations: { url: string; status: string }[] }>(
+    page,
+    `{ knowledgeChatDestinations { url status } }`,
+  );
+  const destination = data.knowledgeChatDestinations.find((row) => row.status === "live" && row.url);
+  test.skip(!destination, "No deployed knowledge chat destination exists in this workspace.");
+  await page.goto(destination!.url);
+  await page.getByLabel("Ask a question").fill("What is Mari?");
+  await page.getByRole("button", { name: "Ask", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Answering…" })).toHaveCount(0, { timeout: 90_000 });
+  await expect(page.locator("article").last()).not.toBeEmpty();
+  await expect(page.getByRole("list", { name: "Sources" })).toBeVisible();
 });
 
 async function configureConnector(page: Page, connector: typeof connectors[number]) {
@@ -239,7 +362,7 @@ test("LIVE Slack signed event is answered through the installed bot", async ({ p
   }
 });
 
-test("LIVE Ollama-backed fact scan completes through the browser", async ({ page }) => {
+test("LIVE configured-LLM fact scan completes through the browser", async ({ page }) => {
   test.skip(!mutations, "Set MARI_E2E_MUTATIONS=1 to allow a workflow run.");
   await signIn(page);
   await page.goto("/facts");
