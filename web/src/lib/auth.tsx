@@ -68,12 +68,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   // Last seen session identity — when it changes (sign-in, sign-out, user
   // switch) every cached query result belongs to someone else: drop it.
   const lastUserId = useRef<AuthUser["id"] | null>(null);
+  const lastUser = useRef<AuthUser | null>(null);
+  const lastBypassEnabled = useRef(false);
   const applyUser = useCallback((next: AuthUser | null) => {
     const nextId = next?.id ?? null;
     if (lastUserId.current !== nextId) {
       lastUserId.current = nextId;
       clearQueryCache();
     }
+    lastUser.current = next;
     setUser(next);
   }, []);
 
@@ -86,13 +89,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   // state instead would read the render before this one.
   const load = useCallback((): Promise<{ user: AuthUser | null; bypassEnabled: boolean }> => {
     return fetch("/auth/me", { headers: projectHeaders() })
-      .then((res) => (res.ok ? res.json() : null))
-      .catch(() => null)
+      .then((res) => {
+        if (res.status === 401 || res.status === 403) return null;
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json();
+      })
       .then((data: any) => {
         const next = (data?.user ?? null) as AuthUser | null;
         applyUser(next);
         setNeedsSetup(Boolean(data?.needsSetup));
         setBypassEnabled(Boolean(data?.bypassEnabled));
+        lastBypassEnabled.current = Boolean(data?.bypassEnabled);
         setOauth({ github: Boolean(data?.oauth?.github), google: Boolean(data?.oauth?.google) });
         const available = (data?.projects ?? []) as AuthProject[];
         const selected = (data?.activeProject ?? null) as AuthProject | null;
@@ -103,7 +110,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           localStorage.setItem("mari.project", selected.slug || String(selected.id));
         }
         return { user: next, bypassEnabled: Boolean(data?.bypassEnabled) };
-      });
+      })
+      // A transport failure is not evidence that the cookie stopped being a
+      // valid session. Keep the last confirmed identity and cached workspace
+      // data; a later request/retry can resolve the outage without bouncing a
+      // signed-in person through the login wall.
+      .catch(() => ({ user: lastUser.current, bypassEnabled: lastBypassEnabled.current }));
   }, [applyUser]);
 
   const refresh = useCallback((): Promise<void> => {

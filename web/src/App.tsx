@@ -96,7 +96,7 @@ function routeFor(page: PageModule<any, any>) {
 
   return function PageRoute() {
     const { data, loading, error } = useData();
-    const { refresh } = useAuth();
+    const { refresh, user } = useAuth();
     const navigate = useNavigate();
     const chrome = useShellChrome();
     // Rebuilt only when `refresh` changes, so a page never sees a new actions
@@ -104,10 +104,11 @@ function routeFor(page: PageModule<any, any>) {
     const actions = useMemo(
       () => makeActions?.({
         refresh,
+        currentUserName: user?.name ?? "",
         navigate: (href: string) => navigate(href),
         replace: (href: string) => navigate(href, { replace: true }),
       }),
-      [refresh, navigate],
+      [refresh, user?.name, navigate],
     );
     return (
       <Page

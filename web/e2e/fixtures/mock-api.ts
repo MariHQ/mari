@@ -11,6 +11,7 @@ export type MockApi = {
   calls: Call[];
   restCalls: { path: string; body: any }[];
   failNext: (pattern: RegExp, message: string) => void;
+  failNextAuthCheck: (status?: number) => void;
   setData: (key: string, value: any) => void;
 };
 
@@ -143,9 +144,15 @@ export async function installMockApi(page: Page, options: {
   const restCalls: { path: string; body: any }[] = [];
   let signedIn = options.signedIn ?? true;
   let failure: { pattern: RegExp; message: string } | null = null;
+  let authFailureStatus: number | null = null;
 
   const projects = options.projects ?? [{ id: 1, slug: "default", name: "Mari", role: "admin", capabilities: ["knowledge.read"] }];
   await page.route("**/auth/me", (route) => {
+    if (authFailureStatus !== null) {
+      const status = authFailureStatus;
+      authFailureStatus = null;
+      return route.fulfill({ status, json: { detail: "temporary auth outage" } });
+    }
     const requested = route.request().headers()["x-mari-project"];
     const activeProject = projects.find((project) => String(project.id) === requested || project.slug === requested)
       ?? (projects.length === 1 ? projects[0] : null);
@@ -266,6 +273,7 @@ export async function installMockApi(page: Page, options: {
   return {
     calls, restCalls,
     failNext: (pattern, message) => { failure = { pattern, message }; },
+    failNextAuthCheck: (status = 503) => { authFailureStatus = status; },
     setData: (key, value) => { state[key] = value; },
   };
 }

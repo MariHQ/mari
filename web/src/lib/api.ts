@@ -101,10 +101,30 @@ export async function gql<T = any>(query: string, variables?: Record<string, unk
 type QueryState<T> = { data: T | null; loading: boolean; error: boolean; errorText?: string };
 export type QueryResult<T> = QueryState<T> & { refetch: () => void };
 
-// Session-lived cache of mapped results, keyed by query+variables. Holding
-// mapped values (not raw payloads) keeps revisits O(1) and referentially
-// stable enough for memo'd children.
+// Cache raw GraphQL payloads, not mapper-specific views. Two adapters may ask
+// the same query with different mappers; caching either mapped value under the
+// shared request key hands the other adapter the wrong runtime shape.
 const queryCache = new Map<string, unknown>();
+const MAX_QUERY_CACHE = 200;
+
+function cacheGet(key: string): unknown | undefined {
+  if (!queryCache.has(key)) return undefined;
+  const value = queryCache.get(key);
+  // Refresh insertion order so eviction is least-recently-used.
+  queryCache.delete(key);
+  queryCache.set(key, value);
+  return value;
+}
+
+function cacheSet(key: string, value: unknown): void {
+  queryCache.delete(key);
+  queryCache.set(key, value);
+  while (queryCache.size > MAX_QUERY_CACHE) {
+    const oldest = queryCache.keys().next().value as string | undefined;
+    if (oldest === undefined) break;
+    queryCache.delete(oldest);
+  }
+}
 
 /** Canonical read hook. First visit: { loading: true } until the API answers
  *  (render a Spinner/EmptyState — never canned data). Revisits: cached real
@@ -119,7 +139,10 @@ export function useQuery<T>(
   opts?: { variables?: Record<string, unknown>; map?: (data: any) => T },
 ): QueryResult<T> {
   const key = query ? query + (opts?.variables ? "::" + JSON.stringify(opts.variables) : "") : "";
-  const cached = key ? (queryCache.get(key) as T | undefined) : undefined;
+  const cachedRaw = key ? cacheGet(key) : undefined;
+  const cached = cachedRaw === undefined
+    ? undefined
+    : opts?.map ? opts.map(cachedRaw) : (cachedRaw as T);
   const [state, setState] = useState<QueryState<T>>(
     !query
       ? { data: null, loading: false, error: false }
@@ -135,7 +158,8 @@ export function useQuery<T>(
   const [prevKey, setPrevKey] = useState(key);
   if (prevKey !== key) {
     setPrevKey(key);
-    const hit = key ? (queryCache.get(key) as T | undefined) : undefined;
+    const raw = key ? cacheGet(key) : undefined;
+    const hit = raw === undefined ? undefined : opts?.map ? opts.map(raw) : (raw as T);
     setState(hit !== undefined
       ? { data: hit, loading: false, error: false }
       : { data: null, loading: !!query, error: false });
@@ -153,7 +177,7 @@ export function useQuery<T>(
         return;
       }
       const mapped = opts?.map ? opts.map(r.data) : (r.data as T);
-      queryCache.set(key, mapped);
+      cacheSet(key, r.data);
       setState({ data: mapped, loading: false, error: false });
     });
     return () => { alive = false; };

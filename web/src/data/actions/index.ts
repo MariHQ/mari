@@ -56,6 +56,8 @@ export async function mutate(query: string, variables?: Record<string, unknown>)
     positional args: the library keeps emitting intents ("go to /sources") and
     this is where they become real routing, so this list will grow. */
 export type ActionContext = {
+  /** Last confirmed signed-in display name, for ownership defaults. */
+  currentUserName: string;
   /** Re-read /auth/me; the auth screens route off the result. */
   refresh: () => Promise<void> | void;
   /** Follow an in-app href. The library must never navigate itself — a

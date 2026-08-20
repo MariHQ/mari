@@ -106,7 +106,10 @@ async def upload(files: list[UploadFile] = File(...)):
                                          "with no folder path) — rename one and upload it separately"})
                 continue
             seen_names.add(name)
-            raw = await f.read()
+            # Bound memory before decoding. UploadFile may be backed by disk,
+            # but an unrestricted read still materializes attacker-controlled
+            # input in the API process.
+            raw = await f.read(MAX_BYTES + 1)
             if len(raw) > MAX_BYTES:
                 results.append({"name": name, "docId": None, "chunks": 0,
                                 "embedded": 0, "error": "file exceeds 1MB"})
@@ -311,14 +314,14 @@ def glossary_harvest(body: HarvestIn):
         candidates.append(c)
 
     batches = [docs[i:i + _BATCH] for i in range(0, len(docs), _BATCH)]
-    read = 0
+    documents_read = 0
     deadline = time.monotonic() + _HARVEST_DEADLINE
     with cf.ThreadPoolExecutor(max_workers=min(_HARVEST_WORKERS, len(batches)),
                                thread_name_prefix="mari-harvest") as pool:
         futures = {pool.submit(_llm_batch, batch): batch for batch in batches}
         for future in cf.as_completed(futures):
             batch = futures[future]
-            read += 1
+            documents_read += len(batch)
             try:
                 raw = future.result()
             except Exception:  # noqa: BLE001 — one bad batch is not a failed harvest
@@ -344,5 +347,5 @@ def glossary_harvest(body: HarvestIn):
     # documentsRead vs documentsTotal is how the caller can tell a corpus with
     # few terms in it from a harvest the deadline cut short.
     return {"candidates": candidates[:25], "llm": True,
-            "documentsRead": sum(len(b) for b in batches[:read]),
+            "documentsRead": documents_read,
             "documentsTotal": len(docs)}

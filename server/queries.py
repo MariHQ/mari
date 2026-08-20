@@ -12,6 +12,7 @@ import json
 import re
 import threading
 import time
+import typing as t
 
 import strawberry
 import numpy as np
@@ -342,7 +343,20 @@ def hybrid_count(query: str) -> int:
 # both result lists are fused and cached together so `search` and
 # `searchTotal` still describe exactly the same approximate candidate set.
 _RANK_TTL_SECONDS = 120.0
-_rank_cache: dict[tuple[int, str], tuple[float, list[dict]]] = {}
+_rank_cache: dict[tuple[t.Any, ...], tuple[float, list[dict]]] = {}
+
+
+def _document_visible(row: dict, ctx: access.AccessContext) -> bool:
+    """Project members see their project; external principals need an ACL match."""
+    if ctx.principal_type != "slack":
+        return True
+    visibility = str(row.get("acl_visibility") or "project")
+    if visibility == "public":
+        return True
+    principals = row.get("acl_principals") or []
+    if isinstance(principals, str):
+        principals = jload(principals) or []
+    return bool(ctx.principals.intersection(str(value) for value in principals))
 _rank_lock = threading.Lock()
 
 
@@ -356,8 +370,10 @@ def _keyword_score(row: dict, terms: list[str]) -> float:
 
 
 def _rank_hybrid(query: str) -> list[dict]:
-    project_id = access.require_current_access().project_id
-    cache_key = (project_id, query)
+    ctx = access.require_current_access()
+    project_id = ctx.project_id
+    cache_key = (project_id, ctx.principal_type, ctx.principal_id,
+                 tuple(sorted(ctx.principals)), query)
     now = time.monotonic()
     with _rank_lock:
         hit = _rank_cache.get(cache_key)
@@ -368,7 +384,8 @@ def _rank_hybrid(query: str) -> list[dict]:
     if query.strip():
         keyword_rows = q("""
           SELECT d.id, d.source, d.title, d.snippet, d.body, d.author, d.author_initials,
-                 d.updated_src, d.kind, array_remove(array_agg(t.tag), NULL) AS tags,
+                 d.updated_src, d.kind, d.acl_visibility, d.acl_principals,
+                 array_remove(array_agg(t.tag), NULL) AS tags,
                  coalesce(max(td.search_weight), 1.0) AS boost
             FROM documents d
             LEFT JOIN tags t ON t.document_id = d.id AND t.project_id = d.project_id
@@ -381,7 +398,8 @@ def _rank_hybrid(query: str) -> list[dict]:
     else:
         keyword_rows = q("""
           SELECT d.id, d.source, d.title, d.snippet, d.body, d.author, d.author_initials,
-                 d.updated_src, d.kind, array_remove(array_agg(t.tag), NULL) AS tags,
+                 d.updated_src, d.kind, d.acl_visibility, d.acl_principals,
+                 array_remove(array_agg(t.tag), NULL) AS tags,
                  coalesce(max(td.search_weight), 1.0) AS boost
             FROM documents d
             LEFT JOIN tags t ON t.document_id = d.id AND t.project_id = d.project_id
@@ -408,7 +426,8 @@ def _rank_hybrid(query: str) -> list[dict]:
     if missing:
         for row in q("""
           SELECT d.id, d.source, d.title, d.snippet, d.body, d.author, d.author_initials,
-                 d.updated_src, d.kind, array_remove(array_agg(t.tag), NULL) AS tags,
+                 d.updated_src, d.kind, d.acl_visibility, d.acl_principals,
+                 array_remove(array_agg(t.tag), NULL) AS tags,
                  coalesce(max(td.search_weight), 1.0) AS boost
             FROM documents d
             LEFT JOIN tags t ON t.document_id = d.id AND t.project_id = d.project_id
@@ -419,6 +438,8 @@ def _rank_hybrid(query: str) -> list[dict]:
     terms = [word for word in re.findall(r"[a-z0-9][a-z0-9_-]*", query.lower()) if len(word) > 1]
     ranked = []
     for doc_id, row in rows_by_id.items():
+        if not _document_visible(row, ctx):
+            continue
         kw = _keyword_score(row, terms)
         sim = semantic.get(doc_id, 0.0)
         # Keyword candidates remain eligible even when the tokenizer produced
@@ -975,8 +996,10 @@ class Query:
 
     @strawberry.field
     def graph_views(self) -> list[GraphView]:
+        project_id = access.require_current_access().project_id
         return [GraphView(id=r["id"], name=r["name"], state=json.dumps(jload(r["state"])))
-                for r in q("SELECT id, name, state FROM graph_views ORDER BY id")]
+                for r in q("""SELECT id, name, state FROM graph_views
+                            WHERE project_id = %s ORDER BY id""", (project_id,))]
 
     @strawberry.field
     def facts(self) -> list[Fact]:
@@ -1095,10 +1118,12 @@ class Query:
 
     @strawberry.field
     def digest(self) -> list[DigestTopic]:
+        project_id = access.require_current_access().project_id
         return [DigestTopic(title=r["title"], summary=r["summary"],
                             where=[DigestWhere(**w) for w in jload(r["wheres"])],
                             impact=[DigestImpact(**i) for i in jload(r["impact"])])
-                for r in q("SELECT * FROM digest_topics ORDER BY id")]
+                for r in q("SELECT * FROM digest_topics WHERE project_id = %s ORDER BY id",
+                           (project_id,))]
 
     @strawberry.field
     def members(self) -> list[Member]:
@@ -1229,7 +1254,9 @@ class Query:
         nothing about the built site."""
         overrides: dict = {}
         if site_id:
-            row = q1("SELECT features FROM sites WHERE id = %s", (site_id,))
+            project_id = access.require_current_access().project_id
+            row = q1("SELECT features FROM sites WHERE project_id = %s AND id = %s",
+                     (project_id, site_id))
             if row:
                 overrides = jload(row["features"]) or {}
         return [SiteFeature(key=r["key"], label=r["label"], hint=r["hint"],
@@ -1238,9 +1265,10 @@ class Query:
 
     @strawberry.field
     def api_keys(self) -> list[ApiKey]:
+        project_id = access.require_current_access().project_id
         return [ApiKey(id=r["id"], name=r["name"], prefix=r["prefix"], scopes=r["scopes"],
                        created=r["created_at"].isoformat(), last_used=r["last_used"], revoked=r["revoked"])
-                for r in q("SELECT * FROM api_keys ORDER BY id")]
+                for r in q("SELECT * FROM api_keys WHERE project_id = %s ORDER BY id", (project_id,))]
 
     @strawberry.field
     def mcp_servers(self) -> list[McpServer]:
@@ -1354,21 +1382,23 @@ class Query:
 
     @strawberry.field
     def sites(self) -> list[Site]:
+        project_id = access.require_current_access().project_id
         return [Site(id=r["id"], name=r["name"], domain=r["domain"], status=r["status"],
                      theme=jload(r["theme"]), sources=jload(r["sources"]), nav=jload(r["nav"]),
                      gates=jload(r["gates"]), docs=r["docs"], warnings=r["warnings"])
-                for r in q("SELECT * FROM sites ORDER BY id")]
+                for r in q("SELECT * FROM sites WHERE project_id = %s ORDER BY id", (project_id,))]
 
     @strawberry.field
     def releases(self, site_id: int | None = None) -> list[Release]:
         """Release history. Omit site_id for every site's, so the Publish page
         can fetch sites and their releases in one document instead of chaining
         a second round trip on the first site's id."""
-        where = "WHERE site_id = %s" if site_id else ""
+        project_id = access.require_current_access().project_id
+        where = "WHERE project_id = %s" + (" AND site_id = %s" if site_id else "")
         return [Release(id=r["id"], site_id=r["site_id"], version=r["version"], status=r["status"],
                         deployed=r["deployed"], docs=r["docs"], notes=r["notes"])
                 for r in q(f"SELECT * FROM releases {where} ORDER BY site_id, id DESC",
-                           (site_id,) if site_id else ())]
+                           (project_id, site_id) if site_id else (project_id,))]
 
     @strawberry.field
     def notifications(self) -> list[Notification]:
@@ -1593,10 +1623,19 @@ class Query:
                            (run_id,) if run_id else ())]
 
     @strawberry.field
-    def chat_sessions(self) -> list[ChatSession]:
+    def chat_sessions(self, info: strawberry.Info) -> list[ChatSession]:
+        ctx = access.require_current_access()
+        user = info.context.get("user") or {}
+        user_id = int(user.get("id") or 0)
+        if not user_id:
+            return []
         out = []
-        for s in q("SELECT * FROM chat_sessions ORDER BY id DESC LIMIT 20"):
-            msgs = q("SELECT * FROM chat_messages WHERE session_id = %s ORDER BY id", (s["id"],))
+        for s in q("""SELECT * FROM chat_sessions
+                       WHERE project_id = %s AND owner_user_id = %s
+                       ORDER BY id DESC LIMIT 20""", (ctx.project_id, user_id)):
+            msgs = q("""SELECT * FROM chat_messages
+                        WHERE project_id = %s AND session_id = %s ORDER BY id""",
+                     (ctx.project_id, s["id"]))
             out.append(ChatSession(id=s["id"], title=s["title"],
                                    messages=[ChatMessage(id=m["id"], role=m["role"], content=m["content"],
                                                          sources=jload(m["sources"])) for m in msgs]))

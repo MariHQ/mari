@@ -483,17 +483,17 @@ def fire_document_triggers(doc_ids: list[int], change: str) -> list[int]:
             first = matched[0].get("source_path") or matched[0]["title"]
             note = f"Triggered by: {first} {verb}" + (f" (+{len(matched) - 1} more)" if len(matched) > 1 else "")
             trigger_meta = {"on": change, "doc_ids": [d["id"] for d in matched], "note": note}
-            n = conn.execute("SELECT coalesce(max(number), 1800) + 1 AS n FROM workflow_runs WHERE workflow_id = %s",
-                             (wf["id"],)).fetchone()["n"]
             row = conn.execute(
-                """INSERT INTO workflow_runs (workflow_id, number, status, started_label, duration,
+                """INSERT INTO workflow_runs (project_id, workflow_id, number, status, started_label, duration,
                                               progress, stats, rows_data, triggered_by)
-                   VALUES (%s, %s, 'running', to_char(now(), 'Mon DD, HH12:MI AM'), '00:00:00', 0, %s, '[]', %s)
-                   RETURNING id""",
-                (wf["id"], n,
+                   VALUES (%s, %s, nextval('workflow_run_number_seq'), 'running',
+                           to_char(now(), 'Mon DD, HH12:MI AM'), '00:00:00', 0, %s, '[]', %s)
+                   RETURNING id, number""",
+                (wf.get("project_id"), wf["id"],
                  json.dumps({"ctx": {"trigger_doc_ids": [d["id"] for d in matched], "trigger": trigger_meta},
                              "trigger": trigger_meta}),
                  note)).fetchone()
+            n = row["number"]
             conn.execute("INSERT INTO events (actor, verb, target) VALUES (%s, %s, %s)",
                          ("Flow trigger", f"auto-started run #{n} ({note[:80]})", wf["name"]))
             conn.commit()
@@ -570,15 +570,16 @@ def run_due_schedules() -> list[int]:
                 continue  # not yet due (no prior run = due immediately)
             label = f"Scheduled · every {every} min"
             trigger_meta = {"on": "schedule", "every_minutes": every, "note": label}
-            n = conn.execute("SELECT coalesce(max(number), 1800) + 1 AS n FROM workflow_runs WHERE workflow_id = %s",
-                             (wf["id"],)).fetchone()["n"]
             row = conn.execute(
-                """INSERT INTO workflow_runs (workflow_id, number, status, started_label, duration,
+                """INSERT INTO workflow_runs (project_id, workflow_id, number, status, started_label, duration,
                                               progress, stats, rows_data, triggered_by)
-                   VALUES (%s, %s, 'running', to_char(now(), 'Mon DD, HH12:MI AM'), '00:00:00', 0, %s, '[]', %s)
-                   RETURNING id""",
-                (wf["id"], n, json.dumps({"ctx": {"trigger": trigger_meta}, "trigger": trigger_meta}),
+                   VALUES (%s, %s, nextval('workflow_run_number_seq'), 'running',
+                           to_char(now(), 'Mon DD, HH12:MI AM'), '00:00:00', 0, %s, '[]', %s)
+                   RETURNING id, number""",
+                (wf.get("project_id"), wf["id"],
+                 json.dumps({"ctx": {"trigger": trigger_meta}, "trigger": trigger_meta}),
                  label)).fetchone()
+            n = row["number"]
             conn.execute("INSERT INTO events (actor, verb, target) VALUES (%s, %s, %s)",
                          ("Flow scheduler", f"auto-started run #{n} ({label})", wf["name"]))
             conn.commit()
@@ -719,8 +720,10 @@ def ensure_fact_scan_flow() -> int:
     """Get-or-create the manual 'Fact scan' flow the Facts page starts. Returns
     its workflow id — the caller needs it to open a run, so unlike the scheduled
     seeds this one answers with the existing id rather than None."""
+    project_id = access.require_current_access().project_id
     with _conn() as conn:
-        for r in conn.execute("SELECT id, nodes FROM workflows").fetchall():
+        for r in conn.execute("SELECT id, nodes FROM workflows WHERE project_id = %s",
+                              (project_id,)).fetchall():
             if any(s.get("kind") == "scan_facts" for s in _wf_nodes(r)):
                 _adopt_rotation(conn, r, "scan_facts", "facts")
                 return r["id"]
@@ -731,9 +734,9 @@ def ensure_fact_scan_flow() -> int:
             {"kind": "scan_facts", "label": "Extract checkable claims", "config": {}},
         ]
         row = conn.execute(
-            """INSERT INTO workflows (name, description, color, pinned, status, nodes, trigger)
-               VALUES (%s, %s, '#1E6FA8', false, 'active', %s, %s) RETURNING id""",
-            (FACT_SCAN_FLOW,
+            """INSERT INTO workflows (project_id, name, description, color, pinned, status, nodes, trigger)
+               VALUES (%s, %s, %s, '#1E6FA8', false, 'active', %s, %s) RETURNING id""",
+            (project_id, FACT_SCAN_FLOW,
              "Mines recent documents for atomic, checkable claims and files them for verification.",
              json.dumps(nodes), json.dumps({"on": ""}))).fetchone()
         conn.execute("INSERT INTO events (actor, verb, target) VALUES (%s, %s, %s)",
@@ -745,8 +748,10 @@ def ensure_fact_scan_flow() -> int:
 def ensure_decision_scan_flow() -> int:
     """Get-or-create the manual 'Decision scan' flow the Decisions page starts.
     Mirrors ensure_fact_scan_flow — same shape, different step."""
+    project_id = access.require_current_access().project_id
     with _conn() as conn:
-        for r in conn.execute("SELECT id, nodes FROM workflows").fetchall():
+        for r in conn.execute("SELECT id, nodes FROM workflows WHERE project_id = %s",
+                              (project_id,)).fetchall():
             if any(s.get("kind") == "scan_decisions" for s in _wf_nodes(r)):
                 _adopt_rotation(conn, r, "scan_decisions", "decisions")
                 return r["id"]
@@ -757,9 +762,9 @@ def ensure_decision_scan_flow() -> int:
             {"kind": "scan_decisions", "label": "Extract decisions", "config": {}},
         ]
         row = conn.execute(
-            """INSERT INTO workflows (name, description, color, pinned, status, nodes, trigger)
-               VALUES (%s, %s, '#7A2E1F', false, 'active', %s, %s) RETURNING id""",
-            (DECISION_SCAN_FLOW,
+            """INSERT INTO workflows (project_id, name, description, color, pinned, status, nodes, trigger)
+               VALUES (%s, %s, %s, '#7A2E1F', false, 'active', %s, %s) RETURNING id""",
+            (project_id, DECISION_SCAN_FLOW,
              "Mines recent documents for decisions the team made and files them awaiting sign-off.",
              json.dumps(nodes), json.dumps({"on": ""}))).fetchone()
         conn.execute("INSERT INTO events (actor, verb, target) VALUES (%s, %s, %s)",

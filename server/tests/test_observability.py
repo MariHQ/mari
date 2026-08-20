@@ -48,6 +48,29 @@ class ObservabilityTests(unittest.TestCase):
         self.assertNotIn("\n", minted)
         self.assertEqual(len(minted), 36)
 
+    def test_unmatched_paths_share_one_bounded_metric_label(self) -> None:
+        metrics = observability.Metrics()
+        original = observability.METRICS
+
+        async def exercise(path: str) -> None:
+            request = Request({
+                "type": "http", "method": "GET", "path": path,
+                "query_string": b"", "scheme": "http", "server": ("test", 80),
+                "client": ("test", 1), "root_path": "", "headers": [],
+            })
+            middleware = observability.RequestTelemetryMiddleware(lambda *_: None)
+            await middleware.dispatch(request, lambda _: asyncio.sleep(0, result=JSONResponse({}, status_code=404)))
+
+        try:
+            observability.METRICS = metrics
+            asyncio.run(exercise("/random/one"))
+            asyncio.run(exercise("/random/two"))
+        finally:
+            observability.METRICS = original
+        rendered = metrics.render()
+        self.assertIn('route="<unmatched>",status="404"} 2', rendered)
+        self.assertNotIn("random", rendered)
+
     def test_prometheus_output_has_counter_gauge_and_cumulative_histogram(self) -> None:
         metrics = observability.Metrics()
         metrics.inc("mari_test_total", route="/x", status=200)

@@ -8,6 +8,7 @@ import strawberry
 from strawberry.scalars import JSON
 
 import access
+import auth
 import flowengine
 import github
 import ingest
@@ -104,14 +105,7 @@ class MutAdmin:
         actor = _require_admin(info)
         if role not in ROLES:
             raise ValueError(f"role must be one of {', '.join(ROLES)}")
-        initials = "".join(w[0].upper() for w in name.split()[:2]) or "??"
-        # `invited_by` is what makes this row claimable at POST /auth/register.
-        # Nothing else in the tree sets it, so a credential-less row that some
-        # other path created (repoaudit's member mapping, say) is not an
-        # invitation and cannot be signed into.
-        exec_("""INSERT INTO users (name, initials, tint, email, role, provider, joined, invited_by)
-                 VALUES (%s, %s, %s, %s, %s, 'manual', now(), %s) ON CONFLICT (name) DO NOTHING""",
-              (name, initials, (hash(name) % 4) + 1, email, role, actor["name"]))
+        auth.issue_invitation(name, email, role, actor["name"])
         audit("invited member", f"{name} ({role})", actor["name"],
               [("Email", email), ("Role", role), ("Provider", "manual invite")])
         return True
@@ -154,23 +148,37 @@ class MutAdmin:
     # ——— api keys ———
     @strawberry.mutation
     def create_api_key(self, info: strawberry.Info, name: str, scopes: str = "read") -> str:
+        import hashlib
         import secrets
         actor = _require_admin(info)
+        project_id = access.require_current_access().project_id
+        name = (name or "").strip()
+        scope_values = sorted({value.strip() for value in scopes.split(",") if value.strip()})
+        allowed = {"read", "search", "facts", "lineage"}
+        if not name or not scope_values or not set(scope_values).issubset(allowed):
+            raise ValueError(f"Scopes must be a comma-separated subset of {', '.join(sorted(allowed))}.")
+        if q1("SELECT 1 FROM api_keys WHERE project_id = %s AND name = %s", (project_id, name)):
+            raise ValueError(f"An API key called '{name}' already exists.")
         token = "mari_sk_" + secrets.token_hex(16)
-        exec_("""INSERT INTO api_keys (name, prefix, scopes, created_at, last_used)
-                 VALUES (%s, %s, %s, now(), 'never') ON CONFLICT (name) DO NOTHING""",
-              (name, token[:12] + "…", scopes))
+        exec_("""INSERT INTO api_keys
+                 (project_id, name, prefix, token_hash, scopes, created_at, last_used)
+                 VALUES (%s, %s, %s, %s, %s, now(), 'never')""",
+              (project_id, name, token[:12] + "…", hashlib.sha256(token.encode()).hexdigest(),
+               ",".join(scope_values)))
         audit("created API key", name, actor["name"],
-              [("Scopes", scopes), ("Prefix", token[:12] + "…")])
+              [("Scopes", ",".join(scope_values)), ("Prefix", token[:12] + "…")])
         return token
 
     @strawberry.mutation
     def revoke_api_key(self, info: strawberry.Info, id: int) -> bool:
         actor = _require_admin(info)
-        key = q1("SELECT name, prefix, scopes FROM api_keys WHERE id = %s", (id,))
+        project_id = access.require_current_access().project_id
+        key = q1("""SELECT name, prefix, scopes FROM api_keys
+                    WHERE project_id = %s AND id = %s""", (project_id, id))
         if not key:
             return False
-        exec_("UPDATE api_keys SET revoked = true WHERE id = %s", (id,))
+        exec_("UPDATE api_keys SET revoked = true, token_hash = '' WHERE project_id = %s AND id = %s",
+              (project_id, id))
         audit("revoked API key", key["name"], actor["name"],
               [("Prefix", key["prefix"]), ("Scopes", key["scopes"])])
         return True

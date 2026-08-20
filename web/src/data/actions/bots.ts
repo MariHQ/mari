@@ -40,7 +40,7 @@ export function botActions(): SourcesBotsActions {
     saveSlackCredentials: async ({ botToken, signingSecret }) => {
       await mutate(UPDATE_SETTING, {
         key: "slack_bot",
-        value: { ...(await botRow("slack_bot")), bot_token: botToken, signing_secret: signingSecret.trim() },
+        value: { ...(await botRow("slack_bot")), bot_token: botToken.trim(), signing_secret: signingSecret.trim() },
       });
     },
     testSlackConnection: async () => {

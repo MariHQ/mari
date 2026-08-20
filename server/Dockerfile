@@ -10,11 +10,10 @@ RUN apt-get update \
 
 WORKDIR /app/server
 
-# Dependencies first for layer caching. psycopg[binary] ships a prebuilt
-# libpq, and markdown is imported by the site builder; neither is in
-# requirements.txt (the local dev flow installs them separately).
+# Dependencies first for layer caching. Every runtime dependency is declared
+# in requirements.txt so local and container installs resolve the same set.
 COPY server/requirements.txt ./requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt "psycopg[binary]>=3.2" markdown
+RUN pip install --no-cache-dir -r requirements.txt
 
 COPY server/ /app/server/
 

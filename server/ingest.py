@@ -117,7 +117,9 @@ def _is_bot(login: str) -> bool:
 
 def _upsert_document(conn, source_id: int, external_id: str, title: str, body: str,
                      source_path: str, kind: str, content_hash: str, author: str,
-                     source: str = "github", initials: str = "GH") -> tuple[int, bool]:
+                     source: str = "github", initials: str = "GH",
+                     acl_visibility: str = "project",
+                     acl_principals: tuple[str, ...] = ()) -> tuple[int, bool]:
     """Upsert one document. Returns (doc_id, inserted) — inserted is True for a
     brand-new row, False for an update (xmax = 0 only on fresh inserts).
     `source`/`initials` default to github; connect_sync passes the provider key."""
@@ -125,16 +127,18 @@ def _upsert_document(conn, source_id: int, external_id: str, title: str, body: s
     project_id = access.require_current_access().project_id
     row = conn.execute("""
         INSERT INTO documents (project_id, source, external_id, title, snippet, body, author, author_initials,
-                               kind, updated_src, created_src, content_hash, source_path, source_id)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_DATE, CURRENT_DATE, %s, %s, %s)
+                               kind, updated_src, created_src, content_hash, source_path, source_id,
+                               acl_visibility, acl_principals)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_DATE, CURRENT_DATE, %s, %s, %s, %s, %s)
         ON CONFLICT (project_id, source, external_id) DO UPDATE SET
           title = EXCLUDED.title, snippet = EXCLUDED.snippet, body = EXCLUDED.body,
           author = EXCLUDED.author, kind = EXCLUDED.kind, updated_src = CURRENT_DATE,
           content_hash = EXCLUDED.content_hash, source_path = EXCLUDED.source_path,
-          source_id = EXCLUDED.source_id
+          source_id = EXCLUDED.source_id, acl_visibility = EXCLUDED.acl_visibility,
+          acl_principals = EXCLUDED.acl_principals
         RETURNING id, (xmax = 0) AS inserted""",
         (project_id, source, external_id, title, snippet, body, author, initials, kind,
-         content_hash, source_path, source_id)
+         content_hash, source_path, source_id, acl_visibility, json.dumps(list(acl_principals)))
     ).fetchone()
     conn.commit()
     return row["id"], bool(row["inserted"])

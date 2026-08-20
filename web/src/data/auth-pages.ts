@@ -6,7 +6,6 @@
  * the pages take it as data so the design canvas can drive the same
  * rendering path from a fixture. */
 
-import { useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import type { LoginData, LoginProvider } from "@mari-design/components/pages/LoginPage";
 import type { SetupData } from "@mari-design/components/pages/SetupPage";
@@ -55,7 +54,6 @@ export function buildLogin(
 
 export function useLogin(): PageData<LoginData> {
   const { oauth, loading, bypassEnabled } = useAuth();
-  const [register] = useState(false);
 
   /* Which auth step is on screen is ROUTE state, not component state. It was
      a `useState` that nothing could ever set, so requesting a magic link
@@ -65,6 +63,7 @@ export function useLogin(): PageData<LoginData> {
      Putting it in the query string means the confirmation survives a reload,
      can be linked to, and gives "Back to sign in" something real to undo. */
   const [params] = useSearchParams();
+  const register = params.get("register") === "1" || Boolean(params.get("invite"));
   const sentTo = params.get("sent") ?? "";
   const screen: LoginData["screen"] = sentTo ? "magic-link" : "credentials";
 

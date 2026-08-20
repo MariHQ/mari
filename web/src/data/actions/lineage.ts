@@ -13,7 +13,7 @@ import { mutate, type ActionContext } from "../actions";
  *  than an uncolored chip with no bucket. */
 const SEVERITIES = new Set(["update-required", "review", "minor"]);
 
-export function lineageActions({ navigate }: ActionContext): LineageActions {
+export function lineageActions({ navigate, currentUserName }: ActionContext): LineageActions {
   return {
     // The graph's nodes ARE documents; the drawers offered "Open document" and
     // linked to "#". The library names the destination, the app follows it.
@@ -58,7 +58,7 @@ export function lineageActions({ navigate }: ActionContext): LineageActions {
     createReviewTask: async ({ title, assignee }) => {
       await mutate(
         "mutation($title: String!, $kind: String!, $kindLabel: String!, $assignee: String!) { createTask(title: $title, kind: $kind, kindLabel: $kindLabel, assignee: $assignee) }",
-        { title, kind: "review", kindLabel: "Review", assignee: assignee || "Daniel H." },
+        { title, kind: "review", kindLabel: "Review", assignee: assignee || currentUserName },
       );
     },
     deriveLinks: async () => {

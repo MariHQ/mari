@@ -83,9 +83,9 @@ test("Ollama embedding and generation settings save without cloud keys", async (
   const embedding = page.getByText("Embedding model", { exact: true }).locator("xpath=ancestor::*[contains(@class,'rounded')][1]");
   const llm = page.getByText("LLM provider", { exact: true }).locator("xpath=ancestor::*[contains(@class,'rounded')][1]");
   await embedding.getByRole("combobox").selectOption("ollama:mxbai-embed-large");
-  await embedding.getByRole("button", { name: "Save" }).click();
+  await page.getByRole("button", { name: "Save", exact: true }).first().click();
   await embedding.getByRole("button", { name: "Re-index everything?" }).click();
-  await llm.getByRole("button", { name: "Save" }).click();
+  await page.getByRole("button", { name: "Save", exact: true }).nth(1).click();
   await expect.poll(() => api.calls.filter((c) => c.query.includes("updateSetting")).length).toBeGreaterThanOrEqual(2);
   expect(api.calls.some((c) => c.variables.key === "embedding" && (c.variables.value as any).provider === "ollama")).toBeTruthy();
   expect(api.calls.some((c) => c.variables.key === "llm" && (c.variables.value as any).provider === "ollama")).toBeTruthy();

@@ -8,6 +8,7 @@ design: every finding has exactly one obvious fix.
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import pathlib
@@ -55,8 +56,8 @@ def ensure_schema() -> None:
 # ——— real GitHub repo resolution (sources with kind='github') ———
 
 BUILDS_DIR = pathlib.Path(
-    os.environ.get("MARI_BUILDS_DIR", pathlib.Path(__file__).parent / "builds")
-) / "audit"
+    os.environ.get("MARI_REPO_AUDIT_DIR", pathlib.Path(__file__).parent / "data" / "repo-audit")
+)
 
 
 def _github_source() -> dict | None:
@@ -67,10 +68,22 @@ def _github_source() -> dict | None:
             "AND coalesce(config->>'repo', '') <> '' ORDER BY id LIMIT 1").fetchone()
 
 
-def _git(args: list[str], cwd: pathlib.Path | None = None, timeout: int = 120) -> str:
+def _git(args: list[str], cwd: pathlib.Path | None = None, timeout: int = 120,
+         token: str = "") -> str:
     """Run git, never leaking the token into exceptions or logs."""
-    tok = (config.get("github", "token") or "").strip()
-    r = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, timeout=timeout)
+    tok = token.strip()
+    env = os.environ.copy()
+    if tok:
+        credential = base64.b64encode(f"x-access-token:{tok}".encode()).decode()
+        # Git reads this one-shot config from the child environment. The
+        # credential never appears in argv/process listings or the remote URL.
+        env.update({
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "http.extraHeader",
+            "GIT_CONFIG_VALUE_0": f"Authorization: Basic {credential}",
+        })
+    r = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True,
+                       timeout=timeout, env=env)
     if r.returncode != 0:
         msg = (r.stderr or r.stdout or "").strip()
         if tok:
@@ -79,7 +92,7 @@ def _git(args: list[str], cwd: pathlib.Path | None = None, timeout: int = 120) -
     return r.stdout
 
 
-def _sync_github_repo(repo_slug: str) -> pathlib.Path:
+def _sync_github_repo(repo_slug: str, token: str = "") -> pathlib.Path:
     """Shallow-clone (or update) owner/name into builds/audit/owner__name.
 
     The token is only ever passed on the command line at call time; the
@@ -88,15 +101,13 @@ def _sync_github_repo(repo_slug: str) -> pathlib.Path:
     owner, _, name = repo_slug.partition("/")
     dest = BUILDS_DIR / f"{owner}__{name}"
     plain_url = f"https://github.com/{repo_slug}.git"
-    tok = (config.get("github", "token") or "").strip()
-    fetch_url = f"https://x-access-token:{tok}@github.com/{repo_slug}.git" if tok else plain_url
     if (dest / ".git").exists():
         # remote HEAD == default branch; avoids hardcoding its name
-        _git(["fetch", "--depth", "50", fetch_url, "HEAD"], cwd=dest)
+        _git(["fetch", "--depth", "50", plain_url, "HEAD"], cwd=dest, token=token)
         _git(["reset", "--hard", "FETCH_HEAD"], cwd=dest)
     else:
         BUILDS_DIR.mkdir(parents=True, exist_ok=True)
-        _git(["clone", "--depth", "50", fetch_url, str(dest)], timeout=300)
+        _git(["clone", "--depth", "50", plain_url, str(dest)], timeout=300, token=token)
         _git(["remote", "set-url", "origin", plain_url], cwd=dest)
     return dest
 
@@ -147,7 +158,10 @@ def run_audit(provider: str = "github") -> int:
     # real connected repo: clone/update and scan the whole tree
     cfg = src["config"] if isinstance(src["config"], dict) else json.loads(src["config"])
     repo_label = cfg.get("repo", "")
-    repo = _sync_github_repo(repo_label)
+    repo = _sync_github_repo(
+        repo_label,
+        str(cfg.get("token") or config.get("github", "token") or ""),
+    )
     base = repo
     md_files = sorted(p for p in repo.rglob("*.md") if ".git" not in p.parts)
 

@@ -7,7 +7,7 @@ test.beforeEach(async ({ page }) => { api = await installMockApi(page); });
 test("review items can be created, completed, filtered, and report write failures", async ({ page }) => {
   await page.goto("/tasks");
   await page.getByRole("textbox", { name: "Review item", exact: true }).fill("Review the deletion SLA");
-  await page.getByLabel("Kind").selectOption("approval");
+  await page.locator('select:has(option[value="approval"])').selectOption("approval");
   await page.getByLabel("Due date").fill("2026-08-29");
   await page.getByRole("button", { name: "Add review item" }).click();
   await expect.poll(() => api.calls.some((call) => call.query.includes("createTask") && call.variables.title === "Review the deletion SLA")).toBeTruthy();
@@ -98,4 +98,17 @@ test("profile, password, and notification settings reach their account endpoints
 
   await page.getByRole("switch", { name: "Mentions and review requests" }).click();
   await expect.poll(() => api.restCalls.filter((call) => call.path.startsWith("/auth/preferences/")).length).toBeGreaterThanOrEqual(3);
+});
+
+test("an unowned fact defaults to the confirmed signed-in member, never demo identity", async ({ page }) => {
+  await page.goto("/facts");
+  await page.getByRole("button", { name: "New fact" }).click();
+  const drawer = page.getByRole("dialog", { name: "New fact" });
+  await drawer.getByLabel("Claim").fill("Browser-created claim");
+  await drawer.getByLabel("Where it comes from").fill("browser test");
+  await drawer.getByRole("button", { name: "Add fact" }).click();
+  await expect.poll(() => api.calls.some((call) => call.query.includes("addFact"))).toBeTruthy();
+  const call = api.calls.find((candidate) => candidate.query.includes("addFact"));
+  expect(call?.variables.owner).toBe("Dana Rodriguez");
+  expect(JSON.stringify(call?.variables)).not.toContain("Daniel H.");
 });

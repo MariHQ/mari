@@ -201,7 +201,10 @@ class RequestTelemetryMiddleware(BaseHTTPMiddleware):
         finally:
             duration = time.perf_counter() - started
             route = request.scope.get("route")
-            path = getattr(route, "path", request.url.path)
+            # Raw unmatched paths are attacker-controlled and unbounded. Keep
+            # one stable label for 404s instead of allocating a time series per
+            # random URL.
+            path = getattr(route, "path", None) or "<unmatched>"
             METRICS.inc("mari_http_requests_total", method=request.method, route=path, status=status)
             METRICS.observe("mari_http_request_duration_seconds", duration,
                             method=request.method, route=path)

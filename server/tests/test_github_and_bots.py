@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 import bots
 import github
+import access
 
 
 class GitHubPollingTests(unittest.TestCase):
@@ -92,7 +93,8 @@ class SlackBotTests(unittest.TestCase):
 
     def test_answer_pipeline_uses_ollama_and_cites_retrieved_docs(self) -> None:
         docs = [{"title": "Deploy", "source": "github", "body": "Run make deploy", "snippet": ""}]
-        with patch.object(bots.llm, "embed", return_value=None), \
+        ctx = access.AccessContext(1, 7, "acme", "Acme", "admin", access.CAPABILITIES)
+        with access.use_access(ctx), patch.object(bots.llm, "embed", return_value=None), \
              patch.object(bots, "hybrid_search", return_value=docs), \
              patch.object(bots, "pq", return_value=[]), \
              patch.object(bots.llm, "generate", return_value="Follow the deploy runbook [1].") as generate:

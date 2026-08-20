@@ -10,10 +10,15 @@ async function expectNoPageOverflow(page: import("@playwright/test").Page) {
 }
 
 test("a 1,500-item review queue renders a bounded, navigable page", async ({ page }) => {
-  api.setData("tasks", Array.from({ length: 1_500 }, (_, index) => ({
-    id: index + 1, title: `Queue item ${index + 1}`, assigneeInitials: "DR",
-    kind: "approval", kindLabel: "Approval", done: false, due: "2026-08-30", overdue: false,
-  })));
+  api.setData("reviewItems", {
+    items: Array.from({ length: 1_500 }, (_, index) => ({
+      id: `task:${index + 1}`, title: `Queue item ${index + 1}`, assignee: "Dana Reyes",
+      kind: "task", status: "pending", source: "", due: "2026-08-30",
+      subjectType: "", subjectId: "", subjectTitle: "", subjectHref: "",
+    })),
+    totalCount: 1_500,
+    pageInfo: { endCursor: "", hasNextPage: true },
+  });
   await page.goto("/tasks");
   await expect(page.getByText("Showing 1 to 25 of 1,500 open review items")).toBeVisible();
   await expect(page.getByRole("button", { name: "Mark done" })).toHaveCount(25);

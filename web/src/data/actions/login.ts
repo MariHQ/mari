@@ -30,7 +30,11 @@ export function loginActions({ refresh, navigate }: {
       await refresh();
     },
     register: async ({ name, email, password, workspace }: Credentials) => {
-      await authPost("/auth/register", { name, email, password, workspace });
+      const inviteToken = new URLSearchParams(window.location.search).get("invite") ?? "";
+      await authPost("/auth/register", {
+        name, email, password, workspace,
+        ...(inviteToken ? { invite_token: inviteToken } : {}),
+      });
       await refresh();
     },
     magicLink: async (email: string) => {

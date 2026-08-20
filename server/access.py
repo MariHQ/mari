@@ -66,6 +66,7 @@ class AccessContext:
     capabilities: FrozenSet[str]
     principal_type: str = "user"
     principal_id: str = ""
+    principals: FrozenSet[str] = frozenset()
 
     def allows(self, capability: str) -> bool:
         return capability in self.capabilities
@@ -96,13 +97,15 @@ def require_current_access() -> AccessContext:
 
 def external_access(project_id: int, project_slug: str, project_name: str,
                     principal_type: str, principal_id: str,
-                    capabilities: FrozenSet[str] | None = None) -> AccessContext:
+                    capabilities: FrozenSet[str] | None = None,
+                    principals: FrozenSet[str] | None = None) -> AccessContext:
     """Build a narrowly scoped context for a verified external principal."""
     return AccessContext(
         user_id=0, project_id=int(project_id), project_slug=project_slug,
         project_name=project_name, role="external",
         capabilities=capabilities or frozenset({"knowledge.read"}),
         principal_type=principal_type, principal_id=principal_id,
+        principals=principals or frozenset(),
     )
 
 

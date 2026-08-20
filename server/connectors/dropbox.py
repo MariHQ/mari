@@ -40,6 +40,7 @@ PROVIDER = {
 
 _EXTS = (".md", ".txt", ".markdown", ".paper")
 _MAX_BYTES = 1024 * 1024
+MAX_PAGES = 50
 
 
 def _http(method, url, headers=None, body=None, timeout=60):
@@ -120,10 +121,13 @@ def list_items(config, cursor):
         })
 
     entries = list(data.get("entries", []))
-    while data.get("has_more"):
+    pages = 1
+    while data.get("has_more") and pages < MAX_PAGES:
         data = _rpc(config, "/files/list_folder/continue", {"cursor": data["cursor"]})
         entries.extend(data.get("entries", []))
+        pages += 1
     next_cursor = data.get("cursor")
+    complete = not bool(data.get("has_more"))
 
     items = []
     tombstones = []
@@ -144,5 +148,6 @@ def list_items(config, cursor):
             "hash_hint": e.get("content_hash") or e.get("rev") or None,
             "acl": ACLMetadata(visibility="connector_scope"),
         })
-    return PollResult(items, next_cursor, snapshot_complete=True,
-                      tombstones=tombstones)
+    return PollResult(items, next_cursor if complete else cursor,
+                      snapshot_complete=complete, tombstones=tombstones,
+                      checkpoint=None if complete else next_cursor)

@@ -127,6 +127,10 @@ CREATE TABLE IF NOT EXISTS users (
   status    text NOT NULL DEFAULT 'active',
   joined    date NOT NULL DEFAULT '2024-04-01'
 );
+-- Empty legacy/contact-only addresses are intentionally excluded.  Real
+-- account addresses are identities and compare case-insensitively.
+CREATE UNIQUE INDEX IF NOT EXISTS users_email_normalized_uniq
+  ON users (lower(email)) WHERE email <> '';
 
 CREATE TABLE IF NOT EXISTS api_keys (
   id         serial PRIMARY KEY,
@@ -251,6 +255,7 @@ CREATE TABLE IF NOT EXISTS workflow_runs (
   rows_data   jsonb NOT NULL DEFAULT '[]',
   UNIQUE (workflow_id, number)
 );
+CREATE SEQUENCE IF NOT EXISTS workflow_run_number_seq START WITH 100000;
 
 -- ————— publishing —————
 CREATE TABLE IF NOT EXISTS sites (
@@ -804,6 +809,17 @@ CREATE INDEX IF NOT EXISTS facts_document_id_idx ON facts (document_id) WHERE do
 -- direction hands an account to whoever appears in a git log.
 ALTER TABLE users ADD COLUMN IF NOT EXISTS invited_by text NOT NULL DEFAULT '';
 
+CREATE TABLE IF NOT EXISTS invitation_tokens (
+  token_hash       text PRIMARY KEY,
+  user_id          int NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+  email_normalized text NOT NULL,
+  created_at       timestamptz NOT NULL DEFAULT now(),
+  expires_at       timestamptz NOT NULL,
+  used_at          timestamptz
+);
+CREATE INDEX IF NOT EXISTS invitation_tokens_expiry_idx
+  ON invitation_tokens (expires_at) WHERE used_at IS NULL;
+
 -- ── Project identity boundary ───────────────────────────────────────────────
 -- Users are global identities. Authorization belongs to a live membership in
 -- a project and is resolved for every request; no project role is copied into
@@ -1072,6 +1088,8 @@ CREATE INDEX IF NOT EXISTS trajectory_steps_trajectory_idx ON trajectory_steps (
 -- operator assigns the row deliberately.
 ALTER TABLE sources ADD COLUMN IF NOT EXISTS project_id int REFERENCES projects(id);
 ALTER TABLE documents ADD COLUMN IF NOT EXISTS project_id int REFERENCES projects(id);
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS acl_visibility text NOT NULL DEFAULT 'project';
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS acl_principals jsonb NOT NULL DEFAULT '[]';
 ALTER TABLE tags ADD COLUMN IF NOT EXISTS project_id int REFERENCES projects(id);
 ALTER TABLE edges ADD COLUMN IF NOT EXISTS project_id int REFERENCES projects(id);
 ALTER TABLE chunks ADD COLUMN IF NOT EXISTS project_id int REFERENCES projects(id);
@@ -1090,6 +1108,12 @@ ALTER TABLE glossary ADD COLUMN IF NOT EXISTS project_id int REFERENCES projects
 ALTER TABLE events ADD COLUMN IF NOT EXISTS project_id int REFERENCES projects(id);
 ALTER TABLE workflows ADD COLUMN IF NOT EXISTS project_id int REFERENCES projects(id);
 ALTER TABLE workflow_runs ADD COLUMN IF NOT EXISTS project_id int REFERENCES projects(id);
+ALTER TABLE sites ADD COLUMN IF NOT EXISTS project_id int REFERENCES projects(id);
+ALTER TABLE releases ADD COLUMN IF NOT EXISTS project_id int REFERENCES projects(id);
+ALTER TABLE digest_topics ADD COLUMN IF NOT EXISTS project_id int REFERENCES projects(id);
+ALTER TABLE graph_views ADD COLUMN IF NOT EXISTS project_id int REFERENCES projects(id);
+ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS project_id int REFERENCES projects(id);
+ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS token_hash text NOT NULL DEFAULT '';
 
 DO $$
 DECLARE only_project int;
@@ -1120,6 +1144,12 @@ BEGIN
     UPDATE workflows SET project_id = only_project WHERE project_id IS NULL;
     UPDATE workflow_runs r SET project_id = COALESCE(w.project_id, only_project)
       FROM workflows w WHERE r.workflow_id = w.id AND r.project_id IS NULL;
+    UPDATE sites SET project_id = only_project WHERE project_id IS NULL;
+    UPDATE releases r SET project_id = COALESCE(s.project_id, only_project)
+      FROM sites s WHERE r.site_id = s.id AND r.project_id IS NULL;
+    UPDATE digest_topics SET project_id = only_project WHERE project_id IS NULL;
+    UPDATE graph_views SET project_id = only_project WHERE project_id IS NULL;
+    UPDATE api_keys SET project_id = only_project WHERE project_id IS NULL;
   END IF;
 END $$;
 
@@ -1154,6 +1184,12 @@ CREATE INDEX IF NOT EXISTS mcp_servers_project_idx ON mcp_servers(project_id, id
 CREATE INDEX IF NOT EXISTS events_project_time_idx ON events(project_id, occurred_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS workflows_project_idx ON workflows(project_id, id);
 CREATE INDEX IF NOT EXISTS workflow_runs_project_idx ON workflow_runs(project_id, workflow_id, id);
+CREATE UNIQUE INDEX IF NOT EXISTS sites_project_name_uidx ON sites(project_id, name);
+CREATE INDEX IF NOT EXISTS releases_project_site_idx ON releases(project_id, site_id, id);
+CREATE INDEX IF NOT EXISTS digest_topics_project_idx ON digest_topics(project_id, id);
+CREATE UNIQUE INDEX IF NOT EXISTS graph_views_project_name_uidx ON graph_views(project_id, name);
+CREATE UNIQUE INDEX IF NOT EXISTS api_keys_project_name_uidx ON api_keys(project_id, name);
+CREATE INDEX IF NOT EXISTS api_keys_token_hash_idx ON api_keys(token_hash) WHERE NOT revoked;
 
 CREATE TABLE IF NOT EXISTS bot_installations (
   id             serial PRIMARY KEY,

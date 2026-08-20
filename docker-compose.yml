@@ -9,7 +9,7 @@ services:
     # locally. Running the API on the host is how you reach an Ollama that is
     # also on the host: from inside a container, "localhost" is the container.
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     environment:
       POSTGRES_USER: mari
       POSTGRES_PASSWORD: mari
@@ -21,6 +21,7 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+    restart: unless-stopped
 
   # One-shot schema load. The SQL files are idempotent, so re-running
   # `docker compose up` is safe.
@@ -82,7 +83,7 @@ services:
       # Local only, read-only: carries the SSO cache boto3 needs to mint
       # credentials. Nothing is written back, and in production the role
       # supplies credentials so this mount is unused.
-      - ${HOME}/.aws:/root/.aws:ro
+      - ${HOME}/.aws:/app/.aws:ro
     extra_hosts:
       # Makes host.docker.internal resolve on Linux (no-op on Docker Desktop).
       - host.docker.internal:host-gateway

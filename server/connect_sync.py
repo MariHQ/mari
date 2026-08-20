@@ -195,6 +195,15 @@ def _sync_worker(source_id: int, full: bool) -> dict:
                 seen_paths.add(path)
                 if authoritative_full:
                     snapshot_seen_paths.add(path)
+                if item.get("unchanged"):
+                    # Provider conditional responses (for example Website
+                    # HTTP 304) deliberately have no body. They prove the
+                    # existing item is present and unchanged; treating that
+                    # empty body as a revision would erase its search chunks.
+                    stats["skipped"] += 1
+                    done += 1
+                    ingest._set(source_id, phase="fetching", done=done)
+                    continue
                 title = (item.get("title") or path).strip() or path
                 body = item.get("body") or ""
                 hint = item.get("hash_hint")
@@ -207,7 +216,9 @@ def _sync_worker(source_id: int, full: bool) -> dict:
                 ingest._set(source_id, phase="chunking", done=done)
                 doc_id, inserted = ingest._upsert_document(
                     conn, source_id, f"{key}:{source_id}:{path}", title, body,
-                    f"{key}/{path}", "page", h, author, source=key, initials=initials)
+                    f"{key}/{path}", "page", h, author, source=key, initials=initials,
+                    acl_visibility=getattr(item.get("acl"), "visibility", "connector_scope"),
+                    acl_principals=tuple(getattr(item.get("acl"), "principals", ()) or ()))
                 (added_doc_ids if inserted else changed_doc_ids).append(doc_id)
                 ingest._set(source_id, phase="embedding")
                 if body.strip():

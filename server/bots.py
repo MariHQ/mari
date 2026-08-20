@@ -111,15 +111,16 @@ BOT_SYSTEM = (
 
 def answer_question(question: str) -> str:
     """Hybrid search + LLM answer with the same deterministic fallback as /chat."""
+    caller_access = access.require_current_access()
     # Curated answers beat generation (same canon as /chat).
     qvec = llm.embed(question)
-    if qvec:
+    if qvec and caller_access.principal_type == "user":
         approved = q1(
             """SELECT question, answer, 1 - (embedding <=> %s::vector) AS sim
                FROM approved_answers
                WHERE project_id = %s AND status = 'approved' AND embedding IS NOT NULL
                ORDER BY embedding <=> %s::vector LIMIT 1""",
-            (str(qvec), access.require_current_access().project_id, str(qvec)),
+            (str(qvec), caller_access.project_id, str(qvec)),
         )
         if approved and approved["sim"] >= 0.62:
             return f"{approved['answer']}\n\n_Approved answer · served verbatim_"
@@ -129,7 +130,8 @@ def answer_question(question: str) -> str:
         f"[{i + 1}] {d['title']} ({d['source']})\n{d['body'] or d['snippet']}"
         for i, d in enumerate(docs)
     )
-    facts = pq("SELECT claim FROM facts WHERE project_id = %s AND status = 'Verified' LIMIT 8")
+    facts = (pq("SELECT claim FROM facts WHERE project_id = %s AND status = 'Verified' LIMIT 8")
+             if caller_access.principal_type == "user" else [])
     if facts:
         context += "\n\nVerified facts:\n" + "\n".join(f"- {f['claim']}" for f in facts)
 
@@ -300,7 +302,8 @@ async def slack_webhook(request: Request):
             token = (cfg.get("bot_token") or "").strip()
             project_access = access.external_access(
                 installation["project_id"], installation["project_slug"], installation["project_name"],
-                "slack", str(installation["id"]), frozenset({"knowledge.read"}))
+                "slack", str(installation["id"]), frozenset({"knowledge.read"}),
+                frozenset({f"channel:{event.get('channel')}"}) if event.get("channel") else frozenset())
             threading.Thread(target=_handle_slack_event,
                              args=(event, token, project_access, installation["id"]), daemon=True).start()
 

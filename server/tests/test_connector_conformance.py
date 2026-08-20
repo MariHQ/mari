@@ -145,6 +145,16 @@ class SnapshotSafetyTests(unittest.TestCase):
         self.assertEqual(result.tombstones, ["gone.md"])
         self.assertEqual(result.cursor, "next")
 
+    def test_dropbox_page_cap_returns_resumable_incomplete_checkpoint(self) -> None:
+        first = {"cursor": "page-1", "has_more": True, "entries": []}
+        with patch.object(dropbox, "MAX_PAGES", 1), patch.object(
+                dropbox, "_rpc", return_value=first) as rpc:
+            result = dropbox.list_items({"access_token": "x"}, "old")
+        self.assertFalse(result.snapshot_complete)
+        self.assertEqual(result.cursor, "old")
+        self.assertEqual(result.checkpoint, "page-1")
+        self.assertEqual(rpc.call_count, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

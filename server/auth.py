@@ -39,6 +39,11 @@ COOKIE = "mari_session"
 # How long a magic sign-in link stays valid.
 MAGIC_LINK_TTL_MIN = 15
 
+# Invitations are bearer credentials, not merely rows with a recognizable
+# email address.  Seven days is long enough for an administrator to deliver a
+# link out of band while keeping forgotten invitations from living forever.
+INVITE_TTL_MIN = 7 * 24 * 60
+
 # How long the first-run admin setup token stays redeemable. `first_run_check`
 # re-mints it on every startup while setup is still pending, so an expired
 # token is fixed by restarting the server — which is also where it is printed.
@@ -96,16 +101,23 @@ _ATTEMPTS_LOCK = threading.Lock()
 def _client_ip(request: Request | None) -> str:
     if request is None:
         return "unknown"
-    forwarded = (request.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
-    return forwarded or (request.client.host if request.client else "unknown")
+    peer = request.client.host if request.client else "unknown"
+    trusted = {str(value).strip() for value in (config.get("server", "trusted_proxies") or [])}
+    if peer in trusted:
+        forwarded = (request.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
+        if forwarded:
+            return forwarded
+    return peer
 
 
 def _rate_limit(bucket: str, key: str, limit: int, window_s: int) -> None:
     ident = f"{bucket}:{key}"
     now = time.time()
     with _ATTEMPTS_LOCK:
-        if len(_ATTEMPTS) > 8192:  # bounded: a flood must not grow the process
-            _ATTEMPTS.clear()
+        if len(_ATTEMPTS) > 8192:  # bounded without forgiving every attacker
+            oldest = sorted(_ATTEMPTS, key=lambda item: _ATTEMPTS[item][-1] if _ATTEMPTS[item] else 0)
+            for stale in oldest[:1024]:
+                _ATTEMPTS.pop(stale, None)
         hits = [t for t in _ATTEMPTS.get(ident, ()) if now - t < window_s]
         if len(hits) >= limit:
             retry = max(1, int(window_s - (now - hits[0])) + 1)
@@ -139,6 +151,73 @@ def _verify(password: str, stored: str) -> bool:
         return False
 
 
+# Login must spend the same scrypt work whether or not an account exists.  A
+# process-local dummy hash is never accepted; it only removes the user-name
+# timing oracle from the negative path.
+_DUMMY_PASSWORD_HASH = _hash(secrets.token_urlsafe(24))
+
+
+def _normalize_email(value: str | None) -> str:
+    return str(value or "").strip().lower()
+
+
+def issue_invitation(name: str, email: str, role: str, invited_by: str) -> str:
+    """Create or rotate an invitation and return its one-time bearer token.
+
+    The GraphQL mutation deliberately continues returning ``bool``.  Until an
+    email transport exists, the link is delivered through the same explicit
+    log channel as setup and magic-link credentials.
+    """
+    email = _normalize_email(email)
+    name = (name or "").strip()
+    if not name or not email:
+        raise ValueError("Name and email are required.")
+    token = secrets.token_urlsafe(32)
+    digest = hashlib.sha256(token.encode()).hexdigest()
+    try:
+        with _conn() as conn:
+            by_email = conn.execute(
+                "SELECT * FROM users WHERE lower(email) = %s FOR UPDATE", (email,)).fetchone()
+            by_name = conn.execute(
+                "SELECT * FROM users WHERE name = %s FOR UPDATE", (name,)).fetchone()
+            if by_email and by_name and by_email["id"] != by_name["id"]:
+                raise ValueError("That name and email belong to different accounts.")
+            user = by_email or by_name
+            if user:
+                pending = (user.get("invited_by") and not user.get("password_hash")
+                           and not user.get("github_id") and not user.get("google_id"))
+                if not pending or _normalize_email(user.get("email")) != email or user.get("name") != name:
+                    raise ValueError("An account with that email or name already exists.")
+                conn.execute("UPDATE users SET role = %s, invited_by = %s WHERE id = %s",
+                             (role, invited_by, user["id"]))
+                user_id = user["id"]
+            else:
+                initials = "".join(w[0].upper() for w in name.split()[:2]) or "??"
+                row = conn.execute(
+                    """INSERT INTO users (name, initials, tint, email, role, provider, joined, invited_by)
+                       VALUES (%s, %s, %s, %s, %s, 'manual', now(), %s) RETURNING id""",
+                    (name, initials, (hash(name) % 4) + 1, email, role, invited_by)).fetchone()
+                user_id = row["id"]
+            # One live credential per invited account.  Redeeming is audited on
+            # the user/event records, so an expired/used token row need not
+            # prevent an administrator from deliberately reissuing access.
+            conn.execute("DELETE FROM invitation_tokens WHERE user_id = %s", (user_id,))
+            conn.execute(
+                """INSERT INTO invitation_tokens
+                     (token_hash, user_id, email_normalized, expires_at)
+                   VALUES (%s, %s, %s, now() + (%s * interval '1 minute'))""",
+                (digest, user_id, email, INVITE_TTL_MIN))
+    except psycopg.errors.UniqueViolation:
+        raise ValueError("An account with that email or name already exists.") from None
+
+    base = str(config.get("auth", "app_url", "http://localhost:5173")).rstrip("/")
+    message = (f"Invitation link for {email} (valid once, 7 days): "
+               f"{base}/login?register=1&invite={token}")
+    log.warning(message)
+    print(f"\n  {message}\n", flush=True)
+    return token
+
+
 def ensure_schema() -> None:
     control_store.ensure_schema()
     with _conn() as conn:
@@ -154,12 +233,10 @@ def ensure_schema() -> None:
         # attribute. init.sql owns creation of this table.
         conn.execute("""INSERT INTO external_identities (user_id, provider, subject, email)
                         SELECT id, 'github', github_id, email FROM users WHERE github_id <> ''
-                        ON CONFLICT (user_id, provider) DO UPDATE
-                          SET subject = EXCLUDED.subject, email = EXCLUDED.email, updated_at = now()""")
+                        ON CONFLICT DO NOTHING""")
         conn.execute("""INSERT INTO external_identities (user_id, provider, subject, email)
                         SELECT id, 'google', google_id, email FROM users WHERE google_id <> ''
-                        ON CONFLICT (user_id, provider) DO UPDATE
-                          SET subject = EXCLUDED.subject, email = EXCLUDED.email, updated_at = now()""")
+                        ON CONFLICT DO NOTHING""")
 
 
 def first_run_check() -> None:
@@ -356,6 +433,7 @@ class Credentials(BaseModel):
     email: str
     password: str
     name: str | None = None
+    invite_token: str | None = None
 
 
 class SetupIn(BaseModel):
@@ -512,14 +590,15 @@ def setup(body: SetupIn, request: Request, response: Response):
             raise HTTPException(403, "Invalid setup token — check the server logs.")
         # Never overwrite an existing row's credentials — a name collision must
         # not become an account takeover (pick a different name/email instead).
-        taken = conn.execute("SELECT 1 FROM users WHERE email = %s OR name = %s",
-                             (body.email, body.name)).fetchone()
+        email = _normalize_email(body.email)
+        taken = conn.execute("SELECT 1 FROM users WHERE lower(email) = %s OR name = %s",
+                             (email, body.name)).fetchone()
         if taken:
             raise HTTPException(409, "A user with that name or email already exists.")
         initials = "".join(w[0].upper() for w in body.name.split()[:2]) or "AD"
         conn.execute("""INSERT INTO users (name, initials, tint, email, role, provider, password_hash)
                         VALUES (%s, %s, 1, %s, 'admin', 'manual', %s)""",
-                     (body.name, initials, body.email, _hash(body.password)))
+                     (body.name, initials, email, _hash(body.password)))
         if body.workspace:
             conn.execute("""INSERT INTO settings (key, value) VALUES ('workspace', %s)
                             ON CONFLICT (key) DO UPDATE SET value = settings.value || EXCLUDED.value""",
@@ -529,7 +608,7 @@ def setup(body: SetupIn, request: Request, response: Response):
                               AND (SELECT count(*) FROM projects) = 1""", (body.workspace,))
         conn.execute("INSERT INTO settings (key, value) VALUES ('setup_complete', 'true') ON CONFLICT DO NOTHING")
         conn.execute("DELETE FROM settings WHERE key = 'setup_token'")
-        user = conn.execute("SELECT * FROM users WHERE email = %s", (body.email,)).fetchone()
+        user = conn.execute("SELECT * FROM users WHERE lower(email) = %s", (email,)).fetchone()
         _join_single_project(conn, user["id"], "owner")
         conn.execute("INSERT INTO events (actor, verb, target) VALUES (%s, 'completed first-run setup', %s)",
                      (body.name, body.workspace or "workspace"))
@@ -551,7 +630,7 @@ def register(body: Credentials, request: Request, response: Response):
 
     Both need first-run setup to be finished: before that there is no admin to
     invite anyone, and the setup token is the only intended way in."""
-    email = (body.email or "").strip()
+    email = _normalize_email(body.email)
     if not body.name or not email:
         raise HTTPException(400, "Name and email are required.")
     if len(body.password) < 8:
@@ -567,10 +646,28 @@ def register(body: Credentials, request: Request, response: Response):
         # not enough on its own: repoaudit's member mapping also creates rows,
         # from addresses it read out of a repository, and those were never an
         # offer of an account.
-        invited = conn.execute(
-            """SELECT * FROM users WHERE lower(email) = lower(%s) AND invited_by <> ''
-                 AND password_hash = '' AND github_id = '' AND google_id = ''""",
-            (email,)).fetchone()
+        invite_token = (body.invite_token or request.headers.get("X-Mari-Invite-Token")
+                        or request.query_params.get("invite") or "").strip()
+        invited = None
+        if invite_token:
+            claimed = conn.execute(
+                """UPDATE invitation_tokens SET used_at = now()
+                     WHERE token_hash = %s AND used_at IS NULL AND expires_at > now()
+                     RETURNING user_id, email_normalized""",
+                (hashlib.sha256(invite_token.encode()).hexdigest(),)).fetchone()
+            if not claimed or claimed["email_normalized"] != email:
+                raise HTTPException(403, "That invitation is invalid, expired, or was already used.")
+            invited = conn.execute(
+                """SELECT * FROM users WHERE id = %s AND lower(email) = %s AND invited_by <> ''
+                     AND password_hash = '' AND github_id = '' AND google_id = '' FOR UPDATE""",
+                (claimed["user_id"], email)).fetchone()
+            if not invited:
+                raise HTTPException(403, "That invitation can no longer be claimed.")
+        elif conn.execute(
+                """SELECT 1 FROM users WHERE lower(email) = %s AND invited_by <> ''
+                     AND password_hash = '' AND github_id = '' AND google_id = ''""",
+                (email,)).fetchone():
+            raise HTTPException(403, "This invitation requires the one-time link sent by an administrator.")
         if invited:
             # Claim the invite. The display name is NOT taken from the request:
             # the admin chose it, `users.name` is unique, and letting a claimer
@@ -605,13 +702,14 @@ def register(body: Credentials, request: Request, response: Response):
 
 @router.post("/login")
 def login(body: Credentials, request: Request, response: Response):
-    ip, email = _client_ip(request), (body.email or "").strip().lower()
+    ip, email = _client_ip(request), _normalize_email(body.email)
     _rate_limit("login-ip", ip, 20, 300)
     _rate_limit("login-account", email, 8, 300)
     with _conn() as conn:
         user = conn.execute("SELECT * FROM users WHERE lower(email) = %s AND password_hash <> ''",
                             (email,)).fetchone()
-    if not user or not _verify(body.password, user["password_hash"]):
+    valid_password = _verify(body.password, user["password_hash"] if user else _DUMMY_PASSWORD_HASH)
+    if not user or not valid_password:
         raise HTTPException(401, "Wrong email or password.")
     _rate_clear("login-ip", ip)
     _rate_clear("login-account", email)
@@ -660,46 +758,98 @@ OAUTH_ID_COLUMN = {"github": "github_id", "google": "google_id"}
 STATE_COOKIE = "mari_oauth_state"
 
 
-def _link_or_create_oauth_user(provider: str, ext_id: str, name: str, email: str) -> dict:
-    """Resolve an OAuth identity to a user row. Match ONLY by the provider id
-    column or by verified email — never by display name: a profile named like
-    an existing member must not inherit that member's row (or role). On a pure
-    name collision we create a fresh 'user'-role row with a deduplicated name."""
+def _link_or_create_oauth_user(provider: str, ext_id: str, name: str, email: str,
+                               email_verified: bool = False) -> dict:
+    """Resolve an immutable provider subject, linking only by verified email."""
     column = OAUTH_ID_COLUMN[provider]
+    ext_id = (ext_id or "").strip()
+    email = _normalize_email(email)
+    if not ext_id:
+        raise HTTPException(400, "OAuth provider returned no account id.")
     with _conn() as conn:
         user = conn.execute("""SELECT u.* FROM external_identities ei
                                JOIN users u ON u.id = ei.user_id
                                WHERE ei.provider = %s AND ei.subject = %s""",
                             (provider, ext_id)).fetchone()
-        user = user or conn.execute(f"SELECT * FROM users WHERE {column} = %s", (ext_id,)).fetchone()
-        if user:
-            pass
-        elif email:
-            existing = conn.execute("SELECT * FROM users WHERE email = %s", (email,)).fetchone()
-            if existing:
-                conn.execute(f"UPDATE users SET {column} = %s WHERE id = %s", (ext_id, existing["id"]))
-                user = conn.execute("SELECT * FROM users WHERE id = %s", (existing["id"],)).fetchone()
         if not user:
-            initials = "".join(w[0].upper() for w in name.split()[:2]) or "??"
-            candidate = name
+            # Transitional lookup for installations upgraded from the legacy
+            # github_id/google_id columns.  It may establish a missing identity
+            # row but never changes an existing provider subject.
+            user = conn.execute(f"SELECT * FROM users WHERE {column} = %s", (ext_id,)).fetchone()
+        if user:
+            if user.get("status", "active") != "active":
+                raise HTTPException(403, "Account is deactivated.")
+            existing_identity = conn.execute(
+                "SELECT subject FROM external_identities WHERE user_id = %s AND provider = %s",
+                (user["id"], provider)).fetchone()
+            if existing_identity and existing_identity["subject"] != ext_id:
+                raise HTTPException(409, "This account is already linked to another provider identity.")
+        else:
+            if not email or not email_verified:
+                raise HTTPException(403, "A provider-verified email is required for first sign-in.")
+            user = conn.execute("SELECT * FROM users WHERE lower(email) = %s", (email,)).fetchone()
+            if user:
+                if user.get("status", "active") != "active":
+                    raise HTTPException(403, "Account is deactivated.")
+                existing_identity = conn.execute(
+                    "SELECT subject FROM external_identities WHERE user_id = %s AND provider = %s",
+                    (user["id"], provider)).fetchone()
+                if existing_identity and existing_identity["subject"] != ext_id:
+                    raise HTTPException(409, "This account is already linked to another provider identity.")
+        if not user:
+            base_name = str(name or email.split("@", 1)[0] or "OAuth user").strip()[:100]
+            candidate = base_name
+            initials = "".join(w[0].upper() for w in candidate.split()[:2]) or "??"
             for n in range(2, 50):
                 if not conn.execute("SELECT 1 FROM users WHERE name = %s", (candidate,)).fetchone():
                     break
-                candidate = f"{name} ({n})"
-            row = conn.execute(f"""INSERT INTO users (name, initials, tint, email, role, provider, {column})
-                                   VALUES (%s, %s, %s, %s, 'user', %s, %s)
-                                   ON CONFLICT (name) DO NOTHING RETURNING id""",
-                               (candidate, initials, (hash(name) % 4) + 1, email, provider, ext_id)).fetchone()
-            if not row:  # lost a concurrent race on the deduped name — very unlikely
-                raise HTTPException(409, "Could not create an account for this OAuth identity — try again.")
-            user = conn.execute("SELECT * FROM users WHERE id = %s", (row["id"],)).fetchone()
-        conn.execute("""INSERT INTO external_identities (user_id, provider, subject, email)
-                        VALUES (%s, %s, %s, %s)
-                        ON CONFLICT (user_id, provider) DO UPDATE
-                          SET subject = EXCLUDED.subject, email = EXCLUDED.email, updated_at = now()""",
-                     (user["id"], provider, ext_id, email))
+                candidate = f"{base_name} ({n})"
+            try:
+                user = conn.execute(
+                    f"""INSERT INTO users (name, initials, tint, email, role, provider, {column})
+                         VALUES (%s, %s, %s, %s, 'user', %s, %s) RETURNING *""",
+                    (candidate, initials, (hash(candidate) % 4) + 1, email, provider, ext_id)).fetchone()
+            except psycopg.errors.UniqueViolation:
+                raise HTTPException(409, "OAuth account was created concurrently; retry sign-in.") from None
+        try:
+            conn.execute("""INSERT INTO external_identities (user_id, provider, subject, email)
+                            VALUES (%s, %s, %s, %s) ON CONFLICT DO NOTHING RETURNING id""",
+                         (user["id"], provider, ext_id, email))
+            # Retain the legacy lookup during migration without permitting a
+            # later callback to replace it.
+            conn.execute(f"UPDATE users SET {column} = %s WHERE id = %s AND {column} = ''",
+                         (ext_id, user["id"]))
+        except psycopg.errors.UniqueViolation:
+            raise HTTPException(409, "OAuth identity was linked concurrently; retry sign-in.") from None
+        linked = conn.execute(
+            "SELECT user_id, subject FROM external_identities WHERE provider = %s AND subject = %s",
+            (provider, ext_id)).fetchone()
+        if not linked or linked["user_id"] != user["id"]:
+            raise HTTPException(409, "OAuth identity belongs to another account.")
         _join_single_project(conn, user["id"], "member")
         return user
+
+
+def _verified_oauth_email(provider: str, profile: dict, access_token: str) -> tuple[str, bool]:
+    """Return only an address for which the provider supplied verification."""
+    if provider == "google":
+        email = _normalize_email(profile.get("email"))
+        return email, bool(email and profile.get("verified_email") is True)
+    req = urllib.request.Request(
+        "https://api.github.com/user/emails",
+        headers={"Authorization": f"Bearer {access_token}", "Accept": "application/vnd.github+json"})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as response:
+            addresses = json.loads(response.read())
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, ValueError):
+        raise HTTPException(400, "OAuth verified-email fetch failed — try signing in again.")
+    if not isinstance(addresses, list):
+        return "", False
+    verified = [row for row in addresses if isinstance(row, dict) and row.get("verified") is True
+                and _normalize_email(row.get("email"))]
+    primary = next((row for row in verified if row.get("primary") is True), None)
+    chosen = primary or (verified[0] if verified else None)
+    return (_normalize_email(chosen.get("email")), True) if chosen else ("", False)
 
 
 @router.get("/oauth/{provider}")
@@ -751,9 +901,10 @@ def oauth_callback(provider: str, code: str, request: Request, state: str = ""):
     ext_id = str(profile.get("id", "")).strip()
     if not ext_id:
         raise HTTPException(400, "OAuth provider returned no account id.")
-    name = profile.get("name") or profile.get("login") or profile.get("email", "user").split("@")[0]
-    email = profile.get("email") or ""
-    user = _link_or_create_oauth_user(provider, ext_id, name, email)
+    name = str(profile.get("name") or profile.get("login")
+               or _normalize_email(profile.get("email")).split("@")[0] or "OAuth user")
+    email, email_verified = _verified_oauth_email(provider, profile, access)
+    user = _link_or_create_oauth_user(provider, ext_id, name, email, email_verified)
     from fastapi.responses import RedirectResponse
     # Land back on the web app: configurable for deployments, dev default.
     resp = RedirectResponse(config.get("auth", "app_url", "http://localhost:5173/"))
@@ -808,14 +959,14 @@ def magic_consume(token: str, request: Request):
     digest = hashlib.sha256(token.encode()).hexdigest()
     with _conn() as conn:
         row = conn.execute(
-            """SELECT user_id FROM magic_links
+            """UPDATE magic_links SET used_at = now()
                 WHERE token_hash = %s AND used_at IS NULL
-                  AND created_at > now() - (%s || ' minutes')::interval""",
+                  AND created_at > now() - (%s * interval '1 minute')
+                RETURNING user_id""",
             (digest, MAGIC_LINK_TTL_MIN)).fetchone()
         if not row:
             # Expired, already spent, or never real: one message for all three.
             return RedirectResponse("/login?error=magic-link-invalid", status_code=303)
-        conn.execute("UPDATE magic_links SET used_at = now() WHERE token_hash = %s", (digest,))
     resp = RedirectResponse("/", status_code=303)
     _create_session(row["user_id"], resp, request)
     return resp

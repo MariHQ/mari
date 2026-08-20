@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import logging
 import re
 from typing import Any
 
@@ -139,6 +140,10 @@ def dispatch(server: dict, message: dict) -> dict | None:
     except (TypeError, ValueError) as exc:
         return {"jsonrpc": "2.0", "id": request_id,
                 "error": {"code": -32602, "message": str(exc)}}
+    except Exception:  # noqa: BLE001 — transport must preserve JSON-RPC framing
+        logging.getLogger("mari.mcp").exception("MCP tool execution failed")
+        return {"jsonrpc": "2.0", "id": request_id,
+                "error": {"code": -32603, "message": "Internal tool error"}}
 
 
 @router.post("/{slug}", response_model=None)

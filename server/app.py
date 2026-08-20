@@ -25,7 +25,7 @@ from contextlib import asynccontextmanager
 
 import psycopg
 import strawberry
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -45,6 +45,7 @@ import onboard
 import repoaudit
 import observability
 import enterprise_identity
+from sitefiles import PublishedSiteFiles
 
 from db import DB_URL, ensure_schema, exec_, q, q1
 from queries import Query, hybrid_search
@@ -119,10 +120,63 @@ app.include_router(connectors_api.router, dependencies=_authed)
 app.include_router(agentchat.router, dependencies=_authed)
 app.include_router(onboard.router, dependencies=_authed)
 
-from fastapi.staticfiles import StaticFiles  # noqa: E402
-
 sitebuilder.BUILDS.mkdir(exist_ok=True)
-app.mount("/sites", StaticFiles(directory=str(sitebuilder.BUILDS), html=True), name="sites")
+
+
+def _site_preview_authenticated(scope: dict[str, t.Any], site: dict[str, t.Any]) -> bool:
+    try:
+        request = Request(scope)
+        if auth_module.current_user(request) is None:
+            return False
+        return auth_module.require_project(request).project_id == int(site.get("project_id") or 0)
+    except Exception:
+        return False
+
+
+app.mount(
+    "/sites",
+    PublishedSiteFiles(
+        directory=str(sitebuilder.BUILDS),
+        lookup=lambda site_id: q1("SELECT status, project_id FROM sites WHERE id = %s", (site_id,)),
+        authenticated=_site_preview_authenticated,
+    ),
+    name="sites",
+)
+
+
+class ApiSearchIn(BaseModel):
+    query: str
+    limit: int = 10
+
+
+@app.post("/api/search", include_in_schema=True)
+def api_search(body: ApiSearchIn, authorization: str = Header(default="")) -> dict[str, t.Any]:
+    """Project-scoped search target for enterprise gateways and assistants."""
+    import hashlib
+
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not token:
+        raise HTTPException(401, "Bearer API key required.")
+    row = q1("""SELECT k.id, k.project_id, k.scopes, p.slug, p.name AS project_name
+                  FROM api_keys k JOIN projects p ON p.id = k.project_id
+                 WHERE k.token_hash = %s AND NOT k.revoked AND p.status = 'active'""",
+             (hashlib.sha256(token.encode()).hexdigest(),))
+    if not row:
+        raise HTTPException(401, "Invalid or revoked API key.")
+    scopes = {value.strip() for value in str(row["scopes"] or "").split(",")}
+    if not ({"read", "search"} & scopes):
+        raise HTTPException(403, "This API key does not allow search.")
+    ctx = access_module.external_access(
+        row["project_id"], row["slug"], row["project_name"], "api_key", str(row["id"]),
+        frozenset({"knowledge.read"}),
+    )
+    with access_module.use_access(ctx):
+        rows = hybrid_search(body.query.strip(), max(1, min(body.limit, 50)))
+    exec_("UPDATE api_keys SET last_used = to_char(now(), 'YYYY-MM-DD HH24:MI:SS') WHERE id = %s",
+          (row["id"],))
+    return {"results": [{"id": item["id"], "title": item["title"],
+                          "source": item["source"], "snippet": item["snippet"],
+                          "score": item.get("score", 0)} for item in rows]}
 
 
 # ————————————————— chat (SSE streaming, DESIGN.md §10) —————————————————

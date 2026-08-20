@@ -13,7 +13,7 @@
 import type { FactScan, FactsActions } from "@mari-design/components/pages/FactsPage";
 import type { RunStatus } from "@mari-design/components/workflow/RunHistory";
 import { gqlResult } from "../../lib/api";
-import { mutate } from "../actions";
+import { mutate, type ActionContext } from "../actions";
 import { factsChanged } from "../facts";
 
 // `rows` and `stats` are JSON scalars on the run, so they arrive whole.
@@ -62,7 +62,7 @@ async function readRun(id: string): Promise<FactScan> {
   return mapRun(r.data, id);
 }
 
-export function factsActions(): FactsActions {
+export function factsActions({ currentUserName }: ActionContext): FactsActions {
   return {
     verifyFact: async (id: number) => {
       await mutate("mutation($id: Int!) { verifyFact(id: $id) }", { id });
@@ -72,7 +72,7 @@ export function factsActions(): FactsActions {
       // rather than being rejected for a field the form left blank.
       await mutate(
         "mutation($claim: String!, $source: String!, $owner: String!) { addFact(claim: $claim, source: $source, owner: $owner) }",
-        { claim, source, owner: owner || "Daniel H." },
+        { claim, source, owner: owner || currentUserName },
       );
       // The drawer closes on success; without this the claim it just captured
       // would not appear in the table behind it until the next visit.
@@ -104,7 +104,7 @@ export function factsActions(): FactsActions {
           title: `Re-verify: ${fact.claim}`,
           kind: "factcheck",
           kindLabel: "Fact check",
-          assignee: fact.owner || "Daniel H.",
+          assignee: fact.owner || currentUserName,
           subjectType: "fact",
           subjectId: String(fact.id),
           subjectTitle: fact.claim,

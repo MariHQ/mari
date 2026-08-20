@@ -38,33 +38,35 @@ export async function agentChatStream(
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buf = "";
+    const dispatch = (frame: string) => {
+      const event = frame.match(/^event:\s*(\S+)/m)?.[1] ?? "token";
+      const dataText = frame.split(/\r?\n/)
+        .filter((line) => line.startsWith("data:"))
+        .map((line) => line.slice(5).replace(/^ /, ""))
+        .join("\n");
+      if (!dataText) return;
+      let data: any;
+      try { data = JSON.parse(dataText); } catch { return; }
+      switch (event) {
+        case "meta": handlers.onMeta?.(data.session_id); break;
+        case "tool_start": handlers.onToolStart?.({ name: data.name, args: data.args ?? {} }); break;
+        case "tool_result": handlers.onToolResult?.({ name: data.name, summary: data.summary ?? "", ok: !!data.ok }); break;
+        case "navigate": handlers.onNavigate?.(String(data.path ?? "")); break;
+        case "warning": handlers.onWarning?.(String(data.message ?? "")); break;
+        case "token": if (data.token) handlers.onToken?.(data.token); break;
+        case "done": handlers.onDone?.(data.session_id); break;
+      }
+    };
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
       buf += decoder.decode(value, { stream: true });
-      const frames = buf.split("\n\n");
+      const frames = buf.split(/\r?\n\r?\n/);
       buf = frames.pop() ?? "";
-      for (const frame of frames) {
-        const event = frame.match(/^event: (\S+)/m)?.[1] ?? "token";
-        const dataLine = frame.split("\n").find((l) => l.startsWith("data: "));
-        if (!dataLine) continue;
-        let data: any;
-        try {
-          data = JSON.parse(dataLine.slice(6));
-        } catch {
-          continue;
-        }
-        switch (event) {
-          case "meta": handlers.onMeta?.(data.session_id); break;
-          case "tool_start": handlers.onToolStart?.({ name: data.name, args: data.args ?? {} }); break;
-          case "tool_result": handlers.onToolResult?.({ name: data.name, summary: data.summary ?? "", ok: !!data.ok }); break;
-          case "navigate": handlers.onNavigate?.(String(data.path ?? "")); break;
-          case "warning": handlers.onWarning?.(String(data.message ?? "")); break;
-          case "token": if (data.token) handlers.onToken?.(data.token); break;
-          case "done": handlers.onDone?.(data.session_id); break;
-        }
-      }
+      frames.forEach(dispatch);
     }
+    buf += decoder.decode();
+    if (buf.trim()) dispatch(buf);
     return true;
   } catch (e) {
     // A user-initiated Stop is a successful outcome, not an offline API.

@@ -15,7 +15,8 @@ import typing as t
 
 _DEFAULTS: dict[str, t.Any] = {
     "database": {"url": "postgresql://localhost/mari_cloud"},
-    "server": {"host": "0.0.0.0", "port": 8000, "cors_origins": ["http://localhost:5173"]},
+    "server": {"host": "0.0.0.0", "port": 8000,
+               "cors_origins": ["http://localhost:5173"], "trusted_proxies": []},
     "ollama": {"host": "http://localhost:11434", "embed_model": "nomic-embed-text", "gen_model": "gemma3:4b"},
     "llm_gateway": {
         "base_url": "", "token": "", "headers": {}, "metadata": {},
@@ -107,6 +108,7 @@ def _load() -> dict:
         "MARI_AUTH_BYPASS_DEV_MODE": ("auth", "bypass_dev_mode"),
         "MARI_AUTH_REGISTRATION": ("auth", "registration_enabled"),
         "MARI_CORS_ORIGINS": ("server", "cors_origins"),
+        "MARI_TRUSTED_PROXIES": ("server", "trusted_proxies"),
         "MARI_GITHUB_TOKEN": ("github", "token"),
         "MARI_GITHUB_POLL_MINUTES": ("github", "poll_minutes"),
         "MARI_GITHUB_WEBHOOK_SECRET": ("github", "webhook_secret"),
@@ -114,7 +116,7 @@ def _load() -> dict:
     for env, (section, key) in env_map.items():
         if os.environ.get(env):
             value: t.Any = os.environ[env]
-            if key == "cors_origins":
+            if key in ("cors_origins", "trusted_proxies"):
                 value = [o.strip() for o in value.split(",")]
             elif key in ("bypass_enabled", "bypass_dev_mode", "registration_enabled"):
                 value = value.strip().lower() in {"1", "true", "yes", "on"}

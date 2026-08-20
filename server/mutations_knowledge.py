@@ -12,12 +12,13 @@ import typing as t
 
 import strawberry
 
+import access
 import flowengine
 import llm
 import review
-from db import actor_name, audit, exec_, jload, q, q1
+from db import actor_name, audit, exec_, jload, q, q1, transaction
 from gqltypes import AnswerCandidate, ImpactDoc, ImpactResult, ReviewPolicyDecision
-from queries import hybrid_search
+from queries import hybrid_search, like_pattern
 
 
 # A document's metadata line is not a claim. The scanner is fed
@@ -723,21 +724,36 @@ class MutKnowledge:
 
     @strawberry.mutation
     def save_graph_view(self, name: str, state: str) -> int:
-        exec_("""INSERT INTO graph_views (name, state, created_by) VALUES (%s, %s::jsonb, %s)
-                 ON CONFLICT (name) DO UPDATE SET state = EXCLUDED.state""", (name, state, actor_name()))
+        if len(state.encode("utf-8")) > 256_000:
+            raise ValueError("Graph view state is too large (maximum 256KB).")
+        try:
+            parsed = json.loads(state)
+        except (TypeError, json.JSONDecodeError):
+            raise ValueError("Graph view state must be valid JSON.") from None
+        if not isinstance(parsed, dict):
+            raise ValueError("Graph view state must be a JSON object.")
+        project_id = access.require_current_access().project_id
+        exec_("""INSERT INTO graph_views (project_id, name, state, created_by)
+                 VALUES (%s, %s, %s::jsonb, %s)
+                 ON CONFLICT (project_id, name) DO UPDATE SET state = EXCLUDED.state""",
+              (project_id, name, json.dumps(parsed), actor_name()))
         audit("saved graph view", name)
-        return (q1("SELECT id FROM graph_views WHERE name = %s", (name,)) or {"id": 0})["id"]
+        return (q1("SELECT id FROM graph_views WHERE project_id = %s AND name = %s",
+                   (project_id, name)) or {"id": 0})["id"]
 
     @strawberry.mutation
     def delete_graph_view(self, id: int) -> bool:
-        exec_("DELETE FROM graph_views WHERE id = %s", (id,))
+        project_id = access.require_current_access().project_id
+        exec_("DELETE FROM graph_views WHERE project_id = %s AND id = %s", (project_id, id))
         return True
 
     # ——— digest ———
     @strawberry.mutation
     def regenerate_digest(self) -> bool:
-        docs = q("SELECT title, snippet, source FROM documents ORDER BY updated_src DESC LIMIT 8")
-        facts = q("SELECT claim, status FROM facts")
+        project_id = access.require_current_access().project_id
+        docs = q("""SELECT title, snippet, source FROM documents
+                    WHERE project_id = %s ORDER BY updated_src DESC LIMIT 8""", (project_id,))
+        facts = q("SELECT claim, status FROM facts WHERE project_id = %s", (project_id,))
         prompt = (
             "Recent documents:\n" + "\n".join(f"- [{d['source']}] {d['title']}: {d['snippet'][:80]}" for d in docs)
             + "\n\nFacts:\n" + "\n".join(f"- {f['claim']} ({f['status']})" for f in facts)
@@ -746,13 +762,20 @@ class MutKnowledge:
             '"impact": [{"name": "service or doc", "tone": "#bf4f2e|#35549d|#5c7a4c|#c8973a"}]}]. Exactly 3 topics.'
         )
         out = llm.generate_json(prompt, system="You are Mari, summarizing the team's week.")
-        if isinstance(out, list) and out:
-            exec_("DELETE FROM digest_topics")
-            for topic in out[:3]:
-                exec_("INSERT INTO digest_topics (title, summary, wheres, impact) VALUES (%s, %s, %s, %s)",
-                      (str(topic.get("title", "Untitled"))[:120], str(topic.get("summary", ""))[:500],
-                       json.dumps(topic.get("wheres", [])), json.dumps(topic.get("impact", []))))
-            audit("regenerated digest", f"{min(len(out),3)} topics")
+        if isinstance(out, list) and out and all(isinstance(topic, dict) for topic in out[:3]):
+            topics = [(str(topic.get("title", "Untitled"))[:120],
+                       str(topic.get("summary", ""))[:500],
+                       json.dumps(topic.get("wheres", [])), json.dumps(topic.get("impact", [])))
+                      for topic in out[:3]]
+            def replace(conn):
+                conn.execute("DELETE FROM digest_topics WHERE project_id = %s", (project_id,))
+                for title, summary, wheres, impact in topics:
+                    conn.execute("""INSERT INTO digest_topics
+                                 (project_id, title, summary, wheres, impact)
+                                 VALUES (%s, %s, %s, %s, %s)""",
+                                 (project_id, title, summary, wheres, impact))
+            transaction(replace)
+            audit("regenerated digest", f"{len(topics)} topics")
             return True
         audit("digest regeneration failed (LLM unavailable)", "kept previous digest")
         return False
@@ -884,20 +907,22 @@ class MutKnowledge:
                 if not (isinstance(t, dict) and t.get("term")):
                     continue
                 term = str(t["term"])[:80]
+                project_id = access.require_current_access().project_id
                 # Provenance, established here rather than asked of the model:
                 # the document that actually contains the term. A term no
                 # document contains was invented, so it is dropped — the review
                 # step must be able to open the source it came from.
                 doc = q1("""SELECT id, title FROM documents
-                            WHERE title ILIKE %s OR body ILIKE %s ORDER BY id LIMIT 1""",
-                         (f"%{term}%", f"%{term}%"))
+                            WHERE project_id = %s AND (title ILIKE %s OR body ILIKE %s)
+                            ORDER BY id LIMIT 1""",
+                         (project_id, like_pattern(term), like_pattern(term)))
                 if not doc:
                     continue
-                exec_("""INSERT INTO glossary (term, definition, owner_name, updated, candidate,
+                exec_("""INSERT INTO glossary (project_id, term, definition, owner_name, updated, candidate,
                                                variants, evidence, evidence_doc_id)
-                         VALUES (%s, %s, 'Mari (harvest)', now(), true, %s, %s, %s)
-                         ON CONFLICT (term) DO NOTHING""",
-                      (term, str(t.get("definition", ""))[:300], str(t.get("variants", ""))[:200],
+                         VALUES (%s, %s, %s, 'Mari (harvest)', now(), true, %s, %s, %s)
+                         ON CONFLICT (project_id, term) DO NOTHING""",
+                      (project_id, term, str(t.get("definition", ""))[:300], str(t.get("variants", ""))[:200],
                        doc["title"], doc["id"]))
                 added += 1
         audit("harvested glossary terms", f"{added} candidates")
@@ -937,13 +962,13 @@ class MutKnowledge:
         like every other long job here, not something a link fires and forgets.
         """
         wf_id = flowengine.ensure_fact_scan_flow()
-        n = (q1("SELECT coalesce(max(number), 1800) AS n FROM workflow_runs WHERE workflow_id = %s",
-                (wf_id,)) or {"n": 1800})["n"] + 1
-        exec_("""INSERT INTO workflow_runs (workflow_id, number, status, started_label, duration,
-                                            progress, stats, rows_data)
-                 VALUES (%s, %s, 'running', to_char(now(), 'Mon DD, HH12:MI AM'), '00:00:00', 0, '{}', '[]')""",
-              (wf_id, n))
-        run = q1("SELECT id FROM workflow_runs WHERE workflow_id = %s AND number = %s", (wf_id, n))
+        project_id = access.require_current_access().project_id
+        run = q1("""INSERT INTO workflow_runs
+                    (project_id, workflow_id, number, status, started_label, duration, progress, stats, rows_data)
+                    VALUES (%s, %s, nextval('workflow_run_number_seq'), 'running',
+                            to_char(now(), 'Mon DD, HH12:MI AM'), '00:00:00', 0, '{}', '[]')
+                    RETURNING id, number""", (project_id, wf_id))
+        n = run["number"]
         exec_("INSERT INTO events (actor, verb, target) VALUES (%s, %s, %s)",
               (actor_name(), f"started run #{n}", flowengine.FACT_SCAN_FLOW))
         flowengine.start_run(run["id"])
@@ -956,13 +981,13 @@ class MutKnowledge:
         through a model and writes to the ledger, so it belongs in the run
         history rather than behind a link that fires and forgets."""
         wf_id = flowengine.ensure_decision_scan_flow()
-        n = (q1("SELECT coalesce(max(number), 1800) AS n FROM workflow_runs WHERE workflow_id = %s",
-                (wf_id,)) or {"n": 1800})["n"] + 1
-        exec_("""INSERT INTO workflow_runs (workflow_id, number, status, started_label, duration,
-                                            progress, stats, rows_data)
-                 VALUES (%s, %s, 'running', to_char(now(), 'Mon DD, HH12:MI AM'), '00:00:00', 0, '{}', '[]')""",
-              (wf_id, n))
-        run = q1("SELECT id FROM workflow_runs WHERE workflow_id = %s AND number = %s", (wf_id, n))
+        project_id = access.require_current_access().project_id
+        run = q1("""INSERT INTO workflow_runs
+                    (project_id, workflow_id, number, status, started_label, duration, progress, stats, rows_data)
+                    VALUES (%s, %s, nextval('workflow_run_number_seq'), 'running',
+                            to_char(now(), 'Mon DD, HH12:MI AM'), '00:00:00', 0, '{}', '[]')
+                    RETURNING id, number""", (project_id, wf_id))
+        n = run["number"]
         exec_("INSERT INTO events (actor, verb, target) VALUES (%s, %s, %s)",
               (actor_name(), f"started run #{n}", flowengine.DECISION_SCAN_FLOW))
         flowengine.start_run(run["id"])

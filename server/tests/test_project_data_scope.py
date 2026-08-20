@@ -60,7 +60,27 @@ class ProjectDataScopeTests(unittest.TestCase):
         self.assertEqual(acme[0]["title"], "Acme only")
         self.assertEqual(beta[0]["title"], "Beta only")
         self.assertEqual(embed.call_count, 2)
-        self.assertEqual(set(queries._rank_cache), {(7, "deploy"), (9, "deploy")})
+        self.assertEqual({(key[0], key[-1]) for key in queries._rank_cache},
+                         {(7, "deploy"), (9, "deploy")})
+
+    def test_slack_principal_only_retrieves_its_channel_and_public_docs(self):
+        rows = [
+            {"id": 1, "source": "slack", "title": "Channel A", "snippet": "deploy", "body": "",
+             "author": "", "author_initials": "", "updated_src": None, "kind": "page", "tags": [],
+             "boost": 1, "acl_visibility": "restricted", "acl_principals": ["channel:C-A"]},
+            {"id": 2, "source": "slack", "title": "Channel B", "snippet": "deploy", "body": "",
+             "author": "", "author_initials": "", "updated_src": None, "kind": "page", "tags": [],
+             "boost": 1, "acl_visibility": "restricted", "acl_principals": ["channel:C-B"]},
+            {"id": 3, "source": "website", "title": "Public", "snippet": "deploy", "body": "",
+             "author": "", "author_initials": "", "updated_src": None, "kind": "page", "tags": [],
+             "boost": 1, "acl_visibility": "public", "acl_principals": []},
+        ]
+        slack_access = access.external_access(
+            7, "acme", "Acme", "slack", "install-1", principals=frozenset({"channel:C-A"}))
+        with access.use_access(slack_access), patch.object(queries.llm, "embed", return_value=None), \
+             patch.object(queries, "q", return_value=rows):
+            result = queries.hybrid_search("deploy")
+        self.assertEqual({row["title"] for row in result}, {"Channel A", "Public"})
 
     def test_vector_artifact_paths_are_project_partitioned(self):
         with tempfile.TemporaryDirectory() as directory, patch.dict(
@@ -70,6 +90,20 @@ class ProjectDataScopeTests(unittest.TestCase):
         self.assertEqual(one.path, Path(directory) / "projects" / "7")
         self.assertEqual(two.path, Path(directory) / "projects" / "9")
         self.assertNotEqual(one.path, two.path)
+
+    def test_chat_history_is_scoped_to_project_and_owner(self):
+        class Info:
+            context = {"user": {"id": 42}}
+
+        rows = [[{"id": 8, "title": "Private"}], [{
+            "id": 9, "role": "user", "content": "secret", "sources": [],
+        }]]
+        with access.use_access(context(7, "acme")), patch.object(
+                queries, "q", side_effect=rows) as query:
+            result = queries.Query().chat_sessions(Info())
+        self.assertEqual(result[0].messages[0].content, "secret")
+        self.assertEqual(query.call_args_list[0].args[1], (7, 42))
+        self.assertEqual(query.call_args_list[1].args[1], (7, 8))
 
     def test_mcp_token_bootstraps_its_project_context(self):
         class Request:

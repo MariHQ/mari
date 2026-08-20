@@ -71,6 +71,13 @@ def exec_(sql: str, args: tuple = ()) -> None:
         conn.execute(sql, args)
 
 
+def transaction(fn: t.Callable[[t.Any], t.Any]) -> t.Any:
+    """Run a small unit of work atomically on one pooled connection."""
+    with POOL.connection() as conn:
+        with conn.transaction():
+            return fn(conn)
+
+
 def project_id() -> int:
     """Current tenant key. Never infer a default project on a data path."""
     return access_module.require_current_access().project_id
