@@ -18,11 +18,7 @@ import typing as t
 
 from mari_server.integrations import llm
 from mari_server import config
-from mari_server import db as postgres
-
-
-def _conn():
-    return postgres.connect()
+from mari_server.repositories import workflows as workflow_store
 
 
 def _now_label() -> str:
@@ -43,54 +39,29 @@ def _elapsed(start: float) -> str:
 # them. The value names the scanner whose bookkeeping column to order by; the
 # column names are fixed here rather than taken from config, because this
 # interpolates into SQL.
-_ROTATE_COLUMNS = {"facts": "facts_scanned_at", "decisions": "decisions_scanned_at"}
-
-
 def _step_fetch(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
     query, tag, k = cfg.get("query", ""), cfg.get("tag", ""), max(1, int(cfg.get("k", 3)))
-    rotate = _ROTATE_COLUMNS.get(str(cfg.get("rotate") or ""))
-    # Least-recently-scanned first when rotating, newest first otherwise.
-    order = (f"{rotate} NULLS FIRST, d.updated_src DESC NULLS LAST, d.id"
-             if rotate else "d.updated_src DESC NULLS LAST, d.id DESC")
-    # A triggered run operates on the documents that fired it.
+    rotation = str(cfg.get("rotate") or "")
     trigger_ids = ctx.get("trigger_doc_ids") or []
-    with _conn() as conn:
-        if trigger_ids:
-            rows = conn.execute("SELECT id, title FROM documents WHERE id = ANY(%s) ORDER BY id",
-                                (trigger_ids,)).fetchall()
-        elif tag:
-            rows = conn.execute(
-                f"""SELECT d.id, d.title FROM documents d JOIN tags t ON t.document_id = d.id
-                    WHERE t.tag = %s ORDER BY {order} LIMIT %s""", (tag, k)).fetchall()
-        elif query:
-            rows = conn.execute(
-                f"""SELECT d.id, d.title FROM documents d
-                    WHERE d.search_vec @@ plainto_tsquery('english', %s) OR d.title ILIKE %s
-                    ORDER BY {order} LIMIT %s""", (query, f"%{query}%", k)).fetchall()
-        else:
-            rows = conn.execute(
-                f"SELECT d.id, d.title FROM documents d ORDER BY {order} LIMIT %s", (k,)).fetchall()
+    rows = workflow_store.select_documents(
+        trigger_ids=trigger_ids, tag=tag, query=query, limit=k, rotation=rotation,
+    )
     ids = [r["id"] for r in rows]
     names = ", ".join(r["title"][:40] for r in rows[:3])
-    src = " (from trigger)" if trigger_ids else (" (least recently scanned)" if rotate else "")
+    src = " (from trigger)" if trigger_ids else (" (least recently scanned)" if rotation else "")
     return "passed", f"{len(ids)} documents{src} · {names}", {"doc_ids": ids}
 
 
 def _step_refine(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
     # late imports — flowengine must stay importable before app/db load
-    from mari_server.repositories.database import exec_, q1
     from mari_server.services.knowledge import llm_refine
     skill = cfg.get("skill", "tighten")
     total = 0
     for doc_id in ctx.get("doc_ids", [])[:2]:  # cap LLM work per run
-        doc = q1("SELECT * FROM documents WHERE id = %s", (doc_id,))
+        doc = workflow_store.document(doc_id)
         if not doc:
             continue
-        for original, replacement, reason in llm_refine(doc, skill):
-            exec_("""INSERT INTO changes (document_id, original, replacement, reason)
-                     VALUES (%s, %s, %s, %s) ON CONFLICT (document_id, original) DO NOTHING""",
-                  (doc_id, original, replacement, reason))
-            total += 1
+        total += workflow_store.save_suggested_changes(doc_id, llm_refine(doc, skill))
     return "passed", f"{total} edits suggested ({skill})", {"edits": total}
 
 
@@ -123,11 +94,7 @@ def _step_tag(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
     # leaves half the documents tagged had to know that rule to answer. The
     # explicit block says it, and it keeps saying it if the loop later grows a
     # second statement or an early return.
-    with _conn() as conn, conn.transaction():
-        n = 0
-        for doc_id in ctx.get("doc_ids", []):
-            conn.execute("INSERT INTO tags (document_id, tag) VALUES (%s, %s) ON CONFLICT DO NOTHING", (doc_id, tag))
-            n += 1
+    n = workflow_store.tag_documents(ctx.get("doc_ids", []), tag)
     return "passed", f"tagged {n} docs '{tag}'", {}
 
 
@@ -144,12 +111,9 @@ def _step_create_task(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
         return "skipped", "branch not taken", {}
     if ctx.get("dry_run"):
         return "passed", f"would create {'assigned' if assignee else 'unassigned'} task: {title[:60]} (dry run)", {}
-    with _conn() as conn, conn.transaction():
-        conn.execute("""INSERT INTO tasks (title, assignee, assignee_initials, assignee_tint, kind, kind_label)
-                        VALUES (%s, %s, %s, 2, %s, %s) ON CONFLICT (title) DO NOTHING""",
-                     (title[:120], assignee,
-                      "".join(w[0] for w in assignee.split()[:2]).upper(),
-                      cfg.get("kind", "factcheck"), cfg.get("kind_label", "Fact check")))
+    workflow_store.create_review_task(
+        title, assignee, cfg.get("kind", "factcheck"), cfg.get("kind_label", "Fact check"),
+    )
     return "passed", f"task: {title[:60]}", {}
 
 
@@ -168,22 +132,16 @@ def _step_notify(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
         return "failed", "notification step requires a recipient", {}
     if ctx.get("dry_run"):
         return "passed", f"would notify {recipient} (dry run)", {}
-    with _conn() as conn:
-        conn.execute("""INSERT INTO notifications (user_name, kind, text, detail, at_label, read)
-                        VALUES (%s, 'info', %s, %s, 'just now', false)
-                        ON CONFLICT (user_name, text) DO NOTHING""",
-                     (recipient,
-                      cfg.get("text", "Flow finished")[:180],
-                      cfg.get("detail", "")[:200]))
+    workflow_store.create_notification(
+        recipient, cfg.get("text", "Flow finished"), cfg.get("detail", ""),
+    )
     return "passed", f"notified {recipient}", {}
 
 
 def _step_summarize(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
     from mari_components import KnowledgeDocument
     from mari_components.knowledge import summarize_digest
-    with _conn() as conn:
-        rows = conn.execute("SELECT id, title, body, snippet, updated_src FROM documents WHERE id = ANY(%s)",
-                            (ctx.get("doc_ids", []),)).fetchall()
+    rows = workflow_store.documents(ctx.get("doc_ids", []))
     if not rows:
         return "skipped", "no documents to summarize", {"summary": ""}
     result = summarize_digest(
@@ -209,11 +167,9 @@ def _step_sync_source(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
     report honest per-step stats from the sync result."""
     from mari_server.services import sync as ingest  # late import — ingest imports flowengine at module load
     source_id = int(cfg.get("source_id") or 0)
-    with _conn() as conn:
-        src = conn.execute("SELECT display_name FROM sources WHERE id = %s", (source_id,)).fetchone()
-    if not src:
+    name = workflow_store.source_name(source_id)
+    if not name:
         return "failed", f"source #{source_id} not found", {}
-    name = src["display_name"]
     if ctx.get("dry_run"):
         return "passed", f"would sync {name} (dry run)", {}
     stats = ingest.run_sync(source_id)
@@ -267,8 +223,7 @@ def _step_refresh_digest(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
         return "passed", "would regenerate the weekly digest (dry run)", {}
     from mari_server.services.knowledge import regenerate_digest
     ok = regenerate_digest()
-    with _conn() as conn:
-        n = conn.execute("SELECT count(*) AS n FROM digest_topics").fetchone()["n"]
+    n = workflow_store.digest_topic_count()
     if not ok:
         return "failed", "LLM unavailable — previous digest kept", {}
     return "passed", f"digest regenerated · {n} topics", {"digest_topics": n}
@@ -338,17 +293,18 @@ def _run_step(kind: str, impl: t.Callable | None, cfg: dict, ctx: dict) -> tuple
 
 
 def _persist(run_id: int, rows: list[dict], status: str, progress: int, stats: dict, start: float) -> None:
-    with _conn() as conn:
-        conn.execute("""UPDATE workflow_runs SET rows_data = %s, status = %s, progress = %s,
-                        stats = %s, duration = %s WHERE id = %s""",
-                     (json.dumps(rows), status, progress, json.dumps(stats), _elapsed(start), run_id))
+    workflow_store.save_run_progress(
+        run_id, rows=rows, status=status, progress=progress,
+        stats=stats, duration=_elapsed(start),
+    )
 
 
 def execute_run(run_id: int, resume_from: int = 0) -> None:
     """Run (or resume) a workflow's steps sequentially, persisting after each."""
-    with _conn() as conn:
-        run = conn.execute("SELECT * FROM workflow_runs WHERE id = %s", (run_id,)).fetchone()
-        wf = conn.execute("SELECT * FROM workflows WHERE id = %s", (run["workflow_id"],)).fetchone()
+    loaded = workflow_store.load_run(run_id)
+    if not loaded:
+        return
+    run, wf = loaded
     steps = wf["nodes"] if isinstance(wf["nodes"], list) else json.loads(wf["nodes"] or "[]")
     rows = run["rows_data"] if isinstance(run["rows_data"], list) else json.loads(run["rows_data"] or "[]")
     ctx: dict = (run["stats"] if isinstance(run["stats"], dict) else json.loads(run["stats"] or "{}")).get("ctx", {})
@@ -417,13 +373,9 @@ def _guarded_run(run_id: int, resume_from: int) -> None:
         execute_run(run_id, resume_from)
     except Exception as e:  # noqa: BLE001
         try:
-            with _conn() as conn:
-                conn.execute(
-                    """UPDATE workflow_runs SET status = 'failed', progress = 100,
-                         stats = coalesce(stats, '{}'::jsonb) || jsonb_build_object('note', %s)
-                       WHERE id = %s AND status = 'running'""",
-                    (f"run failed to start: {type(e).__name__}: {e}"[:200], run_id))
-                conn.commit()
+            workflow_store.fail_running_run(
+                run_id, f"run failed to start: {type(e).__name__}: {e}",
+            )
         except Exception:  # noqa: BLE001
             pass
 
@@ -463,48 +415,27 @@ def fire_document_triggers(doc_ids: list[int], change: str) -> list[int]:
     on them. Returns the started run ids."""
     if not doc_ids or change not in ("document_changed", "document_added"):
         return []
-    with _conn() as conn:
-        docs = conn.execute(
-            "SELECT id, title, source_id, source_path FROM documents WHERE id = ANY(%s)",
-            (doc_ids,)).fetchall()
-        wfs = conn.execute(
-            """SELECT id, name, trigger FROM workflows
-               WHERE status = 'active' AND trigger->>'on' = %s ORDER BY id""", (change,)).fetchall()
-        if not docs or not wfs:
-            return []
-        doc_tags: dict[int, set] = {}
-        for r in conn.execute("SELECT document_id, tag FROM tags WHERE document_id = ANY(%s)",
-                              ([d["id"] for d in docs],)).fetchall():
-            doc_tags.setdefault(r["document_id"], set()).add(r["tag"])
-
-        run_ids: list[int] = []
-        verb = "updated" if change == "document_changed" else "added"
-        for wf in wfs:  # one pass over the batch = fires each workflow at most once
-            trig = wf["trigger"] if isinstance(wf["trigger"], dict) else json.loads(wf["trigger"] or "{}")
-            matched = _trigger_matches(trig, change, docs, doc_tags)
-            if not matched:
-                continue
-            first = matched[0].get("source_path") or matched[0]["title"]
-            note = f"Triggered by: {first} {verb}" + (f" (+{len(matched) - 1} more)" if len(matched) > 1 else "")
-            trigger_meta = {"on": change, "doc_ids": [d["id"] for d in matched], "note": note}
-            row = conn.execute(
-                """INSERT INTO workflow_runs (project_id, workflow_id, number, status, started_label, duration,
-                                              progress, stats, rows_data, triggered_by)
-                   VALUES (%s, %s, nextval('workflow_run_number_seq'), 'running',
-                           to_char(now(), 'Mon DD, HH12:MI AM'), '00:00:00', 0, %s, '[]', %s)
-                   RETURNING id, number""",
-                (wf.get("project_id"), wf["id"],
-                 json.dumps({"ctx": {"trigger_doc_ids": [d["id"] for d in matched], "trigger": trigger_meta},
-                             "trigger": trigger_meta}),
-                 note)).fetchone()
-            n = row["number"]
-            conn.execute("INSERT INTO events (actor, verb, target) VALUES (%s, %s, %s)",
-                         ("Flow trigger", f"auto-started run #{n} ({note[:80]})", wf["name"]))
-            conn.commit()
-            run_ids.append(row["id"])
-        for rid in run_ids:
-            start_run(rid)
-        return run_ids
+    docs, workflows, doc_tags = workflow_store.trigger_inputs(doc_ids, change)
+    if not docs or not workflows:
+        return []
+    run_ids: list[int] = []
+    verb = "updated" if change == "document_changed" else "added"
+    for workflow in workflows:
+        trigger = (workflow["trigger"] if isinstance(workflow["trigger"], dict)
+                   else json.loads(workflow["trigger"] or "{}"))
+        matched = _trigger_matches(trigger, change, docs, doc_tags)
+        if not matched:
+            continue
+        first = matched[0].get("source_path") or matched[0]["title"]
+        note = f"Triggered by: {first} {verb}" + (
+            f" (+{len(matched) - 1} more)" if len(matched) > 1 else "")
+        trigger_meta = {"on": change, "doc_ids": [doc["id"] for doc in matched], "note": note}
+        run_ids.append(workflow_store.create_triggered_run(
+            workflow, trigger_meta["doc_ids"], trigger_meta, note,
+        ))
+    for run_id in run_ids:
+        start_run(run_id)
+    return run_ids
 
 
 # ————— schedule triggers (init.sql: workflow_runs.started_at) —————
@@ -531,19 +462,7 @@ def reconcile_stale_runs() -> int:
     by restart", which was not true: nothing was interrupted, the server was
     simply started again. A waiting run needs no process to be alive; approveRun
     resumes it from `paused_at` whenever someone gets to it."""
-    with _conn() as conn:
-        rows = conn.execute(
-            """UPDATE workflow_runs
-               SET status = 'failed',
-                   stats = coalesce(stats, '{}'::jsonb) || '{"note": "interrupted by restart"}'::jsonb
-               WHERE status = 'running' AND started_at < to_timestamp(%s)
-               RETURNING id""", (PROCESS_START_TS,)).fetchall()
-        if rows:
-            conn.execute("INSERT INTO events (actor, verb, target) VALUES (%s, %s, %s)",
-                         ("Flow scheduler", f"marked {len(rows)} stale run(s) failed (interrupted by restart)",
-                          "startup reconciliation"))
-        conn.commit()
-    return len(rows)
+    return workflow_store.reconcile_stale_runs(PROCESS_START_TS)
 
 
 def run_due_schedules() -> list[int]:
@@ -552,42 +471,25 @@ def run_due_schedules() -> list[int]:
     whose latest run is still running/waiting is never double-started.
     Returns the started run ids."""
     started: list[int] = []
-    with _conn() as conn:
-        wfs = conn.execute(
-            """SELECT id, name, trigger FROM workflows
-               WHERE status = 'active' AND trigger->>'on' = 'schedule' ORDER BY id""").fetchall()
-        for wf in wfs:
-            trig = wf["trigger"] if isinstance(wf["trigger"], dict) else json.loads(wf["trigger"] or "{}")
-            try:
-                every = int(trig.get("every_minutes") or 0)
-            except (TypeError, ValueError):
-                continue
-            if every < 1:
-                continue
-            last = conn.execute(
-                """SELECT status, (now() - started_at) >= make_interval(mins => %s) AS due
-                   FROM workflow_runs WHERE workflow_id = %s ORDER BY id DESC LIMIT 1""",
-                (every, wf["id"])).fetchone()
-            if last and last["status"] in ("running", "waiting"):
-                continue  # never double-start while a run is in progress
-            if last and not last["due"]:
-                continue  # not yet due (no prior run = due immediately)
-            label = f"Scheduled · every {every} min"
-            trigger_meta = {"on": "schedule", "every_minutes": every, "note": label}
-            row = conn.execute(
-                """INSERT INTO workflow_runs (project_id, workflow_id, number, status, started_label, duration,
-                                              progress, stats, rows_data, triggered_by)
-                   VALUES (%s, %s, nextval('workflow_run_number_seq'), 'running',
-                           to_char(now(), 'Mon DD, HH12:MI AM'), '00:00:00', 0, %s, '[]', %s)
-                   RETURNING id, number""",
-                (wf.get("project_id"), wf["id"],
-                 json.dumps({"ctx": {"trigger": trigger_meta}, "trigger": trigger_meta}),
-                 label)).fetchone()
-            n = row["number"]
-            conn.execute("INSERT INTO events (actor, verb, target) VALUES (%s, %s, %s)",
-                         ("Flow scheduler", f"auto-started run #{n} ({label})", wf["name"]))
-            conn.commit()
-            started.append(row["id"])
+    for workflow in workflow_store.scheduled_workflows():
+        trigger = (workflow["trigger"] if isinstance(workflow["trigger"], dict)
+                   else json.loads(workflow["trigger"] or "{}"))
+        try:
+            every = int(trigger.get("every_minutes") or 0)
+        except (TypeError, ValueError):
+            continue
+        if every < 1:
+            continue
+        last = workflow_store.latest_run(workflow["id"], every)
+        if last and last["status"] in ("running", "waiting"):
+            continue
+        if last and not last["due"]:
+            continue
+        label = f"Scheduled · every {every} min"
+        trigger_meta = {"on": "schedule", "every_minutes": every, "note": label}
+        started.append(workflow_store.create_scheduled_run(
+            workflow, trigger_meta, label,
+        ))
     for rid in started:
         start_run(rid)
     return started
@@ -641,60 +543,48 @@ def _wf_nodes(row: dict) -> list[dict]:
 def ensure_sync_flow(source_id: int, repo: str) -> int | None:
     """Idempotently create the scheduled 'Sync <label>' flow for a github or
     connector source. Returns the new workflow id, or None if one exists."""
-    with _conn() as conn:
-        for r in conn.execute("SELECT id, nodes FROM workflows").fetchall():
-            if any(s.get("kind") == "sync_source" and
-                   int((s.get("config") or {}).get("source_id") or 0) == source_id
-                   for s in _wf_nodes(r)):
-                return None
-        nodes = [
-            {"kind": "trigger", "label": "Every 10 min", "config": {"label": "Scheduled · every 10 min"}},
-            {"kind": "sync_source", "label": f"Sync {repo}", "config": {"source_id": source_id}},
-        ]
-        row = conn.execute(
-            """INSERT INTO workflows (name, description, color, pinned, status, nodes, trigger)
-               VALUES (%s, %s, '#5c7a4c', false, 'active', %s, %s) RETURNING id""",
-            (f"Sync {repo}"[:120], f"Keeps {repo} indexed — incremental sync on a schedule.",
-             json.dumps(nodes), json.dumps({"on": "schedule", "every_minutes": 10}))).fetchone()
-        conn.execute("INSERT INTO events (actor, verb, target) VALUES (%s, %s, %s)",
-                     ("Flow scheduler", "created scheduled sync flow", f"Sync {repo}"))
-        conn.commit()
-        return row["id"]
+    existing = workflow_store.find_by_step("sync_source", project_scoped=False)
+    if existing and any(
+        int((step.get("config") or {}).get("source_id") or 0) == source_id
+        for step in existing["nodes"] if isinstance(step, dict)
+    ):
+        return None
+    nodes = [
+        {"kind": "trigger", "label": "Every 10 min", "config": {"label": "Scheduled · every 10 min"}},
+        {"kind": "sync_source", "label": f"Sync {repo}", "config": {"source_id": source_id}},
+    ]
+    return workflow_store.create_default_workflow(
+        name=f"Sync {repo}"[:120],
+        description=f"Keeps {repo} indexed — incremental sync on a schedule.",
+        color="#5c7a4c", status="active", nodes=nodes,
+        trigger={"on": "schedule", "every_minutes": 10}, project_scoped=False,
+    )
 
 
 def ensure_digest_flow() -> int | None:
     """Idempotently create the 'Weekly digest refresh' flow (schedule: every
     10080 min == weekly). The old settings.digest_schedule.enabled decides
     whether it starts active or paused. Returns the new id or None."""
-    with _conn() as conn:
-        for r in conn.execute("SELECT id, nodes FROM workflows").fetchall():
-            if any(s.get("kind") == "refresh_digest" for s in _wf_nodes(r)):
-                return None
-        st = conn.execute("SELECT value FROM settings WHERE key = 'digest_schedule'").fetchone()
-        val = (st or {}).get("value") or {}
-        if isinstance(val, str):
-            val = json.loads(val or "{}")
-        status = "active" if val.get("enabled", True) else "paused"
-        nodes = [
-            {"kind": "trigger", "label": "Every week", "config": {"label": "Scheduled · weekly"}},
-            {"kind": "refresh_digest", "label": "Refresh weekly digest", "config": {}},
-        ]
-        row = conn.execute(
-            """INSERT INTO workflows (name, description, color, pinned, status, nodes, trigger)
-               VALUES (%s, %s, '#c8973a', false, %s, %s, %s) RETURNING id""",
-            ("Weekly digest refresh", "Regenerates the Overview digest from recent documents and facts.",
-             status, json.dumps(nodes), json.dumps({"on": "schedule", "every_minutes": 10080}))).fetchone()
-        conn.execute("INSERT INTO events (actor, verb, target) VALUES (%s, %s, %s)",
-                     ("Flow scheduler", "created scheduled digest flow", "Weekly digest refresh"))
-        conn.commit()
-        return row["id"]
+    if workflow_store.find_by_step("refresh_digest", project_scoped=False):
+        return None
+    status = "active" if workflow_store.setting("digest_schedule").get("enabled", True) else "paused"
+    nodes = [
+        {"kind": "trigger", "label": "Every week", "config": {"label": "Scheduled · weekly"}},
+        {"kind": "refresh_digest", "label": "Refresh weekly digest", "config": {}},
+    ]
+    return workflow_store.create_default_workflow(
+        name="Weekly digest refresh",
+        description="Regenerates the Overview digest from recent documents and facts.",
+        color="#c8973a", status=status, nodes=nodes,
+        trigger={"on": "schedule", "every_minutes": 10080}, project_scoped=False,
+    )
 
 
 FACT_SCAN_FLOW = "Fact scan"
 DECISION_SCAN_FLOW = "Decision scan"
 
 
-def _adopt_rotation(conn, row: dict, scan_kind: str, rotate: str) -> None:
+def _adopt_rotation(row: dict, scan_kind: str, rotate: str) -> None:
     """Teach an already-seeded scan flow to rotate its document selection.
 
     A workspace that ran an earlier version has the flow with `{"k": 8}` and no
@@ -715,75 +605,54 @@ def _adopt_rotation(conn, row: dict, scan_kind: str, rotate: str) -> None:
         return
     nodes[1]["config"] = {**cfg, "rotate": rotate}
     nodes[1]["label"] = "Read documents (least recently scanned)"
-    conn.execute("UPDATE workflows SET nodes = %s WHERE id = %s",
-                 (json.dumps(nodes), row["id"]))
-    conn.commit()
+    workflow_store.update_nodes(row["id"], nodes)
 
 
 def ensure_fact_scan_flow() -> int:
     """Get-or-create the manual 'Fact scan' flow the Facts page starts. Returns
     its workflow id — the caller needs it to open a run, so unlike the scheduled
     seeds this one answers with the existing id rather than None."""
-    project_id = access.require_current_access().project_id
-    with _conn() as conn:
-        for r in conn.execute("SELECT id, nodes FROM workflows WHERE project_id = %s",
-                              (project_id,)).fetchall():
-            if any(s.get("kind") == "scan_facts" for s in _wf_nodes(r)):
-                _adopt_rotation(conn, r, "scan_facts", "facts")
-                return r["id"]
-        nodes = [
+    existing = workflow_store.find_by_step("scan_facts")
+    if existing:
+        _adopt_rotation(existing, "scan_facts", "facts")
+        return existing["id"]
+    nodes = [
             {"kind": "trigger", "label": "Manual", "config": {"label": "Started from Facts"}},
             {"kind": "fetch_docs", "label": "Read documents (least recently scanned)",
              "config": {"k": 8, "rotate": "facts"}},
             {"kind": "scan_facts", "label": "Extract checkable claims", "config": {}},
         ]
-        row = conn.execute(
-            """INSERT INTO workflows (project_id, name, description, color, pinned, status, nodes, trigger)
-               VALUES (%s, %s, %s, '#1E6FA8', false, 'active', %s, %s) RETURNING id""",
-            (project_id, FACT_SCAN_FLOW,
-             "Mines recent documents for atomic, checkable claims and files them for verification.",
-             json.dumps(nodes), json.dumps({"on": ""}))).fetchone()
-        conn.execute("INSERT INTO events (actor, verb, target) VALUES (%s, %s, %s)",
-                     ("Flow scheduler", "created flow", FACT_SCAN_FLOW))
-        conn.commit()
-        return row["id"]
+    return workflow_store.create_default_workflow(
+        name=FACT_SCAN_FLOW,
+        description="Mines recent documents for atomic, checkable claims and files them for verification.",
+        color="#1E6FA8", status="active", nodes=nodes, trigger={"on": ""},
+    )
 
 
 def ensure_decision_scan_flow() -> int:
     """Get-or-create the manual 'Decision scan' flow the Decisions page starts.
     Mirrors ensure_fact_scan_flow — same shape, different step."""
-    project_id = access.require_current_access().project_id
-    with _conn() as conn:
-        for r in conn.execute("SELECT id, nodes FROM workflows WHERE project_id = %s",
-                              (project_id,)).fetchall():
-            if any(s.get("kind") == "scan_decisions" for s in _wf_nodes(r)):
-                _adopt_rotation(conn, r, "scan_decisions", "decisions")
-                return r["id"]
-        nodes = [
+    existing = workflow_store.find_by_step("scan_decisions")
+    if existing:
+        _adopt_rotation(existing, "scan_decisions", "decisions")
+        return existing["id"]
+    nodes = [
             {"kind": "trigger", "label": "Manual", "config": {"label": "Started from Decisions"}},
             {"kind": "fetch_docs", "label": "Read documents (least recently scanned)",
              "config": {"k": 8, "rotate": "decisions"}},
             {"kind": "scan_decisions", "label": "Extract decisions", "config": {}},
         ]
-        row = conn.execute(
-            """INSERT INTO workflows (project_id, name, description, color, pinned, status, nodes, trigger)
-               VALUES (%s, %s, %s, '#7A2E1F', false, 'active', %s, %s) RETURNING id""",
-            (project_id, DECISION_SCAN_FLOW,
-             "Mines recent documents for decisions the team made and files them awaiting sign-off.",
-             json.dumps(nodes), json.dumps({"on": ""}))).fetchone()
-        conn.execute("INSERT INTO events (actor, verb, target) VALUES (%s, %s, %s)",
-                     ("Flow scheduler", "created flow", DECISION_SCAN_FLOW))
-        conn.commit()
-        return row["id"]
+    return workflow_store.create_default_workflow(
+        name=DECISION_SCAN_FLOW,
+        description="Mines recent documents for decisions the team made and files them awaiting sign-off.",
+        color="#7A2E1F", status="active", nodes=nodes, trigger={"on": ""},
+    )
 
 
 def seed_scheduled_flows() -> None:
     """Startup seeding: every github/connector source gets a scheduled sync
     flow; the weekly digest gets a refresh flow. Idempotent — existing kept."""
-    with _conn() as conn:
-        srcs = conn.execute(
-            "SELECT id, display_name, config FROM sources WHERE kind = 'connector'").fetchall()
-    for s in srcs:
+    for s in workflow_store.connector_sources():
         cfg = s["config"] if isinstance(s["config"], dict) else json.loads(s["config"] or "{}")
         ensure_sync_flow(s["id"], cfg.get("repo") or s["display_name"])
     ensure_digest_flow()
