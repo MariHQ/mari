@@ -263,8 +263,7 @@ def _handle_slack_event(event: dict, token: str, project_access=None,
             answer = answer_question(question)
     out = slack_call("chat.postMessage", token, {
         "channel": event.get("channel"), "text": answer,
-        "thread_ts": event.get("thread_ts") or (
-            event.get("ts") if event.get("type") == "app_mention" else None),
+        "thread_ts": event.get("thread_ts") or None,
     })
     if not out.get("ok"):
         raise RuntimeError(f"chat.postMessage: {out.get('error', 'unknown error')}")
@@ -364,27 +363,29 @@ def _process_slack_delivery(row: dict) -> None:
     client_msg_id = str(uuid.uuid5(uuid.NAMESPACE_URL,
                                    f"mari:slack:{row['project_id']}:{row['delivery_id']}"))
     post = {"channel": channel, "text": answer, "client_msg_id": client_msg_id}
-    # Channel mentions start a thread. A root DM gets a normal visible reply;
-    # actual DM/channel thread follow-ups stay in their existing thread.
-    if thread_ts or event.get("type") == "app_mention":
+    # Root mentions and DMs get a normal visible reply. If a user starts a
+    # thread from Mari's response, subsequent turns stay in that thread.
+    if thread_ts:
         post["thread_ts"] = root_ts
     out = slack_call("chat.postMessage", token, post)
     if not out.get("ok"):
         raise RuntimeError(f"chat.postMessage: {out.get('error', 'unknown error')}")
+    participation_ts = thread_ts or str(out.get("ts") or "")
     exec_(
         """INSERT INTO slack_bot_threads
                (installation_id, project_id, channel_id, thread_ts, bot_message_ts)
              VALUES (%s, %s, %s, %s, %s)
              ON CONFLICT (installation_id, channel_id, thread_ts) DO UPDATE
                SET bot_message_ts=EXCLUDED.bot_message_ts, last_event_at=now()""",
-        (installation_id, installation["project_id"], channel, root_ts, str(out.get("ts") or "")),
+        (installation_id, installation["project_id"], channel, participation_ts,
+         str(out.get("ts") or "")),
     )
     exec_("""UPDATE bot_installations SET config=config || %s, updated_at=now() WHERE id=%s""",
           (json.dumps({"last_event_at": _now_iso(), "last_error": ""}), installation_id))
     # Event-driven ingestion is a repair/latency optimization, never a gate on
     # answering the user. Once a real Slack thread exists, refresh it after the
     # response has been posted and let scheduled polling repair any API error.
-    if thread_ts or event.get("type") == "app_mention":
+    if thread_ts:
         try:
             _refresh_slack_aggregate(installation["project_id"], token, channel, root_ts)
         except Exception:
@@ -475,18 +476,6 @@ async def slack_webhook(request: Request):
             except Exception:
                 # No ACK when durability is unavailable: Slack will retry.
                 return Response(status_code=503, content="Slack delivery could not be persisted")
-            # Persist participation as soon as the root event is durable. This
-            # lets a fast/out-of-order human follow-up enter the same queue.
-            # Do this even on replay: if the process died between the durable
-            # inbox insert and this write, Slack's retry repairs the mapping.
-            if is_mention or is_dm:
-                exec_(
-                    """INSERT INTO slack_bot_threads
-                           (installation_id, project_id, channel_id, thread_ts)
-                         VALUES (%s, %s, %s, %s) ON CONFLICT DO NOTHING""",
-                    (installation["id"], installation["project_id"],
-                     str(event.get("channel") or ""), root_ts),
-                )
             if not inserted:
                 return {"ok": True, "duplicate": True}
 

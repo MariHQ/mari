@@ -239,7 +239,7 @@ class SlackSetupToAnswerTests(unittest.TestCase):
         posts = [call for call in FakeSlackHandler.calls if call["path"] == "/api/chat.postMessage"]
         self.assertEqual(len(posts), 2)
         self.assertTrue(all(call["authorization"] == "Bearer xoxb-valid" for call in posts))
-        self.assertEqual(posts[0]["body"]["thread_ts"], "1.0")
+        self.assertNotIn("thread_ts", posts[0]["body"])
         self.assertNotIn("thread_ts", posts[1]["body"])
         self.assertTrue(all("Allowed runbook" in prompt for prompt in prompts))
         self.assertTrue(all("use the production checklist" not in prompt for prompt in prompts))
@@ -249,7 +249,7 @@ class SlackSetupToAnswerTests(unittest.TestCase):
         self.assertTrue(all("Forbidden plan" not in prompt and "Never reveal this" not in prompt
                             for prompt in prompts))
 
-    def test_fast_unmentioned_followup_is_durable_before_first_answer_runs(self):
+    def test_unmentioned_followup_routes_from_maris_posted_response(self):
         inbox = MemoryInbox()
         joined = set()
         installation = self._setup()
@@ -268,19 +268,25 @@ class SlackSetupToAnswerTests(unittest.TestCase):
 
         mention = {"type": "event_callback", "team_id": "T-ACME", "event_id": "Ev-root",
                    "event": {"type": "app_mention", "text": "<@B> start", "channel": "C1", "ts": "10.0"}}
-        followup = {"type": "event_callback", "team_id": "T-ACME", "event_id": "Ev-reply",
+        early = {"type": "event_callback", "team_id": "T-ACME", "event_id": "Ev-early",
                     "event": {"type": "message", "text": "and production?", "channel": "C1",
                               "thread_ts": "10.0", "ts": "10.1"}}
+        followup = {"type": "event_callback", "team_id": "T-ACME", "event_id": "Ev-reply",
+                    "event": {"type": "message", "text": "and production?", "channel": "C1",
+                              "thread_ts": "posted.1", "ts": "10.2"}}
         unrelated = {"type": "event_callback", "team_id": "T-ACME", "event_id": "Ev-other",
                      "event": {"type": "message", "text": "private conversation", "channel": "C1",
                                "thread_ts": "99.0", "ts": "99.1"}}
         with patch.object(bots, "q1", side_effect=lookup), patch.object(bots, "exec_", side_effect=execute), \
-             patch.object(bots, "_EVENT_INBOX", inbox):
+            patch.object(bots, "_EVENT_INBOX", inbox):
             self.assertEqual(asyncio.run(bots.slack_webhook(self._request(mention))), {"ok": True})
+            self.assertEqual(asyncio.run(bots.slack_webhook(self._request(early))), {"ok": True})
+            joined.add((row["id"], "C1", "posted.1"))
             self.assertEqual(asyncio.run(bots.slack_webhook(self._request(followup))), {"ok": True})
             self.assertEqual(asyncio.run(bots.slack_webhook(self._request(unrelated))), {"ok": True})
         self.assertEqual([item["delivery_id"] for item in inbox.rows], ["Ev-root", "Ev-reply"])
-        self.assertEqual(inbox.rows[0]["coalesce_key"], inbox.rows[1]["coalesce_key"])
+        self.assertEqual(inbox.rows[0]["coalesce_key"], "5:C1:10.0")
+        self.assertEqual(inbox.rows[1]["coalesce_key"], "5:C1:posted.1")
         self.assertEqual(installation["installationId"], row["id"])
 
 

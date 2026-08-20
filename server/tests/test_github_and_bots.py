@@ -122,14 +122,14 @@ class SlackBotTests(unittest.TestCase):
         self.assertFalse(bots.verify_slack_signature(raw + b" ", ts, sig, "secret"))
         self.assertFalse(bots.verify_slack_signature(raw, str(int(ts) - 301), sig, "secret"))
 
-    def test_event_handler_strips_mention_answers_and_posts_in_thread(self) -> None:
+    def test_event_handler_strips_mention_and_posts_in_channel(self) -> None:
         with patch.object(bots, "answer_question", return_value="Use the runbook [1].") as answer, \
              patch.object(bots, "slack_call", return_value={"ok": True}) as call, \
              patch.object(bots, "merge_setting") as merge:
             bots._handle_slack_event({"type": "app_mention", "text": "<@UBOT> deploy?", "channel": "C1", "ts": "1.2"}, "xoxb-token")
         answer.assert_called_once_with("deploy?")
         self.assertEqual(call.call_args.args[0], "chat.postMessage")
-        self.assertEqual(call.call_args.args[2]["thread_ts"], "1.2")
+        self.assertIsNone(call.call_args.args[2]["thread_ts"])
         self.assertNotIn("xoxb-token", json.dumps(merge.call_args.args))
 
     def test_answer_pipeline_uses_ollama_and_cites_retrieved_docs(self) -> None:
