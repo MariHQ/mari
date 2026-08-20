@@ -218,6 +218,7 @@ class GatewayContractTests(unittest.TestCase):
             self.assertEqual(llm.generate_json("choose an action", schema=schema), {"action": "answer"})
         payload = post.call_args.args[1]
         self.assertEqual(payload["response_format"], {"type": "json_object"})
+        self.assertEqual(payload["thinking"], {"type": "disabled"})
         self.assertNotIn("json_schema", payload["response_format"])
 
 

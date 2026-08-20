@@ -246,7 +246,13 @@ def _response_format(gateway: dict[str, t.Any] | None,
     if not requested:
         return {}
     if gateway and gateway.get("compatibility") == "deepseek":
-        return {"response_format": {"type": "json_object"}}
+        # DeepSeek defaults to thinking mode, where the reasoning tokens count
+        # against max_tokens and can exhaust the planner budget before any JSON
+        # reaches `content`. Structured decisions need the non-thinking model.
+        return {
+            "response_format": {"type": "json_object"},
+            "thinking": {"type": "disabled"},
+        }
     if isinstance(requested, dict):
         return {"response_format": {
             "type": "json_schema",
