@@ -79,7 +79,11 @@ function initialData() {
     changes: [{ id: 1, original: "10 days", replacement: "30 days", reason: "Verified policy", status: "pending" }],
     claims: [{ id: 1, claim: "Retention is 30 days.", source: "Retention runbook", status: "Verified", verified: "2026-08-18" }],
     approvedAnswers: [{ id: 1, question: "How long is retention?", answer: "Retention is 30 days.", status: "approved", owner: "Dana", channels: ["slack-bot"], sources: [{ source: "github", title: "Retention runbook" }], served: 4, spark: [1, 2, 1], updated: now }],
-    answerCoverageGaps: ["What is the deletion SLA?"], answerHarvestSources: { slack: 2, docs: 3, chat: 1 },
+    answerCoverageGaps: ["What is the deletion SLA?"], answerHarvestSources: [
+      { key: "slack", label: "Slack", count: 2 },
+      { key: "github", label: "GitHub", count: 3 },
+      { key: "chat", label: "Chat history", count: 1 },
+    ],
     lineage: [{ id: "github:1", docId: 1, title: "Retention runbook", source: "github", docKind: "page", icon: "file", x: 0.5, y: 0.5, pinned: false, date: "2026-08-19", createdDate: "2026-08-18", warn: false, owner: "Dana", tags: ["canonical"], staleDays: 0, orphan: true, inbound: 0, outbound: 0, group: "", meta: "Canonical policy" }],
     lineageEdges: [], graphStats: { docs: 3, edges: 0, sources: 2, people: 1 }, graphViews: [],
     tagDefs: [{ tag: "canonical", label: "Canonical", kind: "canonical", searchWeight: 2, isDefault: true, behaviors: "Boosts search", usage: 1 }],

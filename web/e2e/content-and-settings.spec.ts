@@ -65,7 +65,8 @@ test("answers can be drafted and harvested from selected sources", async ({ page
   await page.getByLabel(/Slack/).check();
   await page.getByRole("button", { name: /Scan \d+ sources?/ }).click();
   await expect(page.getByText("How long is deletion?")).toBeVisible();
-  expect(api.calls.some((call) => call.query.includes("scanAnswerCandidates"))).toBeTruthy();
+  const scan = api.calls.find((call) => call.query.includes("scanAnswerCandidates"));
+  expect(scan?.variables.sources).toEqual(expect.arrayContaining(["slack", "github", "chat"]));
 });
 
 test("API keys reveal a new secret once and can be revoked", async ({ page }) => {

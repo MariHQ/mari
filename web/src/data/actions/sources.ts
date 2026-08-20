@@ -1,15 +1,14 @@
 /* Sources & connectors: the writes that fill an empty workspace.
  *
- * Three transports meet here, and which one a handler uses is decided by what
+ * Two transports meet here, and which one a handler uses is decided by what
  * the server actually offers, never by tidiness:
  *
  *   • /connectors/validate + /connectors/connect  (REST) — the connector
  *     framework. `connect` answers 200 with `{error}` on a refusal rather than
  *     a status code, because a bad token is a normal outcome, so the honest
  *     failure is in the body and has to be re-thrown.
- *   • connectGithubRepo / syncSource / resyncSource / disconnectSource
- *     (GraphQL) — GitHub predates the connector framework and has its own
- *     repo-picker path.
+ *   • syncSource / resyncSource / disconnectSource (GraphQL) — lifecycle
+ *     operations for a source that already exists.
  *   • /onboard/upload (REST, multipart) — files cannot travel through GraphQL.
  *
  * Every handler throws the server's own words. "Bad credentials",
@@ -66,27 +65,7 @@ export async function uploadDocuments(files: File[]): Promise<void> {
 
 /* ── connect ────────────────────────────────────────────────────────────── */
 
-/** GitHub is not a connector-framework provider: it has a server-side token
- *  and is chosen by repository. Both its connect and its test go elsewhere. */
-const GITHUB = "github";
-
 export async function connectAny(provider: string, config: Record<string, string>): Promise<void> {
-  if (provider === GITHUB) {
-    const repo = (config.repo ?? "").trim();
-    if (!repo) throw new Error("Name the repository to connect, as owner/name.");
-    await mutate(
-      `mutation($repo: String!, $paths: String, $token: String) {
-        connectGithubRepo(repo: $repo, paths: $paths, token: $token)
-      }`,
-      {
-        repo,
-        paths: (config.paths ?? "").trim() || null,
-        token: (config.token ?? "").trim() || null,
-      },
-    );
-    clearQueryCache();
-    return;
-  }
   // 200 with {error} is this endpoint's refusal: validate ran, nothing was
   // created, and the reason is in the body.
   const r = await postJson<{ error?: string; sourceId?: number }>("/connectors/connect", { provider, config });
@@ -95,9 +74,6 @@ export async function connectAny(provider: string, config: Record<string, string
 }
 
 export async function testAny(provider: string, config: Record<string, string>): Promise<{ ok: boolean; error?: string }> {
-  if (provider === GITHUB) {
-    return postJson<{ ok: boolean; error?: string }>("/connectors/validate", { provider, config });
-  }
   const r = await postJson<{ ok: boolean; error?: string }>("/connectors/validate", { provider, config });
   return { ok: r.ok, error: r.error };
 }

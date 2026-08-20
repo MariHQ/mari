@@ -143,44 +143,54 @@ def _step_derive_links(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
 
 def _step_create_task(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
     title = cfg.get("title", "Review flow output")
+    assignee = str(cfg.get("assignee") or "").strip()
     if ctx.get("branch_taken") is False and cfg.get("only_if_branch"):
         return "skipped", "branch not taken", {}
     if ctx.get("dry_run"):
-        return "passed", f"would create task: {title[:60]} (dry run)", {}
+        return "passed", f"would create {'assigned' if assignee else 'unassigned'} task: {title[:60]} (dry run)", {}
     with _conn() as conn, conn.transaction():
         conn.execute("""INSERT INTO tasks (title, assignee, assignee_initials, assignee_tint, kind, kind_label)
                         VALUES (%s, %s, %s, 2, %s, %s) ON CONFLICT (title) DO NOTHING""",
-                     (title[:120], cfg.get("assignee", "Aki K."),
-                      "".join(w[0] for w in cfg.get("assignee", "Aki K.").split()[:2]).upper(),
+                     (title[:120], assignee,
+                      "".join(w[0] for w in assignee.split()[:2]).upper(),
                       cfg.get("kind", "factcheck"), cfg.get("kind_label", "Fact check")))
     return "passed", f"task: {title[:60]}", {}
 
 
 def _step_approval(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
+    assignee = str(cfg.get("assignee") or "").strip()
+    if not assignee:
+        return "failed", "approval step requires an approver", {}
     if ctx.get("dry_run"):
-        return "passed", f"would await {cfg.get('assignee', 'Aki K.')} (dry run)", {}
-    return "waiting", f"awaiting {cfg.get('assignee', 'Aki K.')}", {"pause": True}
+        return "passed", f"would await {assignee} (dry run)", {}
+    return "waiting", f"awaiting {assignee}", {"pause": True}
 
 
 def _step_deploy(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
+    site_id = int(cfg.get("site_id") or 0)
+    if site_id <= 0:
+        return "failed", "deploy step requires a site", {}
     if ctx.get("dry_run"):
         return "passed", "would deploy the site (dry run)", {}
     from app import Mutation
-    version = Mutation.deploy_site(None, int(cfg.get("site_id", 1)))  # type: ignore[arg-type]
+    version = Mutation.deploy_site(None, site_id)  # type: ignore[arg-type]
     return "passed", f"deployed {version}", {"version": version}
 
 
 def _step_notify(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
+    recipient = str(cfg.get("user") or cfg.get("assignee") or "").strip()
+    if not recipient:
+        return "failed", "notification step requires a recipient", {}
     if ctx.get("dry_run"):
-        return "passed", f"would notify {cfg.get('user', 'Daniel Henneberger')} (dry run)", {}
+        return "passed", f"would notify {recipient} (dry run)", {}
     with _conn() as conn:
         conn.execute("""INSERT INTO notifications (user_name, kind, text, detail, at_label, read)
                         VALUES (%s, 'info', %s, %s, 'just now', false)
                         ON CONFLICT (user_name, text) DO NOTHING""",
-                     (cfg.get("user", "Daniel Henneberger"),
+                     (recipient,
                       cfg.get("text", "Flow finished")[:180],
                       cfg.get("detail", "")[:200]))
-    return "passed", f"notified {cfg.get('user', 'Daniel Henneberger')}", {}
+    return "passed", f"notified {recipient}", {}
 
 
 def _step_summarize(cfg: dict, ctx: dict) -> tuple[str, str, dict]:

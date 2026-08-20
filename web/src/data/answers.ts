@@ -27,7 +27,7 @@ type Res = {
     served: number; spark: number[]; updated: string;
   }[];
   answerCoverageGaps: string[];
-  answerHarvestSources: { slack: number; docs: number; chat: number } | null;
+  answerHarvestSources: { key: string; label: string; count: number }[] | null;
 };
 
 /* ── mapping helpers ────────────────────────────────────────────────────── */
@@ -75,18 +75,17 @@ const TILES: { label: string; sub: string; tone: AnswerStat["tone"]; of: (a: Ans
    offered at all — a workspace with no Slack was previously invited to harvest
    Slack and got nothing back. Every offered source starts selected: there is
    no reason to open the wizard with a source you have switched off. */
-const HARVEST: { key: HarvestSource["key"]; field: "slack" | "docs" | "chat"; label: string; desc: string }[] = [
-  { key: "slack", field: "slack", label: "Slack threads", desc: "Questions asked and answered in channels Mari indexes." },
-  { key: "docs", field: "docs", label: "Documents", desc: "The indexed corpus, mined for questions it already answers." },
-  { key: "history", field: "chat", label: "Chat history", desc: "What people have actually asked the assistant." },
-];
-
 export function mapHarvestSources(res: Res): HarvestSource[] {
-  const counts = res.answerHarvestSources;
-  if (!counts) return [];
-  return HARVEST
-    .filter((h) => (counts[h.field] ?? 0) > 0)
-    .map<HarvestSource>((h) => ({ key: h.key, label: h.label, desc: h.desc, on: true }));
+  return (res.answerHarvestSources ?? [])
+    .filter((source) => source.count > 0)
+    .map((source) => ({
+      key: source.key,
+      label: source.label,
+      desc: source.key === "chat"
+        ? `${source.count.toLocaleString("en-US")} recent questions asked in chat.`
+        : `${source.count.toLocaleString("en-US")} indexed documents available to mine.`,
+      on: true,
+    }));
 }
 
 /** Pure: the answers + coverage gaps → everything the page renders.

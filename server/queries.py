@@ -1606,15 +1606,21 @@ class Query:
 
     @strawberry.field
     def answer_harvest_sources(self) -> JSON:
-        """What `scanAnswerCandidates` would actually have to read, per source
-        key it accepts. The wizard used to offer a hardcoded three, so a
-        workspace with no Slack was invited to scan Slack and got nothing back.
-        Counts, not booleans: the console decides what to offer, and it can
-        only offer what there is something to mine."""
-        slack = q1("SELECT count(*) AS n FROM documents WHERE source = 'slack'")["n"]
-        docs = q1("SELECT count(*) AS n FROM documents WHERE source <> 'slack'")["n"]
-        chat = q1("SELECT count(*) AS n FROM chat_messages WHERE role = 'user'")["n"]
-        return {"slack": int(slack), "docs": int(docs), "chat": int(chat)}
+        """Real provider-backed inputs available to answer harvesting."""
+        from mari_components.connectors import CONNECTOR_CATALOG
+
+        counts = {str(row["source"]): int(row["n"]) for row in q(
+            "SELECT source, count(*) AS n FROM documents GROUP BY source"
+        ) if row.get("source")}
+        rows = [
+            {"key": key, "label": definition.name, "count": counts[key]}
+            for key, definition in CONNECTOR_CATALOG.items()
+            if counts.get(key, 0) > 0
+        ]
+        chat = int(q1("SELECT count(*) AS n FROM chat_messages WHERE role = 'user'")["n"])
+        if chat:
+            rows.append({"key": "chat", "label": "Chat history", "count": chat})
+        return rows
 
     @strawberry.field
     def index_stats(self) -> JSON:

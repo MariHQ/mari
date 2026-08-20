@@ -495,7 +495,10 @@ const ANSWERS_RES: any = {
   ],
   answerCoverageGaps: ["how do i rotate my api key?"],
   // Nothing indexed from chat, so that source has nothing to scan.
-  answerHarvestSources: { slack: 412, docs: 1284, chat: 0 },
+  answerHarvestSources: [
+    { key: "slack", label: "Slack", count: 412 },
+    { key: "github", label: "GitHub", count: 1284 },
+  ],
 };
 const answerRows = mapAnswers(ANSWERS_RES);
 check("answers: a status this build cannot draw is dropped", answerRows.length === 2);
@@ -505,7 +508,7 @@ check("answers: an unknown channel has no toggle, so it is dropped",
    button without it, and offers only the sources this workspace can scan. */
 const harvestSources = mapHarvestSources(ANSWERS_RES);
 check("answers: a source with nothing in it is not offered",
-  harvestSources.length === 2 && harvestSources.every((s) => s.key !== "history"));
+  harvestSources.length === 2 && harvestSources.every((s) => s.key !== "chat"));
 const answersData = buildAnswers(answerRows, ANSWERS_RES.answerCoverageGaps, "all", harvestSources);
 check("answers: the stat strip counts the answers under it",
   answersData.stats[0].value === "1" && answersData.stats[2].value === "1,284");

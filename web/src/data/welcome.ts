@@ -30,7 +30,7 @@ type Res = {
     fields: { key: string; label: string; secret?: boolean; placeholder?: string; help?: string; multiline?: boolean; required?: boolean }[];
   }[];
   githubRepos: { fullName: string; description: string; private: boolean; defaultBranch: string; connected: boolean }[];
-  glossaryCandidates: { id: number; term: string; variants: string; definition: string; evidence: string }[];
+  glossaryCandidates: { id: number; term: string; variants: string; definition: string; evidence: string; evidenceDocId?: number }[];
   sourcePulse: {
     id: number; provider: string; name: string; status: string;
     docsCount: number; health: string; kind: string; lastSyncAt: string;
@@ -141,11 +141,13 @@ export function buildWelcome(res: Res | null): WelcomeData {
     uploadFiles: mapUploadFiles(res),
     connectSync: NO_CONNECT_SYNC,
     glossaryCandidates: (res.glossaryCandidates ?? []).map<Candidate>((c) => ({
+      id: c.id,
       term: c.term,
       definition: c.definition,
       // The document the harvester found the term in. "" for a term someone
       // typed in by hand, which was never mined from a document.
       evidence: c.evidence ?? "",
+      evidenceDocId: c.evidenceDocId || undefined,
     })),
     syncRows,
     // Counted off the rows above, so the closing line cannot claim more than

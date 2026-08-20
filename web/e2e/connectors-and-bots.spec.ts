@@ -24,10 +24,10 @@ async function openBotsDestination(page: import("@playwright/test").Page) {
 }
 
 const connectors = [
-  { name: "Confluence", fields: { "Site URL": "https://acme.atlassian.test", "Atlassian account email": "docs@example.test", "API token": "atl-secret" }, transport: "rest" },
-  { name: "Slack", fields: { "Bot token": "xoxb-browser-test", "Channels": "engineering" }, transport: "rest" },
-  { name: "Google Drive", fields: { "OAuth2 access token": "ya29.browser-test", "Folder ID": "folder-1" }, transport: "rest" },
-  { name: "GitHub", fields: { "Personal access token": "github_pat_browser", "Repository": "acme/handbook" }, transport: "graphql" },
+  { name: "Confluence", fields: { "Site URL": "https://acme.atlassian.test", "Atlassian account email": "docs@example.test", "API token": "atl-secret" } },
+  { name: "Slack", fields: { "Bot token": "xoxb-browser-test", "Channels": "engineering" } },
+  { name: "Google Drive", fields: { "OAuth2 access token": "ya29.browser-test", "Folder ID": "folder-1" } },
+  { name: "GitHub", fields: { "Personal access token": "github_pat_browser", "Repository": "acme/handbook" } },
 ] as const;
 
 for (const connector of connectors) {
@@ -48,11 +48,8 @@ for (const connector of connectors) {
     await expect(dialog.getByText(/initial sync runs on the server/i)).toBeVisible();
 
     expect(api.restCalls.some((c) => c.path === "/connectors/validate" && c.body.provider === connector.name.toLowerCase().replace("google drive", "gdrive"))).toBeTruthy();
-    if (connector.transport === "rest") {
-      expect(api.restCalls.some((c) => c.path === "/connectors/connect")).toBeTruthy();
-    } else {
-      expect(api.calls.some((c) => c.query.includes("connectGithubRepo") && c.variables.repo === "acme/handbook")).toBeTruthy();
-    }
+    expect(api.restCalls.some((c) => c.path === "/connectors/connect"
+      && c.body.provider === connector.name.toLowerCase().replace("google drive", "gdrive"))).toBeTruthy();
   });
 }
 

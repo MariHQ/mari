@@ -145,19 +145,13 @@ for (const connector of connectors) {
     await expect(dialog.getByText(/Connection OK/)).toBeVisible({ timeout: 30_000 });
     const accepted = page.waitForResponse((response) => {
       if (response.request().method() !== "POST") return false;
-      if (connector.name === "GitHub") {
-        return response.url().endsWith("/graphql")
-          && (response.request().postData() ?? "").includes("connectGithubRepo");
-      }
       return response.url().endsWith("/connectors/connect");
     });
     await dialog.getByRole("button", { name: "Connect & sync" }).click();
     const response = await accepted;
     expect(response.ok(), `${connector.name} connection request`).toBeTruthy();
     const payload = await response.json();
-    const sourceId = connector.name === "GitHub"
-      ? Number(payload.data?.connectGithubRepo)
-      : Number(payload.sourceId);
+    const sourceId = Number(payload.sourceId);
     expect(sourceId, `${connector.name} connection must return its source id`).toBeGreaterThan(0);
     await expect(dialog.getByText(/initial sync runs on the server/i)).toBeVisible({ timeout: 30_000 });
     await waitForCompletedSync(page, sourceId, connector.name);

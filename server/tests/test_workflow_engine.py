@@ -28,7 +28,7 @@ class WorkflowStepTests(unittest.TestCase):
         status, detail, updates = flowengine._step_approval({"assignee": "Reviewer"}, {})
         self.assertEqual((status, updates), ("waiting", {"pause": True}))
         self.assertIn("Reviewer", detail)
-        self.assertEqual(flowengine._step_approval({}, {"dry_run": True})[0], "passed")
+        self.assertEqual(flowengine._step_approval({}, {"dry_run": True})[0], "failed")
 
     def test_document_trigger_filters_are_anded(self) -> None:
         docs = [

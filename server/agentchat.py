@@ -284,7 +284,7 @@ def guided_workflow(message: str) -> GuidedWorkflow | None:
     if any(term in text for term in ("welcome setup", "onboarding", "initial workspace setup")):
         return GuidedWorkflow(
             "Complete onboarding", "/welcome",
-            "I opened Welcome. Work through the connector or upload step, review harvested glossary "
+            "I opened Welcome. Connect a knowledge source with a connector, review the harvested glossary "
             "terms, use Back when needed, and finish only after the initial knowledge is visible.",
         )
     return None
@@ -549,19 +549,6 @@ def _synthesize(convo: str, trace: list[dict]) -> str:
     return (raw or "").strip() or recap
 
 
-def _fallback_answer(message: str) -> tuple[list[dict], t.Iterator[str]]:
-    """Ollama-down degradation: deterministic search-and-summarize."""
-    rows = hybrid_search(message, 8)
-    trace = [{"kind": "tool", "name": "search", "args": {"query": message[:120]},
-              "summary": f"{len(rows)} hits", "ok": True}]
-    if rows:
-        answer = ("The local model is unavailable, but hybrid search found: "
-                  + "; ".join(f"{r['title']} (doc {r['id']})" for r in rows[:5]) + ".")
-    else:
-        answer = "The local model is unavailable and hybrid search found nothing for that."
-    return trace, _token_chunks(answer)
-
-
 def agent_events(session_id: int, message: str, project_access=None) -> t.Iterator[str]:
     if project_access is not None:
         access.set_access(project_access)
@@ -608,14 +595,10 @@ def agent_events(session_id: int, message: str, project_access=None) -> t.Iterat
         force_answer = step == MAX_STEPS - 1
         prompt = _build_prompt(convo, observations, force_answer)
         raw = llm.generate(prompt, system=SYSTEM, timeout=90.0)
-        if raw is None:  # ollama down → deterministic degradation
-            yield _sse("warning", {"message": "Local model unreachable — falling back to search-and-summarize."})
-            fb_trace, tokens = _fallback_answer(message)
-            for ev in fb_trace:
-                yield _sse("tool_start", {"name": ev["name"], "args": ev["args"]})
-                yield _sse("tool_result", {"name": ev["name"], "summary": ev["summary"], "ok": ev["ok"]})
-            trace.extend(fb_trace)
-            model_detail = "agent-fallback"
+        if raw is None:
+            final = "The configured language model is unavailable. Check Models settings and try again."
+            yield _sse("warning", {"message": final})
+            model_detail = "agent-model-unavailable"
             break
 
         parsed = parse_step(raw)

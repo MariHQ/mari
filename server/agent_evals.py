@@ -85,7 +85,7 @@ CASES = (
         ("glossary", "search existing", "defaults or weights", "generated knowledge"),
     ),
     AgentEvalCase(
-        "models", "Help me set up Ollama model settings", "/settings/models",
+        "models", "Help me set up generation and embedding models", "/settings/models",
         ("generation and embedding", "connection settings", "connection test", "reindex"),
     ),
     AgentEvalCase(
@@ -118,13 +118,13 @@ CASES = (
     ),
     AgentEvalCase(
         "onboarding", "Help me with initial workspace onboarding", "/welcome",
-        ("connector or upload", "glossary", "back", "initial knowledge"),
+        ("connector", "glossary", "back", "initial knowledge"),
     ),
 )
 
 TOOL_CASES = (
     AgentToolEvalCase("source_inventory", "What sources are connected?", "list_sources",
-                      ("confluence", "healthy")),
+                      ("connected", "health")),
     AgentToolEvalCase("automation_inventory", "What automations are available?", "list_flows",
                       ("fact scan", "active")),
     AgentToolEvalCase("review_inventory", "Which review tasks are open?", "list_tasks",

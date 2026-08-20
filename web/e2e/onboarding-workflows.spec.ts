@@ -124,8 +124,9 @@ test("GitHub onboarding uses its repository transport and returns to the connect
   await page.getByRole("button", { name: "Connect & sync" }).click();
   await expect(page.getByText(/initial sync runs on the server/i)).toBeVisible();
 
-  expect(api.calls.some((call) => call.query.includes("connectGithubRepo")
-    && call.variables.repo === "acme/product-docs"
-    && call.variables.token === "github_pat_onboarding")).toBeTruthy();
+  expect(api.restCalls.some((call) => call.path === "/connectors/connect"
+    && call.body.provider === "github"
+    && call.body.config.repo === "acme/product-docs"
+    && call.body.config.token === "github_pat_onboarding")).toBeTruthy();
   await expectStableSurface(page, errors);
 });

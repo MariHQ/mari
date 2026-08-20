@@ -6,7 +6,7 @@ Run:                 uvicorn app:app --reload --port 8000
 
 DESIGN.md §4–§5: hybrid search = tsvector rank + pgvector cosine, boosted by
 tag weights (tag_definitions.search_weight). LLM features run on local ollama
-(gemma3:4b) with deterministic fallbacks so the demo works offline.
+(gemma3:4b by default) through the configured model provider.
 
 Module layout: db.py (helpers) · gqltypes.py (GraphQL types) · queries.py
 (Query root + hybrid search) · mutations_knowledge/publish/admin.py (Mutation
@@ -305,10 +305,10 @@ def _chat_for_access(body: ChatIn, access: access_module.AccessContext, usage_de
             answer.append(token)
             yield f"data: {json.dumps({'token': token})}\n\n"
         if not answer:
-            fallback = ("I couldn't reach the local model, but hybrid search found: "
-                        + "; ".join(d["title"] for d in docs) + ".")
-            answer.append(fallback)
-            yield f"data: {json.dumps({'token': fallback})}\n\n"
+            unavailable = "The configured language model is unavailable. Check Models settings and try again."
+            answer.append(unavailable)
+            yield f"event: warning\ndata: {json.dumps({'message': unavailable})}\n\n"
+            yield f"data: {json.dumps({'token': unavailable})}\n\n"
         exec_("""INSERT INTO chat_messages (project_id, session_id, role, content, sources)
                  VALUES (%s, %s, 'assistant', %s, %s)""",
               (project_id, session_id, "".join(answer), json.dumps(sources)))

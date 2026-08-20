@@ -1017,16 +1017,16 @@ class MutKnowledge:
 
     @strawberry.mutation
     def scan_answer_candidates(self, sources: list[str]) -> list[AnswerCandidate]:
-        """LLM mines documents ('slack'/'docs') and recent chat questions ('chat')
+        """Mine selected connector documents and optional recent chat questions
         for FAQ answer candidates. Inserts NOTHING — the wizard's review step
         decides what becomes an approved answer."""
         existing = {r["question"].lower() for r in q("SELECT question FROM approved_answers")}
-        selected = {"slack", "docs"} & set(sources)
-        clause = ("" if selected == {"slack", "docs"} else
-                  "WHERE source = 'slack'" if selected == {"slack"} else
-                  "WHERE source <> 'slack'")
-        docs = q(f"""SELECT id, title, snippet, body, source, updated_src FROM documents
-                     {clause} ORDER BY updated_src DESC NULLS LAST LIMIT 16""") if selected else []
+        from mari_components.connectors import CONNECTOR_CATALOG
+
+        selected = sorted(set(sources) & set(CONNECTOR_CATALOG))
+        docs = q("""SELECT id, title, snippet, body, source, updated_src FROM documents
+                     WHERE source = ANY(%s) ORDER BY updated_src DESC NULLS LAST LIMIT 16""",
+                 (selected,)) if selected else []
         components = [_component_document(doc) for doc in docs]
         if "chat" in sources:
             for index, message in enumerate(q(
