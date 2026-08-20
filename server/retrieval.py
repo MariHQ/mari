@@ -31,6 +31,16 @@ from collections import defaultdict
 import numpy as np
 
 import config
+from mari_components.retrieval import (
+    FDEConfig as ComponentFDEConfig,
+    PolarCodec,
+    encode_fde as component_encode_fde,
+    encode_polar as component_encode_polar,
+    exact_maxsim as component_exact_maxsim,
+    polar_scores as component_polar_scores,
+    projection_parameters as component_projection_parameters,
+    train_polar as component_train_polar,
+)
 
 
 _ARTIFACTS = ("metadata.json", "document_ids.npy", "offsets.npy", "vectors.npy", "polar.npy")
@@ -69,145 +79,49 @@ class FDEConfig:
 
 
 def projection_parameters(config: FDEConfig, input_dimension: int):
-    """Data-oblivious SimHash and CountSketch projections from MUVERA."""
-    output = []
-    for repetition in range(config.repetitions):
-        rng = np.random.default_rng(config.seed + repetition)
-        simhash = rng.normal(size=(input_dimension, config.simhash_bits)).astype(np.float32)
-        destinations = rng.integers(0, config.projection_dimension, size=input_dimension)
-        signs = rng.choice(np.asarray([-1.0, 1.0], np.float32), size=input_dimension)
-        projection = np.zeros((input_dimension, config.projection_dimension), np.float32)
-        projection[np.arange(input_dimension), destinations] = signs
-        output.append((simhash, projection))
-    return output
-
-
-def _gray_partition(bits: np.ndarray) -> np.ndarray:
-    index = np.zeros(len(bits), np.int32)
-    for column in range(bits.shape[1]):
-        index = (index << 1) + np.logical_xor(bits[:, column], index & 1)
-    return index
-
-
-def _partition_bits(partitions: int, width: int) -> np.ndarray:
-    gray = np.arange(partitions, dtype=np.int32)
-    binary = np.bitwise_xor(gray, gray >> 1)
-    shifts = np.arange(width - 1, -1, -1, dtype=np.int32)
-    return ((binary[:, None] >> shifts[None, :]) & 1).astype(bool)
+    return component_projection_parameters(ComponentFDEConfig(**dataclasses.asdict(config)), input_dimension)
 
 
 def encode_fde(points: np.ndarray, config: FDEConfig, parameters, *, query: bool) -> np.ndarray:
-    """Encode query points by sum and document points by partition centroid."""
-    points = np.asarray(points, np.float32)
-    if points.ndim != 2 or not len(points):
-        raise ValueError("MUVERA needs at least one input vector")
-    output = np.zeros(
-        (config.repetitions, config.partitions, config.projection_dimension), np.float32)
-    target_bits = _partition_bits(config.partitions, config.simhash_bits)
-    for repetition, (simhash, projection) in enumerate(parameters):
-        signs = points @ simhash > 0
-        buckets = _gray_partition(signs)
-        projected = points @ projection
-        np.add.at(output[repetition], buckets, projected)
-        if query:
-            continue
-        counts = np.bincount(buckets, minlength=config.partitions)
-        occupied = counts > 0
-        output[repetition, occupied] /= counts[occupied, None]
-        if config.fill_empty_partitions and np.any(~occupied):
-            for bucket in np.flatnonzero(~occupied):
-                nearest = int(np.argmin(np.count_nonzero(signs != target_bits[bucket], axis=1)))
-                output[repetition, bucket] = projected[nearest]
-    return output.reshape(-1)
-
-
-def _orthogonal_rotation(dimension: int, seed: int = 91) -> np.ndarray:
-    rng = np.random.default_rng(seed + dimension)
-    q, r = np.linalg.qr(rng.normal(size=(dimension, dimension)))
-    q *= np.sign(np.diag(r))[None, :]
-    return q.astype(np.float32)
-
-
-def _fit_two_centers(values: np.ndarray) -> np.ndarray:
-    """Deterministic one-dimensional two-means; avoids a runtime sklearn dependency."""
-    values = np.asarray(values, np.float32).reshape(-1)
-    centers = np.quantile(values, [0.25, 0.75]).astype(np.float32)
-    for _ in range(32):
-        split = float(np.mean(centers))
-        low, high = values[values <= split], values[values > split]
-        updated = np.asarray([
-            low.mean() if len(low) else centers[0],
-            high.mean() if len(high) else centers[1],
-        ], np.float32)
-        if np.allclose(updated, centers):
-            break
-        centers = updated
-    return np.sort(centers)
+    return component_encode_fde(
+        points, ComponentFDEConfig(**dataclasses.asdict(config)), tuple(parameters), query=query)
 
 
 def train_polar(fdes: np.ndarray) -> tuple[dict, np.ndarray]:
-    """Train and encode the rt-intent block-2, one-angle-bit, zero-radius codec."""
-    fdes = np.asarray(fdes, np.float32)
-    if fdes.ndim != 2 or fdes.shape[1] % 2:
-        raise ValueError("PolarQuant block-2 encoding needs an even FDE dimension")
-    rotation = _orthogonal_rotation(2)
-    blocks = fdes.reshape(len(fdes), -1, 2) @ rotation
-    angles = np.arctan2(blocks[..., 1], blocks[..., 0])
-    centers = _fit_two_centers(angles)
-    boundary = float(np.mean(centers))
-    packed = np.packbits((angles > boundary).astype(np.uint8), axis=1)
-    # One shared radius is intentional for the 0.5-bit format. It changes score
-    # scale, not order, while keeping the representation at one bit per pair.
-    radius = float(np.linalg.norm(blocks, axis=2).mean())
-    codec = {
-        "name": "polar_ultra_1bit_block2_r0",
-        "dimension": int(fdes.shape[1]),
-        "angle_centers": [centers.tolist()],
-        "radius_centers": [radius],
-        "boundary": boundary,
-        "packed_bytes": int(packed.shape[1]),
-        "bits_per_fde_coordinate": 0.5,
-    }
-    return codec, packed
+    codec, packed = component_train_polar(fdes)
+    return {
+        "name": codec.name,
+        "dimension": codec.dimension,
+        "angle_centers": [list(codec.angle_centers)],
+        "radius_centers": [codec.radius],
+        "boundary": codec.boundary,
+        "packed_bytes": codec.packed_bytes,
+        "bits_per_fde_coordinate": codec.bits_per_fde_coordinate,
+    }, packed
+
+
+def _component_codec(codec: dict) -> PolarCodec:
+    return PolarCodec(
+        dimension=int(codec["dimension"]),
+        angle_centers=tuple(float(value) for value in codec["angle_centers"][0]),
+        radius=float(codec["radius_centers"][0]),
+        boundary=float(codec["boundary"]),
+        packed_bytes=int(codec["packed_bytes"]),
+        name=str(codec.get("name") or "polar_ultra_1bit_block2_r0"),
+        bits_per_fde_coordinate=float(codec.get("bits_per_fde_coordinate", 0.5)),
+    )
 
 
 def encode_polar(fde: np.ndarray, codec: dict) -> np.ndarray:
-    blocks = np.asarray(fde, np.float32).reshape(-1, 2) @ _orthogonal_rotation(2)
-    angles = np.arctan2(blocks[:, 1], blocks[:, 0])
-    return np.packbits((angles > float(codec["boundary"])).astype(np.uint8))
-
-
-def _byte_lookup(query_fde: np.ndarray, codec: dict) -> tuple[float, np.ndarray]:
-    rotation = _orthogonal_rotation(2)
-    centers = np.asarray(codec["angle_centers"][0], np.float32)
-    radius = float(codec["radius_centers"][0])
-    prototypes = (radius * np.stack([np.cos(centers), np.sin(centers)], axis=1)) @ rotation.T
-    query_blocks = np.asarray(query_fde, np.float32).reshape(-1, 2)
-    pair_lookup = query_blocks @ prototypes.T
-    base = float(np.sum(pair_lookup[:, 0], dtype=np.float32))
-    deltas = (pair_lookup[:, 1] - pair_lookup[:, 0]).reshape(-1, 8)
-    byte_values = np.arange(256, dtype=np.uint16)
-    shifts = np.arange(7, -1, -1, dtype=np.uint16)
-    bits = ((byte_values[:, None] >> shifts) & 1).astype(np.float32)
-    return base, deltas @ bits.T
+    return component_encode_polar(fde, _component_codec(codec))
 
 
 def polar_scores(index: np.ndarray, query_fde: np.ndarray, codec: dict) -> np.ndarray:
-    base, lookup = _byte_lookup(query_fde, codec)
-    scores = np.full(len(index), base, np.float32)
-    for position in range(index.shape[1]):
-        scores += lookup[position, index[:, position]]
-    return scores
+    return component_polar_scores(index, query_fde, _component_codec(codec))
 
 
 def exact_maxsim(query_points: np.ndarray, document_points: np.ndarray) -> float:
-    # Copies are deliberate: persisted arrays are memory-mapped read-only and
-    # normalization must never mutate either the caller's query or the index.
-    qv = np.array(query_points, dtype=np.float32, copy=True)
-    dv = np.array(document_points, dtype=np.float32, copy=True)
-    qv /= np.maximum(np.linalg.norm(qv, axis=1, keepdims=True), 1e-12)
-    dv /= np.maximum(np.linalg.norm(dv, axis=1, keepdims=True), 1e-12)
-    return float((qv @ dv.T).max(axis=1).sum())
+    return component_exact_maxsim(query_points, document_points)
 
 
 class DerivedVectorIndex:

@@ -16,6 +16,11 @@ from typing import Callable, Iterable
 
 import access
 from db import actor_name, audit, exec_, q, q1
+from mari_components.knowledge.approvals import (
+    ApprovalPolicy as ComponentApprovalPolicy,
+    ReviewItem as ComponentReviewItem,
+    evaluate_approval,
+)
 
 POLICY_VERSION = "review-v1"
 
@@ -155,22 +160,20 @@ def filter_items(items: Iterable[ReviewRecord], *, kinds: list[str] | None = Non
 
 def evaluate_policy(item: ReviewRecord, reviewer: str, *, min_confidence: float = .9,
                     min_evidence: int = 2) -> PolicyResult:
-    reasons = []
-    if not reviewer:
-        return PolicyResult(item.id, "deny", "A named reviewer is required.")
-    if item.proposer and item.proposer.casefold() == reviewer.casefold():
-        return PolicyResult(item.id, "deny", "Separation of duties: proposer cannot approve.")
-    if item.confidence < min_confidence:
-        reasons.append(f"confidence {item.confidence:.2f} is below {min_confidence:.2f}")
-    if item.evidence_count < min_evidence:
-        reasons.append(f"evidence count {item.evidence_count} is below {min_evidence}")
-    if not item.trusted_source:
-        reasons.append("source is not trusted for automatic approval")
-    if reasons:
-        return PolicyResult(item.id, "manual", "; ".join(reasons).capitalize() + ".")
-    if item.kind not in {"fact", "decision", "answer"}:
-        return PolicyResult(item.id, "manual", f"{item.kind} requires its kind-specific reviewer.")
-    return PolicyResult(item.id, "allow", "Meets confidence, evidence, trusted-source, and separation-of-duties policy.")
+    decision = evaluate_approval(
+        ComponentReviewItem(
+            item.id, item.kind, item.proposer.casefold(), item.confidence,
+            item.evidence_count, item.trusted_source,
+        ),
+        reviewer.casefold(),
+        ComponentApprovalPolicy(
+            minimum_confidence=min_confidence,
+            minimum_evidence=min_evidence,
+            version=POLICY_VERSION,
+        ),
+    )
+    return PolicyResult(item.id, decision.outcome, decision.explanation,
+                        policy_version=decision.policy_version)
 
 
 def _apply(item: ReviewRecord) -> None:

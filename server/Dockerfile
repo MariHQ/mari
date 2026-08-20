@@ -10,6 +10,12 @@ RUN apt-get update \
 
 WORKDIR /app/server
 
+# The reusable product-knowledge algorithms are a pinned repository submodule.
+# Install them before the application dependencies so container builds use the
+# exact same component revision as local/CI tests.
+COPY vendor/mari-components/ /app/vendor/mari-components/
+RUN pip install --no-cache-dir /app/vendor/mari-components
+
 # Dependencies first for layer caching. Every runtime dependency is declared
 # in requirements.txt so local and container installs resolve the same set.
 COPY server/requirements.txt ./requirements.txt
