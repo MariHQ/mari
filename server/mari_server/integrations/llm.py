@@ -108,8 +108,9 @@ def _settings() -> tuple[dict, dict]:
     llm_cfg: dict = {}
     embed_cfg: dict = {}
     try:
-        from mari_server.repositories.database import jload, q  # late: db imports flowengine imports this module
-        for row in q("SELECT key, value FROM settings WHERE key IN ('llm', 'embedding')"):
+        from mari_server.repositories.database import jload
+        from mari_server.repositories import settings
+        for row in settings.model_settings():
             value = jload(row["value"])
             if isinstance(value, dict):
                 (llm_cfg if row["key"] == "llm" else embed_cfg).update(value)

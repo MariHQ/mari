@@ -47,3 +47,13 @@ def mark_notifications_read(user_name: str) -> None:
     with db.connect() as conn, conn.transaction():
         conn.execute("UPDATE notifications SET read = true WHERE project_id = %s AND user_name = %s",
                      (project_id, user_name))
+
+
+def model_settings() -> list[dict]:
+    try:
+        project_id = access.require_current_access().project_id
+    except RuntimeError:
+        return []
+    with db.connect() as conn:
+        return conn.execute("""SELECT key, value FROM settings WHERE project_id = %s
+          AND key IN ('llm', 'embedding')""", (project_id,)).fetchall()

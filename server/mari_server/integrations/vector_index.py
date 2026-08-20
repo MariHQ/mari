@@ -353,11 +353,9 @@ def _parse_vector(value: t.Any) -> np.ndarray | None:
 def rebuild_from_database() -> dict | None:
     """Snapshot canonical chunk vectors. Imported lazily to avoid db cycles."""
     from mari_server.domain import access
-    from mari_server.repositories.database import pq
+    from mari_server.repositories import vectors
     context = access.require_current_access()
-    rows = pq("""SELECT document_id, content_hash, embedding::text AS embedding
-                 FROM chunks WHERE project_id = %s AND embedding IS NOT NULL
-                 ORDER BY document_id, idx""")
+    rows = vectors.embedded_chunks(context.project_id)
     grouped: dict[int, list[np.ndarray]] = defaultdict(list)
     hashes: dict[int, list[str]] = defaultdict(list)
     for row in rows:
