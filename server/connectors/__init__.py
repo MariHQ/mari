@@ -49,8 +49,8 @@ def _discover() -> dict:
         # Provider modules retain their catalog metadata and a temporary
         # direct-call compatibility surface; production registry calls use the
         # infrastructure-neutral mari-components implementations.
-        import component_connectors
-        validate, list_items = component_connectors.functions(
+        from mari_server.infrastructure import connector_provider
+        validate, list_items = connector_provider.functions(
             str(provider["key"]), validate, list_items)
         out[provider["key"]] = {
             "key": provider["key"],
@@ -64,13 +64,13 @@ def _discover() -> dict:
     # nor duplicate provider metadata.  This also gives GitHub the same generic
     # worker contract as every other newly connected source.
     from mari_components.connectors import connector_definitions
-    import component_connectors
+    from mari_server.infrastructure import connector_provider
 
     def unavailable(*_args, **_kwargs):
         raise RuntimeError("legacy connector operation is unavailable")
 
     for definition in connector_definitions():
-        validate, list_items = component_connectors.functions(
+        validate, list_items = connector_provider.functions(
             definition.key, unavailable, unavailable,
         )
         out[definition.key] = {
@@ -94,6 +94,9 @@ def _discover() -> dict:
             },
             "validate": validate,
             "list_items": list_items,
+            "poll_pages": lambda cfg, cursor, full=False, key=definition.key: (
+                connector_provider.poll_pages(key, cfg, cursor, full=full)
+            ),
             "definition": definition,
         }
     return out

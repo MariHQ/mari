@@ -18,7 +18,7 @@ import access
 import auth
 import config
 import ingest
-import component_connectors
+from mari_server.infrastructure import connector_provider as component_connectors
 from event_inbox import DEFAULT_INBOX
 from db import exec_, q, q1
 from mari_components import PollRequest

@@ -22,7 +22,7 @@ from pydantic import BaseModel
 import auth
 import access
 import connect_sync
-import component_connectors
+from mari_server.infrastructure import connector_provider as component_connectors
 import flowengine
 import ingest
 from db import audit, exec_, q, q1

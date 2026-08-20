@@ -49,6 +49,22 @@ not copy reusable logic back into a route or database module.
 - `agentchat.py`: temporary compatibility exports only; new code must not depend
   on it.
 
+## Connector ingestion
+
+- `application/connector_ingestion.py`: consumes native connector pages lazily
+  and applies each replay-safe synchronization plan through one transaction
+  port. It neither buffers a corpus nor knows Postgres.
+- `infrastructure/connector_provider.py`: adapts Mari's HTTP client and stored
+  cursor envelope to `mari-components` connector definitions.
+- `infrastructure/connector_runtime.py`: project-scoped document/chunk writes,
+  checkpoints, embeddings, link extraction, and workflow triggers.
+- `component_connectors.py` and `connect_sync.py`: temporary compatibility
+  exports only.
+
+Each page's knowledge mutations, manifest, and provider checkpoint commit in
+one transaction. Full-snapshot absence deletion is planned only by
+`mari-components` after a provider declares the terminal page complete.
+
 ## Migration rules
 
 1. Migrate one complete vertical workflow at a time, with its tests.
@@ -60,6 +76,6 @@ not copy reusable logic back into a route or database module.
 6. `test_architecture.py` is a required CI gate. Extend it when a new boundary is
    introduced.
 
-Next verticals are connector ingestion, knowledge review, and publishing. The
+Next verticals are knowledge review and publishing. The
 large GraphQL modules should become transport declarations that call those use
 cases, not be split mechanically by line count.

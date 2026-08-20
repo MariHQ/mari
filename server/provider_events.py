@@ -15,7 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 import access
 import auth
-import component_connectors
+from mari_server.infrastructure import connector_provider as component_connectors
 import ingest
 from db import q1
 from event_inbox import DEFAULT_INBOX

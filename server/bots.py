@@ -30,7 +30,7 @@ from pydantic import BaseModel
 import auth
 import access
 import config
-import component_connectors
+from mari_server.infrastructure import connector_provider as component_connectors
 import llm
 from mari_components.connectors import SlackConfig, fetch_slack_thread_by_id
 from mari_components.connectors.events import (
