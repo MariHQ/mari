@@ -95,6 +95,15 @@ class GitHubEventTests(unittest.TestCase):
             provider_events.process_github_delivery(row)
         run.assert_called_once_with(41, False)
 
+    def test_worker_rejects_delivery_after_installation_disconnects(self):
+        row = {"project_id": 3, "payload": {"installation_id": 7, "source_id": 41,
+               "hint": {"repository": "acme/docs"}}}
+        with patch.object(provider_events, "q1", return_value=None), \
+             patch.object(provider_events.ingest, "run_sync") as run:
+            with self.assertRaisesRegex(RuntimeError, "installation is no longer active"):
+                provider_events.process_github_delivery(row)
+        run.assert_not_called()
+
 
 class ConfluenceEventTests(unittest.TestCase):
     def setUp(self):
@@ -161,6 +170,81 @@ class ConfluenceEventTests(unittest.TestCase):
         self.assertEqual(item["hash_hint"], "4")
         self.assertEqual(item["space_key"], "ENG")
         self.assertEqual(item["acl"].visibility, "connector_scope")
+
+    def test_targeted_tombstone_deletes_only_the_routed_source_document(self):
+        source = {"id": 8, "project_id": 3, "config": {
+            "cursor": "durable-poll-cursor", "item_hashes": {"123": "3", "456": "2"}}}
+        conn = _PageSyncConn(document_rows=[{"id": 91}], count=1)
+        with patch.object(confluence, "fetch_page", return_value=None), \
+             patch.object(provider_events.ingest, "_conn", return_value=_Context(conn)), \
+             patch.object(provider_events.ingest, "_delete_documents") as delete:
+            provider_events._sync_confluence_page(source, "123")
+        delete.assert_called_once_with(conn, [91])
+        update = next(args for sql, args in conn.calls if "UPDATE sources SET config" in sql)
+        saved = json.loads(update[0])
+        self.assertEqual(saved["cursor"], "durable-poll-cursor")
+        self.assertNotIn("123", saved["item_hashes"])
+        self.assertEqual(saved["item_hashes"]["456"], "2")
+
+    def test_targeted_update_indexes_only_canonical_page(self):
+        source = {"id": 8, "project_id": 3, "config": {
+            "cursor": "durable-poll-cursor", "item_hashes": {}}}
+        canonical = {"path": "123", "title": "Canonical", "body": "Trusted",
+                     "hash_hint": "9", "space_key": "ENG"}
+        conn = _PageSyncConn(count=1)
+        with patch.object(confluence, "fetch_page", return_value=canonical), \
+             patch.object(provider_events.ingest, "_conn", return_value=_Context(conn)), \
+             patch.object(provider_events.ingest, "_upsert_document", return_value=(91, True)) as upsert, \
+             patch.object(provider_events.ingest, "_chunk_settings", return_value=(100, 10)), \
+             patch.object(provider_events.ingest, "_sync_chunks") as chunks:
+            provider_events._sync_confluence_page(source, "123")
+        self.assertEqual(upsert.call_args.args[3:5], ("Canonical", "Trusted"))
+        chunks.assert_called_once_with(conn, 91, "Canonical", "Trusted", 100, 10)
+        update = next(args for sql, args in conn.calls if "UPDATE sources SET config" in sql)
+        saved = json.loads(update[0])
+        self.assertEqual(saved["cursor"], "durable-poll-cursor")
+        self.assertEqual(saved["item_hashes"]["123"], "9")
+
+
+class _Context:
+    def __init__(self, value):
+        self.value = value
+
+    def __enter__(self):
+        return self.value
+
+    def __exit__(self, *_args):
+        return False
+
+
+class _Result:
+    def __init__(self, *, rows=None, one=None):
+        self.rows = rows or []
+        self.one = one
+
+    def fetchall(self):
+        return self.rows
+
+    def fetchone(self):
+        return self.one
+
+
+class _PageSyncConn:
+    def __init__(self, *, document_rows=None, count=0):
+        self.document_rows = document_rows or []
+        self.count = count
+        self.calls = []
+
+    def execute(self, sql, args=()):
+        self.calls.append((sql, args))
+        if "SELECT id FROM documents" in sql:
+            return _Result(rows=self.document_rows)
+        if "SELECT count(*) AS n" in sql:
+            return _Result(one={"n": self.count})
+        return _Result()
+
+    def commit(self):
+        return None
 
 
 if __name__ == "__main__":
