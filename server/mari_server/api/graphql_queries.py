@@ -28,7 +28,12 @@ from mari_server.services import review as review_application
 from mari_server.repositories import review_repository
 from mari_server.repositories import knowledge as knowledge_store
 from mari_server.repositories import document_repository, lineage_repository as lineage_store
-from mari_server.repositories.database import actor_name, jload, q, q1
+from mari_server.repositories import trajectories as trajectory_store, workflows as workflow_store
+from mari_server.repositories import mcp_repository, knowledge_chat_repository
+from mari_server.repositories import sources as source_store, audit as audit_store
+from mari_server.repositories import settings as settings_store, analytics as analytics_store
+from mari_server.repositories import chat as chat_store
+from mari_server.repositories.database import actor_name, jload
 from mari_server.services.excerpt import excerpt
 from mari_server.api.graphql_types import (
     ActivityBucket, ActivityItem, ApiKey, ApprovedAnswer,
@@ -257,26 +262,6 @@ def _details(row: dict) -> list[AuditDetail]:
     return out
 
 
-def _audit_where(query: str, date_from: str | None, date_to: str | None) -> tuple[str, tuple]:
-    """The access log's filter, as one predicate. Shared by `audit_log` and
-    `audit_log_total` so the count and the rows can never describe different
-    filters."""
-    clauses, args = [], []
-    text = (query or "").strip()
-    if text:
-        clauses.append("(actor ILIKE %s OR verb ILIKE %s OR target ILIKE %s)")
-        args += [f"%{text}%"] * 3
-    floor, ceil = _iso_date_arg(date_from), _iso_date_arg(date_to)
-    if floor:
-        clauses.append("occurred_at >= %s")
-        args.append(floor)
-    if ceil:
-        # Inclusive of the whole end day: the filter names dates, not instants.
-        clauses.append("occurred_at < (%s::date + 1)")
-        args.append(ceil)
-    return (" AND ".join(clauses) if clauses else "true"), tuple(args)
-
-
 def _mask_setting(key: str, value):
     if key == "setup_token":
         return _mask_secret(value if isinstance(value, str) else json.dumps(value))
@@ -331,20 +316,11 @@ class Query:
                      category: str | None = None) -> list[Trajectory]:
         """Newest harvested agent workflows, bounded for progressive rendering."""
         cap, start = max(1, min(int(limit), 100)), max(0, int(offset))
-        args: list = []
-        where = ""
-        if (category or "").strip():
-            where = "WHERE category = %s"
-            args.append(category.strip())
-        args.extend((cap, start))
-        rows = q(f"SELECT * FROM trajectories {where} ORDER BY started_at DESC, id DESC LIMIT %s OFFSET %s",
-                 tuple(args))
+        rows, steps = trajectory_store.list_trajectories(cap, start, (category or "").strip() or None)
         if not rows:
             return []
         by_id: dict[int, list[TrajectoryStep]] = {int(row["id"]): [] for row in rows}
-        for step in q("""SELECT trajectory_id, ordinal, tool, action_family, args, summary, ok
-                           FROM trajectory_steps WHERE trajectory_id = ANY(%s)
-                           ORDER BY trajectory_id, ordinal""", (list(by_id),)):
+        for step in steps:
             by_id[int(step["trajectory_id"])].append(TrajectoryStep(
                 ordinal=int(step["ordinal"]), tool=step["tool"], action_family=step["action_family"],
                 args=jload(step["args"]) or {}, summary=step["summary"], ok=bool(step["ok"])))
@@ -359,15 +335,11 @@ class Query:
 
     @strawberry.field
     def trajectory_total(self, category: str | None = None) -> int:
-        if (category or "").strip():
-            return int(q1("SELECT count(*) AS n FROM trajectories WHERE category = %s",
-                          (category.strip(),))["n"])
-        return int(q1("SELECT count(*) AS n FROM trajectories")["n"])
+        return trajectory_store.trajectory_count((category or "").strip() or None)
 
     @strawberry.field
     def trajectory_categories(self) -> list[str]:
-        return [row["category"] for row in q(
-            "SELECT category FROM trajectories GROUP BY category ORDER BY count(*) DESC, category")]
+        return trajectory_store.trajectory_categories()
 
     @strawberry.field
     def overview_stats(self, since: str | None = None) -> JSON:
@@ -385,24 +357,14 @@ class Query:
         The other three are gauges of the workspace right now (facts awaiting
         review, runs in flight, active flows) and have no window to count over."""
         floor = _iso_date_arg(since)
-        if floor:
-            changes = q1("SELECT count(*) AS n FROM changes WHERE created_at >= %s", (floor,))["n"]
-        else:
-            changes = q1("SELECT count(*) AS n FROM changes WHERE created_at >= now() - interval '7 days'")["n"]
-        facts_review = q1("SELECT count(*) AS n FROM facts WHERE status <> 'Verified'")["n"]
-        running = q1("SELECT count(*) AS n FROM workflow_runs WHERE status IN ('running','waiting')")["n"]
-        flows = q1("SELECT count(*) AS n FROM workflows WHERE status = 'active'")["n"]
-        return {"changes": int(changes), "factsReview": int(facts_review),
-                "flowsRunning": int(running), "flowsActive": int(flows)}
+        return analytics_store.overview(floor)
 
     @strawberry.field
     def source_pulse(self) -> list[SourcePulse]:
         # bars = real per-source doc-change counts by day (last 12 days, empty
         # days = 0), from documents timestamps; [] when a source has no recent
         # activity — never an invented curve.
-        daily = q("""SELECT source_id, updated_src AS day, count(*) AS n FROM documents
-                     WHERE source_id IS NOT NULL AND updated_src >= current_date - 11
-                     GROUP BY source_id, updated_src""")
+        daily, workflow_rows, source_rows = source_store.pulse_inputs()
         per_src: dict[int, dict] = {}
         for d in daily:
             per_src.setdefault(d["source_id"], {})[d["day"]] = int(d["n"])
@@ -429,7 +391,7 @@ class Query:
         # same way, so the Sources card and the Flows editor can only ever show
         # one cadence for one source.
         schedules: dict[int, tuple[int, int | None]] = {}
-        for w in q("SELECT id, status, nodes, trigger FROM workflows"):
+        for w in workflow_rows:
             trig = jload(w["trigger"]) or {}
             every = trig.get("every_minutes") if trig.get("on") == "schedule" else None
             for step in jload(w["nodes"]) or []:
@@ -449,18 +411,13 @@ class Query:
                         last_sync_at=r["last_sync_at"].isoformat() if r.get("last_sync_at") else "",
                         sync_flow_id=schedules.get(r["id"], (None, None))[0],
                         sync_interval_minutes=schedules.get(r["id"], (None, None))[1])
-            for r in q("SELECT * FROM sources ORDER BY id")
+            for r in source_rows
         ]
 
     @strawberry.field
     def github_repos(self) -> list[GithubRepo]:
         """Repos visible to the configured token; [] (never errors) without a token."""
-        source = q1(
-            """SELECT config FROM sources
-               WHERE kind = 'connector' AND split_part(provider, ':', 1) = 'github'
-                 AND config->>'token' <> ''
-               ORDER BY id DESC LIMIT 1"""
-        )
+        source, connected_rows = source_store.github_configs()
         source_cfg = jload(source["config"]) if source else {}
         available_token = github.configured_token() or str((source_cfg or {}).get("token") or "")
         if not available_token:
@@ -469,9 +426,7 @@ class Query:
             repos = github.repositories(available_token)
         except Exception:
             return []
-        connected = {jload(r["config"]).get("repo", "")
-                     for r in q("""SELECT config FROM sources WHERE kind = 'connector'
-                                   AND split_part(provider, ':', 1) = 'github'""")}
+        connected = {jload(r["config"]).get("repo", "") for r in connected_rows}
         return [GithubRepo(
             full_name=r["full_name"], description=r.get("description") or "",
             private=bool(r.get("private")), default_branch=r.get("default_branch") or "main",
@@ -482,16 +437,10 @@ class Query:
     def sync_status(self, source_id: int) -> SyncStatus:
         project_id = access.require_current_access().project_id
         live = ingest.status(source_id)
-        src = q1("""SELECT kind, config, last_sync_at FROM sources
-                    WHERE project_id = %s AND id = %s""", (project_id, source_id))
+        src, counts = source_store.sync_summary(source_id)
         cfg = jload(src["config"]) if src else {}
         # Connector cursors are provider-native and shown as bounded text.
         cursor = cfg.get("cursor") or ""
-        counts = q1("""
-          SELECT count(DISTINCT d.id) AS docs, count(c.id) AS chunks,
-                 count(c.id) FILTER (WHERE c.embedding IS NOT NULL) AS embedded
-          FROM documents d LEFT JOIN chunks c ON c.document_id = d.id
-          WHERE d.project_id = %s AND d.source_id = %s""", (project_id, source_id)) or {"docs": 0, "chunks": 0, "embedded": 0}
         last_sync = src["last_sync_at"].isoformat() if src and src["last_sync_at"] else (cfg.get("last_sync_at") or "")
         return SyncStatus(
             state=live["state"], phase=live["phase"], done=live["done"], total=live["total"],
@@ -861,20 +810,19 @@ class Query:
         return [McpServer(id=r["id"], name=r["name"], url=r["url"], scope=r["scope"],
                           status=r["status"], tools=r["tools"], config=jload(r["config"]),
                           token="")
-                for r in q("SELECT * FROM mcp_servers WHERE project_id = %s ORDER BY id",
-                           (access.require_current_access().project_id,))]
+                for r in mcp_repository.list_servers(access.require_current_access().project_id)]
 
     @strawberry.field
     def checkpoints(self) -> list[Checkpoint]:
         return [Checkpoint(id=r["id"], provider=r["provider"], item=r["item"], stage=r["stage"],
                            progress=r["progress"], total=r["total"], cursor_id=r["cursor_id"],
                            duration=r["duration"], status=r["status"])
-                for r in q("SELECT * FROM ingest_checkpoints ORDER BY id")]
+                for r in source_store.checkpoints()]
 
     @strawberry.field
     def sync_events(self) -> list[SyncEvent]:
         return [SyncEvent(id=r["id"], provider=r["provider"], event=r["event"], detail=r["detail"], at=r["at_label"])
-                for r in q("SELECT * FROM sync_events ORDER BY id DESC LIMIT 12")]
+                for r in source_store.sync_events()]
 
     @strawberry.field
     def audit_log(self, limit: int = 40, query: str = "",
@@ -883,12 +831,10 @@ class Query:
         dates bounding `occurred_at` inclusively. The access log is deeper than
         any window the console can hold, so the filter has to reach the whole
         table rather than narrowing the page already fetched."""
-        where, args = _audit_where(query, date_from, date_to)
-        project_id = access.require_current_access().project_id
+        floor, ceil = _iso_date_arg(date_from), _iso_date_arg(date_to)
         return [AuditEvent(id=r["id"], actor=r["actor"], verb=r["verb"], target=r["target"],
                            at=r["occurred_at"].isoformat(), detail=_details(r))
-                for r in q(f"SELECT * FROM events WHERE project_id = %s AND {where} ORDER BY occurred_at DESC, id DESC LIMIT %s",
-                           (project_id,) + args + (limit,))]
+                for r in audit_store.events(query, floor, ceil, limit)]
 
     @strawberry.field
     def audit_log_total(self, query: str = "",
@@ -896,32 +842,12 @@ class Query:
         """Rows matching the same filter, so the console can say what its window
         is a window onto instead of comparing a filtered view against the
         window's own size. No filter = the whole log."""
-        where, args = _audit_where(query, date_from, date_to)
-        return int(q1(f"SELECT count(*) AS n FROM events WHERE project_id = %s AND {where}",
-                      (access.require_current_access().project_id,) + args)["n"])
+        return audit_store.event_count(query, _iso_date_arg(date_from), _iso_date_arg(date_to))
 
     @strawberry.field
     def activity_feed(self, limit: int = 12) -> list[ActivityItem]:
         """Live feed for the overview: runs, edits, deploys — not chatter."""
-        rows = q("""
-          SELECT id, actor, verb, target,
-                 to_char(occurred_at, 'HH24:MI') AS at,
-                 -- Age in seconds. The console's live feed counts up from this
-                 -- between polls ("42s ago" → "1m ago"), which a wall-clock
-                 -- "HH:MI" cannot support: it has no date, so an event from
-                 -- yesterday renders as if it just happened.
-                 greatest(0, extract(epoch FROM now() - occurred_at))::int AS seconds_ago,
-                 CASE
-                   WHEN verb LIKE '%%run%%' OR verb LIKE 'started%%' THEN 'run'
-                   WHEN verb LIKE 'deploy%%' OR verb LIKE 'rolled%%' THEN 'deploy'
-                   WHEN verb LIKE '%%fact%%' OR verb LIKE '%%verif%%' THEN 'fact'
-                   WHEN verb LIKE '%%task%%' OR verb IN ('completed','reopened') THEN 'task'
-                   WHEN verb LIKE '%%sync%%' OR verb LIKE '%%connect%%' THEN 'sync'
-                   WHEN verb LIKE '%%link%%' OR verb LIKE 'derived%%' THEN 'link'
-                   ELSE 'edit'
-                 END AS kind
-          FROM events WHERE project_id = %s ORDER BY occurred_at DESC, id DESC LIMIT %s
-        """, (access.require_current_access().project_id, limit))
+        rows = audit_store.activity(limit)
         return [ActivityItem(id=r["id"], kind=r["kind"], actor=r["actor"],
                              text=r["verb"], target=r["target"], at=r["at"],
                              seconds_ago=int(r["seconds_ago"])) for r in rows]
@@ -931,15 +857,11 @@ class Query:
         return [Workflow(id=r["id"], name=r["name"], description=r["description"], color=r["color"],
                          pinned=r["pinned"], status=r["status"], nodes=jload(r["nodes"]),
                          trigger=jload(r.get("trigger")) or {})
-                for r in q("SELECT * FROM workflows ORDER BY id")]
+                for r in workflow_store.list_workflows()]
 
     @strawberry.field
     def workflow_runs(self, workflow_id: int | None = None) -> list[WorkflowRun]:
-        where = "WHERE r.workflow_id = %s" if workflow_id else ""
-        rows = q(f"""SELECT r.*, w.name AS wf_name FROM workflow_runs r
-                     JOIN workflows w ON w.id = r.workflow_id {where}
-                     ORDER BY r.number DESC LIMIT 10""",
-                 (workflow_id,) if workflow_id else ())
+        rows = workflow_store.list_runs(workflow_id)
         return [WorkflowRun(id=r["id"], workflow_id=r["workflow_id"], workflow_name=r["wf_name"],
                             number=r["number"], status=r["status"],
                             # ISO, not started_label: the console formats and
@@ -953,11 +875,9 @@ class Query:
     def workflow_run(self, id: int) -> WorkflowRun | None:
         """One run by id. `workflowRuns` only returns the ten newest of a flow,
         which is not a way to follow a specific run someone just started."""
-        rows = q("""SELECT r.*, w.name AS wf_name FROM workflow_runs r
-                    JOIN workflows w ON w.id = r.workflow_id WHERE r.id = %s""", (id,))
-        if not rows:
+        r = workflow_store.get_run(id)
+        if not r:
             return None
-        r = rows[0]
         return WorkflowRun(id=r["id"], workflow_id=r["workflow_id"], workflow_name=r["wf_name"],
                            number=r["number"], status=r["status"],
                            started=r["started_at"].isoformat() if r.get("started_at") else "",
@@ -968,14 +888,12 @@ class Query:
     @strawberry.field
     def knowledge_chat_destinations(self) -> list[KnowledgeChatDestination]:
         project_id = access.require_current_access().project_id
-        project = q1("SELECT slug FROM projects WHERE id = %s", (project_id,)) or {"slug": ""}
+        project_slug, rows = knowledge_chat_repository.list_destinations(project_id)
         return [KnowledgeChatDestination(
                     id=r["id"], name=r["name"], slug=r["slug"], title=r["title"],
                     welcome=r["welcome"], status=r["status"],
-                    url=f"/knowledge-chat/{project['slug']}/{r['slug']}")
-                for r in q("""SELECT id, name, slug, title, welcome, status
-                             FROM knowledge_chat_destinations
-                             WHERE project_id = %s ORDER BY id""", (project_id,))]
+                    url=f"/knowledge-chat/{project_slug}/{r['slug']}")
+                for r in rows]
 
     @strawberry.field
     def notifications(self) -> list[Notification]:
@@ -983,16 +901,14 @@ class Query:
         for `actor_name()`, so reading by anything else leaves the badge stuck."""
         return [Notification(id=r["id"], kind=r["kind"], text=r["text"], detail=r["detail"],
                              at=r["at_label"], read=r["read"])
-                for r in q("SELECT * FROM notifications WHERE user_name = %s ORDER BY id",
-                           (actor_name(),))]
+                for r in settings_store.notifications(actor_name())]
 
     @strawberry.field
     def workspace(self) -> Workspace:
         """The `workspace` settings row, which first-run setup writes and
         Settings → Members edits. Fields nobody has filled in come back "" —
         an unnamed workspace is a real state, not a missing fetch."""
-        row = q1("SELECT value FROM settings WHERE key = 'workspace'")
-        v = jload(row["value"]) if row else {}
+        v = jload(settings_store.value("workspace")) or {}
         if not isinstance(v, dict):
             v = {}
         return Workspace(name=str(v.get("name") or ""), slug=str(v.get("slug") or ""),
@@ -1006,13 +922,12 @@ class Query:
         GitHub team is whatever an admin saved, and counts as connected only
         when the server also holds a credential to read it with; SCIM has no
         endpoint, so it reports unavailable rather than "Enterprise"."""
-        row = q1("SELECT value FROM settings WHERE key = 'provisioning'")
-        v = jload(row["value"]) if row else {}
+        v = jload(settings_store.value("provisioning")) or {}
         if not isinstance(v, dict):
             v = {}
         team = str(v.get("github_team") or "")
         has_token = bool(github.configured_token())
-        synced = int(q1("SELECT count(*) AS n FROM users WHERE provider = 'github'")["n"])
+        synced = settings_store.github_member_count()
         providers = [name for name, key in (("github", "github_client_id"),
                                             ("google", "google_client_id"))
                      if config.get("auth", key)]
@@ -1028,7 +943,7 @@ class Query:
     def settings(self) -> list[Setting]:
         return [Setting(key=r["key"], value=_mask_setting(
                     r["key"], _effective_model_setting(r["key"], jload(r["value"]))))
-                for r in q("SELECT * FROM settings ORDER BY key")]
+                for r in settings_store.all_settings()]
 
     @strawberry.field
     def approved_answers(self) -> list[ApprovedAnswer]:
@@ -1036,9 +951,7 @@ class Query:
                                owner=r["owner_name"], channels=r["channels"], sources=jload(r["sources"]),
                                served=r["served"], spark=r["spark"],
                                updated=r["updated"].isoformat())
-                for r in q("""SELECT * FROM approved_answers WHERE project_id = %s
-                              ORDER BY (status = 'approved') DESC, served DESC""",
-                           (access.require_current_access().project_id,))]
+                for r in knowledge_store.approved_answers()]
 
     @strawberry.field
     def answer_coverage_gaps(self, limit: int = 8) -> list[str]:
@@ -1048,33 +961,20 @@ class Query:
         to the assistant. A question already served by an approved answer is
         not a gap, so anything matching one verbatim is filtered out. Returns
         [] on a workspace nobody has asked anything in — never a sample list."""
-        rows = q("""
-          WITH asked AS (
-            SELECT lower(trim(detail)) AS question, max(at) AS last_at FROM usage_log
-             WHERE kind = 'search' AND length(trim(detail)) >= 8 GROUP BY 1
-            UNION ALL
-            SELECT lower(trim(content)), max(created_at) FROM chat_messages
-             WHERE role = 'user' AND length(trim(content)) BETWEEN 8 AND 200 GROUP BY 1)
-          SELECT a.question, max(a.last_at) AS last_at FROM asked a
-           WHERE NOT EXISTS (SELECT 1 FROM approved_answers ans
-                              WHERE ans.status = 'approved' AND lower(ans.question) = a.question)
-           GROUP BY a.question ORDER BY max(a.last_at) DESC LIMIT %s""", (limit,))
-        return [r["question"] for r in rows]
+        return knowledge_store.answer_coverage_gaps(limit)
 
     @strawberry.field
     def answer_harvest_sources(self) -> JSON:
         """Real provider-backed inputs available to answer harvesting."""
         from mari_components.connectors import CONNECTOR_CATALOG
 
-        counts = {str(row["source"]): int(row["n"]) for row in q(
-            "SELECT source, count(*) AS n FROM documents GROUP BY source"
-        ) if row.get("source")}
+        source_counts, chat = knowledge_store.harvest_source_counts()
+        counts = {str(row["source"]): int(row["n"]) for row in source_counts if row.get("source")}
         rows = [
             {"key": key, "label": definition.name, "count": counts[key]}
             for key, definition in CONNECTOR_CATALOG.items()
             if counts.get(key, 0) > 0
         ]
-        chat = int(q1("SELECT count(*) AS n FROM chat_messages WHERE role = 'user'")["n"])
         if chat:
             rows.append({"key": "chat", "label": "Chat history", "count": chat})
         return rows
@@ -1083,10 +983,7 @@ class Query:
     def index_stats(self) -> JSON:
         """Corpus size as the embedding config page states it: documents, the
         chunks they were split into, and how many of those carry a vector."""
-        s = q1("""SELECT (SELECT count(*) FROM documents) AS docs,
-                         count(*) AS chunks,
-                         count(*) FILTER (WHERE embedding IS NOT NULL) AS embedded
-                  FROM chunks""") or {"docs": 0, "chunks": 0, "embedded": 0}
+        s = knowledge_store.index_stats() or {"docs": 0, "chunks": 0, "embedded": 0}
         return {"docs": int(s["docs"]), "chunks": int(s["chunks"]), "embedded": int(s["embedded"])}
 
     @strawberry.field
@@ -1111,10 +1008,7 @@ class Query:
 
     @strawberry.field
     def decisions(self) -> list[Decision]:
-        project_id = access.require_current_access().project_id
-        rows = q("""SELECT d.*, s.statement AS sup_stmt FROM decisions d
-                    LEFT JOIN decisions s ON s.project_id = d.project_id AND s.id = d.superseded_by
-                    WHERE d.project_id = %s ORDER BY d.id DESC""", (project_id,))
+        rows = knowledge_store.decisions_with_supersession()
         return [Decision(id=r["id"], statement=r["statement"], context=r["context"], status=r["status"],
                          source_label=r["source_label"], owners=r["owners"],
                          decided_on=r["decided_on"].isoformat() if r["decided_on"] else "",
@@ -1130,28 +1024,7 @@ class Query:
         page writes ("over the last 30 days, from …") describes every tile
         above it and not just the two that happen to have a timestamp."""
         floor, ceil = _iso_date_arg(since), _iso_date_arg(until)
-        # One predicate, applied to each table's own timestamp column.
-        def window(col: str) -> tuple[str, tuple]:
-            clauses, args = [], []
-            if floor:
-                clauses.append(f"{col} >= %s")
-                args.append(floor)
-            if ceil:
-                clauses.append(f"{col} < (%s::date + 1)")
-                args.append(ceil)
-            return (" AND ".join(clauses) if clauses else "true"), tuple(args)
-
-        w_usage, a_usage = window("at")
-        counts = q1(f"""
-          SELECT count(*) FILTER (WHERE kind = 'search') AS searches,
-                 count(*) FILTER (WHERE kind = 'chat_answer') AS served,
-                 min(at) AS since
-          FROM usage_log WHERE {w_usage}""", a_usage) or {"searches": 0, "served": 0, "since": None}
-        w_found, a_found = window("created_at")
-        drift = q1(f"SELECT count(*) AS n FROM findings WHERE kind IN ('fact','freshness') AND {w_found}",
-                   a_found)["n"]
-        w_chg, a_chg = window("created_at")
-        fixed = q1(f"SELECT count(*) AS n FROM changes WHERE status = 'accepted' AND {w_chg}", a_chg)["n"]
+        counts, drift, fixed = analytics_store.insight_stats(floor, ceil)
         # The window's own floor when the caller named one; otherwise the first
         # thing this workspace ever did, which is what "since" meant before
         # there was a picker. "" when it has done nothing at all.
@@ -1163,31 +1036,13 @@ class Query:
     def freshness(self) -> list[FreshnessRow]:
         """Rollup over connected sources only (docs with a source_id) — one row
         per live sources row; seed/sample docs never masquerade as a provider."""
-        project_id = access.require_current_access().project_id
-        rows = q("""
-          WITH bucketed AS (
-            SELECT d.source_id,
-                   CASE WHEN d.updated_src IS NULL OR d.updated_src < current_date - 30
-                          OR EXISTS (SELECT 1 FROM tags t WHERE t.document_id = d.id AND t.tag = 'stale')
-                        THEN 'stale'
-                        WHEN d.updated_src < current_date - 7 THEN 'aging'
-                        ELSE 'fresh' END AS bucket
-            FROM documents d WHERE d.project_id = %s AND d.source_id IS NOT NULL)
-          SELECT s.display_name AS source, s.provider AS provider,
-                 count(*) FILTER (WHERE b.bucket = 'fresh') AS fresh,
-                 count(*) FILTER (WHERE b.bucket = 'aging') AS aging,
-                 count(*) FILTER (WHERE b.bucket = 'stale') AS stale
-          FROM sources s LEFT JOIN bucketed b ON b.source_id = s.id
-          WHERE s.project_id = %s
-          GROUP BY s.id, s.display_name, s.provider ORDER BY count(b.source_id) DESC, s.id""",
-                 (project_id, project_id))
+        rows = source_store.freshness()
         return [FreshnessRow(source=r["source"], provider=r["provider"], fresh=r["fresh"],
                              aging=r["aging"], stale=r["stale"]) for r in rows]
 
     @strawberry.field
     def readability(self) -> list[ReadabilityRow]:
-        rows = q("""SELECT id, title, source, readability FROM documents
-                    WHERE project_id = %s ORDER BY id""", (access.require_current_access().project_id,))
+        rows = knowledge_store.readability()
         out = []
         for r in rows:
             grade, note = (r["readability"].split("|", 1) + [""])[:2] if r["readability"] else ("", "")
@@ -1202,38 +1057,30 @@ class Query:
         return [GlossaryCandidate(id=r["id"], term=r["term"], variants=r["variants"],
                                   definition=r["definition"], evidence=r["evidence"] or "",
                                   evidence_doc_id=r["evidence_doc_id"] or 0)
-                for r in q("SELECT * FROM glossary WHERE project_id = %s AND candidate ORDER BY id",
-                           (access.require_current_access().project_id,))]
+                for r in knowledge_store.glossary_candidates()]
 
     @strawberry.field
     def audit_runs(self) -> list[AuditRun]:
         return [AuditRun(id=r["id"], provider=r["provider"], repo=r["repo"], findings=r["findings"],
                          fixed=r["fixed"], ran_at=r["ran_at"].isoformat())
-                for r in q("SELECT * FROM audit_runs ORDER BY id DESC LIMIT 10")]
+                for r in audit_store.repository_runs()]
 
     @strawberry.field
     def audit_findings(self, run_id: int | None = None) -> list[AuditFinding]:
-        where = "WHERE run_id = %s" if run_id else "WHERE run_id = (SELECT max(id) FROM audit_runs)"
         return [AuditFinding(id=r["id"], run_id=r["run_id"], kind=r["kind"], title=r["title"],
                              detail=r["detail"], fix_action=r["fix_action"],
                              fix_payload=jload(r["fix_payload"]), status=r["status"])
-                for r in q(f"SELECT * FROM audit_findings {where} ORDER BY kind, id",
-                           (run_id,) if run_id else ())]
+                for r in audit_store.repository_findings(run_id)]
 
     @strawberry.field
     def chat_sessions(self, info: strawberry.Info) -> list[ChatSession]:
-        ctx = access.require_current_access()
+        access.require_current_access()
         user = info.context.get("user") or {}
         user_id = int(user.get("id") or 0)
         if not user_id:
             return []
         out = []
-        for s in q("""SELECT * FROM chat_sessions
-                       WHERE project_id = %s AND owner_user_id = %s
-                       ORDER BY id DESC LIMIT 20""", (ctx.project_id, user_id)):
-            msgs = q("""SELECT * FROM chat_messages
-                        WHERE project_id = %s AND session_id = %s ORDER BY id""",
-                     (ctx.project_id, s["id"]))
+        for s, msgs in chat_store.sessions_for_owner(user_id):
             out.append(ChatSession(id=s["id"], title=s["title"],
                                    messages=[ChatMessage(id=m["id"], role=m["role"], content=m["content"],
                                                          sources=jload(m["sources"])) for m in msgs]))

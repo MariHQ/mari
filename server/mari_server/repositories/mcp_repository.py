@@ -10,6 +10,11 @@ from mari_server.services.mcp import McpPorts
 from mari_server.domain.mcp import McpServerSpec
 
 
+def list_servers(project_id: int) -> list[dict]:
+    from mari_server.repositories.database import q
+    return q("SELECT * FROM mcp_servers WHERE project_id = %s ORDER BY id", (project_id,))
+
+
 def _name_exists(project_id: int, name: str) -> bool:
     return bool(q1(
         "SELECT id FROM mcp_servers WHERE project_id = %s AND name = %s", (project_id, name),

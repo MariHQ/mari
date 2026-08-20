@@ -33,6 +33,39 @@ _PENDING = threading.BoundedSemaphore(_PENDING_LIMIT)
 _RECONCILE_LOCK = threading.Lock()
 _LAST_RECONCILE: dict[int, float] = {}
 
+
+def list_trajectories(limit: int, offset: int, category: str | None = None) -> tuple[list[dict], list[dict]]:
+    project_id = access.require_current_access().project_id
+    args: list = [project_id]
+    where = "project_id = %s"
+    if category:
+        where += " AND category = %s"
+        args.append(category)
+    args.extend((limit, offset))
+    rows = q(f"SELECT * FROM trajectories WHERE {where} ORDER BY started_at DESC, id DESC LIMIT %s OFFSET %s",
+             tuple(args))
+    if not rows:
+        return [], []
+    steps = q("""SELECT trajectory_id, ordinal, tool, action_family, args, summary, ok
+                   FROM trajectory_steps WHERE project_id = %s AND trajectory_id = ANY(%s)
+                   ORDER BY trajectory_id, ordinal""", (project_id, [row["id"] for row in rows]))
+    return rows, steps
+
+
+def trajectory_count(category: str | None = None) -> int:
+    project_id = access.require_current_access().project_id
+    if category:
+        return int(q1("SELECT count(*) AS n FROM trajectories WHERE project_id = %s AND category = %s",
+                      (project_id, category))["n"])
+    return int(q1("SELECT count(*) AS n FROM trajectories WHERE project_id = %s", (project_id,))["n"])
+
+
+def trajectory_categories() -> list[str]:
+    project_id = access.require_current_access().project_id
+    return [row["category"] for row in q(
+        """SELECT category FROM trajectories WHERE project_id = %s
+           GROUP BY category ORDER BY count(*) DESC, category""", (project_id,))]
+
 FAMILY = {
     "search": "discover", "read_document": "inspect", "list_sources": "inspect",
     "list_flows": "inspect", "inspect_flow": "inspect",

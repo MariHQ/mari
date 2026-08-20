@@ -98,6 +98,41 @@ def create_review_task(title: str, assignee: str, kind: str, kind_label: str) ->
         )
 
 
+def list_workflows() -> list[dict]:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn:
+        return conn.execute(
+            "SELECT * FROM workflows WHERE project_id = %s ORDER BY id", (project_id,),
+        ).fetchall()
+
+
+def list_runs(workflow_id: int | None = None, limit: int = 10) -> list[dict]:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn:
+        if workflow_id is not None:
+            return conn.execute(
+                """SELECT r.*, w.name AS wf_name FROM workflow_runs r
+                   JOIN workflows w ON w.project_id = r.project_id AND w.id = r.workflow_id
+                  WHERE r.project_id = %s AND r.workflow_id = %s
+                  ORDER BY r.number DESC LIMIT %s""", (project_id, workflow_id, limit),
+            ).fetchall()
+        return conn.execute(
+            """SELECT r.*, w.name AS wf_name FROM workflow_runs r
+               JOIN workflows w ON w.project_id = r.project_id AND w.id = r.workflow_id
+              WHERE r.project_id = %s ORDER BY r.number DESC LIMIT %s""", (project_id, limit),
+        ).fetchall()
+
+
+def get_run(run_id: int) -> dict | None:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn:
+        return conn.execute(
+            """SELECT r.*, w.name AS wf_name FROM workflow_runs r
+               JOIN workflows w ON w.project_id = r.project_id AND w.id = r.workflow_id
+              WHERE r.project_id = %s AND r.id = %s""", (project_id, run_id),
+        ).fetchone()
+
+
 def create_notification(recipient: str, text: str, detail: str) -> None:
     project_id = access.require_current_access().project_id
     with db.connect() as conn, conn.transaction():

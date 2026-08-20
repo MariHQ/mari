@@ -6,6 +6,18 @@ from mari_server.repositories.database import audit, transaction
 from mari_server.services.knowledge_chat import KnowledgeChatPorts
 
 
+def list_destinations(project_id: int) -> tuple[str, list[dict]]:
+    def load(conn):
+        project = conn.execute("SELECT slug FROM projects WHERE id = %s", (project_id,)).fetchone()
+        rows = conn.execute(
+            """SELECT id, name, slug, title, welcome, status
+                 FROM knowledge_chat_destinations WHERE project_id = %s ORDER BY id""",
+            (project_id,),
+        ).fetchall()
+        return str(project["slug"]) if project else "", rows
+    return transaction(load)
+
+
 def _create(project_id: int, name: str, slug: str, title: str, welcome: str) -> int:
     def create(conn):
         if conn.execute(

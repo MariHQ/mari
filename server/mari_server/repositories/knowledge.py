@@ -378,3 +378,66 @@ def api_keys() -> list[dict]:
         return conn.execute(
             "SELECT * FROM api_keys WHERE project_id = %s ORDER BY id", (project_id,),
         ).fetchall()
+
+
+def approved_answers() -> list[dict]:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn:
+        return conn.execute("""SELECT * FROM approved_answers WHERE project_id = %s
+          ORDER BY (status = 'approved') DESC, served DESC""", (project_id,)).fetchall()
+
+
+def answer_coverage_gaps(limit: int) -> list[str]:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn:
+        rows = conn.execute("""WITH asked AS (
+          SELECT lower(trim(detail)) AS question, max(at) AS last_at FROM usage_log
+           WHERE project_id = %s AND kind = 'search' AND length(trim(detail)) >= 8 GROUP BY 1
+          UNION ALL SELECT lower(trim(content)), max(created_at) FROM chat_messages
+           WHERE project_id = %s AND role = 'user' AND length(trim(content)) BETWEEN 8 AND 200 GROUP BY 1)
+          SELECT a.question, max(a.last_at) AS last_at FROM asked a
+          WHERE NOT EXISTS (SELECT 1 FROM approved_answers ans WHERE ans.project_id = %s
+            AND ans.status = 'approved' AND lower(ans.question) = a.question)
+          GROUP BY a.question ORDER BY max(a.last_at) DESC LIMIT %s""",
+          (project_id, project_id, project_id, limit)).fetchall()
+    return [str(row["question"]) for row in rows]
+
+
+def harvest_source_counts() -> tuple[list[dict], int]:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn:
+        sources = conn.execute("SELECT source, count(*) AS n FROM documents WHERE project_id = %s GROUP BY source",
+                               (project_id,)).fetchall()
+        chat = conn.execute("SELECT count(*) AS n FROM chat_messages WHERE project_id = %s AND role = 'user'",
+                            (project_id,)).fetchone()
+    return sources, int(chat["n"])
+
+
+def index_stats() -> dict:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn:
+        return conn.execute("""SELECT (SELECT count(*) FROM documents WHERE project_id = %s) AS docs,
+          count(*) AS chunks, count(*) FILTER (WHERE embedding IS NOT NULL) AS embedded
+          FROM chunks WHERE project_id = %s""", (project_id, project_id)).fetchone()
+
+
+def decisions_with_supersession() -> list[dict]:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn:
+        return conn.execute("""SELECT d.*, s.statement AS sup_stmt FROM decisions d
+          LEFT JOIN decisions s ON s.project_id = d.project_id AND s.id = d.superseded_by
+          WHERE d.project_id = %s ORDER BY d.id DESC""", (project_id,)).fetchall()
+
+
+def readability() -> list[dict]:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn:
+        return conn.execute("SELECT id, title, source, readability FROM documents WHERE project_id = %s ORDER BY id",
+                            (project_id,)).fetchall()
+
+
+def glossary_candidates() -> list[dict]:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn:
+        return conn.execute("SELECT * FROM glossary WHERE project_id = %s AND candidate ORDER BY id",
+                            (project_id,)).fetchall()
