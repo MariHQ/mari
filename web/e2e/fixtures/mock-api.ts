@@ -149,6 +149,7 @@ export async function installMockApi(page: Page, options: {
   const calls: Call[] = [];
   const restCalls: { path: string; body: any }[] = [];
   let signedIn = options.signedIn ?? true;
+  let needsSetup = Boolean(options.needsSetup);
   let failure: { pattern: RegExp; message: string } | null = null;
   let authFailureStatus: number | null = null;
 
@@ -163,12 +164,19 @@ export async function installMockApi(page: Page, options: {
     const activeProject = projects.find((project) => String(project.id) === requested || project.slug === requested)
       ?? (projects.length === 1 ? projects[0] : null);
     return route.fulfill({ json: {
-      user: signedIn ? USER : null, needsSetup: Boolean(options.needsSetup), bypassEnabled: false,
+      user: signedIn ? USER : null, needsSetup, bypassEnabled: false,
       oauth: { github: true, google: true }, projects, activeProject,
       capabilities: activeProject?.capabilities ?? [],
     } });
   });
   await page.route("**/auth/logout", (route) => { signedIn = false; return route.fulfill({ json: { ok: true } }); });
+  await page.route("**/auth/setup", async (route) => {
+    const body = route.request().postDataJSON();
+    restCalls.push({ path: "/auth/setup", body });
+    signedIn = true;
+    needsSetup = false;
+    return route.fulfill({ json: { user: USER } });
+  });
   await page.route("**/auth/preferences", (route) => route.fulfill({ json: {
     name: USER.name,
     email: USER.email,

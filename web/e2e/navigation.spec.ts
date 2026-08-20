@@ -149,8 +149,24 @@ test("the login route is a labelled, overflow-safe browser surface", async ({ pa
 
 test("first-run setup is reachable only while the workspace needs setup", async ({ page }) => {
   await page.unrouteAll({ behavior: "wait" });
-  await installMockApi(page, { signedIn: false, needsSetup: true });
+  const api = await installMockApi(page, { signedIn: false, needsSetup: true });
+  api.setData("sourcePulse", []);
   await page.goto("/setup");
   await expect(page.getByRole("heading", { name: "Welcome to Mari" })).toBeVisible();
+  await expect(page.getByText(/server logs/i)).toHaveCount(0);
+  await expect(page.getByLabel("Admin token")).toHaveCount(0);
+  await page.getByLabel("Your name").fill("Dana Rodriguez");
+  await page.getByLabel("Email").fill("dana@example.test");
+  await page.getByLabel("Password", { exact: true }).fill("correct horse battery staple");
+  await page.getByLabel("Confirm password").fill("correct horse battery staple");
+  await page.getByLabel("Workspace name").fill("Acme Product");
+  await page.getByRole("button", { name: "Finish setup" }).click();
+  await expect.poll(() => api.restCalls.find((call) => call.path === "/auth/setup")?.body).toEqual({
+    name: "Dana Rodriguez",
+    email: "dana@example.test",
+    password: "correct horse battery staple",
+    workspace: "Acme Product",
+  });
+  await expect(page).toHaveURL(/\/welcome$/);
   await expectUiContract(page);
 });

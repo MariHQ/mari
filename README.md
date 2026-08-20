@@ -114,15 +114,10 @@ cp .env.example .env          # every value optional — defaults just work
 docker compose up --build
 ```
 
-First run prints a one-time setup token:
-
-```sh
-docker compose logs api | grep -A3 "FIRST-TIME SETUP"
-```
-
-Open **http://localhost:8080**, redeem the token to create your admin account, and the onboarding wizard takes it from there — connect a source, pick a style guide, seed your glossary.
-
-The setup token is good for **24 hours**; if it expires, restart the API for a new one. The Setup page checks it (`POST /auth/setup/check`) before asking for a password, so a wrong token is rejected up front and a right one is only spent by the setup that completes.
+Open **http://localhost:8080**. On a fresh installation, the setup page creates
+the first owner and workspace directly; Postgres serializes the claim so only
+one first-owner request can succeed. The onboarding wizard then takes over —
+connect a source, pick a style guide, and seed your glossary.
 
 After that the workspace is **invite-only**: admins invite members from Settings → Members, and only an invited address can register.
 

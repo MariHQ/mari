@@ -932,9 +932,9 @@ check("login: renders the form",
 states(login, buildLogin({}, "credentials", false));
 
 console.log("setup");
-check("setup: an unclaimed install opens on the token step", buildSetup(true).step === "token");
+check("setup: an unclaimed install opens on the owner form", buildSetup(true).step === "admin");
 check("setup: a claimed install is done", buildSetup(false).step === "done");
-check("setup: renders the token step",
+check("setup: renders the owner form",
   render(setup, { data: buildSetup(true), loading: false, error: null }).length > 500);
 states(setup, buildSetup(false), { errorIgnored: true });
 

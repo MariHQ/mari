@@ -44,11 +44,6 @@ MAGIC_LINK_TTL_MIN = 15
 # link out of band while keeping forgotten invitations from living forever.
 INVITE_TTL_MIN = 7 * 24 * 60
 
-# How long the first-run admin setup token stays redeemable. `first_run_check`
-# re-mints it on every startup while setup is still pending, so an expired
-# token is fixed by restarting the server — which is also where it is printed.
-SETUP_TOKEN_TTL_MIN = 24 * 60
-
 # A bypass session is a demo convenience, not a workday. It gets its own short
 # lifetime regardless of auth.session_days.
 BYPASS_SESSION_HOURS = 12
@@ -240,36 +235,7 @@ def ensure_schema() -> None:
 
 
 def first_run_check() -> None:
-    """If nobody can log in yet, mint a setup token and print it to the logs."""
-    with _conn() as conn:
-        can_login = conn.execute(
-            "SELECT count(*) AS n FROM users WHERE password_hash <> '' OR github_id <> '' OR google_id <> ''"
-        ).fetchone()["n"]
-        done = conn.execute("SELECT 1 FROM settings WHERE key = 'setup_complete'").fetchone()
-        if can_login or done:
-            _warn_if_bypass_enabled()
-            return
-        # The desktop supervisor passes a fresh token directly to the bundled
-        # local web client. Server deployments keep the log-only token flow.
-        token = os.environ.get("MARI_DESKTOP_SETUP_TOKEN") or secrets.token_urlsafe(24)
-        conn.execute("""INSERT INTO settings (key, value) VALUES ('setup_token', %s)
-                        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value""",
-                     (json.dumps({"hash": hashlib.sha256(token.encode()).hexdigest(),
-                                  "minted_at": time.time()}),))
-    # Default the printed URL to the docker compose port: the quick start is
-    # the flow where someone actually reads this banner cold. A dev running
-    # uvicorn + vite (5173) can set auth.app_url, and already knows their port.
-    app_url = config.get("auth", "app_url", "http://localhost:8080").rstrip("/")
-    banner = "\n".join([
-        "", "=" * 68,
-        "  MARI — FIRST-TIME SETUP",
-        "  No admin account exists yet. Open the app and finish setup with",
-        "  this one-time admin token (it will not be shown again):",
-        "", f"      {token}", "",
-        f"  Setup URL: {app_url}/setup", "=" * 68, "",
-    ])
-    log.warning(banner)
-    print(banner, flush=True)
+    """First-owner setup is self-service in the browser, not a boot side effect."""
     _warn_if_bypass_enabled()
 
 
@@ -459,7 +425,6 @@ class Credentials(BaseModel):
 
 
 class SetupIn(BaseModel):
-    token: str
     name: str
     email: str
     password: str
@@ -570,48 +535,13 @@ def bypass(request: Request, response: Response):
     return {"user": _user_out(user)}
 
 
-def _read_setup_token(conn, *, for_update: bool = False) -> dict:
-    """The stored setup token, or a loud reason there isn't a usable one."""
-    row = conn.execute(
-        "SELECT value FROM settings WHERE key = 'setup_token'" + (" FOR UPDATE" if for_update else "")
-    ).fetchone()
-    if not row:
-        raise HTTPException(400, "Setup is not pending.")
-    stored = row["value"] if isinstance(row["value"], dict) else json.loads(row["value"])
-    minted = stored.get("minted_at")
-    # Tokens minted before this column existed have no timestamp; they are
-    # treated as still valid rather than locking an in-progress install out.
-    if minted is not None and time.time() - float(minted) > SETUP_TOKEN_TTL_MIN * 60:
-        raise HTTPException(403, "That setup token has expired — restart the server for a new one.")
-    return stored
-
-
-class SetupCheckIn(BaseModel):
-    token: str
-
-
-@router.post("/setup/check")
-def setup_check(body: SetupCheckIn, request: Request):
-    """Pre-flight for the Setup page: is this token the one? Compares the hash
-    and spends nothing — the row is only deleted by a completed POST /setup."""
-    _rate_limit("setup", _client_ip(request), 10, 300)
-    with _conn() as conn:
-        stored = _read_setup_token(conn)
-        if not secrets.compare_digest(hashlib.sha256(body.token.encode()).hexdigest(),
-                                      str(stored.get("hash") or "")):
-            raise HTTPException(403, "Invalid setup token — check the server logs.")
-    _rate_clear("setup", _client_ip(request))
-    return {"ok": True}
-
-
 @router.post("/setup")
 def setup(body: SetupIn, request: Request, response: Response):
     _rate_limit("setup", _client_ip(request), 10, 300)
     with _conn() as conn:
-        stored = _read_setup_token(conn, for_update=True)
-        if not secrets.compare_digest(hashlib.sha256(body.token.encode()).hexdigest(),
-                                      str(stored.get("hash") or "")):
-            raise HTTPException(403, "Invalid setup token — check the server logs.")
+        conn.execute("SELECT pg_advisory_xact_lock(hashtext('mari:first-owner-setup'))")
+        if conn.execute("SELECT 1 FROM settings WHERE key = 'setup_complete'").fetchone():
+            raise HTTPException(409, "This workspace has already been set up.")
         # Never overwrite an existing row's credentials — a name collision must
         # not become an account takeover (pick a different name/email instead).
         email = _normalize_email(body.email)
@@ -631,7 +561,6 @@ def setup(body: SetupIn, request: Request, response: Response):
                             WHERE id = (SELECT id FROM projects ORDER BY id LIMIT 1)
                               AND (SELECT count(*) FROM projects) = 1""", (body.workspace,))
         conn.execute("INSERT INTO settings (key, value) VALUES ('setup_complete', 'true') ON CONFLICT DO NOTHING")
-        conn.execute("DELETE FROM settings WHERE key = 'setup_token'")
         user = conn.execute("SELECT * FROM users WHERE lower(email) = %s", (email,)).fetchone()
         _join_single_project(conn, user["id"], "owner")
         conn.execute("INSERT INTO events (actor, verb, target) VALUES (%s, 'completed first-run setup', %s)",

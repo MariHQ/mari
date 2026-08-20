@@ -149,11 +149,38 @@ class PasswordAndMagicTests(unittest.TestCase):
         self.assertIn("used_at IS NULL", statements[0])
         self.assertIn("RETURNING user_id", statements[0])
 
-    def test_setup_redemption_locks_the_single_use_token_row(self):
-        stored = {"hash": "digest", "minted_at": None}
-        conn = FakeConn(lambda _sql, _args: Result({"value": stored}))
-        self.assertEqual(auth._read_setup_token(conn, for_update=True), stored)
-        self.assertIn("FOR UPDATE", conn.calls[0][0])
+    def test_first_run_check_does_not_mint_or_log_a_credential(self):
+        with patch.object(auth, "_warn_if_bypass_enabled") as warn, \
+             patch.object(auth, "_conn") as connect:
+            auth.first_run_check()
+        warn.assert_called_once_with()
+        connect.assert_not_called()
+
+    def test_self_service_setup_serializes_the_first_owner_claim(self):
+        owner = {**USER, "name": "Dana", "email": "dana@example.test", "role": "admin"}
+        def handler(sql, _args):
+            if sql.startswith("SELECT 1 FROM settings WHERE key = 'setup_complete'"):
+                return Result()
+            if sql.startswith("SELECT 1 FROM users WHERE lower(email)"):
+                return Result()
+            if sql.startswith("SELECT * FROM users WHERE lower(email)"):
+                return Result(owner)
+            return Result()
+        conn = FakeConn(handler)
+        body = auth.SetupIn(name="Dana", email="dana@example.test",
+                            password="correct horse battery staple", workspace="Acme")
+        with patch.object(auth, "_conn", return_value=conn), \
+             patch.object(auth, "_hash", return_value="password-hash"), \
+             patch.object(auth, "_join_single_project") as join, \
+             patch.object(auth, "_create_session"):
+            result = auth.setup(body, request(), Response())
+        self.assertEqual(result["user"]["email"], "dana@example.test")
+        statements = [sql for sql, _ in conn.calls]
+        lock_at = next(i for i, sql in enumerate(statements) if "pg_advisory_xact_lock" in sql)
+        check_at = next(i for i, sql in enumerate(statements) if "setup_complete" in sql and sql.startswith("SELECT"))
+        self.assertLess(lock_at, check_at)
+        self.assertFalse(any("setup_token" in sql for sql in statements))
+        join.assert_called_once_with(conn, owner["id"], "owner")
 
 
 class LegacyOauthTests(unittest.TestCase):
