@@ -1606,6 +1606,11 @@ class Query:
         return {"docs": int(s["docs"]), "chunks": int(s["chunks"]), "embedded": int(s["embedded"])}
 
     @strawberry.field
+    def model_catalog(self) -> JSON:
+        """Provider-reported model choices; never a hardcoded UI catalog."""
+        return llm.model_catalog()
+
+    @strawberry.field
     def bots_status(self) -> JSON:
         """Slack + GitHub bot wiring, as GET /bots/status reports it. Same
         function, so the console's Sources page and the REST surface can never

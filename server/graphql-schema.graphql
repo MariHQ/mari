@@ -526,6 +526,7 @@ type Query {
   answerCoverageGaps(limit: Int! = 8): [String!]!
   answerHarvestSources: JSON!
   indexStats: JSON!
+  modelCatalog: JSON!
   botsStatus: JSON!
   connectorCatalog: JSON!
   decisions: [Decision!]!

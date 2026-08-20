@@ -17,12 +17,14 @@ import type { PageData } from "./types";
 const QUERY = `{
   settings { key value }
   indexStats
+  modelCatalog
   sourcePulse { provider name }
 }`;
 
 type Res = {
   settings: { key: string; value: unknown }[];
   indexStats: { docs: number; chunks: number; embedded: number } | null;
+  modelCatalog?: { embedding?: string[]; generation?: string[]; errors?: Record<string, string> };
   sourcePulse: { provider: string; name: string }[];
 };
 
@@ -95,8 +97,8 @@ export function buildSettingsModels(res: Res | null): SettingsModelsData {
     embedding: qualified(embedding),
     llm: qualified(llm),
     dims: embedding.dims ?? 0,
-    embeddingOptions: Array.from(new Set(embedding.options ?? [])),
-    llmOptions: Array.from(new Set(llm.options ?? [])),
+    embeddingOptions: Array.from(new Set(res.modelCatalog?.embedding ?? [])),
+    llmOptions: Array.from(new Set(res.modelCatalog?.generation ?? [])),
     chunking: mapChunking(res),
     // Masked by the server (queries.py `_mask_setting`); "" means no key set,
     // which is what the field should read as.

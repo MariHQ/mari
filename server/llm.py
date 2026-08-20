@@ -73,6 +73,8 @@ _settings_lock = threading.Lock()
 _last_error = threading.local()
 _sentence_models: dict[str, t.Any] = {}
 _sentence_models_lock = threading.Lock()
+_catalog_cache: dict[str, t.Any] = {"at": 0.0, "value": None}
+_catalog_lock = threading.Lock()
 
 
 def last_error() -> str:
@@ -684,3 +686,75 @@ def gateway_health(timeout: float = 10.0) -> dict[str, t.Any]:
     return {"ok": True, "detail": "LLM gateway is reachable and authenticated",
             "models": len(models) if isinstance(models, list) else 0,
             "latency_ms": round((time.perf_counter() - started) * 1000)}
+
+
+def model_catalog(*, refresh: bool = False) -> dict[str, t.Any]:
+    """Models proven available by provider APIs plus the exact active choices.
+
+    Nothing is inferred from a name. Ollama's `/api/tags` finds installed
+    models and `/api/show` classifies their declared capabilities. An
+    OpenAI-compatible gateway's `/models` list is generation-only unless the
+    active embedding selection explicitly names one of its models, because the
+    standard model object does not advertise embedding capability.
+    """
+    now = time.monotonic()
+    with _catalog_lock:
+        cached = _catalog_cache.get("value")
+        if not refresh and cached is not None and now - float(_catalog_cache["at"]) < 30.0:
+            return dict(cached)
+
+    embedding = embedding_model()
+    generation = generation_model()
+    embedding_options: set[str] = set()
+    generation_options: set[str] = set()
+    errors: dict[str, str] = {}
+
+    if all(embedding):
+        embedding_options.add(f"{embedding[0]}:{embedding[1]}")
+    if all(generation):
+        generation_options.add(f"{generation[0]}:{generation[1]}")
+
+    tags = _post(f"{ollama_host()}/api/tags", None, timeout=2.0, method="GET")
+    if tags is None:
+        errors["ollama"] = last_error() or "Ollama model discovery failed"
+    else:
+        for item in (tags.get("models") or [])[:50]:
+            name = str(item.get("name") or item.get("model") or "").strip() \
+                if isinstance(item, dict) else ""
+            if not name:
+                continue
+            shown = _post(f"{ollama_host()}/api/show", {"model": name}, timeout=2.0)
+            if shown is None:
+                errors["ollama"] = last_error() or "Ollama capability discovery failed"
+                continue
+            capabilities = set(shown.get("capabilities") or [])
+            if "embedding" in capabilities:
+                embedding_options.add(f"ollama:{name}")
+            if capabilities.intersection({"completion", "tools", "vision"}):
+                generation_options.add(f"ollama:{name}")
+
+    gateway = gateway_config()
+    if gateway.get("base_url"):
+        if config_error := _gateway_config_error(gateway):
+            errors["gateway"] = config_error
+        else:
+            listed = _post(f"{gateway['base_url']}/models", None,
+                           _gateway_headers(gateway, "model-catalog"), timeout=3.0,
+                           provider_name="gateway", max_retries=gateway["max_retries"],
+                           method="GET")
+            if listed is None:
+                errors["gateway"] = last_error() or "LLM gateway model discovery failed"
+            else:
+                for item in listed.get("data") or []:
+                    model_id = str(item.get("id") or "").strip() if isinstance(item, dict) else ""
+                    if model_id:
+                        generation_options.add(f"gateway:{model_id}")
+
+    value = {
+        "embedding": sorted(embedding_options),
+        "generation": sorted(generation_options),
+        "errors": errors,
+    }
+    with _catalog_lock:
+        _catalog_cache.update({"at": now, "value": value})
+    return dict(value)

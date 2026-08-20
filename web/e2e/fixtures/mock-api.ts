@@ -102,6 +102,11 @@ function initialData() {
       { key: "branding", value: { name: "Acme", primary: "#b04e2c" } },
     ],
     indexStats: { docs: 3, chunks: 4, embedded: 4 },
+    modelCatalog: {
+      embedding: ["ollama:nomic-embed-text", "ollama:mxbai-embed-large", "sentence-transformers:sentence-transformers/all-mpnet-base-v2"],
+      generation: ["ollama:gemma3:4b", "ollama:llama3.2", "gateway:deepseek-v4-flash"],
+      errors: {},
+    },
     connectorCatalog: [
       { key: "github", name: "GitHub", blurb: "Repositories", connected: true, fields: [{ key: "token", label: "Personal access token", secret: true, required: true }, { key: "repo", label: "Repository", required: true }] },
       { key: "slack", name: "Slack", blurb: "Channel history", connected: false, fields: [{ key: "bot_token", label: "Bot token", secret: true, required: true }, { key: "channels", label: "Channels", required: false }] },

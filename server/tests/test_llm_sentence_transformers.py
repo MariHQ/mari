@@ -21,6 +21,7 @@ class _Model:
 class SentenceTransformerEmbeddingTests(unittest.TestCase):
     def tearDown(self) -> None:
         llm._sentence_models.clear()
+        llm._catalog_cache.update({"at": 0.0, "value": None})
 
     def test_local_sentence_transformer_returns_normalized_native_768_vector(self):
         model = _Model(np.full(llm.EMBED_DIMS, 0.125, dtype=np.float32))
@@ -73,6 +74,41 @@ class SentenceTransformerEmbeddingTests(unittest.TestCase):
             "default": "ollama:nomic-embed-text",
             "options": ["ollama:nomic-embed-text"],
         }), ("", ""))
+
+    def test_catalog_uses_provider_capabilities_and_gateway_models(self):
+        def post(url, payload=None, *args, **kwargs):
+            if url.endswith("/api/tags"):
+                return {"models": [{"name": "embedder"}, {"name": "chat"}, {"name": "opaque"}]}
+            if url.endswith("/api/show"):
+                return {
+                    "embedder": {"capabilities": ["embedding"]},
+                    "chat": {"capabilities": ["completion", "tools"]},
+                    "opaque": {"capabilities": []},
+                }[payload["model"]]
+            if url.endswith("/models"):
+                return {"data": [{"id": "deepseek-v4-flash"}]}
+            self.fail(url)
+
+        gateway = {"base_url": "https://api.deepseek.com", "token": "secret",
+                   "headers": {}, "metadata": {}, "model_header": "", "max_retries": 0,
+                   "compatibility": "deepseek"}
+        with patch.object(llm, "embedding_model", return_value=(
+                "sentence-transformers", "sentence-transformers/all-mpnet-base-v2")), \
+             patch.object(llm, "generation_model", return_value=(
+                 "gateway", "deepseek-v4-flash")), \
+             patch.object(llm, "gateway_config", return_value=gateway), \
+             patch.object(llm, "_post", side_effect=post):
+            catalog = llm.model_catalog(refresh=True)
+
+        self.assertEqual(catalog["embedding"], [
+            "ollama:embedder",
+            "sentence-transformers:sentence-transformers/all-mpnet-base-v2",
+        ])
+        self.assertEqual(catalog["generation"], [
+            "gateway:deepseek-v4-flash",
+            "ollama:chat",
+        ])
+        self.assertNotIn("opaque", str(catalog))
 
 
 if __name__ == "__main__":

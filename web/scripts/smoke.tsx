@@ -833,6 +833,11 @@ const MODELS_RES: any = {
     { key: "chunking", value: { default: { strategy: "heading", max_tokens: 512, overlap: 64 }, slack: { strategy: "thread", max_tokens: 768, overlap: 0 } } },
   ],
   indexStats: { docs: 12480, chunks: 90210, embedded: 90000 },
+  modelCatalog: {
+    embedding: ["openai:text-embedding-3-small", "ollama:nomic-embed-text"],
+    generation: ["anthropic:claude-sonnet-5"],
+    errors: {},
+  },
   sourcePulse: [{ provider: "slack", name: "Slack · #engineering" }],
 };
 const modelsData = buildSettingsModels(MODELS_RES);
