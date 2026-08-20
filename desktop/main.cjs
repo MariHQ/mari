@@ -126,7 +126,7 @@ async function waitForApi(origin) {
   const deadline = Date.now() + 60_000;
   let lastError = "";
   while (Date.now() < deadline) {
-    if (apiProcess?.exitCode !== null) {
+    if (apiProcess && apiProcess.exitCode !== null) {
       throw new Error(`The local API exited with code ${apiProcess.exitCode}.`);
     }
     try {
@@ -237,6 +237,18 @@ function createWindow() {
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https?:\/\//i.test(url)) void shell.openExternal(url);
     return { action: "deny" };
+  });
+  mainWindow.webContents.on("will-navigate", (event, url) => {
+    let allowed = false;
+    try {
+      allowed = Boolean(appUrl) && new URL(url).origin === new URL(appUrl).origin;
+    } catch {
+      allowed = false;
+    }
+    if (!allowed) {
+      event.preventDefault();
+      if (/^https?:\/\//i.test(url)) void shell.openExternal(url);
+    }
   });
   mainWindow.once("ready-to-show", () => mainWindow.show());
 }

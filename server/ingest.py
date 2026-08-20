@@ -141,6 +141,9 @@ def _upsert_document(conn, source_id: int, external_id: str, title: str, body: s
          content_hash, source_path, source_id, acl_visibility, json.dumps(list(acl_principals)))
     ).fetchone()
     conn.commit()
+    # Import lazily: queries imports ingest for status resolvers.
+    from queries import invalidate_search
+    invalidate_search(project_id)
     return row["id"], bool(row["inserted"])
 
 
@@ -197,6 +200,8 @@ def _delete_documents(conn, doc_ids: list[int]) -> None:
     conn.execute("DELETE FROM edges WHERE from_doc = ANY(%s) OR to_doc = ANY(%s)", (doc_ids, doc_ids))
     conn.execute("DELETE FROM documents WHERE id = ANY(%s)", (doc_ids,))
     conn.commit()
+    from queries import invalidate_search
+    invalidate_search(access.require_current_access().project_id)
 
 
 # ————————————————— the sync worker —————————————————

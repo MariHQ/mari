@@ -15,16 +15,32 @@ relational state.
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import io
 import json
 import os
 import pathlib
+import re
+import shutil
 import threading
 import time
 import typing as t
+import uuid
 from collections import defaultdict
 
 import numpy as np
+
+
+_ARTIFACTS = ("metadata.json", "document_ids.npy", "offsets.npy", "vectors.npy", "polar.npy")
+_GENERATION_RE = re.compile(r"^[a-f0-9]{32}$")
+
+
+def _file_digest(path: pathlib.Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -196,6 +212,8 @@ class DerivedVectorIndex:
         self._lock = threading.RLock()
         self._loaded_at = 0.0
         self._snapshot: dict[str, t.Any] | None = None
+        self._snapshot_generation = ""
+        self._reload_seconds = max(0.0, float(os.environ.get("MARI_VECTOR_RELOAD_SECONDS", "5")))
         if self.uri.startswith("s3://"):
             cache = os.environ.get("MARI_VECTOR_CACHE", ".mari/vector-cache")
             self.path = pathlib.Path(cache)
@@ -219,6 +237,7 @@ class DerivedVectorIndex:
         vectors = np.concatenate([clean[int(i)] for i in ids]).astype(np.float32)
         metadata = {
             "version": 1,
+            "generation": uuid.uuid4().hex,
             "built_at": time.time(),
             "documents": len(ids),
             "vectors": len(vectors),
@@ -231,6 +250,7 @@ class DerivedVectorIndex:
         with self._lock:
             self._snapshot = {"metadata": metadata, "ids": ids, "offsets": offsets,
                               "vectors": vectors, "packed": packed}
+            self._snapshot_generation = metadata["generation"]
             self._loaded_at = time.time()
         return metadata
 
@@ -263,54 +283,148 @@ class DerivedVectorIndex:
             np.save(buf, value, allow_pickle=False)
             files[name] = buf.getvalue()
         files["metadata.json"] = json.dumps(metadata, sort_keys=True, separators=(",", ":")).encode()
-        for name, body in files.items():
-            temporary = self.path / f".{name}.tmp"
-            temporary.write_bytes(body)
-            temporary.replace(self.path / name)
+        generation = str(metadata["generation"])
+        generations = self.path / "generations"
+        generations.mkdir(parents=True, exist_ok=True)
+        staging = generations / f".{generation}.{uuid.uuid4().hex}.tmp"
+        staging.mkdir()
+        try:
+            for name, body in files.items():
+                (staging / name).write_bytes(body)
+            final = generations / generation
+            staging.replace(final)
+        except Exception:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
+        manifest = {
+            "version": 1,
+            "generation": generation,
+            "files": {name: hashlib.sha256(body).hexdigest() for name, body in files.items()},
+        }
+        pointer = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
+        temporary = self.path / f".current.{uuid.uuid4().hex}.tmp"
+        temporary.write_bytes(pointer)
+        temporary.replace(self.path / "current.json")
         if self.uri.startswith("s3://"):
-            self._mirror_s3(files)
+            self._mirror_s3(generation, files, pointer)
 
-    def _mirror_s3(self, files: dict[str, bytes]) -> None:
+    def _mirror_s3(self, generation: str, files: dict[str, bytes], pointer: bytes) -> None:
         import boto3
         bucket_key = self.uri[5:]
         bucket, _, prefix = bucket_key.partition("/")
         client = boto3.client("s3")
         for name, body in files.items():
-            key = "/".join(v for v in (prefix.rstrip("/"), name) if v)
+            key = "/".join(v for v in (prefix.rstrip("/"), "generations", generation, name) if v)
             client.put_object(Bucket=bucket, Key=key, Body=body)
+        # The pointer is the commit record and must always be uploaded last.
+        key = "/".join(v for v in (prefix.rstrip("/"), "current.json") if v)
+        client.put_object(Bucket=bucket, Key=key, Body=pointer)
+
+    def _local_generation(self) -> tuple[str, pathlib.Path] | None:
+        pointer = self.path / "current.json"
+        try:
+            manifest = json.loads(pointer.read_text())
+            generation = str(manifest["generation"])
+            if not _GENERATION_RE.fullmatch(generation):
+                return None
+            return generation, self.path / "generations" / generation
+        except (OSError, KeyError, TypeError, json.JSONDecodeError):
+            # Backward-compatible read of pre-generation local snapshots.
+            if not pointer.exists() and (self.path / "metadata.json").exists():
+                return "legacy", self.path
+            return None
 
     def _load(self) -> dict[str, t.Any] | None:
         with self._lock:
-            if self._snapshot is not None:
+            now = time.time()
+            if self._snapshot is not None and now - self._loaded_at < self._reload_seconds:
                 return self._snapshot
-            if self.uri.startswith("s3://") and not (self.path / "metadata.json").exists():
+            if self.uri.startswith("s3://"):
                 self._pull_s3()
+            local = self._local_generation()
+            if local is None:
+                return self._snapshot
+            generation, directory = local
+            if self._snapshot is not None and generation == self._snapshot_generation:
+                self._loaded_at = now
+                return self._snapshot
             try:
-                metadata = json.loads((self.path / "metadata.json").read_text())
-                self._snapshot = {
+                metadata = json.loads((directory / "metadata.json").read_text())
+                if generation != "legacy" and metadata.get("generation") != generation:
+                    raise ValueError("metadata generation mismatch")
+                candidate = {
                     "metadata": metadata,
-                    "ids": np.load(self.path / "document_ids.npy", mmap_mode="r"),
-                    "offsets": np.load(self.path / "offsets.npy", mmap_mode="r"),
-                    "vectors": np.load(self.path / "vectors.npy", mmap_mode="r"),
-                    "packed": np.load(self.path / "polar.npy", mmap_mode="r"),
+                    "ids": np.load(directory / "document_ids.npy", mmap_mode="r"),
+                    "offsets": np.load(directory / "offsets.npy", mmap_mode="r"),
+                    "vectors": np.load(directory / "vectors.npy", mmap_mode="r"),
+                    "packed": np.load(directory / "polar.npy", mmap_mode="r"),
                 }
-                self._loaded_at = time.time()
+                # Cross-file shape checks turn a corrupt generation into a
+                # cache miss while retaining the previously loaded snapshot.
+                if len(candidate["offsets"]) != len(candidate["ids"]) + 1:
+                    raise ValueError("invalid offset count")
+                if len(candidate["packed"]) != len(candidate["ids"]):
+                    raise ValueError("invalid packed vector count")
+                if int(candidate["offsets"][-1]) != len(candidate["vectors"]):
+                    raise ValueError("invalid vector offsets")
             except (OSError, ValueError, json.JSONDecodeError):
-                return None
+                if self.uri.startswith("s3://") and generation != "legacy":
+                    # Force the next refresh to redownload this generation;
+                    # keep serving the last known-good in-memory snapshot now.
+                    (self.path / "current.json").unlink(missing_ok=True)
+                return self._snapshot
+            self._snapshot = candidate
+            self._snapshot_generation = generation
+            self._loaded_at = now
             return self._snapshot
 
-    def _pull_s3(self) -> None:
+    def _pull_s3(self) -> bool:
         import boto3
         bucket_key = self.uri[5:]
         bucket, _, prefix = bucket_key.partition("/")
         self.path.mkdir(parents=True, exist_ok=True)
+        generations = self.path / "generations"
+        generations.mkdir(parents=True, exist_ok=True)
         client = boto3.client("s3")
-        for name in ("metadata.json", "document_ids.npy", "offsets.npy", "vectors.npy", "polar.npy"):
-            key = "/".join(v for v in (prefix.rstrip("/"), name) if v)
-            try:
-                client.download_file(bucket, key, str(self.path / name))
-            except Exception:  # noqa: BLE001 -- an absent derived cache is a cache miss
-                return
+        pointer_tmp = self.path / f".remote-current.{uuid.uuid4().hex}.tmp"
+        staging: pathlib.Path | None = None
+        try:
+            pointer_key = "/".join(v for v in (prefix.rstrip("/"), "current.json") if v)
+            client.download_file(bucket, pointer_key, str(pointer_tmp))
+            pointer_bytes = pointer_tmp.read_bytes()
+            manifest = json.loads(pointer_bytes)
+            generation = str(manifest["generation"])
+            checksums = manifest.get("files") or {}
+            if not _GENERATION_RE.fullmatch(generation) or set(checksums) != set(_ARTIFACTS):
+                raise ValueError("invalid vector generation manifest")
+            local = self._local_generation()
+            if (local and local[0] == generation
+                    and all((local[1] / name).is_file() for name in _ARTIFACTS)):
+                return True
+            staging = generations / f".{generation}.{uuid.uuid4().hex}.download"
+            staging.mkdir()
+            for name in _ARTIFACTS:
+                key = "/".join(v for v in (
+                    prefix.rstrip("/"), "generations", generation, name) if v)
+                downloaded = staging / name
+                client.download_file(bucket, key, str(downloaded))
+                if _file_digest(downloaded) != checksums[name]:
+                    raise ValueError(f"checksum mismatch for {name}")
+            final = generations / generation
+            if final.exists():
+                shutil.rmtree(staging)
+            else:
+                staging.replace(final)
+            local_pointer = self.path / f".current.{uuid.uuid4().hex}.tmp"
+            local_pointer.write_bytes(pointer_bytes)
+            local_pointer.replace(self.path / "current.json")
+            return True
+        except Exception:  # noqa: BLE001 -- derived storage failure is a cache miss
+            if staging is not None:
+                shutil.rmtree(staging, ignore_errors=True)
+            return False
+        finally:
+            pointer_tmp.unlink(missing_ok=True)
 
     @property
     def available(self) -> bool:

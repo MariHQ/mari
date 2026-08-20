@@ -548,9 +548,11 @@ def bypass(request: Request, response: Response):
     return {"user": _user_out(user)}
 
 
-def _read_setup_token(conn) -> dict:
+def _read_setup_token(conn, *, for_update: bool = False) -> dict:
     """The stored setup token, or a loud reason there isn't a usable one."""
-    row = conn.execute("SELECT value FROM settings WHERE key = 'setup_token'").fetchone()
+    row = conn.execute(
+        "SELECT value FROM settings WHERE key = 'setup_token'" + (" FOR UPDATE" if for_update else "")
+    ).fetchone()
     if not row:
         raise HTTPException(400, "Setup is not pending.")
     stored = row["value"] if isinstance(row["value"], dict) else json.loads(row["value"])
@@ -584,7 +586,7 @@ def setup_check(body: SetupCheckIn, request: Request):
 def setup(body: SetupIn, request: Request, response: Response):
     _rate_limit("setup", _client_ip(request), 10, 300)
     with _conn() as conn:
-        stored = _read_setup_token(conn)
+        stored = _read_setup_token(conn, for_update=True)
         if not secrets.compare_digest(hashlib.sha256(body.token.encode()).hexdigest(),
                                       str(stored.get("hash") or "")):
             raise HTTPException(403, "Invalid setup token — check the server logs.")

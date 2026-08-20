@@ -1161,6 +1161,11 @@ ALTER TABLE approved_answers DROP CONSTRAINT IF EXISTS approved_answers_question
 ALTER TABLE decisions DROP CONSTRAINT IF EXISTS decisions_statement_key;
 ALTER TABLE mcp_servers DROP CONSTRAINT IF EXISTS mcp_servers_name_key;
 ALTER TABLE glossary DROP CONSTRAINT IF EXISTS glossary_term_key;
+ALTER TABLE digest_topics DROP CONSTRAINT IF EXISTS digest_topics_title_key;
+ALTER TABLE workflows DROP CONSTRAINT IF EXISTS workflows_name_key;
+ALTER TABLE sites DROP CONSTRAINT IF EXISTS sites_name_key;
+ALTER TABLE graph_views DROP CONSTRAINT IF EXISTS graph_views_name_key;
+ALTER TABLE api_keys DROP CONSTRAINT IF EXISTS api_keys_name_key;
 CREATE UNIQUE INDEX IF NOT EXISTS sources_project_provider_uidx ON sources(project_id, provider);
 CREATE UNIQUE INDEX IF NOT EXISTS documents_project_external_uidx ON documents(project_id, source, external_id);
 CREATE UNIQUE INDEX IF NOT EXISTS facts_project_claim_uidx ON facts(project_id, claim);
@@ -1169,6 +1174,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS answers_project_question_uidx ON approved_answ
 CREATE UNIQUE INDEX IF NOT EXISTS decisions_project_statement_uidx ON decisions(project_id, statement);
 CREATE UNIQUE INDEX IF NOT EXISTS mcp_project_name_uidx ON mcp_servers(project_id, name);
 CREATE UNIQUE INDEX IF NOT EXISTS glossary_project_term_uidx ON glossary(project_id, term);
+CREATE UNIQUE INDEX IF NOT EXISTS digest_topics_project_title_uidx ON digest_topics(project_id, title);
+CREATE UNIQUE INDEX IF NOT EXISTS workflows_project_name_uidx ON workflows(project_id, name);
 CREATE INDEX IF NOT EXISTS documents_project_updated_idx ON documents(project_id, updated_src DESC);
 CREATE INDEX IF NOT EXISTS chunks_project_document_idx ON chunks(project_id, document_id);
 CREATE INDEX IF NOT EXISTS tags_project_document_idx ON tags(project_id, document_id);

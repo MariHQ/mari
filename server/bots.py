@@ -16,10 +16,10 @@ Settings keys (existing settings CRUD; jsonb values):
 from __future__ import annotations
 
 import datetime
+import concurrent.futures as cf
 import hashlib
 import hmac
 import json
-import threading
 import time
 import urllib.error
 import urllib.request
@@ -31,12 +31,39 @@ import auth
 import access
 import config
 import llm
+from event_dedupe import EventLedger
 from db import exec_, pq, pq1, q, q1
 from queries import hybrid_search
 
 router = APIRouter()
 
 SLACK_API = "https://slack.com/api"
+SLACK_WORKERS = max(1, int(config.get("bots", "slack_workers", 4)))
+SLACK_PENDING = max(SLACK_WORKERS, int(config.get("bots", "slack_pending", 64)))
+
+
+class _BoundedExecutor:
+    """Thread pool whose pending queue has an explicit non-blocking ceiling."""
+
+    def __init__(self, workers: int, pending: int):
+        import threading
+        self._slots = threading.BoundedSemaphore(pending)
+        self._pool = cf.ThreadPoolExecutor(max_workers=workers, thread_name_prefix="mari-slack")
+
+    def submit(self, function, *args) -> bool:
+        if not self._slots.acquire(blocking=False):
+            return False
+        try:
+            future = self._pool.submit(function, *args)
+        except Exception:
+            self._slots.release()
+            raise
+        future.add_done_callback(lambda _future: self._slots.release())
+        return True
+
+
+_SLACK_EXECUTOR = _BoundedExecutor(SLACK_WORKERS, SLACK_PENDING)
+_SLACK_EVENTS = EventLedger()
 
 
 # ————————————————— settings helpers —————————————————
@@ -220,7 +247,8 @@ def verify_github_signature(raw: bytes, signature: str, secrets: list[str]) -> b
 
 
 def _handle_slack_event(event: dict, token: str, project_access=None,
-                        installation_id: int | None = None) -> None:
+                        installation_id: int | None = None,
+                        event_id: str = "") -> None:
     """Background worker: answer the question and post back into Slack."""
     error = ""
     try:
@@ -254,11 +282,15 @@ def _handle_slack_event(event: dict, token: str, project_access=None,
     except Exception as e:  # noqa: BLE001 — record, never crash the thread
         error = f"{type(e).__name__}: {e}"
     patch = {"last_event_at": _now_iso(), "last_error": error}
-    if installation_id is None:  # compatibility for direct/internal callers
-        merge_setting("slack_bot", patch)
-    else:
-        exec_("""UPDATE bot_installations SET config = config || %s, updated_at = now()
-                 WHERE id = %s""", (json.dumps(patch), installation_id))
+    try:
+        if installation_id is None:  # compatibility for direct/internal callers
+            merge_setting("slack_bot", patch)
+        else:
+            exec_("""UPDATE bot_installations SET config = config || %s, updated_at = now()
+                     WHERE id = %s""", (json.dumps(patch), installation_id))
+    finally:
+        if event_id:
+            _SLACK_EVENTS.complete("slack", event_id)
 
 
 @router.post("/webhooks/slack")
@@ -299,13 +331,26 @@ async def slack_webhook(request: Request):
         is_dm = etype == "message" and event.get("channel_type") == "im"
         # Skip our own echoes and edits/joins (message_changed etc.).
         if (is_mention or is_dm) and not event.get("bot_id") and not event.get("subtype"):
+            event_id = str(payload.get("event_id") or "").strip()
+            if not event_id:
+                # Slack normally provides event_id.  The deterministic fallback
+                # keeps older/test payloads idempotent without trusting text.
+                identity = json.dumps({"team": team_id, "event": event},
+                                      sort_keys=True, separators=(",", ":"))
+                event_id = "derived:" + hashlib.sha256(identity.encode()).hexdigest()
+            if not _SLACK_EVENTS.claim("slack", event_id):
+                return {"ok": True, "duplicate": True}
             token = (cfg.get("bot_token") or "").strip()
             project_access = access.external_access(
                 installation["project_id"], installation["project_slug"], installation["project_name"],
                 "slack", str(installation["id"]), frozenset({"knowledge.read"}),
                 frozenset({f"channel:{event.get('channel')}"}) if event.get("channel") else frozenset())
-            threading.Thread(target=_handle_slack_event,
-                             args=(event, token, project_access, installation["id"]), daemon=True).start()
+            if not _SLACK_EXECUTOR.submit(
+                    _handle_slack_event, event, token, project_access, installation["id"], event_id):
+                _SLACK_EVENTS.release("slack", event_id)
+                # Non-2xx asks Slack to retry later; no work was accepted and
+                # the idempotency claim was released.
+                return Response(status_code=503, content="Slack worker queue is full")
 
     return {"ok": True}  # ack within 3s; work continues on the thread
 

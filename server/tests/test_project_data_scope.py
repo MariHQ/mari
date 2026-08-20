@@ -18,6 +18,7 @@ import db
 import mcp
 import queries
 import retrieval
+import mutations_knowledge
 
 
 def context(project_id: int, slug: str) -> access.AccessContext:
@@ -39,6 +40,30 @@ class ProjectDataScopeTests(unittest.TestCase):
         self.assertEqual(query.call_args.args[1], (7, "Runbook"))
         with self.assertRaises(RuntimeError):
             db.pq("SELECT 1 WHERE %s = %s", (1,))
+
+    def test_core_knowledge_queries_always_bind_active_project(self):
+        with access.use_access(context(7, "acme")), \
+             patch.object(queries, "q", return_value=[]) as query:
+            service = queries.Query()
+            service.facts()
+            service.tasks()
+            service.glossary()
+            service.approved_answers()
+            service.decisions()
+        self.assertEqual(len(query.call_args_list), 5)
+        for call in query.call_args_list:
+            self.assertIn("project_id", call.args[0])
+            self.assertEqual(call.args[1][0], 7)
+
+    def test_foreign_knowledge_ids_fail_closed_before_write(self):
+        with access.use_access(context(7, "acme")), \
+             patch.object(mutations_knowledge, "q1", return_value=None) as read, \
+             patch.object(mutations_knowledge, "exec_") as write:
+            self.assertFalse(mutations_knowledge.MutKnowledge().set_task_done(99, True))
+            self.assertFalse(mutations_knowledge.MutKnowledge().ratify_decision(99))
+            self.assertFalse(mutations_knowledge.MutKnowledge().set_answer_channels(99, ["slack"]))
+        self.assertTrue(all(call.args[1][0] == 7 for call in read.call_args_list))
+        write.assert_not_called()
 
     def test_embedding_and_rank_caches_do_not_cross_projects(self):
         rows = {
@@ -140,12 +165,24 @@ class ProjectDataScopeTests(unittest.TestCase):
 
         installation = {"id": 5, "project_id": 7, "project_slug": "acme", "project_name": "Acme",
                         "config": {"signing_secret": "acme-secret", "bot_token": "xoxb"}}
+        submitted = []
+
+        class Executor:
+            def submit(self, *args):
+                submitted.append(args)
+                return True
+
+        class Ledger:
+            def claim(self, *_args): return True
+            def release(self, *_args): pass
+
         with patch.object(bots, "q1", return_value=installation) as lookup, \
-             patch.object(bots.threading, "Thread") as thread:
+             patch.object(bots, "_SLACK_EXECUTOR", Executor()), \
+             patch.object(bots, "_SLACK_EVENTS", Ledger()):
             result = asyncio.run(bots.slack_webhook(Request()))
         self.assertEqual(result, {"ok": True})
         self.assertEqual(lookup.call_args.args[1], ("T-ACME",))
-        routed = thread.call_args.kwargs["args"][2]
+        routed = submitted[0][3]
         self.assertEqual(routed.project_id, 7)
         self.assertEqual(routed.principal_type, "slack")
 

@@ -149,6 +149,12 @@ class PasswordAndMagicTests(unittest.TestCase):
         self.assertIn("used_at IS NULL", statements[0])
         self.assertIn("RETURNING user_id", statements[0])
 
+    def test_setup_redemption_locks_the_single_use_token_row(self):
+        stored = {"hash": "digest", "minted_at": None}
+        conn = FakeConn(lambda _sql, _args: Result({"value": stored}))
+        self.assertEqual(auth._read_setup_token(conn, for_update=True), stored)
+        self.assertIn("FOR UPDATE", conn.calls[0][0])
+
 
 class LegacyOauthTests(unittest.TestCase):
     def test_first_link_requires_provider_verified_email(self):

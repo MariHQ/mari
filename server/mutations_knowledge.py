@@ -354,15 +354,19 @@ class MutKnowledge:
 
     @strawberry.mutation
     def set_task_done(self, id: int, done: bool) -> bool:
-        exec_("UPDATE tasks SET done = %s WHERE id = %s", (done, id))
-        exec_("INSERT INTO events (actor, verb, target) SELECT %s, %s, title FROM tasks WHERE id = %s",
-              (actor_name(), "completed" if done else "reopened", id))
+        project_id = access.require_current_access().project_id
+        task = q1("SELECT title FROM tasks WHERE project_id = %s AND id = %s", (project_id, id))
+        if not task:
+            return False
+        exec_("UPDATE tasks SET done = %s WHERE project_id = %s AND id = %s", (done, project_id, id))
+        audit("completed" if done else "reopened", task["title"])
         return True
 
     @strawberry.mutation
     def clear_done_tasks(self) -> int:
-        n = q1("SELECT count(*) AS n FROM tasks WHERE done")["n"]
-        exec_("DELETE FROM tasks WHERE done")
+        project_id = access.require_current_access().project_id
+        n = q1("SELECT count(*) AS n FROM tasks WHERE project_id = %s AND done", (project_id,))["n"]
+        exec_("DELETE FROM tasks WHERE project_id = %s AND done", (project_id,))
         if n:
             audit("cleared done tasks", f"{n} tasks")
         return n
@@ -371,8 +375,13 @@ class MutKnowledge:
     def verify_fact(self, id: int) -> bool:
         # verified_at is a DATE; the legacy `verified` text column held a
         # display string the console could neither re-format nor sort on.
-        exec_("UPDATE facts SET status = 'Verified', verified_at = current_date WHERE id = %s", (id,))
-        exec_("INSERT INTO events (actor, verb, target) SELECT %s, 'verified fact', claim FROM facts WHERE id = %s", (actor_name(), id))
+        project_id = access.require_current_access().project_id
+        fact = q1("SELECT claim FROM facts WHERE project_id = %s AND id = %s", (project_id, id))
+        if not fact:
+            return False
+        exec_("""UPDATE facts SET status = 'Verified', verified_at = current_date
+                 WHERE project_id = %s AND id = %s""", (project_id, id))
+        audit("verified fact", fact["claim"])
         return True
 
     @strawberry.mutation
@@ -397,12 +406,13 @@ class MutKnowledge:
         subject = tuple((value or "").strip() for value in
                         (subject_type, subject_id, subject_title, subject_href))
         due_date = _iso_date(due)
+        project_id = access.require_current_access().project_id
         exec_("""INSERT INTO tasks
-                 (title, assignee, assignee_initials, assignee_tint, kind, kind_label, due_date,
+                 (project_id, title, assignee, assignee_initials, assignee_tint, kind, kind_label, due_date,
                   subject_type, subject_id, subject_title, subject_href)
-                 VALUES (%s, %s, %s, 1, %s, %s, %s, %s, %s, %s, %s)
-                 ON CONFLICT (title) DO NOTHING""",
-              (title, assignee, initials, kind, kind_label, due_date, *subject))
+                 VALUES (%s, %s, %s, %s, 1, %s, %s, %s, %s, %s, %s, %s)
+                 ON CONFLICT (project_id, title) DO NOTHING""",
+              (project_id, title, assignee, initials, kind, kind_label, due_date, *subject))
         detail = [("Assignee", assignee or "(unassigned)"), ("Kind", kind_label),
                   ("Due", due_date or "(no deadline)")]
         if subject[0]:
@@ -415,10 +425,11 @@ class MutKnowledge:
         """Set or (with null/empty) clear a task's deadline. ISO date in, ISO
         date out — the console formats and sorts on the raw value."""
         value = _iso_date(due)
-        before = q1("SELECT title, due_date FROM tasks WHERE id = %s", (id,))
+        project_id = access.require_current_access().project_id
+        before = q1("SELECT title, due_date FROM tasks WHERE project_id = %s AND id = %s", (project_id, id))
         if not before:
             return False
-        exec_("UPDATE tasks SET due_date = %s WHERE id = %s", (value, id))
+        exec_("UPDATE tasks SET due_date = %s WHERE project_id = %s AND id = %s", (value, project_id, id))
         audit("set task due date" if value else "cleared task due date", before["title"],
               detail=[("Previous due", before["due_date"].isoformat() if before["due_date"] else "(none)"),
                       ("New due", value or "(none)")])
@@ -436,13 +447,16 @@ class MutKnowledge:
         keeps NULL, which is the truth about it: Doc Review lists a document's
         claims by this key, so a guessed id would put someone else's claim
         under this title."""
+        project_id = access.require_current_access().project_id
         doc_id = document_id or None
-        if doc_id and not q1("SELECT 1 FROM documents WHERE id = %s", (doc_id,)):
+        if doc_id and not q1("SELECT 1 FROM documents WHERE project_id = %s AND id = %s", (project_id, doc_id)):
             raise ValueError(f"No document {doc_id} to attribute this claim to")
         owner = owner.strip() or actor_name()
-        exec_("""INSERT INTO facts (claim, source, owner_name, owner_tint, status, verified, document_id)
-                 VALUES (%s, %s, %s, 1, 'Needs review', '—', %s) ON CONFLICT (claim) DO NOTHING""",
-              (claim, source, owner, doc_id))
+        exec_("""INSERT INTO facts
+                 (project_id, claim, source, owner_name, owner_tint, status, verified, document_id)
+                 VALUES (%s, %s, %s, %s, 1, 'Needs review', '—', %s)
+                 ON CONFLICT (project_id, claim) DO NOTHING""",
+              (project_id, claim, source, owner, doc_id))
         audit("added fact", claim, detail=[("Owner", owner), ("Source", source)])
         return True
 
@@ -712,14 +726,25 @@ class MutKnowledge:
 
     @strawberry.mutation
     def pin_node(self, document_id: int, x: float, y: float) -> bool:
-        exec_("UPDATE documents SET graph_x = %s, graph_y = %s WHERE id = %s", (x, y, document_id))
-        exec_("INSERT INTO events (actor, verb, target) SELECT %s, 'pinned graph node', title FROM documents WHERE id = %s",
-              (actor_name(), document_id))
+        project_id = access.require_current_access().project_id
+        doc = q1("SELECT title FROM documents WHERE project_id = %s AND id = %s",
+                 (project_id, document_id))
+        if not doc:
+            return False
+        exec_("""UPDATE documents SET graph_x = %s, graph_y = %s
+                 WHERE project_id = %s AND id = %s""", (x, y, project_id, document_id))
+        audit("pinned graph node", doc["title"])
         return True
 
     @strawberry.mutation
     def unpin_node(self, document_id: int) -> bool:
-        exec_("UPDATE documents SET graph_x = NULL, graph_y = NULL WHERE id = %s", (document_id,))
+        project_id = access.require_current_access().project_id
+        row = q1("SELECT title FROM documents WHERE project_id = %s AND id = %s", (project_id, document_id))
+        if not row:
+            return False
+        exec_("UPDATE documents SET graph_x = NULL, graph_y = NULL WHERE project_id = %s AND id = %s",
+              (project_id, document_id))
+        audit("unpinned graph node", row["title"])
         return True
 
     @strawberry.mutation
@@ -805,72 +830,98 @@ class MutKnowledge:
     # ——— approved answers ———
     @strawberry.mutation
     def upsert_answer(self, question: str, answer: str, id: int | None = None) -> bool:
+        project_id = access.require_current_access().project_id
         if id:
-            exec_("UPDATE approved_answers SET question = %s, answer = %s, updated = now() WHERE id = %s",
-                  (question, answer, id))
+            exec_("""UPDATE approved_answers SET question = %s, answer = %s, updated = now()
+                     WHERE project_id = %s AND id = %s""", (question, answer, project_id, id))
         else:
-            exec_("""INSERT INTO approved_answers (question, answer, status, owner_name, updated)
-                     VALUES (%s, %s, 'draft', %s, now())
-                     ON CONFLICT (question) DO UPDATE SET answer = EXCLUDED.answer, updated = now()""",
-                  (question, answer, actor_name()))
+            exec_("""INSERT INTO approved_answers
+                     (project_id, question, answer, status, owner_name, updated)
+                     VALUES (%s, %s, %s, 'draft', %s, now())
+                     ON CONFLICT (project_id, question) DO UPDATE
+                       SET answer = EXCLUDED.answer, updated = now()""",
+                  (project_id, question, answer, actor_name()))
         audit("drafted answer", question)
         return True
 
     @strawberry.mutation
     def set_answer_status(self, id: int, status: str) -> bool:
-        exec_("UPDATE approved_answers SET status = %s, updated = now() WHERE id = %s", (status, id))
+        project_id = access.require_current_access().project_id
+        row = q1("""SELECT question, answer FROM approved_answers
+                    WHERE project_id = %s AND id = %s""", (project_id, id))
+        if not row:
+            return False
+        exec_("""UPDATE approved_answers SET status = %s, updated = now()
+                 WHERE project_id = %s AND id = %s""", (status, project_id, id))
         if status == "approved":
             vec = None
-            row = q1("SELECT question, answer FROM approved_answers WHERE id = %s", (id,))
             if row:
                 vec = llm.embed(row["question"] + " " + row["answer"])
             if vec:
-                exec_("UPDATE approved_answers SET embedding = %s::vector WHERE id = %s", (str(vec), id))
-        exec_("INSERT INTO events (actor, verb, target) SELECT %s, %s || ' answer', question FROM approved_answers WHERE id = %s",
-              (actor_name(), status, id))
+                exec_("""UPDATE approved_answers SET embedding = %s::vector
+                         WHERE project_id = %s AND id = %s""", (str(vec), project_id, id))
+        audit(f"{status} answer", row["question"])
         return True
 
     @strawberry.mutation
     def set_answer_channels(self, id: int, channels: list[str]) -> bool:
-        exec_("UPDATE approved_answers SET channels = %s WHERE id = %s", (channels, id))
+        project_id = access.require_current_access().project_id
+        row = q1("SELECT question FROM approved_answers WHERE project_id = %s AND id = %s", (project_id, id))
+        if not row:
+            return False
+        exec_("UPDATE approved_answers SET channels = %s WHERE project_id = %s AND id = %s",
+              (channels, project_id, id))
+        audit("updated answer channels", row["question"], detail=[("Channels", ", ".join(channels) or "(none)")])
         return True
 
     # ——— decisions ———
     @strawberry.mutation
     def add_decision(self, statement: str, context: str = "", source_label: str = "") -> bool:
-        exec_("""INSERT INTO decisions (statement, context, status, source_label, owners)
-                 VALUES (%s, %s, 'proposed', %s, %s) ON CONFLICT (statement) DO NOTHING""",
-              (statement, context, source_label or "Captured in Mari", [actor_name()]))
+        project_id = access.require_current_access().project_id
+        exec_("""INSERT INTO decisions (project_id, statement, context, status, source_label, owners)
+                 VALUES (%s, %s, %s, 'proposed', %s, %s)
+                 ON CONFLICT (project_id, statement) DO NOTHING""",
+              (project_id, statement, context, source_label or "Captured in Mari", [actor_name()]))
         audit("captured decision", statement)
         return True
 
     @strawberry.mutation
     def ratify_decision(self, id: int) -> bool:
-        exec_("UPDATE decisions SET status = 'ratified', decided_on = now() WHERE id = %s", (id,))
-        exec_("INSERT INTO events (actor, verb, target) SELECT %s, 'ratified decision', statement FROM decisions WHERE id = %s",
-              (actor_name(), id))
+        project_id = access.require_current_access().project_id
+        decision = q1("SELECT statement FROM decisions WHERE project_id = %s AND id = %s",
+                      (project_id, id))
+        if not decision:
+            return False
+        exec_("""UPDATE decisions SET status = 'ratified', decided_on = now()
+                 WHERE project_id = %s AND id = %s""", (project_id, id))
+        audit("ratified decision", decision["statement"])
         return True
 
     @strawberry.mutation
     def supersede_decision(self, id: int, by_statement: str) -> bool:
-        exec_("""INSERT INTO decisions (statement, status, source_label, owners, decided_on)
-                 VALUES (%s, 'ratified', 'Supersedes an earlier decision', %s, now())
-                 ON CONFLICT (statement) DO NOTHING""", (by_statement, [actor_name()]))
+        project_id = access.require_current_access().project_id
+        old = q1("SELECT statement FROM decisions WHERE project_id = %s AND id = %s", (project_id, id))
+        if not old:
+            return False
+        exec_("""INSERT INTO decisions (project_id, statement, status, source_label, owners, decided_on)
+                 VALUES (%s, %s, 'ratified', 'Supersedes an earlier decision', %s, now())
+                 ON CONFLICT (project_id, statement) DO NOTHING""", (project_id, by_statement, [actor_name()]))
         exec_("""UPDATE decisions SET status = 'superseded',
-                   superseded_by = (SELECT id FROM decisions WHERE statement = %s)
-                 WHERE id = %s""", (by_statement, id))
-        exec_("INSERT INTO events (actor, verb, target) SELECT %s, 'superseded decision', statement FROM decisions WHERE id = %s",
-              (actor_name(), id))
+                   superseded_by = (SELECT id FROM decisions WHERE project_id = %s AND statement = %s)
+                 WHERE project_id = %s AND id = %s""", (project_id, by_statement, project_id, id))
+        audit("superseded decision", old["statement"], detail=[("Replacement", by_statement)])
         return True
 
     @strawberry.mutation
     def decision_impact(self, id: int) -> ImpactResult:
-        d = q1("SELECT * FROM decisions WHERE id = %s", (id,))
+        project_id = access.require_current_access().project_id
+        d = q1("SELECT * FROM decisions WHERE project_id = %s AND id = %s", (project_id, id))
         if not d:
             return ImpactResult(claim="", summary="Decision not found.", docs=[])
         result = MutKnowledge.impact_analysis(self, d["statement"])
-        exec_("UPDATE decisions SET impact_summary = %s, impact_count = %s WHERE id = %s",
-              (result.summary[:300], len(result.docs), id))
+        exec_("""UPDATE decisions SET impact_summary = %s, impact_count = %s
+                 WHERE project_id = %s AND id = %s""",
+              (result.summary[:300], len(result.docs), project_id, id))
         return result
 
     # ——— insights ———
@@ -930,11 +981,17 @@ class MutKnowledge:
 
     @strawberry.mutation
     def promote_glossary_candidate(self, id: int, accept: bool) -> bool:
+        project_id = access.require_current_access().project_id
+        term = q1("SELECT term FROM glossary WHERE project_id = %s AND id = %s", (project_id, id))
+        if not term:
+            return False
         if accept:
-            exec_("UPDATE glossary SET candidate = false WHERE id = %s", (id,))
-            exec_("INSERT INTO events (actor, verb, target) SELECT %s, 'accepted glossary term', term FROM glossary WHERE id = %s", (actor_name(), id))
+            exec_("UPDATE glossary SET candidate = false WHERE project_id = %s AND id = %s",
+                  (project_id, id))
+            audit("accepted glossary term", term["term"])
         else:
-            exec_("DELETE FROM glossary WHERE id = %s AND candidate", (id,))
+            exec_("DELETE FROM glossary WHERE project_id = %s AND id = %s AND candidate",
+                  (project_id, id))
         return True
 
     @strawberry.mutation
@@ -969,8 +1026,7 @@ class MutKnowledge:
                             to_char(now(), 'Mon DD, HH12:MI AM'), '00:00:00', 0, '{}', '[]')
                     RETURNING id, number""", (project_id, wf_id))
         n = run["number"]
-        exec_("INSERT INTO events (actor, verb, target) VALUES (%s, %s, %s)",
-              (actor_name(), f"started run #{n}", flowengine.FACT_SCAN_FLOW))
+        audit(f"started run #{n}", flowengine.FACT_SCAN_FLOW)
         flowengine.start_run(run["id"])
         return run["id"]
 
@@ -988,8 +1044,7 @@ class MutKnowledge:
                             to_char(now(), 'Mon DD, HH12:MI AM'), '00:00:00', 0, '{}', '[]')
                     RETURNING id, number""", (project_id, wf_id))
         n = run["number"]
-        exec_("INSERT INTO events (actor, verb, target) VALUES (%s, %s, %s)",
-              (actor_name(), f"started run #{n}", flowengine.DECISION_SCAN_FLOW))
+        audit(f"started run #{n}", flowengine.DECISION_SCAN_FLOW)
         flowengine.start_run(run["id"])
         return run["id"]
 

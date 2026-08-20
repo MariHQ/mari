@@ -6,6 +6,8 @@ import json
 import hashlib
 import os
 import time
+import threading
+from functools import wraps
 
 import strawberry
 from strawberry.scalars import JSON
@@ -16,7 +18,7 @@ import flowengine
 import llm
 import sitebuilder
 import access
-from db import actor_name, audit, exec_, jload, q, q1
+from db import actor_name, audit, exec_, jload, q, q1, transaction
 from mutations_admin import _require_admin
 
 # ——— sites.theme: validated on the way in ———
@@ -29,6 +31,22 @@ from mutations_admin import _require_admin
 # a prompt-injected document could otherwise choose the accent colour.
 
 THEME_KEYS = ("theme", "accent", "radius", "density", "mode", "masthead")
+
+_SITE_LOCKS: dict[int, threading.RLock] = {}
+_SITE_LOCKS_GUARD = threading.Lock()
+
+
+def _site_lock(site_id: int) -> threading.RLock:
+    with _SITE_LOCKS_GUARD:
+        return _SITE_LOCKS.setdefault(int(site_id), threading.RLock())
+
+
+def _locked_site(fn):
+    @wraps(fn)
+    def locked(site_id, *args, **kwargs):
+        with _site_lock(site_id):
+            return fn(site_id, *args, **kwargs)
+    return locked
 
 
 def _next_version(site_id: int) -> str:
@@ -122,8 +140,9 @@ class MutPublish:
         if not run:
             raise ValueError("Workflow not found in this project.")
         n = run["number"]
-        exec_("INSERT INTO events (actor, verb, target) SELECT %s, 'started run #' || %s, name FROM workflows WHERE id = %s",
-              (actor_name(), n, workflow_id))
+        workflow = q1("SELECT name FROM workflows WHERE project_id = %s AND id = %s",
+                      (project_id, workflow_id)) or {"name": f"workflow {workflow_id}"}
+        audit(f"started run #{n}", workflow["name"])
         flowengine.start_run(run["id"])
         return n
 
@@ -142,7 +161,7 @@ class MutPublish:
             rows[paused_at]["detail"] = f"approved by {actor_name()}"
         exec_("UPDATE workflow_runs SET rows_data = %s, status = 'running' WHERE project_id = %s AND id = %s",
               (json.dumps(rows), project_id, run_id))
-        exec_("INSERT INTO events (actor, verb, target) VALUES (%s, 'approved run', '#' || %s)", (actor_name(), run["number"]))
+        audit("approved run", f"#{run['number']}")
         flowengine.start_run(run_id, paused_at + 1)
         return True
 
@@ -178,17 +197,24 @@ class MutPublish:
     @strawberry.mutation
     def delete_workflow(self, id: int) -> bool:
         project_id = access.require_current_access().project_id
+        workflow = q1("SELECT name FROM workflows WHERE project_id = %s AND id = %s",
+                      (project_id, id))
+        if not workflow:
+            return False
         exec_("DELETE FROM workflow_runs WHERE project_id = %s AND workflow_id = %s", (project_id, id))
-        exec_("INSERT INTO events (actor, verb, target) SELECT %s, 'deleted flow', name FROM workflows WHERE id = %s", (actor_name(), id))
         exec_("DELETE FROM workflows WHERE project_id = %s AND id = %s", (project_id, id))
+        audit("deleted flow", workflow["name"])
         return True
 
     @strawberry.mutation
     def set_workflow_status(self, id: int, status: str) -> bool:
         project_id = access.require_current_access().project_id
+        workflow = q1("SELECT name FROM workflows WHERE project_id = %s AND id = %s",
+                      (project_id, id))
+        if not workflow:
+            return False
         exec_("UPDATE workflows SET status = %s WHERE project_id = %s AND id = %s", (status, project_id, id))
-        exec_("INSERT INTO events (actor, verb, target) SELECT %s, %s || ' flow', name FROM workflows WHERE id = %s",
-              (actor_name(), 'enabled' if status == 'active' else 'paused', id))
+        audit("enabled flow" if status == "active" else "paused flow", workflow["name"])
         return True
 
     @strawberry.mutation
@@ -199,6 +225,7 @@ class MutPublish:
 
     # ——— publishing ———
     @staticmethod
+    @_locked_site
     def _do_build(id: int, generator: str | None) -> dict:
         """Shared build path. Resolves the generator (explicit param wins, else
         the choice persisted in the site's config jsonb, else 'mari'), persists
@@ -405,6 +432,10 @@ class MutPublish:
 
     @strawberry.mutation
     def deploy_site(self, id: int) -> str:
+        with _site_lock(id):
+            return self._deploy_site_locked(id)
+
+    def _deploy_site_locked(self, id: int) -> str:
         project_id = access.require_current_access().project_id
         site = q1("SELECT * FROM sites WHERE project_id = %s AND id = %s", (project_id, id))
         if not site:
@@ -432,13 +463,20 @@ class MutPublish:
             raise ValueError(f"Deploy failed — {detail}. The build is intact; "
                              "fix the bucket or credentials and deploy again.")
         version = _next_version(id)
-        exec_("""UPDATE releases SET status = 'previous'
-                 WHERE project_id = %s AND site_id = %s AND status = 'live'""", (project_id, id))
-        exec_("""INSERT INTO releases (project_id, site_id, version, status, deployed, docs, notes)
-                 VALUES (%s, %s, %s, 'live', to_char(now(), 'Mon DD, HH12:MI AM'), %s, %s)
-                 ON CONFLICT (site_id, version) DO NOTHING""",
-              (project_id, id, version, site["docs"], detail))
-        exec_("UPDATE sites SET status = 'live' WHERE project_id = %s AND id = %s", (project_id, id))
+        def record_release(conn):
+            conn.execute("""UPDATE releases SET status = 'previous'
+                            WHERE project_id = %s AND site_id = %s AND status = 'live'""",
+                         (project_id, id))
+            release = conn.execute("""INSERT INTO releases
+                         (project_id, site_id, version, status, deployed, docs, notes)
+                         VALUES (%s, %s, %s, 'live', to_char(now(), 'Mon DD, HH12:MI AM'), %s, %s)
+                         RETURNING id""",
+                         (project_id, id, version, site["docs"], detail)).fetchone()
+            if not release:
+                raise RuntimeError("Release row was not recorded.")
+            conn.execute("""UPDATE sites SET status = 'live'
+                            WHERE project_id = %s AND id = %s""", (project_id, id))
+        transaction(record_release)
         audit("deployed site", f"{site['name']} {version} — {detail}")
         return version
 
@@ -512,7 +550,10 @@ class MutPublish:
             tools = {"search": 1, "facts": 1, "glossary": 1, "chat": 1, "lineage": 1, "answers": 1}
             exec_("UPDATE mcp_servers SET config = jsonb_set(config, '{capabilities}', %s), tools = %s WHERE project_id = %s AND id = %s",
                   (json.dumps(caps), sum(tools.get(c, 0) for c in caps) or 1, project.project_id, id))
-        exec_("INSERT INTO events (actor, verb, target, project_id) SELECT %s, 'updated MCP server', name, project_id FROM mcp_servers WHERE project_id = %s AND id = %s", (actor_name(), project.project_id, id))
+        server = q1("SELECT name FROM mcp_servers WHERE project_id = %s AND id = %s",
+                    (project.project_id, id))
+        if server:
+            audit("updated MCP server", server["name"])
         return True
 
     @strawberry.mutation
@@ -520,8 +561,11 @@ class MutPublish:
         _require_admin(info)
         project = info.context.get("access")
         if project is None: raise PermissionError("Choose a project.")
-        exec_("INSERT INTO events (actor, verb, target, project_id) SELECT %s, 'deleted MCP server', name, project_id FROM mcp_servers WHERE project_id = %s AND id = %s", (actor_name(), project.project_id, id))
+        server = q1("SELECT name FROM mcp_servers WHERE project_id = %s AND id = %s",
+                    (project.project_id, id))
         exec_("DELETE FROM mcp_servers WHERE project_id = %s AND id = %s", (project.project_id, id))
+        if server:
+            audit("deleted MCP server", server["name"])
         return True
 
     @strawberry.mutation

@@ -335,7 +335,19 @@ def hybrid_count(query: str) -> int:
     """How many documents this query matches, corpus-wide — not how many were
     returned. The console says "showing N of M" and M has to be the corpus's
     answer, or the sentence is a claim nobody can trace."""
-    return len(_rank_hybrid(query))
+    ranked_count = len(_rank_hybrid(query))
+    ctx = access.require_current_access()
+    if ctx.principal_type == "slack":
+        return ranked_count
+    if not query.strip():
+        row = q1("SELECT count(*) AS n FROM documents WHERE project_id = %s", (ctx.project_id,))
+    else:
+        pattern = like_pattern(query.strip())
+        row = q1("""SELECT count(*) AS n FROM documents
+                    WHERE project_id = %s
+                      AND (title ILIKE %s OR snippet ILIKE %s OR body ILIKE %s)""",
+                 (ctx.project_id, pattern, pattern, pattern))
+    return max(ranked_count, int((row or {}).get("n") or 0))
 
 
 # MUVERA/PolarQuant replaces the pgvector ANN half of the old CTE above. The
@@ -344,6 +356,14 @@ def hybrid_count(query: str) -> int:
 # `searchTotal` still describe exactly the same approximate candidate set.
 _RANK_TTL_SECONDS = 120.0
 _rank_cache: dict[tuple[t.Any, ...], tuple[float, list[dict]]] = {}
+_rank_lock = threading.Lock()
+
+
+def invalidate_search(project_id: int) -> None:
+    """Drop ranked results immediately after a canonical document write."""
+    with _rank_lock:
+        for key in [key for key in _rank_cache if key and key[0] == int(project_id)]:
+            _rank_cache.pop(key, None)
 
 
 def _document_visible(row: dict, ctx: access.AccessContext) -> bool:
@@ -357,7 +377,6 @@ def _document_visible(row: dict, ctx: access.AccessContext) -> bool:
     if isinstance(principals, str):
         principals = jload(principals) or []
     return bool(ctx.principals.intersection(str(value) for value in principals))
-_rank_lock = threading.Lock()
 
 
 def _keyword_score(row: dict, terms: list[str]) -> float:
@@ -788,8 +807,10 @@ class Query:
 
     @strawberry.field
     def sync_status(self, source_id: int) -> SyncStatus:
+        project_id = access.require_current_access().project_id
         live = ingest.status(source_id)
-        src = q1("SELECT kind, config, last_sync_at FROM sources WHERE id = %s", (source_id,))
+        src = q1("""SELECT kind, config, last_sync_at FROM sources
+                    WHERE project_id = %s AND id = %s""", (project_id, source_id))
         cfg = jload(src["config"]) if src else {}
         # github cursors are commit shas (shown short); connector cursors are
         # provider-native (timestamps, delta tokens) and shown whole.
@@ -800,7 +821,7 @@ class Query:
           SELECT count(DISTINCT d.id) AS docs, count(c.id) AS chunks,
                  count(c.id) FILTER (WHERE c.embedding IS NOT NULL) AS embedded
           FROM documents d LEFT JOIN chunks c ON c.document_id = d.id
-          WHERE d.source_id = %s""", (source_id,)) or {"docs": 0, "chunks": 0, "embedded": 0}
+          WHERE d.project_id = %s AND d.source_id = %s""", (project_id, source_id)) or {"docs": 0, "chunks": 0, "embedded": 0}
         last_sync = src["last_sync_at"].isoformat() if src and src["last_sync_at"] else (cfg.get("last_sync_at") or "")
         return SyncStatus(
             state=live["state"], phase=live["phase"], done=live["done"], total=live["total"],
@@ -824,7 +845,8 @@ class Query:
             rows = hybrid_search(query, k, offset)
         else:
             # No query: most-recently-updated, paged the same way.
-            rows = q(DOC_SQL.format(where="") + " LIMIT %s OFFSET %s", (k, offset))
+            rows = q(DOC_SQL.format(where="WHERE d.project_id = %s") + " LIMIT %s OFFSET %s",
+                     (access.require_current_access().project_id, k, offset))
         return [_doc(r) for r in rows]
 
     @strawberry.field
@@ -833,7 +855,8 @@ class Query:
         limit. The count the results feed puts above the list."""
         if query.strip():
             return hybrid_count(query)
-        return int(q1("SELECT count(*) AS n FROM documents")["n"])
+        return int(q1("SELECT count(*) AS n FROM documents WHERE project_id = %s",
+                      (access.require_current_access().project_id,))["n"])
 
     @strawberry.field
     def recent_searches(self, limit: int = 6) -> list[str]:
@@ -855,19 +878,24 @@ class Query:
         # this read the whole edge table to answer "what links here". Ordering
         # ends in id so two documents with the same title do not swap places
         # between reads.
+        project_id = access.require_current_access().project_id
         rows = q("""
           SELECT d.id, d.source, d.title, e.rel, 'out' AS direction
-          FROM edges e JOIN documents d ON d.id = e.to_doc WHERE e.from_doc = %s
+          FROM edges e JOIN documents d ON d.id = e.to_doc
+          WHERE e.project_id = %s AND d.project_id = %s AND e.from_doc = %s
           UNION ALL
           SELECT d.id, d.source, d.title, e.rel, 'in' AS direction
-          FROM edges e JOIN documents d ON d.id = e.from_doc WHERE e.to_doc = %s
-          ORDER BY title, id, rel""", (document_id, document_id))
+          FROM edges e JOIN documents d ON d.id = e.from_doc
+          WHERE e.project_id = %s AND d.project_id = %s AND e.to_doc = %s
+          ORDER BY title, id, rel""", (project_id, project_id, document_id,
+                                        project_id, project_id, document_id))
         return [RelatedDoc(id=r["id"], source=r["source"], title=r["title"],
                            rel=r["rel"], direction=r["direction"]) for r in rows]
 
     @strawberry.field
     def document(self, id: int) -> Document | None:
-        rows = q(DOC_SQL.format(where="WHERE d.id = %s"), (id,))
+        project_id = access.require_current_access().project_id
+        rows = q(DOC_SQL.format(where="WHERE d.project_id = %s AND d.id = %s"), (project_id, id))
         if not rows:
             return None
         # Per-user, and it must be the same name toggleWatch writes, or the
@@ -878,24 +906,34 @@ class Query:
 
     @strawberry.field
     def revisions(self, document_id: int) -> list[AuditEvent]:
+        project_id = access.require_current_access().project_id
         return [AuditEvent(id=r["id"], actor=r["actor"], verb=r["verb"], target=r["target"],
                            at=r["occurred_at"].isoformat(), detail=_details(r))
                 for r in q("""SELECT e.* FROM events e JOIN documents d ON e.target = d.title
-                              WHERE d.id = %s ORDER BY e.occurred_at DESC LIMIT 20""", (document_id,))]
+                              WHERE d.project_id = %s AND e.project_id = %s AND d.id = %s
+                              ORDER BY e.occurred_at DESC LIMIT 20""",
+                            (project_id, project_id, document_id))]
 
     @strawberry.field
     def findings(self, document_id: int) -> list[Finding]:
+        project_id = access.require_current_access().project_id
         return [Finding(id=r["id"], kind=r["kind"], severity=r["severity"], text=r["text"], note=r["note"])
-                for r in q("SELECT * FROM findings WHERE document_id = %s ORDER BY id", (document_id,))]
+                for r in q("""SELECT f.* FROM findings f JOIN documents d ON d.id = f.document_id
+                              WHERE d.project_id = %s AND f.document_id = %s ORDER BY f.id""",
+                           (project_id, document_id))]
 
     @strawberry.field
     def changes(self, document_id: int) -> list[Change]:
+        project_id = access.require_current_access().project_id
         return [Change(id=r["id"], original=r["original"], replacement=r["replacement"],
                        reason=r["reason"], status=r["status"])
-                for r in q("SELECT * FROM changes WHERE document_id = %s ORDER BY id", (document_id,))]
+                for r in q("""SELECT c.* FROM changes c JOIN documents d ON d.id = c.document_id
+                              WHERE d.project_id = %s AND c.document_id = %s ORDER BY c.id""",
+                           (project_id, document_id))]
 
     @strawberry.field
     def lineage(self) -> list[LineageNode]:
+        project_id = access.require_current_access().project_id
         # The two degree counts used to be correlated subqueries evaluated once
         # per document — with no index on edges(to_doc), that is O(documents ×
         # edges) and it grew quadratically with the graph the page exists to
@@ -906,9 +944,9 @@ class Query:
         rows = q("""
           WITH degree AS (
             SELECT doc, sum(inb) AS inbound, sum(outb) AS outbound FROM (
-              SELECT to_doc   AS doc, 1 AS inb, 0 AS outb FROM edges
+              SELECT to_doc   AS doc, 1 AS inb, 0 AS outb FROM edges WHERE project_id = %s
               UNION ALL
-              SELECT from_doc AS doc, 0 AS inb, 1 AS outb FROM edges
+              SELECT from_doc AS doc, 0 AS inb, 1 AS outb FROM edges WHERE project_id = %s
             ) x GROUP BY doc
           )
           SELECT d.id, d.source, d.external_id, d.title, d.author, d.updated_src, d.created_src,
@@ -919,10 +957,12 @@ class Query:
                  coalesce(max(g.inbound), 0)::int AS inbound,
                  coalesce(max(g.outbound), 0)::int AS outbound
           FROM documents d
-          LEFT JOIN tags t ON t.document_id = d.id
-          LEFT JOIN sources s ON s.id = d.source_id
+          LEFT JOIN tags t ON t.project_id = d.project_id AND t.document_id = d.id
+          LEFT JOIN sources s ON s.project_id = d.project_id AND s.id = d.source_id
           LEFT JOIN degree g ON g.doc = d.id
-          GROUP BY d.id, s.kind, s.config ORDER BY d.id""")
+          WHERE d.project_id = %s
+          GROUP BY d.id, s.kind, s.config ORDER BY d.id""",
+                 (project_id, project_id, project_id))
         pos = layout_nodes(rows)
         today = dt.date.today()
         out = []
@@ -948,17 +988,20 @@ class Query:
 
     @strawberry.field
     def lineage_edges(self) -> list[LineageEdge]:
+        project_id = access.require_current_access().project_id
         rows = q("""
           SELECT e.id, f.external_id AS from_id, t.external_id AS to_id, e.rel, e.created_at,
                  e.curve, e.meta
           FROM edges e JOIN documents f ON f.id = e.from_doc JOIN documents t ON t.id = e.to_doc
-          ORDER BY e.id""")
+          WHERE e.project_id = %s AND f.project_id = %s AND t.project_id = %s
+          ORDER BY e.id""", (project_id, project_id, project_id))
         return [LineageEdge(id=r["id"], from_id=r["from_id"], to_id=r["to_id"], kind=r["rel"],
                             date=r["created_at"].isoformat() if r["created_at"] else "",
                             curve=r["curve"], meta=jload(r["meta"])) for r in rows]
 
     @strawberry.field
     def graph_stats(self) -> GraphStats:
+        project_id = access.require_current_access().project_id
         # "stale" is relative to the newest doc so seeded 2024 data reads sensibly.
         s = q1("""
           SELECT count(*) AS docs,
@@ -972,14 +1015,17 @@ class Query:
                                   AND NOT EXISTS (SELECT 1 FROM edges e WHERE e.rel = 'translates'
                                                   AND (e.from_doc = d.id OR e.to_doc = d.id))) AS untranslated,
                  count(*) FILTER (WHERE d.author = '' OR d.author = 'CI') AS unowned
-          FROM documents d""")
-        contradictions = q1("SELECT count(*) AS n FROM edges WHERE rel = 'contradicts'")["n"]
+          FROM documents d WHERE d.project_id = %s""", (project_id,))
+        contradictions = q1("""SELECT count(*) AS n FROM edges
+                                WHERE project_id = %s AND rel = 'contradicts'""", (project_id,))["n"]
         cited = q("""SELECT d.title, d.id, count(*) AS inbound FROM edges e
                      JOIN documents d ON d.id = e.to_doc
-                     GROUP BY d.id ORDER BY inbound DESC, d.id LIMIT 3""")
+                     WHERE e.project_id = %s AND d.project_id = %s
+                     GROUP BY d.id ORDER BY inbound DESC, d.id LIMIT 3""", (project_id, project_id))
         activity = q("""SELECT * FROM (
                           SELECT occurred_at::date AS day, count(*) AS n FROM events
-                          GROUP BY 1 ORDER BY 1 DESC LIMIT 60) x ORDER BY day""")
+                          WHERE project_id = %s
+                          GROUP BY 1 ORDER BY 1 DESC LIMIT 60) x ORDER BY day""", (project_id,))
         return GraphStats(
             docs=s["docs"], stale=s["stale"], orphans=s["orphans"],
             untranslated=s["untranslated"], unowned=s["unowned"], contradictions=int(contradictions),
@@ -1009,7 +1055,8 @@ class Query:
         return [Fact(id=r["id"], claim=r["claim"], source=r["source"], owner=r["owner_name"],
                      owner_tint=r["owner_tint"], status=r["status"],
                      verified=r["verified_at"].isoformat() if r["verified_at"] else "")
-                for r in q("SELECT * FROM facts ORDER BY id")]
+                for r in q("SELECT * FROM facts WHERE project_id = %s ORDER BY id",
+                           (access.require_current_access().project_id,))]
 
     @strawberry.field
     def claims(self, document_id: int) -> list[Fact]:
@@ -1022,14 +1069,16 @@ class Query:
         return [Fact(id=r["id"], claim=r["claim"], source=r["source"], owner=r["owner_name"],
                      owner_tint=r["owner_tint"], status=r["status"],
                      verified=r["verified_at"].isoformat() if r["verified_at"] else "")
-                for r in q("SELECT * FROM facts WHERE document_id = %s ORDER BY id", (document_id,))]
+                for r in q("SELECT * FROM facts WHERE project_id = %s AND document_id = %s ORDER BY id",
+                           (access.require_current_access().project_id, document_id))]
 
     @strawberry.field
     def fact_contradictions(self) -> list[FactContradiction]:
         """Claims in the ledger that disagree with each other. Deterministic
         (see detect_contradictions) — no model call, and [] on a ledger whose
         claims are consistent, which is the common case."""
-        rows = q("SELECT id, claim, status FROM facts ORDER BY id")
+        rows = q("SELECT id, claim, status FROM facts WHERE project_id = %s ORDER BY id",
+                 (access.require_current_access().project_id,))
         return [FactContradiction(
             fact_id=a["id"], claim=a["claim"], status=a["status"],
             other_fact_id=b["id"], other_claim=b["claim"], other_status=b["status"],
@@ -1041,7 +1090,8 @@ class Query:
         # overdue is derived in SQL against the database's own current_date, so
         # it cannot drift from the due date the same row reports.
         rows = q("""SELECT *, (due_date IS NOT NULL AND NOT done AND due_date < current_date) AS overdue
-                    FROM tasks ORDER BY id""")
+                    FROM tasks WHERE project_id = %s ORDER BY id""",
+                 (access.require_current_access().project_id,))
         return [Task(id=r["id"], title=r["title"], assignee_initials=r["assignee_initials"],
                      assignee_tint=r["assignee_tint"], kind=r["kind"], kind_label=r["kind_label"],
                      done=r["done"], due=r["due_date"].isoformat() if r["due_date"] else "",
@@ -1079,20 +1129,23 @@ class Query:
         """The strip above the board: counts and rosters rolled up off the same
         rows `tasks` returns. None on an empty inbox — there is nothing to
         summarise, and the board renders without a headline."""
+        project_id = access.require_current_access().project_id
         s = q1("""SELECT count(*) AS total,
                          count(*) FILTER (WHERE NOT done) AS open,
                          count(*) FILTER (WHERE done) AS done,
                          count(*) FILTER (WHERE NOT done AND due_date < current_date) AS overdue,
                          count(*) FILTER (WHERE NOT done AND due_date >= current_date
                                           AND due_date <= current_date + 7) AS due_soon
-                  FROM tasks""")
+                  FROM tasks WHERE project_id = %s""", (project_id,))
         if not s or not s["total"]:
             return None
         tags = [r["kind_label"] for r in q(
-            "SELECT DISTINCT kind_label FROM tasks WHERE kind_label <> '' ORDER BY kind_label")]
+            """SELECT DISTINCT kind_label FROM tasks
+               WHERE project_id = %s AND kind_label <> '' ORDER BY kind_label""", (project_id,))]
         people = [r["assignee_initials"] for r in q(
             """SELECT DISTINCT assignee_initials FROM tasks
-               WHERE NOT done AND assignee_initials <> '' ORDER BY assignee_initials""")]
+               WHERE project_id = %s AND NOT done AND assignee_initials <> ''
+               ORDER BY assignee_initials""", (project_id,))]
         # The headline is whichever number needs acting on: a missed deadline
         # outranks the open count, and "all caught up" is itself the news.
         if s["overdue"]:
@@ -1136,7 +1189,8 @@ class Query:
     def glossary(self) -> list[GlossaryTerm]:
         return [GlossaryTerm(id=r["id"], term=r["term"], definition=r["definition"],
                              owner=r["owner_name"], updated=r["updated"].isoformat())
-                for r in q("SELECT * FROM glossary ORDER BY term")]
+                for r in q("SELECT * FROM glossary WHERE project_id = %s ORDER BY term",
+                           (access.require_current_access().project_id,))]
 
     @strawberry.field
     def tag_defs(self) -> list[TagDef]:
@@ -1213,13 +1267,16 @@ class Query:
         many carry a vector. Counted off `chunks` at read time. A workspace that
         has uploaded nothing gets an empty manifest and a '' summary — never a
         sample receipt."""
+        project_id = access.require_current_access().project_id
         rows = q("""SELECT d.id, d.source_path, d.external_id, d.updated_src,
                            count(c.id) AS chunks,
                            count(c.embedding) AS embedded
                     FROM documents d
-                    JOIN sources s ON s.id = d.source_id AND s.provider = 'upload'
-                    LEFT JOIN chunks c ON c.document_id = d.id
-                    GROUP BY d.id ORDER BY d.id""")
+                    JOIN sources s ON s.project_id = d.project_id AND s.id = d.source_id
+                                      AND s.provider = 'upload'
+                    LEFT JOIN chunks c ON c.project_id = d.project_id AND c.document_id = d.id
+                    WHERE d.project_id = %s
+                    GROUP BY d.id ORDER BY d.id""", (project_id,))
         files = []
         for r in rows:
             # source_path is 'upload/<file>' and external_id 'upload:<file>';
@@ -1458,7 +1515,9 @@ class Query:
                                owner=r["owner_name"], channels=r["channels"], sources=jload(r["sources"]),
                                served=r["served"], spark=r["spark"],
                                updated=r["updated"].isoformat())
-                for r in q("SELECT * FROM approved_answers ORDER BY (status = 'approved') DESC, served DESC")]
+                for r in q("""SELECT * FROM approved_answers WHERE project_id = %s
+                              ORDER BY (status = 'approved') DESC, served DESC""",
+                           (access.require_current_access().project_id,))]
 
     @strawberry.field
     def answer_coverage_gaps(self, limit: int = 8) -> list[str]:
@@ -1520,8 +1579,10 @@ class Query:
 
     @strawberry.field
     def decisions(self) -> list[Decision]:
+        project_id = access.require_current_access().project_id
         rows = q("""SELECT d.*, s.statement AS sup_stmt FROM decisions d
-                    LEFT JOIN decisions s ON s.id = d.superseded_by ORDER BY d.id DESC""")
+                    LEFT JOIN decisions s ON s.project_id = d.project_id AND s.id = d.superseded_by
+                    WHERE d.project_id = %s ORDER BY d.id DESC""", (project_id,))
         return [Decision(id=r["id"], statement=r["statement"], context=r["context"], status=r["status"],
                          source_label=r["source_label"], owners=r["owners"],
                          decided_on=r["decided_on"].isoformat() if r["decided_on"] else "",
@@ -1570,6 +1631,7 @@ class Query:
     def freshness(self) -> list[FreshnessRow]:
         """Rollup over connected sources only (docs with a source_id) — one row
         per live sources row; seed/sample docs never masquerade as a provider."""
+        project_id = access.require_current_access().project_id
         rows = q("""
           WITH bucketed AS (
             SELECT d.source_id,
@@ -1578,19 +1640,22 @@ class Query:
                         THEN 'stale'
                         WHEN d.updated_src < current_date - 7 THEN 'aging'
                         ELSE 'fresh' END AS bucket
-            FROM documents d WHERE d.source_id IS NOT NULL)
+            FROM documents d WHERE d.project_id = %s AND d.source_id IS NOT NULL)
           SELECT s.display_name AS source, s.provider AS provider,
                  count(*) FILTER (WHERE b.bucket = 'fresh') AS fresh,
                  count(*) FILTER (WHERE b.bucket = 'aging') AS aging,
                  count(*) FILTER (WHERE b.bucket = 'stale') AS stale
           FROM sources s LEFT JOIN bucketed b ON b.source_id = s.id
-          GROUP BY s.id, s.display_name, s.provider ORDER BY count(b.source_id) DESC, s.id""")
+          WHERE s.project_id = %s
+          GROUP BY s.id, s.display_name, s.provider ORDER BY count(b.source_id) DESC, s.id""",
+                 (project_id, project_id))
         return [FreshnessRow(source=r["source"], provider=r["provider"], fresh=r["fresh"],
                              aging=r["aging"], stale=r["stale"]) for r in rows]
 
     @strawberry.field
     def readability(self) -> list[ReadabilityRow]:
-        rows = q("SELECT id, title, source, readability FROM documents ORDER BY id")
+        rows = q("""SELECT id, title, source, readability FROM documents
+                    WHERE project_id = %s ORDER BY id""", (access.require_current_access().project_id,))
         out = []
         for r in rows:
             grade, note = (r["readability"].split("|", 1) + [""])[:2] if r["readability"] else ("", "")
@@ -1605,7 +1670,8 @@ class Query:
         return [GlossaryCandidate(id=r["id"], term=r["term"], variants=r["variants"],
                                   definition=r["definition"], evidence=r["evidence"] or "",
                                   evidence_doc_id=r["evidence_doc_id"] or 0)
-                for r in q("SELECT * FROM glossary WHERE candidate ORDER BY id")]
+                for r in q("SELECT * FROM glossary WHERE project_id = %s AND candidate ORDER BY id",
+                           (access.require_current_access().project_id,))]
 
     @strawberry.field
     def audit_runs(self) -> list[AuditRun]:

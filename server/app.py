@@ -48,7 +48,7 @@ import enterprise_identity
 from sitefiles import PublishedSiteFiles
 
 from db import DB_URL, ensure_schema, exec_, q, q1
-from queries import Query, hybrid_search
+from queries import Query, hybrid_search, like_pattern
 from mutations_knowledge import MutKnowledge
 from mutations_publish import MutPublish
 from mutations_admin import MutAdmin
@@ -242,8 +242,8 @@ def chat(body: ChatIn, access: t.Any = Depends(auth_module.require_project)):
     if not approved:
         hit = q1("""SELECT id, question, answer, 1.0 AS sim FROM approved_answers
                     WHERE project_id = %s AND status = 'approved'
-                      AND (question ILIKE %s OR %s ILIKE '%%' || question || '%%')
-                    LIMIT 1""", (project_id, f"%{body.message[:60]}%", body.message))
+                      AND (question ILIKE %s OR position(lower(question) in lower(%s)) > 0)
+                    LIMIT 1""", (project_id, like_pattern(body.message[:60]), body.message))
         approved = hit
 
     if approved:
