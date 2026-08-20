@@ -28,6 +28,11 @@ import flowengine
 import ingest
 import access
 import links
+from mari_components import (
+    DocumentACL, KnowledgeDocument, PollPage as ComponentPollPage, Principal,
+    SyncMode, Tombstone,
+)
+from mari_components.sync import ManifestEntry, SyncState, plan_sync
 
 # internal config keys the worker owns (never provider credential fields)
 INTERNAL_KEYS = ("provider_key", "cursor", "item_hashes", "last_sync_at", "last_error",
@@ -105,6 +110,22 @@ def deletion_ids(rows: list[dict], provider_key: str, seen_paths: set[str],
     return gone
 
 
+def _component_document(item: dict) -> KnowledgeDocument:
+    acl = item.get("acl")
+    principals = []
+    for value in tuple(getattr(acl, "principals", ()) or ()):
+        kind, separator, identifier = str(value).partition(":")
+        principals.append(Principal(kind if separator else "provider", identifier if separator else kind))
+    return KnowledgeDocument(
+        str(item.get("path") or ""), str(item.get("title") or item.get("path") or ""),
+        str(item.get("body") or ""), revision=str(item.get("hash_hint") or ""),
+        updated_at=str(item.get("updated_at") or ""),
+        source_url=str(item.get("source_url") or ""),
+        acl=DocumentACL(getattr(acl, "visibility", "connector_scope"), tuple(principals)),
+        metadata={"unchanged": bool(item.get("unchanged"))},
+    )
+
+
 def _sync_worker(source_id: int, full: bool) -> dict:
     """Run one connector sync. Returns honest stats (plus 'error' on failure) —
     the same shape flowengine's sync_source step reads from ingest.run_sync."""
@@ -147,7 +168,7 @@ def _sync_worker(source_id: int, full: bool) -> dict:
             # A rebuild is prepared in memory and becomes authoritative only
             # after a complete listing succeeds. Clearing chunks/cursors first
             # made a transient provider failure destroy the working index.
-            cursor, hashes = None, {}
+            cursor = None
 
         # —— validate (cheap, honest) ——
         ingest._set(source_id, state="running", phase="listing", done=0, total=0, error="")
@@ -176,12 +197,27 @@ def _sync_worker(source_id: int, full: bool) -> dict:
             # only safe recovery because it can reconcile removals too.
             return _sync_worker(source_id, True)
         items = [item.as_dict() if isinstance(item, PollItem) else item for item in poll.items]
-        # An incomplete poll may expose a provider-native, resumable checkpoint.
-        # Without one we hold the previous durable cursor and safely replay.
-        new_cursor = poll.cursor if poll.snapshot_complete else (poll.checkpoint or stored_cursor)
-        if authoritative_full and not poll.snapshot_complete:
-            # Retain prior coverage while merging any safely refreshed items.
-            hashes = {**stored_hashes, **hashes}
+        component_page = ComponentPollPage(
+            upserts=tuple(_component_document(item) for item in items if item.get("path")),
+            tombstones=tuple(Tombstone(str(path)) for path in poll.tombstones if str(path)),
+            next_cursor=poll.cursor,
+            next_checkpoint=poll.checkpoint,
+            snapshot_complete=poll.snapshot_complete,
+        )
+        sync_plan = plan_sync(
+            SyncState(
+                cursor=stored_cursor,
+                manifest={path: ManifestEntry(str(value)) for path, value in stored_hashes.items()},
+                full_seen=frozenset(snapshot_seen_paths),
+            ),
+            component_page,
+            mode=SyncMode.FULL if authoritative_full else SyncMode.INCREMENTAL,
+        )
+        changed_paths = {document.external_id for document in sync_plan.upserts}
+        hashes = {path: entry.fingerprint for path, entry in sync_plan.state.manifest.items()}
+        snapshot_seen_paths = set(sync_plan.state.full_seen)
+        new_cursor = (sync_plan.state.cursor if sync_plan.snapshot_complete
+                      else sync_plan.state.checkpoint or stored_cursor)
         total = len(items)
         ingest._set(source_id, total=total)
         with ingest._conn() as conn:
@@ -191,7 +227,7 @@ def _sync_worker(source_id: int, full: bool) -> dict:
 
         done = 0
         seen_paths: set[str] = set()
-        tombstones = {str(path) for path in poll.tombstones if str(path)}
+        tombstones = {item.external_id for item in sync_plan.deletes}
         initials = (key[:2] or "??").upper()
         author = entry["provider"].get("name", key)
 
@@ -202,26 +238,15 @@ def _sync_worker(source_id: int, full: bool) -> dict:
                     done += 1
                     continue
                 seen_paths.add(path)
-                if authoritative_full:
-                    snapshot_seen_paths.add(path)
-                if item.get("unchanged"):
-                    # Provider conditional responses (for example Website
-                    # HTTP 304) deliberately have no body. They prove the
-                    # existing item is present and unchanged; treating that
-                    # empty body as a revision would erase its search chunks.
+                if path not in changed_paths:
                     stats["skipped"] += 1
                     done += 1
                     ingest._set(source_id, phase="fetching", done=done)
                     continue
                 title = (item.get("title") or path).strip() or path
                 body = item.get("body") or ""
-                hint = item.get("hash_hint")
-                h = str(hint) if hint else ingest._sha(f"{title}\n\n{body}")
+                h = hashes[path]
                 done += 1
-                if not full and hashes.get(path) == h:
-                    stats["skipped"] += 1  # hash_hint / body hash unchanged — no re-embed
-                    ingest._set(source_id, phase="fetching", done=done)
-                    continue
                 ingest._set(source_id, phase="chunking", done=done)
                 doc_id, inserted = ingest._upsert_document(
                     conn, source_id, f"{key}:{source_id}:{path}", title, body,
@@ -241,7 +266,6 @@ def _sync_worker(source_id: int, full: bool) -> dict:
                 stats["items_changed"] += 1
                 stats["chunks"] += n
                 stats["embedded"] += e
-                hashes[path] = h
                 ingest._set(source_id, done=done)
                 if done % 5 == 0:
                     _checkpoint(conn, provider_col, display, "embedded", done, total,
@@ -254,14 +278,8 @@ def _sync_worker(source_id: int, full: bool) -> dict:
             ingest._set(source_id, phase="indexing")
             rows = conn.execute(
                 "SELECT id, source_path FROM documents WHERE source_id = %s", (source_id,)).fetchall()
-            deletion_seen = snapshot_seen_paths if authoritative_full else seen_paths
-            gone = deletion_ids(rows, key, deletion_seen, tombstones, full=authoritative_full,
-                                snapshot_complete=poll.snapshot_complete)
-            if tombstones:
-                for path in tombstones:
-                    hashes.pop(path, None)
-            if authoritative_full and poll.snapshot_complete:
-                hashes = {p: hv for p, hv in hashes.items() if p in snapshot_seen_paths}
+            gone = deletion_ids(rows, key, set(), tombstones, full=False,
+                                snapshot_complete=False)
             if gone:
                 ingest._delete_documents(conn, gone)
                 stats["files_deleted"] = len(gone)
