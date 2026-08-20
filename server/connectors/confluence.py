@@ -34,6 +34,9 @@ PROVIDER = {
         {"key": "space_key", "label": "Space key (optional)", "secret": False,
          "placeholder": "ENG",
          "help": "Limit sync to one space; leave blank for all readable spaces"},
+        {"key": "webhook_secret", "label": "Webhook signing secret", "secret": True,
+         "placeholder": "A long random secret",
+         "help": "Use this secret to HMAC-sign Confluence webhook requests to Mari"},
     ],
     "docs_url": "https://support.atlassian.com/atlassian-account/docs/manage-api-tokens-for-your-atlassian-account/",
 }
@@ -231,6 +234,34 @@ def _page_to_item(page: dict) -> dict:
         "updated_at": updated,
         "hash_hint": str(version) if version is not None else None,
     }
+
+
+def fetch_page(config: dict, page_id: str) -> dict | None:
+    """Fetch one page canonically; ``None`` is an authoritative tombstone.
+
+    Webhook bodies are deliberately never indexed. They are only dirty hints;
+    the event worker calls this endpoint so edits and deletes have the same
+    trust boundary as polling.
+    """
+    page_id = str(page_id or "").strip()
+    if not page_id:
+        raise ConfluenceError("Confluence: page id is required", 400)
+    try:
+        page = _get(
+            config,
+            f"/wiki/rest/api/content/{urllib.parse.quote(page_id, safe='')}",
+            {"expand": "body.storage,version,history.lastUpdated,space"},
+        )
+    except ConfluenceError as exc:
+        if exc.status == 404:
+            return None
+        raise
+    if str(page.get("type") or "page") != "page":
+        return None
+    item = _page_to_item(page)
+    item["acl"] = ACLMetadata(visibility="connector_scope")
+    item["space_key"] = str((page.get("space") or {}).get("key") or "")
+    return item
 
 
 def list_items(config: dict, cursor: str | None) -> PollResult:
