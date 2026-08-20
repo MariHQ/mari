@@ -13,7 +13,8 @@ import typing as t
 from mari_server.integrations import llm
 from mari_server.domain import access
 from mari_server.repositories import lineage_repository as links
-from mari_server.repositories.database import actor_name, audit, exec_, q, q1, transaction
+from mari_server.repositories import knowledge as knowledge_store
+from mari_server.repositories.database import actor_name, audit
 from mari_components import KnowledgeDocument
 from mari_components.knowledge import (
     check_claims as component_check_claims,
@@ -111,29 +112,20 @@ SCAN_CALL_TIMEOUT = 60.0  # per model call
 SCAN_DEADLINE = 180.0    # wall clock for the whole scan, however many documents
 
 
-def _scan_batch(column: str, doc_ids: list[int] | None, limit: int) -> list[dict]:
+def _scan_batch(kind: str, doc_ids: list[int] | None, limit: int) -> list[dict]:
     """The documents this scan should read.
 
     With `doc_ids` (a flow step's fetch_docs output) those documents, in the
     order given. Without, the least-recently-scanned documents first, newest
     breaking the tie — so every document is reached in turn instead of the two
     newest being re-read on every scan forever."""
-    if doc_ids:
-        rows = q(f"""SELECT id, title, snippet, body, source, updated_src FROM documents
-                     WHERE id = ANY(%s) ORDER BY {column} NULLS FIRST,
-                                                updated_src DESC NULLS LAST, id""",
-                 (list(doc_ids),))
-        return rows[:limit] if limit else rows
-    return q(f"""SELECT id, title, snippet, body, source, updated_src FROM documents
-                 ORDER BY {column} NULLS FIRST, updated_src DESC NULLS LAST, id
-                 LIMIT %s""", (limit,))
+    return knowledge_store.scan_documents(kind, doc_ids, limit)
 
 
-def _mark_scanned(column: str, doc_ids: list[int]) -> None:
+def _mark_scanned(kind: str, doc_ids: list[int]) -> None:
     """Record that the scanner read these documents. This is what makes the
     next scan pick different ones; without it the rotation above is a no-op."""
-    if doc_ids:
-        exec_(f"UPDATE documents SET {column} = now() WHERE id = ANY(%s)", (list(doc_ids),))
+    knowledge_store.mark_scanned(kind, doc_ids)
 
 
 def _scan_concurrently(docs: list[dict], operation) -> tuple[list[tuple[dict, t.Any]], int]:
@@ -210,10 +202,10 @@ def scan_decisions_for(doc_ids: list[int] | None = None,
     """Mine `doc_ids` (or the least-recently-scanned documents) for
     decisions. Returns (added, documents read, note) — the note is '' when
     the scan finished, and says what was left unread when it did not."""
-    docs = _scan_batch("decisions_scanned_at", doc_ids, limit)
+    docs = _scan_batch("decisions", doc_ids, limit)
     if not docs:
         return 0, 0, ""
-    existing = {r["statement"].lower() for r in q("SELECT statement FROM decisions")}
+    existing = knowledge_store.decision_statements()
 
     def extract(doc: dict):
         return component_extract_decisions(
@@ -232,15 +224,16 @@ def scan_decisions_for(doc_ids: list[int] | None = None,
                     else str(item.get("statement", ""))).strip()[:200]
             if not stmt or stmt.lower() in existing:
                 continue
-            exec_("""INSERT INTO decisions (statement, context, status, source_label, owners)
-                     VALUES (%s, %s, 'proposed', %s, %s) ON CONFLICT (statement) DO NOTHING""",
-                  (stmt, ((item.evidence[0].quote if item.evidence else "")
-                          if hasattr(item, "evidence") else str(item.get("context", "")))[:400],
-                   ("Mari scan · " + doc["title"])[:120], [actor_name()]))
-            existing.add(stmt.lower())
-            added += 1
+            if knowledge_store.add_decision(
+                stmt,
+                ((item.evidence[0].quote if item.evidence else "")
+                 if hasattr(item, "evidence") else str(item.get("context", "")))[:400],
+                ("Mari scan · " + doc["title"])[:120], actor_name(),
+            ):
+                existing.add(stmt.lower())
+                added += 1
 
-    _mark_scanned("decisions_scanned_at", [doc["id"] for doc, _ in results])
+    _mark_scanned("decisions", [doc["id"] for doc, _ in results])
     note = (f"{unread} document{'' if unread == 1 else 's'} not read — the scan hit its "
             f"{int(SCAN_DEADLINE)}s budget; run it again to continue") if unread else ""
     audit("scanned for decisions", f"{added} candidates from {len(results)} documents"
@@ -261,11 +254,11 @@ def scan_facts_for(doc_ids: list[int] | None = None,
     the call rather than a guess about the output.
 
     Returns (added, documents read, note)."""
-    docs = [d for d in _scan_batch("facts_scanned_at", doc_ids, limit)
+    docs = [d for d in _scan_batch("facts", doc_ids, limit)
             if (d["body"] or d["snippet"] or "").strip()]
     if not docs:
         return 0, 0, ""
-    existing = {r["claim"].lower() for r in q("SELECT claim FROM facts")}
+    existing = knowledge_store.fact_claims()
 
     def extract(doc: dict):
         return component_extract_facts(
@@ -290,13 +283,13 @@ def scan_facts_for(doc_ids: list[int] | None = None,
                 continue
             # `source` stays the human label it always was; `document_id`
             # is the key, and it is the document this call actually read.
-            exec_("""INSERT INTO facts (claim, source, owner_name, owner_tint, status, verified, document_id)
-                     VALUES (%s, %s, %s, 1, 'Needs review', '—', %s) ON CONFLICT (claim) DO NOTHING""",
-                  (claim, ("Mari scan · " + doc["title"])[:80], actor_name(), doc["id"]))
-            existing.add(claim.lower())
-            added += 1
+            if knowledge_store.add_fact(
+                claim, ("Mari scan · " + doc["title"])[:80], actor_name(), doc["id"],
+            ):
+                existing.add(claim.lower())
+                added += 1
 
-    _mark_scanned("facts_scanned_at", [doc["id"] for doc, _ in results])
+    _mark_scanned("facts", [doc["id"] for doc, _ in results])
     note = (f"{unread} document{'' if unread == 1 else 's'} not read — the scan hit its "
             f"{int(SCAN_DEADLINE)}s budget; run it again to continue") if unread else ""
     audit("scanned for facts", f"{added} candidates from {len(results)} documents"
@@ -305,12 +298,12 @@ def scan_facts_for(doc_ids: list[int] | None = None,
 
 
 def fact_check_document(document_id: int) -> int:
-    doc = q1("SELECT * FROM documents WHERE id = %s", (document_id,))
+    doc = knowledge_store.document(document_id)
     if not doc:
         return 0
-    facts = q("SELECT claim FROM facts WHERE status = 'Verified'")
+    facts = knowledge_store.fact_claims(verified_only=True)
     assessments = component_check_claims(
-        [fact["claim"] for fact in facts], [_component_document(doc)],
+        list(facts), [_component_document(doc)],
         generate_json=lambda prompt, _version: llm.generate_json(
             prompt, system="You are Mari, a rigorous fact checker."),
         maximum_documents=1,
@@ -319,12 +312,11 @@ def fact_check_document(document_id: int) -> int:
     for assessment in assessments[:5]:
         if assessment.verdict != "contradicted" or not assessment.evidence:
             continue
-        exec_("""INSERT INTO findings (document_id, kind, severity, text, note)
-                 VALUES (%s, 'fact', 'error', %s, %s)
-                 ON CONFLICT (document_id, text) DO NOTHING""",
-              (document_id, assessment.evidence[0].quote[:200],
-               f"{assessment.claim}: {assessment.explanation}"[:300]))
-        found += 1
+        if knowledge_store.add_finding(
+            document_id, assessment.evidence[0].quote[:200],
+            f"{assessment.claim}: {assessment.explanation}"[:300],
+        ):
+            found += 1
     audit("ran fact check", doc["title"])
     return found
 
@@ -337,10 +329,7 @@ def derive_links() -> int:
 
 
 def regenerate_digest() -> bool:
-    project_id = access.require_current_access().project_id
-    docs = q("""SELECT id, external_id, title, body, snippet, source, updated_src
-                  FROM documents WHERE project_id = %s
-                  ORDER BY updated_src DESC LIMIT 8""", (project_id,))
+    docs = knowledge_store.recent_documents(8)
     documents = [_component_document(doc) for doc in docs]
     result = component_summarize_digest(
         documents,
@@ -360,15 +349,6 @@ def regenerate_digest() -> bool:
                 wheres.append({"source": row["source"], "label": row["title"]})
         topics.append((topic.title[:120], topic.summary[:500], json.dumps(wheres), "[]"))
 
-    def replace(conn):
-        conn.execute("DELETE FROM digest_topics WHERE project_id = %s", (project_id,))
-        for title, summary, wheres, impact in topics:
-            conn.execute("""INSERT INTO digest_topics
-                         (project_id, title, summary, wheres, impact)
-                         VALUES (%s, %s, %s, %s, %s)""",
-                         (project_id, title, summary, wheres, impact))
-
-    transaction(replace)
+    knowledge_store.replace_digest(topics)
     audit("regenerated digest", f"{len(topics)} topics")
     return True
-
