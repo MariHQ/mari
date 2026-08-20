@@ -234,6 +234,13 @@ def _completion_limit(gateway: dict[str, t.Any] | None, tokens: int) -> dict[str
     return {key: tokens}
 
 
+def _thinking_control(gateway: dict[str, t.Any] | None) -> dict[str, t.Any]:
+    """Use DeepSeek Flash as the low-latency, visible-output model we configured."""
+    if gateway and gateway.get("compatibility") == "deepseek":
+        return {"thinking": {"type": "disabled"}}
+    return {}
+
+
 def _response_format(gateway: dict[str, t.Any] | None,
                      requested: bool | dict[str, t.Any]) -> dict[str, t.Any]:
     """Provider-native structured output for model decisions.
@@ -251,7 +258,7 @@ def _response_format(gateway: dict[str, t.Any] | None,
         # reaches `content`. Structured decisions need the non-thinking model.
         return {
             "response_format": {"type": "json_object"},
-            "thinking": {"type": "disabled"},
+            **_thinking_control(gateway),
         }
     if isinstance(requested, dict):
         return {"response_format": {
@@ -555,6 +562,7 @@ def generate(prompt: str, system: str = "", timeout: float = 120.0,
             "model": model,
             "messages": messages,
             **_completion_limit(gateway, 700),
+            **_thinking_control(gateway),
             **_response_format(gateway, json_format),
         }
         headers = _gateway_headers(gateway, model) if gateway else {"Authorization": f"Bearer {key}"}
@@ -655,6 +663,7 @@ def chat_stream(messages: list[dict], system: str = "") -> t.Iterator[str]:
             _fail("settings.llm names the openai provider but no OpenAI API key is set")
             return
         payload = {"model": model, "stream": True, **_completion_limit(gateway, 800),
+                   **_thinking_control(gateway),
                    "messages": ([{"role": "system", "content": system}] if system else []) + messages}
         base = gateway["base_url"] if gateway else OPENAI_BASE
         if gateway and (config_error := _gateway_config_error(gateway)):

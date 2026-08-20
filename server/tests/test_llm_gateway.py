@@ -205,6 +205,7 @@ class GatewayContractTests(unittest.TestCase):
             self.assertEqual(llm.generate("health prompt"), "ready")
         payload = post.call_args.args[1]
         self.assertEqual(payload["max_tokens"], 700)
+        self.assertEqual(payload["thinking"], {"type": "disabled"})
         self.assertNotIn("max_completion_tokens", payload)
         self.assertNotIn("metadata", payload)
 
