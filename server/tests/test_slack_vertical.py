@@ -141,10 +141,10 @@ class SlackSetupToAnswerTests(unittest.TestCase):
             1, 7, "acme", "Acme", "admin", access.CAPABILITIES, principal_id="1")
 
     def _setup(self):
-        with access.use_access(self.project), patch.object(bots, "SLACK_API", self.slack_api), \
+        with patch.object(bots, "SLACK_API", self.slack_api), \
              patch.object(bots.auth, "_conn", return_value=self.database):
             return bots.slack_setup(bots.SlackSetupIn(
-                bot_token=" xoxb-valid ", signing_secret=" signing-secret "))
+                bot_token=" xoxb-valid ", signing_secret=" signing-secret "), self.project)
 
     @staticmethod
     def _request(payload: dict, secret: str = "signing-secret"):
@@ -165,11 +165,11 @@ class SlackSetupToAnswerTests(unittest.TestCase):
         return row
 
     def test_invalid_auth_test_never_persists_credentials(self):
-        with access.use_access(self.project), patch.object(bots, "SLACK_API", self.slack_api), \
+        with patch.object(bots, "SLACK_API", self.slack_api), \
              patch.object(bots.auth, "_conn", return_value=self.database), \
              self.assertRaisesRegex(HTTPException, "invalid_auth"):
             bots.slack_setup(bots.SlackSetupIn(
-                bot_token="xoxb-rejected", signing_secret="signing-secret"))
+                bot_token="xoxb-rejected", signing_secret="signing-secret"), self.project)
         self.assertIsNone(self.database.installation)
         self.assertFalse(any("bot_installations" in sql for sql, _ in self.database.calls))
 
@@ -177,11 +177,11 @@ class SlackSetupToAnswerTests(unittest.TestCase):
         self.database.installation = {"id": 8, "project_id": 9, "provider": "slack",
                                       "external_team_id": "T-ACME", "config": {},
                                       "status": "connected"}
-        with access.use_access(self.project), patch.object(bots, "SLACK_API", self.slack_api), \
+        with patch.object(bots, "SLACK_API", self.slack_api), \
              patch.object(bots.auth, "_conn", return_value=self.database), \
              self.assertRaisesRegex(HTTPException, "another project") as error:
             bots.slack_setup(bots.SlackSetupIn(
-                bot_token="xoxb-valid", signing_secret="signing-secret"))
+                bot_token="xoxb-valid", signing_secret="signing-secret"), self.project)
         self.assertEqual(error.exception.status_code, 409)
         self.assertFalse(any(sql.startswith("UPDATE bot_installations") for sql, _ in self.database.calls))
 

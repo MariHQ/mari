@@ -208,10 +208,12 @@ async def confluence_webhook(source_id: int, request: Request):
 
 @router.get(
     "/connectors/confluence/{source_id}/webhook",
-    dependencies=[Depends(auth.require_capability("source.manage"))],
 )
-def confluence_webhook_setup(source_id: int, request: Request):
-    current = access.require_current_access()
+def confluence_webhook_setup(
+    source_id: int,
+    request: Request,
+    current: access.AccessContext = Depends(auth.require_capability("source.manage")),
+):
     source = q1(
         """SELECT id, config FROM sources
             WHERE id=%s AND project_id=%s AND kind='connector' AND provider='confluence'""",

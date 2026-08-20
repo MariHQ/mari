@@ -477,20 +477,22 @@ async def slack_webhook(request: Request):
 # ————————————————— GET /bots/status —————————————————
 
 
-@router.get("/bots/status", dependencies=[Depends(auth.require_project)])
-def bots_status() -> dict:
-    slack_row = pq1("""SELECT config FROM bot_installations
+@router.get("/bots/status")
+def bots_status(current: access.AccessContext = Depends(auth.require_project)) -> dict:
+    project_id = current.project_id
+    slack_row = q1("""SELECT config FROM bot_installations
                        WHERE project_id = %s AND provider = 'slack' AND status = 'connected'
-                       ORDER BY id LIMIT 1""")
-    gh_row = pq1("""SELECT config FROM bot_installations
+                       ORDER BY id LIMIT 1""", (project_id,))
+    gh_row = q1("""SELECT config FROM bot_installations
                     WHERE project_id = %s AND provider = 'github' AND status = 'connected'
-                    ORDER BY id LIMIT 1""")
+                    ORDER BY id LIMIT 1""", (project_id,))
     slack = (slack_row or {}).get("config") or {}
     gh = (gh_row or {}).get("config") or {}
     env_secret = (config.get("github", "webhook_secret") or "").strip()
-    repos = pq(
+    repos = q(
         "SELECT id, config->>'repo' AS repo FROM sources "
-        "WHERE project_id = %s AND kind = 'github' AND config->>'repo' IS NOT NULL ORDER BY id"
+        "WHERE project_id = %s AND kind = 'github' AND config->>'repo' IS NOT NULL ORDER BY id",
+        (project_id,),
     )
     return {
         "slack": {
@@ -510,9 +512,11 @@ def bots_status() -> dict:
 # ————————————————— POST /bots/slack/setup —————————————————
 
 
-@router.post("/bots/slack/setup",
-             dependencies=[Depends(auth.require_capability("destination.manage"))])
-def slack_setup(body: SlackSetupIn) -> dict:
+@router.post("/bots/slack/setup")
+def slack_setup(
+    body: SlackSetupIn,
+    current: access.AccessContext = Depends(auth.require_capability("destination.manage")),
+) -> dict:
     """Verify credentials and persist the installation webhook routing uses.
 
     `auth.test` is the identity proof: callers do not get to choose a team id,
@@ -532,7 +536,7 @@ def slack_setup(body: SlackSetupIn) -> dict:
         raise HTTPException(502, "Slack auth.test returned no team id.")
     team_name = str(verified.get("team") or "").strip()[:200]
     bot_user = str(verified.get("user") or "").strip()[:200]
-    project_id = access.require_current_access().project_id
+    project_id = current.project_id
     config_patch = {
         "bot_token": token,
         "signing_secret": signing_secret,
@@ -575,12 +579,14 @@ def slack_setup(body: SlackSetupIn) -> dict:
 # ————————————————— POST /bots/slack/test —————————————————
 
 
-@router.post("/bots/slack/test",
-             dependencies=[Depends(auth.require_capability("destination.manage"))])
-def slack_test() -> dict:
-    row = pq1("""SELECT id, config FROM bot_installations
+@router.post("/bots/slack/test")
+def slack_test(
+    current: access.AccessContext = Depends(auth.require_capability("destination.manage")),
+) -> dict:
+    project_id = current.project_id
+    row = q1("""SELECT id, config FROM bot_installations
                  WHERE project_id = %s AND provider = 'slack' AND status = 'connected'
-                 ORDER BY id LIMIT 1""")
+                 ORDER BY id LIMIT 1""", (project_id,))
     cfg = (row or {}).get("config") or {}
     token = (cfg.get("bot_token") or "").strip()
     if not token:
@@ -591,5 +597,5 @@ def slack_test() -> dict:
     exec_("""UPDATE bot_installations SET config = config || %s, updated_at = now()
              WHERE id = %s AND project_id = %s""",
           (json.dumps({"team_name": out.get("team", ""), "connected_at": _now_iso()}),
-           row["id"], access.require_current_access().project_id))
+           row["id"], project_id))
     return {"ok": True, "team": out.get("team", ""), "botUser": out.get("user", "")}

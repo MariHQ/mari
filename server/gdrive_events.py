@@ -52,10 +52,12 @@ def _source(source_id: int, project_id: int) -> dict | None:
     )
 
 
-@router.post("/connectors/google-drive/watch",
-             dependencies=[Depends(auth.require_capability("source.manage"))])
-def create_watch(body: DriveWatchIn) -> dict:
-    project_id = access.require_current_access().project_id
+@router.post("/connectors/google-drive/watch")
+def create_watch(
+    body: DriveWatchIn,
+    current: access.AccessContext = Depends(auth.require_capability("source.manage")),
+) -> dict:
+    project_id = current.project_id
     source = _source(body.source_id, project_id)
     if not source:
         raise HTTPException(404, "Google Drive source not found.")
@@ -299,8 +301,7 @@ def renew_due_watches() -> int:
             frozenset({"source.manage"}),
         )
         try:
-            with access.use_access(context):
-                create_watch(DriveWatchIn(source_id=int(row["source_id"])))
+            create_watch(DriveWatchIn(source_id=int(row["source_id"])), context)
             renewed += 1
         except Exception as exc:  # existing channel remains active until its expiration
             log.warning("Google Drive watch renewal failed for source %s: %s",

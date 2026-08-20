@@ -86,11 +86,11 @@ class DriveWatchSetupTests(unittest.TestCase):
         def execute(sql, args=()):
             calls.append((" ".join(sql.split()), args))
         response = json.dumps({"resourceId": "resource-1", "expiration": "1800000000000"}).encode()
-        with access.use_access(self.context), patch.object(gdrive_events, "_source", return_value=self.source), \
+        with patch.object(gdrive_events, "_source", return_value=self.source), \
              patch.object(gdrive_events.config, "get", return_value="https://mari.example.test"), \
              patch.object(gdrive_events, "exec_", side_effect=execute), \
              patch.object(gdrive_events.gdrive, "_request", return_value=(200, response)) as watch:
-            result = gdrive_events.create_watch(gdrive_events.DriveWatchIn(source_id=5))
+            result = gdrive_events.create_watch(gdrive_events.DriveWatchIn(source_id=5), self.context)
         self.assertTrue(result["ok"])
         self.assertTrue(calls[0][0].startswith("INSERT INTO gdrive_watch_channels"))
         body = json.loads(watch.call_args.args[3])
@@ -99,20 +99,20 @@ class DriveWatchSetupTests(unittest.TestCase):
         self.assertNotIn(body["token"], json.dumps(result))
 
     def test_watch_fails_explicitly_without_cursor_or_https(self):
-        with access.use_access(self.context), patch.object(gdrive_events, "_source",
+        with patch.object(gdrive_events, "_source",
                 return_value={**self.source, "config": {"cursor": ""}}), \
              self.assertRaisesRegex(HTTPException, "initial poll"):
-            gdrive_events.create_watch(gdrive_events.DriveWatchIn(source_id=5))
-        with access.use_access(self.context), patch.object(gdrive_events, "_source", return_value=self.source), \
+            gdrive_events.create_watch(gdrive_events.DriveWatchIn(source_id=5), self.context)
+        with patch.object(gdrive_events, "_source", return_value=self.source), \
              patch.object(gdrive_events.config, "get", return_value="http://localhost:8000"), \
              self.assertRaisesRegex(HTTPException, "HTTPS"):
-            gdrive_events.create_watch(gdrive_events.DriveWatchIn(source_id=5))
+            gdrive_events.create_watch(gdrive_events.DriveWatchIn(source_id=5), self.context)
 
     def test_due_watch_is_replaced_under_project_scope(self):
         rows = [{"source_id": 5, "project_id": 9, "slug": "acme", "name": "Acme"}]
         seen = []
-        def renew(body):
-            seen.append((body.source_id, access.require_current_access().project_id))
+        def renew(body, current):
+            seen.append((body.source_id, current.project_id))
             return {"ok": True}
         with patch.object(gdrive_events, "q", return_value=rows), \
              patch.object(gdrive_events, "exec_"), \
