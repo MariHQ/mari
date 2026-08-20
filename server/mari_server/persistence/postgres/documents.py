@@ -197,27 +197,29 @@ def ports(conn) -> DocumentPorts:
             """INSERT INTO documents
                  (project_id, source, external_id, title, snippet, body, author, author_initials,
                   kind, updated_src, created_src, content_hash, source_path, source_id,
-                  acl_visibility, acl_principals)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_DATE, CURRENT_DATE,
-                       %s, %s, %s, %s, %s)
+                  acl_visibility, acl_principals, observed_at)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                       %s, %s, %s, %s, %s, %s)
                ON CONFLICT (project_id, source, external_id) DO UPDATE SET
                  title = EXCLUDED.title, snippet = EXCLUDED.snippet, body = EXCLUDED.body,
-                 author = EXCLUDED.author, kind = EXCLUDED.kind, updated_src = CURRENT_DATE,
+                 author = EXCLUDED.author, kind = EXCLUDED.kind,
+                 updated_src = EXCLUDED.updated_src, observed_at = EXCLUDED.observed_at,
                  content_hash = EXCLUDED.content_hash, source_path = EXCLUDED.source_path,
                  source_id = EXCLUDED.source_id, acl_visibility = EXCLUDED.acl_visibility,
                  acl_principals = EXCLUDED.acl_principals
                RETURNING id, (xmax = 0) AS inserted""",
             (version.project_id, fields.source, version.external_id, version.title,
              excerpt(version.body, version.title), version.body, fields.author,
-             fields.author_initials, fields.kind, version.revision, version.source_url,
+             fields.author_initials, fields.kind, version.source_updated_at,
+             version.source_updated_at, version.revision, version.source_url,
              int(version.source_id), str(version.acl.get("visibility") or "project"),
-             json.dumps(version.acl.get("principals") or [])),
+             json.dumps(version.acl.get("principals") or []), version.recorded_at),
         ).fetchone()
         return int(row["id"]), bool(row["inserted"])
 
     def projected_versions(project_id: int, document_ids: list[int]) -> list[DocumentVersion]:
         rows = conn.execute(
-            """SELECT source_id, external_id, content_hash, title, body, source_path,
+            """SELECT source_id, external_id, content_hash, title, body, source_path, updated_src,
                       acl_visibility, acl_principals
                  FROM documents WHERE project_id = %s AND id = ANY(%s)""",
             (project_id, document_ids),
@@ -227,6 +229,7 @@ def ports(conn) -> DocumentPorts:
             external_id=str(row["external_id"]), revision=str(row["content_hash"] or ""),
             title=str(row["title"]), body=str(row["body"] or ""),
             source_url=str(row["source_path"] or ""),
+            source_updated_at=row["updated_src"],
             acl={"visibility": str(row["acl_visibility"] or "project"),
                  "principals": _acl(row["acl_principals"])},
         ) for row in rows]

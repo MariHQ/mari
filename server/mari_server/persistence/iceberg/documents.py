@@ -14,6 +14,7 @@ import typing as t
 
 import pyarrow as pa
 from pyiceberg.expressions import EqualTo
+from pyiceberg.types import TimestamptzType
 
 from mari_server.persistence.iceberg.warehouse import IcebergWarehouse, warehouse
 from mari_components.documents import DocumentVersion, document_key
@@ -35,6 +36,7 @@ SCHEMA = pa.schema([
     pa.field("acl_json", pa.string(), nullable=False),
     pa.field("reason", pa.string(), nullable=False),
     pa.field("actor", pa.string(), nullable=False),
+    pa.field("source_updated_at", pa.timestamp("us", tz="UTC")),
     pa.field("recorded_at", pa.timestamp("us", tz="UTC"), nullable=False),
 ])
 
@@ -44,9 +46,12 @@ class IcebergDocumentStore:
         self.store = store or warehouse()
         self._lock = threading.RLock()
         try:
-            self.store.catalog.load_table(TABLE)
+            table = self.store.catalog.load_table(TABLE)
         except Exception:
-            self.store.catalog.create_table(TABLE, schema=SCHEMA)
+            table = self.store.catalog.create_table(TABLE, schema=SCHEMA)
+        if "source_updated_at" not in table.schema().column_names:
+            with table.update_schema() as update:
+                update.add_column("source_updated_at", TimestamptzType())
 
     def _rows(self, *, key: str | None = None, project_id: int | None = None) -> list[dict[str, t.Any]]:
         table = self.store.catalog.load_table(TABLE)
@@ -82,6 +87,7 @@ class IcebergDocumentStore:
                 latest["status"] == version.status,
                 latest["source_url"] == version.source_url,
                 latest["acl_json"] == acl_json,
+                latest.get("source_updated_at") == version.source_updated_at,
             )):
                 return latest
             row = {
@@ -99,6 +105,10 @@ class IcebergDocumentStore:
                 "acl_json": acl_json,
                 "reason": version.reason,
                 "actor": version.actor,
+                "source_updated_at": (
+                    version.source_updated_at.astimezone(dt.timezone.utc)
+                    if version.source_updated_at else None
+                ),
                 "recorded_at": version.recorded_at.astimezone(dt.timezone.utc),
             }
             self.store.catalog.load_table(TABLE).append(
@@ -117,6 +127,7 @@ class IcebergDocumentStore:
             revision=current["revision"], title=current["title"], body=current["body"],
             status=status, source_url=current["source_url"],
             acl=json.loads(current["acl_json"]), reason=reason, actor=actor,
+            source_updated_at=current.get("source_updated_at"),
         ))
 
     def get(self, project_id: int, source_id: str, external_id: str,

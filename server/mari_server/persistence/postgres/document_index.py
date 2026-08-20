@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import statistics
+import datetime as dt
 from mari_server.providers import models as llm
 from mari_server.providers import vectors as retrieval
 from mari_server.identity import context as access
@@ -41,16 +42,24 @@ def upsert_document(conn, source_id: int, external_id: str, title: str, body: st
                      source_path: str, kind: str, content_hash: str, author: str,
                      source: str = "github", initials: str = "GH",
                      acl_visibility: str = "project",
-                     acl_principals: tuple[str, ...] = ()) -> tuple[int, bool]:
+                     acl_principals: tuple[str, ...] = (),
+                     source_updated_at: str = "") -> tuple[int, bool]:
     """Upsert one document. Returns (doc_id, inserted) — inserted is True for a
     brand-new row, False for an update (xmax = 0 only on fresh inserts).
     `source`/`initials` default to github; connect_sync passes the provider key."""
     project_id = access.require_current_access().project_id
+    provider_time = None
+    if source_updated_at:
+        provider_time = dt.datetime.fromisoformat(source_updated_at.replace("Z", "+00:00"))
+        if provider_time.tzinfo is None:
+            provider_time = provider_time.replace(tzinfo=dt.timezone.utc)
+        provider_time = provider_time.astimezone(dt.timezone.utc)
     version = DocumentVersion(
         project_id=project_id, source_id=str(source_id), external_id=external_id,
         revision=content_hash, title=title, body=body, source_url=source_path,
         acl={"visibility": acl_visibility, "principals": list(acl_principals)},
         reason="connector ingestion", actor=author or "connector",
+        source_updated_at=provider_time,
     )
     doc_id, inserted = document_application.upsert(
         version,

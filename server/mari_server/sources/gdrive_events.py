@@ -167,6 +167,7 @@ def _apply_poll(source: dict, source_config: dict, poll) -> None:
                     f"{principal.kind}:{principal.identifier}"
                     for principal in document.acl.principals
                 ),
+                source_updated_at=document.updated_at,
             )
             if hashes.get(path) != content_hash:
                 document_index.sync_chunks(conn, doc_id, title, body, max_tokens, overlap)

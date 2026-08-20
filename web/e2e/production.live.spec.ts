@@ -155,6 +155,19 @@ test("LIVE ingested source is searchable, inspectable, and represented in lineag
   expect(source!.docsCount).toBeGreaterThan(0);
   expect(source!.health.toLowerCase()).not.toMatch(/failed|error/);
 
+  const indexed = await graphql<{ search: { source: string; date: string }[] }>(
+    page,
+    `{ search(query: "Mari", k: 100) { source date } }`,
+  );
+  const githubDates = indexed.search
+    .filter((document) => document.source.toLowerCase() === "github")
+    .map((document) => document.date);
+  expect(githubDates.length).toBeGreaterThan(0);
+  for (const date of githubDates) {
+    expect(date, "GitHub source time must retain time-of-day and an explicit UTC offset")
+      .toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|\+00:00)$/);
+  }
+
   await page.goto("/knowledge");
   const main = page.getByRole("main", { name: "Main content" });
   await expect(main).toContainText(/\d+\s*documents match/, { timeout: 30_000 });

@@ -84,7 +84,7 @@ def graph_stats(project_id: int) -> tuple[dict, int, list[dict], list[dict]]:
         summary = conn.execute("""
           SELECT count(*) AS docs,
                  count(*) FILTER (WHERE d.updated_src <
-                   (SELECT max(updated_src) FROM documents WHERE project_id = %s) - 45
+                   (SELECT max(updated_src) FROM documents WHERE project_id = %s) - interval '45 days'
                    OR EXISTS (SELECT 1 FROM tags t WHERE t.project_id = %s
                               AND t.document_id = d.id
                               AND t.tag IN ('stale','needs-review'))) AS stale,

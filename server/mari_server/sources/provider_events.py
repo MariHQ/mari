@@ -253,6 +253,7 @@ def _sync_confluence_page(source: dict[str, t.Any], page_id: str) -> None:
                 conn, int(source["id"]), f"confluence:{source['id']}:{path}", title, body,
                 f"confluence/{path}", "page", content_hash, "Confluence",
                 source="confluence", initials="CO", acl_visibility="connector_scope",
+                source_updated_at=document.updated_at,
             )
             max_tokens, overlap = document_index.chunk_settings()
             if body.strip():

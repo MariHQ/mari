@@ -40,9 +40,9 @@ def reconcile_stale_checkpoints(process_start_ts: float) -> int:
 def pulse_inputs() -> tuple[list[dict], list[dict], list[dict]]:
     project_id = access.require_current_access().project_id
     with db.connect() as conn:
-        daily = conn.execute("""SELECT source_id, updated_src AS day, count(*) AS n FROM documents
+        daily = conn.execute("""SELECT source_id, updated_src::date AS day, count(*) AS n FROM documents
           WHERE project_id = %s AND source_id IS NOT NULL AND updated_src >= current_date - 11
-          GROUP BY source_id, updated_src""", (project_id,)).fetchall()
+          GROUP BY source_id, updated_src::date""", (project_id,)).fetchall()
         workflows = conn.execute(
             "SELECT id, status, nodes, trigger FROM workflows WHERE project_id = %s", (project_id,),
         ).fetchall()

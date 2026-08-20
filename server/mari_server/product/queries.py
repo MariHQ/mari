@@ -368,7 +368,7 @@ class Query:
         per_src: dict[int, dict] = {}
         for d in daily:
             per_src.setdefault(d["source_id"], {})[d["day"]] = int(d["n"])
-        today = dt.date.today()
+        today = dt.datetime.now(dt.timezone.utc)
 
         def bars(source_id: int) -> list[int]:
             days = per_src.get(source_id)

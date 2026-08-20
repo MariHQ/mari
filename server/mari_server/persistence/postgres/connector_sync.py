@@ -188,6 +188,7 @@ def sync_source(source_id: int, full: bool, *, update_status, fire_document_trig
                         f"{key}/{path}", "page", fingerprint, author, source=key,
                         initials=initials, acl_visibility=document.acl.visibility,
                         acl_principals=principals,
+                        source_updated_at=document.updated_at,
                     )
                     (inserted_ids if inserted else updated_ids).append(doc_id)
                     update_status(source_id, phase="embedding")
