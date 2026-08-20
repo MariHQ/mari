@@ -6,6 +6,11 @@ accepted credentials. Run the deterministic server, component, and Playwright
 suites with `make test`; run the real local-model probe with
 `make test-live-ollama` while Ollama is available.
 
+The production-like gate is `make test-integration`. Unlike the normal browser
+suite, it uses no mocked GraphQL or REST handlers: nginx, FastAPI, Postgres,
+Iceberg, MinIO, SQLite control state, and Ollama all run as real services. Its
+GitHub Actions workflow is `.github/workflows/integration-stack.yml`.
+
 | Burndown area | Browser + server assurance | Status / remaining production check |
 | --- | --- | --- |
 | Demo → OSS migration | Every console route loads under a shared landmark/accessibility/overflow contract on desktop and mobile; Firefox and WebKit smoke every route; OSS messaging and Ollama settings are asserted | **External check:** compare the deployed demo artifact, environment, migrations, and routing with this revision |

@@ -45,7 +45,7 @@ _DEFAULTS: dict[str, t.Any] = {
         "oidc_scopes": "openid email profile groups", "oidc_group_role_map": {},
         "scim_bearer_token": "",
     },
-    "s3": {"bucket": "", "region": ""},
+    "s3": {"bucket": "", "region": "", "endpoint_url": ""},
     "audit": {"languages": ["es", "fr"], "default_tag": "customer-facing"},
     "github": {"token": "", "poll_minutes": 10, "webhook_secret": ""},
 }
@@ -86,6 +86,8 @@ def _load() -> dict:
     env_map = {
         "MARI_DB": ("database", "url"),
         "MARI_OLLAMA_HOST": ("ollama", "host"),
+        "MARI_OLLAMA_EMBED_MODEL": ("ollama", "embed_model"),
+        "MARI_OLLAMA_GEN_MODEL": ("ollama", "gen_model"),
         "MARI_LLM_GATEWAY_URL": ("llm_gateway", "base_url"),
         "MARI_LLM_GATEWAY_TOKEN": ("llm_gateway", "token"),
         "MARI_LLM_GATEWAY_HEADERS": ("llm_gateway", "headers"),
@@ -93,6 +95,7 @@ def _load() -> dict:
         "MARI_LLM_GATEWAY_MODEL_HEADER": ("llm_gateway", "model_header"),
         "MARI_LLM_GATEWAY_RETRIES": ("llm_gateway", "max_retries"),
         "MARI_S3_BUCKET": ("s3", "bucket"),
+        "MARI_S3_ENDPOINT_URL": ("s3", "endpoint_url"),
         "MARI_GITHUB_CLIENT_ID": ("auth", "github_client_id"),
         "MARI_GITHUB_CLIENT_SECRET": ("auth", "github_client_secret"),
         "MARI_GOOGLE_CLIENT_ID": ("auth", "google_client_id"),

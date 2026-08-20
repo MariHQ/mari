@@ -24,8 +24,8 @@ export default defineConfig({
     timeout: 120_000,
   },
   projects: [
-    { name: "chromium", use: { ...devices["Desktop Chrome"] }, testIgnore: /\.live\.spec\.ts/ },
-    { name: "mobile-chromium", use: { ...devices["Pixel 7"] }, testIgnore: /\.live\.spec\.ts/ },
+    { name: "chromium", use: { ...devices["Desktop Chrome"] }, testIgnore: /\.(live|integration)\.spec\.ts/ },
+    { name: "mobile-chromium", use: { ...devices["Pixel 7"] }, testIgnore: /\.(live|integration)\.spec\.ts/ },
     { name: "firefox-smoke", use: { ...devices["Desktop Firefox"] }, testMatch: /navigation\.spec\.ts/ },
     { name: "webkit-smoke", use: { ...devices["Desktop Safari"] }, testMatch: /navigation\.spec\.ts/ },
     ...(process.env.MARI_E2E_LIVE === "1"
@@ -33,6 +33,14 @@ export default defineConfig({
           name: "live-chromium",
           use: { ...devices["Desktop Chrome"], trace: "off", video: "off" },
           testMatch: /\.live\.spec\.ts/,
+          workers: 1,
+        }]
+      : []),
+    ...(process.env.MARI_E2E_INTEGRATION === "1"
+      ? [{
+          name: "integration-chromium",
+          use: { ...devices["Desktop Chrome"], trace: "retain-on-failure" as const },
+          testMatch: /\.integration\.spec\.ts/,
           workers: 1,
         }]
       : []),

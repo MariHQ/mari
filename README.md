@@ -134,7 +134,18 @@ npm --prefix web install
 (cd web && npx playwright install chromium)
 make test                    # server, web contract/smoke, and Playwright
 make test-live-ollama        # real local Ollama generation + embedding
+make test-integration        # production images + Postgres + Iceberg + MinIO + Ollama
 ```
+
+`make test-integration` is the assembled-system gate used in CI. It starts the
+same API and nginx images shipped by the deployment, applies the schema to a
+fresh pgvector/Postgres database, seeds one scoped project, persists Iceberg
+state and SQLite control state on the API data volume, mirrors a real
+MUVERA/PolarQuant generation into MinIO, and calls real Ollama embedding and
+generation models. Playwright then signs in through the explicit development
+bypass and verifies health/security headers, real search results, durable
+Review writes, project identity, and the audit surface. The stack is isolated
+and deleted after the run; no third-party credentials are used.
 
 Credential-gated sandbox connector and bot checks are documented in
 [`docs/workflow-test-matrix.md`](docs/workflow-test-matrix.md). They are never

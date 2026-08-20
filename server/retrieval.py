@@ -30,9 +30,17 @@ from collections import defaultdict
 
 import numpy as np
 
+import config
+
 
 _ARTIFACTS = ("metadata.json", "document_ids.npy", "offsets.npy", "vectors.npy", "polar.npy")
 _GENERATION_RE = re.compile(r"^[a-f0-9]{32}$")
+
+
+def _s3_client():
+    import boto3
+    endpoint = config.get("s3", "endpoint_url")
+    return boto3.client("s3", **({"endpoint_url": endpoint} if endpoint else {}))
 
 
 def _file_digest(path: pathlib.Path) -> str:
@@ -309,10 +317,9 @@ class DerivedVectorIndex:
             self._mirror_s3(generation, files, pointer)
 
     def _mirror_s3(self, generation: str, files: dict[str, bytes], pointer: bytes) -> None:
-        import boto3
         bucket_key = self.uri[5:]
         bucket, _, prefix = bucket_key.partition("/")
-        client = boto3.client("s3")
+        client = _s3_client()
         for name, body in files.items():
             key = "/".join(v for v in (prefix.rstrip("/"), "generations", generation, name) if v)
             client.put_object(Bucket=bucket, Key=key, Body=body)
@@ -379,13 +386,12 @@ class DerivedVectorIndex:
             return self._snapshot
 
     def _pull_s3(self) -> bool:
-        import boto3
         bucket_key = self.uri[5:]
         bucket, _, prefix = bucket_key.partition("/")
         self.path.mkdir(parents=True, exist_ok=True)
         generations = self.path / "generations"
         generations.mkdir(parents=True, exist_ok=True)
-        client = boto3.client("s3")
+        client = _s3_client()
         pointer_tmp = self.path / f".remote-current.{uuid.uuid4().hex}.tmp"
         staging: pathlib.Path | None = None
         try:

@@ -1,4 +1,4 @@
-.PHONY: test test-server test-web test-browser test-live-ollama
+.PHONY: test test-server test-web test-browser test-live-ollama test-integration
 
 test: test-server test-web test-browser
 
@@ -13,3 +13,6 @@ test-browser:
 
 test-live-ollama:
 	MARI_TEST_LIVE_OLLAMA=1 PYTHONPATH=server server/.venv/bin/python -m unittest server.tests.test_llm_ollama.LiveOllamaTests -v
+
+test-integration:
+	./deploy/integration/run.sh

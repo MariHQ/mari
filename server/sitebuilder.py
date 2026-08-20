@@ -1119,7 +1119,11 @@ def deploy_to_s3(build_dir: str, deploy_cfg: dict, site: dict | None = None,
     key_prefix = f"{prefix}/" if prefix else ""
     try:
         import boto3
-        s3 = boto3.client("s3", region_name=deploy_cfg.get("region") or None)
+        client_options = {"region_name": deploy_cfg.get("region") or None}
+        endpoint = deploy_cfg.get("endpointUrl") or os.environ.get("MARI_S3_ENDPOINT_URL")
+        if endpoint:
+            client_options["endpoint_url"] = endpoint
+        s3 = boto3.client("s3", **client_options)
         root = pathlib.Path(build_dir)
         keys: set[str] = set()
         for f in root.rglob("*"):
@@ -1179,5 +1183,3 @@ def deploy_to_s3(build_dir: str, deploy_cfg: dict, site: dict | None = None,
             detail = " — ".join(p for p in (code, msg) if p)
         detail = detail or str(e) or e.__class__.__name__
         return False, f"S3 deploy to s3://{bucket}/{key_prefix} failed: {type(e).__name__}: {detail}"
-
-

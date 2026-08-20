@@ -1,0 +1,61 @@
+name: Production-like integration stack
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: integration-stack-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  assembled-stack:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      COMPOSE: docker compose -f docker-compose.yml -f deploy/integration/docker-compose.yml
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+        working-directory: web
+      - run: npx playwright install --with-deps chromium
+        working-directory: web
+      - name: Start production-like stack
+        run: $COMPOSE up -d --build --wait --wait-timeout 900
+      - name: Probe Postgres, Iceberg, MinIO, and Ollama
+        run: $COMPOSE exec -T -e MARI_INTEGRATION_STACK=1 api python -m unittest tests.test_integration_stack -v
+      - name: Run Playwright against production images
+        working-directory: web
+        env:
+          MARI_E2E_EXTERNAL_SERVER: "1"
+          MARI_E2E_BASE_URL: http://127.0.0.1:8080
+          MARI_E2E_INTEGRATION: "1"
+        run: npx playwright test --project=integration-chromium --reporter=line
+      - name: Capture service diagnostics
+        if: failure()
+        run: |
+          mkdir -p .artifacts/integration-stack
+          $COMPOSE ps > .artifacts/integration-stack/compose-ps.txt
+          $COMPOSE logs --no-color > .artifacts/integration-stack/compose.log
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: integration-stack-failures
+          path: |
+            .artifacts/integration-stack
+            .artifacts/playwright
+          if-no-files-found: ignore
+      - name: Tear down stack
+        if: always()
+        run: $COMPOSE down -v --remove-orphans
