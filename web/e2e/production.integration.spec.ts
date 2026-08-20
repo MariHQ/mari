@@ -33,7 +33,7 @@ test("real Postgres knowledge is searchable through the production web image", a
 test("review writes persist through GraphQL and a browser reload", async ({ page }) => {
   await page.goto("/tasks");
   const title = `CI persisted review ${Date.now()}`;
-  await page.getByLabel("Review item").fill(title);
+  await page.getByRole("textbox", { name: "Review item", exact: true }).fill(title);
   await page.getByRole("button", { name: "Add review item" }).click();
   await expect(page.getByText(title, { exact: true })).toBeVisible();
   await page.reload();
@@ -45,6 +45,6 @@ test("project identity and audit data survive a new browser context", async ({ b
   const second = await context.newPage();
   await signIn(second);
   await second.goto("/settings/audit");
-  await expect(second.getByRole("heading", { name: "Audit log" })).toBeVisible();
+  await expect(second.getByRole("heading", { name: "Access log" })).toBeVisible();
   await context.close();
 });

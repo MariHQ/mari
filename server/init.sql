@@ -404,11 +404,16 @@ CREATE TABLE IF NOT EXISTS graph_views (
 
 -- Default perspectives (§4.1) — generic lenses, not tied to any content.
 -- states use the frontend URL-param names.
-INSERT INTO graph_views (name, state, created_by) VALUES
+INSERT INTO graph_views (name, state, created_by)
+SELECT seed.name, seed.state::jsonb, seed.created_by
+FROM (VALUES
   ('Stale docs', '{"lens":"stale","scope":"everything"}', 'Mari'),
   ('Untranslated customer-facing', '{"chip":"untranslated","scope":"everything"}', 'Mari'),
   ('Recent decisions', '{"rels":["derived","translates"],"scope":"everything"}', 'Mari')
-ON CONFLICT (name) DO NOTHING;
+) AS seed(name, state, created_by)
+WHERE NOT EXISTS (
+  SELECT 1 FROM graph_views existing WHERE existing.name = seed.name
+);
 
 -- ═══════════════════════════════════════════════════════════════════════
 -- ▼ real ingestion: chunk embeddings + per-source provenance

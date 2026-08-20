@@ -21,7 +21,7 @@ COPY server/ /app/server/
 # works read-only-ish out of the box.
 RUN addgroup --system mari \
     && adduser --system --ingroup mari --home /app mari \
-    && mkdir -p /app/server/builds \
+    && mkdir -p /app/server/builds /app/data \
     && chown -R mari:mari /app
 
 USER mari

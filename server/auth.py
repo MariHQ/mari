@@ -398,10 +398,32 @@ class CallerMiddleware:
             return await self.app(scope, receive, send)
         access_module.set_access(None)
         try:
-            current_user(Request(scope, receive))
+            request = Request(scope, receive)
+            user = current_user(request)
+            # Strawberry executes synchronous resolvers in a worker thread.
+            # Resolve project access in the outer ASGI task so that context is
+            # copied into that worker; doing it only in the context_getter can
+            # leave resolver ContextVars empty even though info.context has a
+            # valid membership. The route guard remains authoritative and
+            # reports invalid/missing selections itself.
+            if user and scope.get("path") == "/graphql":
+                try:
+                    project, _ = access_module.resolve_access(
+                        user, request.headers.get("X-Mari-Project"), _conn,
+                        required=False,
+                    )
+                    scope["mari_access"] = project
+                except HTTPException:
+                    pass
         except Exception:  # noqa: BLE001 — identifying the caller must never
             set_caller(None)  # fail the request; the route's own guard decides
-        return await self.app(scope, receive, send)
+        try:
+            return await self.app(scope, receive, send)
+        finally:
+            # ASGI servers may reuse the request task. Never let one caller's
+            # identity or project survive into a later request.
+            access_module.set_access(None)
+            set_caller(None)
 
 
 def require_user(request: Request) -> dict:
