@@ -23,32 +23,24 @@ services:
       retries: 10
     restart: unless-stopped
 
-  # One-shot schema load. The SQL files are idempotent, so re-running
-  # `docker compose up` is safe.
+  # One-shot, lock-serialized schema migration using the production API image.
+  # The API repeats the same check at startup so non-Compose deployments are
+  # safe too; the checksum ledger turns that repeat into a no-op.
   db-init:
-    image: pgvector/pgvector:pg16
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    image: mari-cloud-api:latest
     depends_on:
       db:
         condition: service_healthy
     environment:
-      PGPASSWORD: mari
-    volumes:
-      - ./server/init.sql:/sql/init.sql:ro
-    entrypoint:
-      - psql
-      - -h
-      - db
-      - -U
-      - mari
-      - -d
-      - mari_cloud
-      - -v
-      - ON_ERROR_STOP=1
-      - -f
-      - /sql/init.sql
+      MARI_DB: postgresql://mari:mari@db:5432/mari_cloud
+    command: ["python", "-m", "schema_migrations"]
     restart: "no"
 
   api:
+    image: mari-cloud-api:latest
     build:
       context: .
       dockerfile: server/Dockerfile

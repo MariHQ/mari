@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import os
-import pathlib
 import threading
 import typing as t
 
@@ -160,8 +159,6 @@ def jload(v: t.Any) -> t.Any:
 
 
 def ensure_schema() -> None:
-    """Apply the complete schema (init.sql, idempotent) so startup, local
-    `psql -f init.sql`, and the docker-compose db-init service all agree."""
-    sql = (pathlib.Path(__file__).parent / "init.sql").read_text()
-    with psycopg.connect(DB_URL) as conn:
-        conn.execute(sql)
+    """Apply serialized, checksum-verified migrations before serving traffic."""
+    from schema_migrations import migrate
+    migrate(DB_URL)

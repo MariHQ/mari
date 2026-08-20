@@ -16,6 +16,7 @@ class IntegrationStackTests(unittest.TestCase):
         import iceberg
         import llm
         import retrieval
+        import schema_migrations
         from db import q1
 
         context = access.AccessContext(
@@ -44,6 +45,10 @@ class IntegrationStackTests(unittest.TestCase):
             )
 
         self.assertIn("mutation_journal", iceberg.warehouse().table_names())
+        self.assertEqual(schema_migrations.migrate(), [])
+        migration = q1("SELECT version, checksum FROM schema_migrations WHERE version = %s", ("0001_baseline",))
+        self.assertEqual(migration["version"], "0001_baseline")
+        self.assertEqual(len(migration["checksum"]), 64)
         client = boto3.client("s3", endpoint_url=os.environ["MARI_S3_ENDPOINT_URL"])
         keys = [
             row["Key"]

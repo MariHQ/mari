@@ -29,6 +29,20 @@ spec:
         runAsNonRoot: true
         seccompProfile:
           type: RuntimeDefault
+      initContainers:
+        - name: schema-migrations
+          image: ghcr.io/marihq/mari-api:replace-with-digest
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-m", "schema_migrations"]
+          envFrom:
+            - configMapRef:
+                name: mari-config
+            - secretRef:
+                name: mari-secrets
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
       containers:
         - name: api
           image: ghcr.io/marihq/mari-api:replace-with-digest
