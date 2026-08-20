@@ -24,9 +24,13 @@ const LEGACY_PRIMARY_LABELS = [
 ] as const;
 
 async function primaryNavigation(page: import("@playwright/test").Page) {
-  const menu = page.getByRole("button", { name: "Menu" });
-  if (await menu.isVisible().catch(() => false)) await menu.click();
   const navigation = page.getByRole("navigation", { name: "Primary" });
+  const menu = page.getByRole("button", { name: "Menu" });
+  await expect.poll(async () => (
+    await navigation.isVisible().catch(() => false)
+    || await menu.isVisible().catch(() => false)
+  )).toBe(true);
+  if (!await navigation.isVisible().catch(() => false)) await menu.click();
   await expect(navigation).toBeVisible();
   return navigation;
 }
