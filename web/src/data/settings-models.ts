@@ -69,9 +69,6 @@ const gatewayOf = (llm: LlmRow): GatewaySettings => ({
   modelHeader: llm.gateway?.model_header ?? "",
   maxRetries: llm.gateway?.max_retries ?? 2,
 });
-const withGateway = (options: string[], fallback: string) =>
-  options.some((option) => option.startsWith("gateway:")) ? options : [...options, fallback];
-
 /* ── mapper ─────────────────────────────────────────────────────────────── */
 
 export const EMPTY: SettingsModelsData = {
@@ -98,11 +95,8 @@ export function buildSettingsModels(res: Res | null): SettingsModelsData {
     embedding: qualified(embedding),
     llm: qualified(llm),
     dims: embedding.dims ?? 0,
-    embeddingOptions: Array.from(new Set([
-      ...(embedding.options ?? []),
-      "sentence-transformers:sentence-transformers/all-mpnet-base-v2",
-    ])),
-    llmOptions: withGateway(llm.options ?? [], "gateway:enterprise-chat"),
+    embeddingOptions: Array.from(new Set(embedding.options ?? [])),
+    llmOptions: Array.from(new Set(llm.options ?? [])),
     chunking: mapChunking(res),
     // Masked by the server (queries.py `_mask_setting`); "" means no key set,
     // which is what the field should read as.

@@ -62,6 +62,7 @@ class GatewayConfigTests(unittest.TestCase):
             ("llm_gateway", "metadata"): {"application": "mari"},
             ("llm_gateway", "model_header"): "X-Model",
             ("llm_gateway", "max_retries"): 2,
+            ("llm_gateway", "compatibility"): "openai",
         }
         stored = {"gateway": {"base_url": "https://workspace.test/v1/", "max_retries": 99}}
         with patch.object(llm, "_settings", return_value=(stored, {})), \
@@ -152,7 +153,7 @@ class GatewayTransportTests(unittest.TestCase):
 class GatewayContractTests(unittest.TestCase):
     CFG = {"base_url": "https://gateway.test/v1", "token": "gateway-token",
            "headers": {"X-Tenant": "acme"}, "metadata": {"application": "mari"},
-           "model_header": "X-Model", "max_retries": 2}
+           "model_header": "X-Model", "max_retries": 2, "compatibility": "openai"}
 
     def test_generation_uses_openai_contract_metadata_and_usage_hook(self) -> None:
         response = {"choices": [{"message": {"content": " gateway ok "}}],

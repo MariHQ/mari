@@ -24,7 +24,6 @@ embedding_provider = "sentence-transformers"
 embedding_model = "sentence-transformers/all-mpnet-base-v2"
 
 [sentence_transformers]
-model = "sentence-transformers/all-mpnet-base-v2"
 cache_dir = ".mari/sentence-transformers"
 
 [llm_gateway]

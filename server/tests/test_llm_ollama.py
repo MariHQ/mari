@@ -13,7 +13,8 @@ class OllamaContractTests(unittest.TestCase):
 
     def test_embedding_uses_ollama_contract_and_enforces_index_width(self) -> None:
         vector = [0.25] * llm.EMBED_DIMS
-        with patch.object(llm, "_settings", return_value=({}, {})), \
+        with patch.object(llm, "_settings", return_value=({}, {
+                 "provider": "ollama", "model": "nomic-embed-text"})), \
              patch.object(llm.config, "get", side_effect=lambda section, key: {
                  ("ollama", "host"): "http://ollama:11434/",
                  ("ollama", "embed_model"): "nomic-embed-text",
@@ -58,7 +59,10 @@ class LiveOllamaTests(unittest.TestCase):
                 ("ollama", "gen_model"): os.environ.get("MARI_TEST_GEN_MODEL", "gemma3:4b"),
             }.get((section, key))
 
-        with patch.object(llm, "_settings", return_value=({}, {})), patch.object(llm.config, "get", side_effect=cfg):
+        with patch.object(llm, "_settings", return_value=(
+                {"provider": "ollama", "model": os.environ.get("MARI_TEST_GEN_MODEL", "gemma3:4b")},
+                {"provider": "ollama", "model": os.environ.get("MARI_TEST_EMBED_MODEL", "nomic-embed-text")}
+             )), patch.object(llm.config, "get", side_effect=cfg):
             vector = llm.embed("Mari indexes team documentation.")
             answer = llm.generate("Reply with exactly: ollama-ok", timeout=60)
         self.assertIsNotNone(vector, llm.last_error())

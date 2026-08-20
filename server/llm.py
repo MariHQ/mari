@@ -11,11 +11,10 @@ a variable with no reader, so the compose deployment could never reach ollama at
 all (DEAD-2). Both settings rows are read here now, on every call, through a
 short-lived cache.
 
-Resolution order, per capability:
-
-  1. `settings.llm` / `settings.embedding` — what an admin chose in the console.
-  2. `mari.toml` / `MARI_OLLAMA_HOST` (config.py) — what the deployment provides.
-  3. The shipped defaults below.
+Each capability has one selection. A deployment may own it with the atomic
+provider/model pair in `mari.toml` or the environment; otherwise the admin-owned
+`settings.llm` / `settings.embedding` row is authoritative. A partial or
+missing selection is an error. Providers are never substituted after an error.
 
 Providers: `ollama` and `local` (a local daemon), `openai`, and `anthropic`
 (generation only — Anthropic serves no embedding endpoint). Provider API keys
@@ -51,7 +50,8 @@ import urllib.request
 import config
 import observability
 
-# Shipped defaults — the last resort, after settings and after mari.toml.
+# Connection defaults are not provider/model fallbacks. Fresh databases seed
+# their explicit model selections in init.sql.
 DEFAULT_OLLAMA = "http://localhost:11434"
 DEFAULT_EMBED_MODEL = "nomic-embed-text"
 DEFAULT_GEN_MODEL = "gemma3:4b"
@@ -71,6 +71,8 @@ _SETTINGS_TTL = 30.0
 _settings_cache: dict[str, t.Any] = {"at": 0.0, "llm": {}, "embedding": {}}
 _settings_lock = threading.Lock()
 _last_error = threading.local()
+_sentence_models: dict[str, t.Any] = {}
+_sentence_models_lock = threading.Lock()
 
 
 def last_error() -> str:
@@ -155,18 +157,14 @@ def _split_ref(ref: str) -> tuple[str, str]:
     return (provider.strip().lower(), model.strip()) if sep else ("", provider.strip())
 
 
-def _resolve(cfg: dict, default_provider: str, default_model: str) -> tuple[str, str]:
-    """(provider, model) from a settings row. Explicit `provider`/`model` fields
-    win; otherwise the row's `default` ('provider:model') is parsed; otherwise
-    the shipped defaults. An empty model field never overrides a real default —
-    a blank box in the console means "unset", not "use the empty model"."""
-    provider = str(cfg.get("provider") or "").strip().lower()
-    model = str(cfg.get("model") or "").strip()
-    if not provider or not model:
-        ref_provider, ref_model = _split_ref(cfg.get("default") or "")
-        provider = provider or ref_provider
-        model = model or ref_model
-    return provider or default_provider, model or default_model
+def _resolve(cfg: dict) -> tuple[str, str]:
+    """Return exactly the provider/model pair stored by the admin.
+
+    Older rows may contain `default` or option-catalog metadata. Those fields
+    are deliberately not executable configuration.
+    """
+    return (str(cfg.get("provider") or "").strip().lower(),
+            str(cfg.get("model") or "").strip())
 
 
 def _api_key(provider: str) -> str:
@@ -186,12 +184,14 @@ def gateway_config() -> dict[str, t.Any]:
         "metadata": config.get("llm_gateway", "metadata") or {},
         "model_header": config.get("llm_gateway", "model_header") or "",
         "max_retries": config.get("llm_gateway", "max_retries", 2),
+        "compatibility": config.get("llm_gateway", "compatibility", "openai"),
     }
     cfg.update(stored)
     cfg["base_url"] = str(cfg.get("base_url") or "").rstrip("/")
     cfg["token"] = str(cfg.get("token") or _api_key("gateway") or "")
     cfg["headers"] = cfg.get("headers") if isinstance(cfg.get("headers"), dict) else {}
     cfg["metadata"] = cfg.get("metadata") if isinstance(cfg.get("metadata"), dict) else {}
+    cfg["compatibility"] = str(cfg.get("compatibility") or "").strip().lower()
     try:
         cfg["max_retries"] = min(5, max(0, int(cfg.get("max_retries", 2))))
     except (TypeError, ValueError):
@@ -218,8 +218,17 @@ def _gateway_headers(cfg: dict[str, t.Any], model: str) -> dict[str, str]:
 
 
 def _gateway_payload(payload: dict, cfg: dict[str, t.Any]) -> dict:
+    if cfg.get("compatibility") == "deepseek":
+        return payload
     metadata = cfg.get("metadata") or {}
     return {**payload, **({"metadata": metadata} if metadata else {})}
+
+
+def _completion_limit(gateway: dict[str, t.Any] | None, tokens: int) -> dict[str, int]:
+    """Provider-compatible completion limit without weakening generic gateways."""
+    key = "max_tokens" if gateway and gateway.get("compatibility") == "deepseek" \
+        else "max_completion_tokens"
+    return {key: tokens}
 
 
 def _gateway_config_error(cfg: dict[str, t.Any]) -> str:
@@ -229,6 +238,8 @@ def _gateway_config_error(cfg: dict[str, t.Any]) -> str:
     parsed = urllib.parse.urlsplit(base)
     if parsed.scheme not in ("http", "https") or not parsed.netloc or parsed.username or parsed.password:
         return "LLM gateway base URL must be an http(s) URL without embedded credentials"
+    if cfg.get("compatibility") not in {"openai", "deepseek"}:
+        return "LLM gateway compatibility must be configured as openai or deepseek"
     return ""
 
 
@@ -239,15 +250,21 @@ def ollama_host() -> str:
 
 
 def embedding_model() -> tuple[str, str]:
+    provider = str(config.get("models", "embedding_provider") or "").strip().lower()
+    model = str(config.get("models", "embedding_model") or "").strip()
+    if provider or model:
+        return provider, model
     _, embed_cfg = _settings()
-    return _resolve(embed_cfg, "ollama",
-                    str(config.get("ollama", "embed_model") or DEFAULT_EMBED_MODEL))
+    return _resolve(embed_cfg)
 
 
 def generation_model() -> tuple[str, str]:
+    provider = str(config.get("models", "generation_provider") or "").strip().lower()
+    model = str(config.get("models", "generation_model") or "").strip()
+    if provider or model:
+        return provider, model
     llm_cfg, _ = _settings()
-    return _resolve(llm_cfg, "ollama",
-                    str(config.get("ollama", "gen_model") or DEFAULT_GEN_MODEL))
+    return _resolve(llm_cfg)
 
 
 # ————————————————— HTTP —————————————————
@@ -390,6 +407,19 @@ def _stream(url: str, payload: dict, headers: dict | None = None,
 # ————————————————— embeddings —————————————————
 
 
+def _sentence_model(model: str) -> t.Any:
+    with _sentence_models_lock:
+        loaded = _sentence_models.get(model)
+        if loaded is None:
+            from sentence_transformers import SentenceTransformer
+            loaded = SentenceTransformer(
+                model,
+                cache_folder=str(config.get("sentence_transformers", "cache_dir") or "") or None,
+            )
+            _sentence_models[model] = loaded
+        return loaded
+
+
 def embed(text: str) -> list[float] | None:
     """A vector for `text`, or None with `last_error()` explaining why.
 
@@ -400,10 +430,22 @@ def embed(text: str) -> list[float] | None:
     provider, model = embedding_model()
     body = text[:4000]
 
-    if provider in ("ollama", "local", ""):
+    if not provider or not model:
+        _fail("embedding provider and model must both be configured")
+        return None
+
+    if provider == "ollama":
         out = _post(f"{ollama_host()}/api/embeddings",
                     {"model": model, "prompt": body}, timeout=30.0)
         vec = out.get("embedding") if out else None
+    elif provider == "sentence-transformers":
+        try:
+            encoded = _sentence_model(model).encode(
+                body, normalize_embeddings=True, convert_to_numpy=True)
+            vec = encoded.tolist() if hasattr(encoded, "tolist") else list(encoded)
+        except Exception as exc:  # noqa: BLE001 — model/cache/runtime boundary
+            _fail(f"sentence-transformers model {model!r} failed ({type(exc).__name__})")
+            return None
     elif provider in ("openai", "gateway"):
         gateway = gateway_config() if provider == "gateway" else None
         key = (gateway or {}).get("token") or _api_key("openai")
@@ -429,12 +471,12 @@ def embed(text: str) -> list[float] | None:
         vec = data[0].get("embedding") if data else None
     else:
         _fail(f"settings.embedding names provider {provider!r}, which has no embedding "
-              f"endpoint here (supported: ollama, local, openai, gateway)")
+              f"endpoint here (supported: ollama, sentence-transformers, openai, gateway)")
         return None
 
     if not vec:
         if not last_error():
-            _fail(f"{provider or 'ollama'} returned no embedding for model {model!r}")
+            _fail(f"{provider} returned no embedding for model {model!r}")
         return None
     if len(vec) != EMBED_DIMS:
         _fail(f"model {model!r} returned a {len(vec)}-dimension vector; this index "
@@ -451,7 +493,11 @@ def generate(prompt: str, system: str = "", timeout: float = 120.0) -> str | Non
     """One completion, or None with `last_error()` explaining why."""
     provider, model = generation_model()
 
-    if provider in ("ollama", "local", ""):
+    if not provider or not model:
+        _fail("generation provider and model must both be configured")
+        return None
+
+    if provider == "ollama":
         out = _post(f"{ollama_host()}/api/generate",
                     {"model": model, "prompt": prompt, "system": system, "stream": False,
                      "options": {"temperature": 0.3, "num_predict": 700}},
@@ -470,7 +516,7 @@ def generate(prompt: str, system: str = "", timeout: float = 120.0) -> str | Non
         if gateway and (config_error := _gateway_config_error(gateway)):
             _fail(config_error)
             return None
-        payload = {"model": model, "messages": messages, "max_completion_tokens": 700}
+        payload = {"model": model, "messages": messages, **_completion_limit(gateway, 700)}
         headers = _gateway_headers(gateway, model) if gateway else {"Authorization": f"Bearer {key}"}
         if gateway:
             payload = _gateway_payload(payload, gateway)
@@ -539,7 +585,11 @@ def chat_stream(messages: list[dict], system: str = "") -> t.Iterator[str]:
     """Yield response tokens; yields nothing if the configured model is down."""
     provider, model = generation_model()
 
-    if provider in ("ollama", "local", ""):
+    if not provider or not model:
+        _fail("generation provider and model must both be configured")
+        return
+
+    if provider == "ollama":
         payload = {"model": model,
                    "messages": ([{"role": "system", "content": system}] if system else []) + messages,
                    "stream": True,
@@ -562,7 +612,7 @@ def chat_stream(messages: list[dict], system: str = "") -> t.Iterator[str]:
         if provider == "openai" and not key:
             _fail("settings.llm names the openai provider but no OpenAI API key is set")
             return
-        payload = {"model": model, "stream": True, "max_completion_tokens": 800,
+        payload = {"model": model, "stream": True, **_completion_limit(gateway, 800),
                    "messages": ([{"role": "system", "content": system}] if system else []) + messages}
         base = gateway["base_url"] if gateway else OPENAI_BASE
         if gateway and (config_error := _gateway_config_error(gateway)):
