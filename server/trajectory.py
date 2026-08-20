@@ -35,7 +35,10 @@ _LAST_RECONCILE: dict[int, float] = {}
 
 FAMILY = {
     "search": "discover", "read_document": "inspect", "list_sources": "inspect",
-    "list_flows": "inspect", "list_tasks": "inspect", "list_answers": "inspect",
+    "list_flows": "inspect", "inspect_flow": "inspect",
+    "list_workflow_observations": "inspect", "inspect_workflow_observation": "inspect",
+    "list_product_surfaces": "inspect", "list_connector_types": "inspect",
+    "list_tasks": "inspect", "list_answers": "inspect",
     "tag_document": "change", "untag_document": "change",
     "create_task": "change", "approve_answer": "approve", "sync_source": "execute",
     "run_flow": "execute", "navigate": "navigate",
