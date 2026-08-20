@@ -5,8 +5,8 @@ primary_region = "sjc"
   dockerfile = "deploy/fly/Dockerfile"
 
 [env]
-  MARI_APP_URL = "https://mari-dogfood.fly.dev"
-  MARI_OAUTH_REDIRECT_BASE = "https://mari-dogfood.fly.dev"
+  MARI_APP_URL = "https://demo.mari.guru"
+  MARI_OAUTH_REDIRECT_BASE = "https://demo.mari.guru"
   MARI_LLM_PROVIDER = "gateway"
   MARI_LLM_MODEL = "deepseek-v4-flash"
   MARI_EMBEDDING_PROVIDER = "sentence-transformers"
