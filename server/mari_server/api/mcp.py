@@ -18,7 +18,7 @@ from fastapi import APIRouter, Header, HTTPException, Request, Response
 
 from mari_server.api import bots
 from mari_server.api import access
-from mari_server.repositories.database import pq, q1
+from mari_server.repositories import mcp_repository
 from mari_server.services.search import hybrid_search
 
 router = APIRouter(prefix="/mcp")
@@ -83,30 +83,16 @@ def call_tool(server: dict, name: str, args: dict) -> dict:
         status = args.get("status")
         if status and status not in ("Verified", "Needs review"):
             raise ValueError("status must be Verified or Needs review")
-        sql = "SELECT id, claim, source, status FROM facts"
-        rows = pq(sql + (" WHERE project_id = %s AND status = %s" if status
-                         else " WHERE project_id = %s") + " ORDER BY id LIMIT 200",
-                  (status,) if status else ())
-        return _result(rows)
+        return _result(mcp_repository.facts(status))
     if name == "list_glossary":
-        return _result(pq("""SELECT id, term, definition FROM glossary
-                             WHERE project_id = %s AND NOT candidate ORDER BY term LIMIT 200"""))
+        return _result(mcp_repository.glossary())
     if name == "list_answers":
-        return _result(pq("""SELECT id, question, answer FROM approved_answers
-                             WHERE project_id = %s AND status = 'approved' ORDER BY id LIMIT 200"""))
+        return _result(mcp_repository.answers())
     if name == "document_lineage":
         doc_id = int(args.get("document_id") or 0)
         if doc_id < 1:
             raise ValueError("document_id is required")
-        return _result(pq("""SELECT e.id, e.rel, f.id AS from_id, f.title AS from_title,
-                                   t.id AS to_id, t.title AS to_title
-                            FROM edges e JOIN documents f ON f.id = e.from_doc
-                            JOIN documents t ON t.id = e.to_doc
-                            WHERE e.project_id = %s AND f.project_id = e.project_id
-                              AND t.project_id = e.project_id
-                              AND (e.from_doc = %s OR e.to_doc = %s)
-                            ORDER BY e.id LIMIT 200""",
-                         (doc_id, doc_id)))
+        return _result(mcp_repository.lineage(doc_id))
     if name == "ask_knowledge":
         question = str(args.get("question") or "").strip()
         if not question:
@@ -154,12 +140,7 @@ async def mcp_endpoint(slug: str, request: Request,
         raise HTTPException(401, "Bearer token required")
     # Token lookup is the bootstrap boundary: after it succeeds every tool
     # executes with the server's immutable project context.
-    server = q1("""SELECT m.id, m.name, m.config, m.project_id,
-                          p.slug AS project_slug, p.name AS project_name
-                     FROM mcp_servers m JOIN projects p ON p.id = m.project_id
-                    WHERE (m.token_hash = %s OR (m.token <> '' AND m.token = %s))
-                      AND m.status = 'connected'
-                      AND p.status = 'active'""", (hashlib.sha256(token.encode()).hexdigest(), token))
+    server = mcp_repository.authenticate(hashlib.sha256(token.encode()).hexdigest(), token)
     if not server or _slug(server["name"]) != slug:
         raise HTTPException(401, "Invalid MCP server or token")
     try:

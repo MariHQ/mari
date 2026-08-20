@@ -25,7 +25,8 @@ from mari_server.services import connector_sync
 from mari_server.integrations import connector_provider as component_connectors
 from mari_server.services import workflow_runtime as flowengine
 from mari_server.services import sync as ingest
-from mari_server.repositories.database import audit, exec_, q, q1
+from mari_server.repositories import sources as source_store
+from mari_server.repositories.database import audit
 from mari_components.connectors import connector_definition, connector_definitions
 
 router = APIRouter(prefix="/connectors")
@@ -53,9 +54,7 @@ def _field_specs(definition) -> list[dict]:
 def _connected_map() -> dict[str, int]:
     """provider key → newest live source id."""
     out: dict[str, int] = {}
-    for r in q("""SELECT id, kind, provider, config FROM sources
-                  WHERE project_id = %s AND kind = 'connector' ORDER BY id""",
-               (access.require_current_access().project_id,)):
+    for r in source_store.connector_sources():
         cfg = r["config"] if isinstance(r["config"], dict) else json.loads(r["config"] or "{}")
         if r["kind"] == "connector":
             out[connector_sync.provider_key_of(r["provider"], cfg)] = r["id"]
@@ -168,21 +167,12 @@ def connect(body: ProviderIn) -> dict:
     qual = _qualifier(definition, body.config or {})
     provider_col = f"{key}:{qual}" if qual else key
     display = f"{definition.name} — {qual}" if qual else definition.name
-    project_id = access.require_current_access().project_id
-    if q1("SELECT id FROM sources WHERE project_id = %s AND kind = 'connector' AND provider = %s", (project_id, provider_col)):
-        return {"error": f"{display} is already connected"}
-
     cfg = dict(body.config or {})
     cfg.update({"provider_key": key, "cursor": "", "item_hashes": {},
                 "last_sync_at": "", "last_error": ""})
-    exec_("""INSERT INTO sources (project_id, provider, display_name, kind, status, stat_num, stat_unit,
-                                  bars, config, docs_count, health)
-             VALUES (%s, %s, %s, 'connector', 'active', '0', 'docs', '{}', %s, 0, 'Syncing')""",
-          (project_id, provider_col, display, json.dumps(cfg)))
-    source_id = q1("SELECT id FROM sources WHERE project_id = %s AND provider = %s", (project_id, provider_col))["id"]
-    exec_("""INSERT INTO sync_events (provider, event, detail, at_label)
-             VALUES (%s, %s, '', to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))""",
-          (provider_col, f"connected: {display}"))
+    source_id = source_store.add_connector(provider_col, display, cfg)
+    if source_id is None:
+        return {"error": f"{display} is already connected"}
     audit("connected source", display)
     # every connected source gets a scheduled sync flow (Flows UI owns cadence)
     flowengine.ensure_sync_flow(source_id, display)

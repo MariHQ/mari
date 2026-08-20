@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from mari_server import db
 from mari_server.domain import access
+import json
 
 
 def pulse_inputs() -> tuple[list[dict], list[dict], list[dict]]:
@@ -76,3 +77,26 @@ def freshness() -> list[dict]:
           FROM sources s LEFT JOIN bucketed b ON b.source_id = s.id
           WHERE s.project_id = %s GROUP BY s.id, s.display_name, s.provider
           ORDER BY count(b.source_id) DESC, s.id""", (project_id, project_id)).fetchall()
+
+
+def connector_sources() -> list[dict]:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn:
+        return conn.execute("""SELECT id, kind, provider, config FROM sources
+          WHERE project_id = %s AND kind = 'connector' ORDER BY id""", (project_id,)).fetchall()
+
+
+def add_connector(provider: str, display_name: str, config: dict) -> int | None:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn, conn.transaction():
+        if conn.execute("""SELECT id FROM sources WHERE project_id = %s
+          AND kind = 'connector' AND provider = %s""", (project_id, provider)).fetchone():
+            return None
+        row = conn.execute("""INSERT INTO sources
+          (project_id, provider, display_name, kind, status, stat_num, stat_unit, bars, config, docs_count, health)
+          VALUES (%s, %s, %s, 'connector', 'active', '0', 'docs', '{}', %s, 0, 'Syncing') RETURNING id""",
+          (project_id, provider, display_name, json.dumps(config))).fetchone()
+        conn.execute("""INSERT INTO sync_events (project_id, provider, event, detail, at_label)
+          VALUES (%s, %s, %s, '', to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))""",
+          (project_id, provider, f"connected: {display_name}"))
+    return int(row["id"])
