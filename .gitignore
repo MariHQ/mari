@@ -10,6 +10,7 @@ __pycache__/
 .venv/
 .idea/
 .env
+.env.live
 mari.toml
 server/builds/
 deploy/lambda/mari_cloud.dump

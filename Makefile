@@ -1,4 +1,4 @@
-.PHONY: test test-server test-web test-browser test-contracts test-agent-evals test-live-ollama test-integration test-reliability test-restore
+.PHONY: test test-server test-web test-browser test-contracts test-agent-evals test-live-ollama test-live-connectors test-integration test-reliability test-restore
 
 test: test-server test-web test-browser
 
@@ -19,6 +19,9 @@ test-agent-evals:
 
 test-live-ollama:
 	MARI_TEST_LIVE_OLLAMA=1 PYTHONPATH=server server/.venv/bin/python -m unittest server.tests.test_llm_ollama.LiveOllamaTests -v
+
+test-live-connectors:
+	./deploy/live-canary.sh
 
 test-integration:
 	./deploy/integration/run.sh

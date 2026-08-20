@@ -32,7 +32,13 @@ const connectors = [
   {
     name: "Google Drive",
     required: ["MARI_E2E_GDRIVE_ACCESS_TOKEN"],
-    fields: { "OAuth2 access token": "MARI_E2E_GDRIVE_ACCESS_TOKEN", "Folder ID": "MARI_E2E_GDRIVE_FOLDER_ID" },
+    fields: {
+      "OAuth2 access token": "MARI_E2E_GDRIVE_ACCESS_TOKEN",
+      "OAuth2 refresh token (optional)": "MARI_E2E_GDRIVE_REFRESH_TOKEN",
+      "OAuth client ID (for refresh)": "MARI_E2E_GDRIVE_CLIENT_ID",
+      "OAuth client secret (for refresh)": "MARI_E2E_GDRIVE_CLIENT_SECRET",
+      "Folder ID (optional)": "MARI_E2E_GDRIVE_FOLDER_ID",
+    },
   },
   {
     name: "GitHub",
@@ -54,6 +60,37 @@ async function configureConnector(page: Page, connector: typeof connectors[numbe
   return dialog;
 }
 
+async function waitForCompletedSync(page: Page, sourceId: number, connectorName: string) {
+  type SyncResult = { state: string; phase: string; lastError: string; docCount: number; chunkCount: number };
+  let latest: SyncResult | undefined;
+  await expect.poll(async () => {
+    const response = await page.request.post("/graphql", {
+      headers: { "Content-Type": "application/json" },
+      data: {
+        query: `query($id: Int!) {
+          syncStatus(sourceId: $id) { state phase lastError docCount chunkCount }
+        }`,
+        variables: { id: sourceId },
+      },
+    });
+    expect(response.ok(), `${connectorName} sync status request`).toBeTruthy();
+    const body = await response.json();
+    expect(body.errors, `${connectorName} sync status GraphQL errors`).toBeUndefined();
+    latest = body.data?.syncStatus;
+    if (latest?.state === "error") {
+      throw new Error(`${connectorName} initial sync failed: ${latest.lastError || "unknown error"}`);
+    }
+    return latest?.state === "idle" && latest?.phase === "done";
+  }, {
+    message: `${connectorName} initial poll should reach its durable completed state`,
+    timeout: 300_000,
+    intervals: [500, 1_000, 2_000, 5_000],
+  }).toBe(true);
+  expect(latest?.docCount, `${connectorName} sandbox must contain at least one readable document`).toBeGreaterThan(0);
+  expect(latest?.chunkCount, `${connectorName} documents must reach searchable chunks`).toBeGreaterThan(0);
+  expect(latest?.lastError).toBe("");
+}
+
 for (const connector of connectors) {
   test(`LIVE ${connector.name} validates credentials without storing them`, async ({ page }) => {
     test.skip(connector.required.some((key) => !env[key]), `Missing ${connector.required.join(", ")}`);
@@ -66,14 +103,30 @@ for (const connector of connectors) {
 }
 
 for (const connector of connectors) {
-  test(`LIVE ${connector.name} validates and schedules its initial poll`, async ({ page }) => {
+  test(`LIVE ${connector.name} validates, ingests, and completes its initial poll`, async ({ page }) => {
     test.skip(!mutations, "Set MARI_E2E_MUTATIONS=1 to allow sandbox connector creation.");
     test.skip(connector.required.some((key) => !env[key]), `Missing ${connector.required.join(", ")}`);
     const dialog = await configureConnector(page, connector);
     await dialog.getByRole("button", { name: "Test connection" }).click();
     await expect(dialog.getByText(/Connection OK/)).toBeVisible({ timeout: 30_000 });
+    const accepted = page.waitForResponse((response) => {
+      if (response.request().method() !== "POST") return false;
+      if (connector.name === "GitHub") {
+        return response.url().endsWith("/graphql")
+          && (response.request().postData() ?? "").includes("connectGithubRepo");
+      }
+      return response.url().endsWith("/connectors/connect");
+    });
     await dialog.getByRole("button", { name: "Connect & sync" }).click();
+    const response = await accepted;
+    expect(response.ok(), `${connector.name} connection request`).toBeTruthy();
+    const payload = await response.json();
+    const sourceId = connector.name === "GitHub"
+      ? Number(payload.data?.connectGithubRepo)
+      : Number(payload.sourceId);
+    expect(sourceId, `${connector.name} connection must return its source id`).toBeGreaterThan(0);
     await expect(dialog.getByText(/initial sync runs on the server/i)).toBeVisible({ timeout: 30_000 });
+    await waitForCompletedSync(page, sourceId, connector.name);
   });
 }
 
