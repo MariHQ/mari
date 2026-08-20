@@ -15,7 +15,8 @@ from mari_server.services import sync as ingest
 from mari_server.repositories import lineage_repository as links
 from mari_server.integrations import llm
 from mari_server.services import repository_audit as repoaudit
-from mari_server.repositories.database import audit, exec_, q, q1
+from mari_server.repositories import admin as admin_store
+from mari_server.repositories.database import audit
 
 # ————— the authorization rule —————
 #
@@ -75,14 +76,7 @@ class MutAdmin:
         connection — no fabricated backfill progress, sparkline, or checkpoint
         theater. Real connectors plug in behind this seam (DESIGN.md §7)."""
         actor = _require_admin(info)
-        project_id = access.require_current_access().project_id
-        exec_("""INSERT INTO sources (project_id, provider, display_name, status, stat_num, stat_unit, bars, config, docs_count, health)
-                 VALUES (%s, %s, %s, 'active', '0', 'items', '{}', %s, 0, 'Never synced')
-                 ON CONFLICT (project_id, provider) DO UPDATE SET config = sources.config || EXCLUDED.config, status = 'active'""",
-              (project_id, provider, display_name, json.dumps(config)))
-        exec_("""INSERT INTO sync_events (provider, event, detail, at_label)
-                 VALUES (%s, %s, '', to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))""",
-              (provider, f"connected: {display_name}"))
+        admin_store.connect_source(provider, display_name, config)
         audit("connected source", display_name, actor["name"], detail=[("Provider", provider),
               ("Settings", ", ".join(sorted(config)) if isinstance(config, dict) else "")])
         return True
@@ -90,12 +84,7 @@ class MutAdmin:
     @strawberry.mutation
     def disconnect_source(self, info: strawberry.Info, provider: str) -> bool:
         actor = _require_admin(info)
-        project_id = access.require_current_access().project_id
-        exec_("UPDATE sources SET status = 'paused', health = 'Paused' WHERE project_id = %s AND provider = %s", (project_id, provider))
-        exec_("UPDATE ingest_checkpoints SET status = 'paused' WHERE provider = %s AND status = 'running'", (provider,))
-        exec_("""INSERT INTO sync_events (provider, event, detail, at_label)
-                 VALUES (%s, 'paused', 'Paused by admin', to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))""",
-              (provider,))
+        admin_store.pause_source(provider)
         audit("paused source", provider, actor["name"])
         return True
 
@@ -115,17 +104,12 @@ class MutAdmin:
         actor = _require_admin(info)
         if role not in ROLES:
             raise ValueError(f"role must be one of {', '.join(ROLES)}")
-        before = q1("SELECT name, role, email FROM users WHERE id = %s", (id,))
+        before = admin_store.change_member_role(id, role)
         if not before:
             return False
         # Do not let the last admin demote themselves into a workspace nobody
         # can administer — the only way back would be the setup token, and
         # setup_complete blocks re-minting it.
-        if before["role"] == "admin" and role != "admin":
-            others = q1("SELECT count(*) AS n FROM users WHERE role = 'admin' AND id <> %s", (id,))["n"]
-            if not others:
-                raise ValueError("This is the only admin — promote someone else first.")
-        exec_("UPDATE users SET role = %s WHERE id = %s", (role, id))
         audit(f"changed role to {role}", before["name"], actor["name"],
               [("Email", before["email"]), ("Previous role", before["role"]), ("New role", role)])
         return True
@@ -133,14 +117,9 @@ class MutAdmin:
     @strawberry.mutation
     def remove_member(self, info: strawberry.Info, id: int) -> bool:
         actor = _require_admin(info)
-        before = q1("SELECT name, role, email, provider FROM users WHERE id = %s", (id,))
+        before = admin_store.remove_member(id)
         if not before:
             return False
-        if before["role"] == "admin":
-            others = q1("SELECT count(*) AS n FROM users WHERE role = 'admin' AND id <> %s", (id,))["n"]
-            if not others:
-                raise ValueError("This is the only admin — promote someone else first.")
-        exec_("DELETE FROM users WHERE id = %s", (id,))
         audit("removed member", before["name"], actor["name"],
               [("Email", before["email"]), ("Role", before["role"]), ("Account source", before["provider"])])
         return True
@@ -148,23 +127,15 @@ class MutAdmin:
     # ——— api keys ———
     @strawberry.mutation
     def create_api_key(self, info: strawberry.Info, name: str, scopes: str = "read") -> str:
-        import hashlib
         import secrets
         actor = _require_admin(info)
-        project_id = access.require_current_access().project_id
         name = (name or "").strip()
         scope_values = sorted({value.strip() for value in scopes.split(",") if value.strip()})
         allowed = {"read", "search", "facts", "lineage"}
         if not name or not scope_values or not set(scope_values).issubset(allowed):
             raise ValueError(f"Scopes must be a comma-separated subset of {', '.join(sorted(allowed))}.")
-        if q1("SELECT 1 FROM api_keys WHERE project_id = %s AND name = %s", (project_id, name)):
-            raise ValueError(f"An API key called '{name}' already exists.")
         token = "mari_sk_" + secrets.token_hex(16)
-        exec_("""INSERT INTO api_keys
-                 (project_id, name, prefix, token_hash, scopes, created_at, last_used)
-                 VALUES (%s, %s, %s, %s, %s, now(), 'never')""",
-              (project_id, name, token[:12] + "…", hashlib.sha256(token.encode()).hexdigest(),
-               ",".join(scope_values)))
+        admin_store.create_api_key(name, token, scope_values)
         audit("created API key", name, actor["name"],
               [("Scopes", ",".join(scope_values)), ("Prefix", token[:12] + "…")])
         return token
@@ -172,13 +143,9 @@ class MutAdmin:
     @strawberry.mutation
     def revoke_api_key(self, info: strawberry.Info, id: int) -> bool:
         actor = _require_admin(info)
-        project_id = access.require_current_access().project_id
-        key = q1("""SELECT name, prefix, scopes FROM api_keys
-                    WHERE project_id = %s AND id = %s""", (project_id, id))
+        key = admin_store.revoke_api_key(id)
         if not key:
             return False
-        exec_("UPDATE api_keys SET revoked = true, token_hash = '' WHERE project_id = %s AND id = %s",
-              (project_id, id))
         audit("revoked API key", key["name"], actor["name"],
               [("Prefix", key["prefix"]), ("Scopes", key["scopes"])])
         return True
@@ -188,16 +155,14 @@ class MutAdmin:
     def update_setting(self, info: strawberry.Info, key: str, value: JSON) -> bool:
         actor = _require_admin(info)
         if key == "llm" and isinstance(value, dict):
-            before = q1("SELECT value FROM settings WHERE key = 'llm'")
-            existing = (before or {}).get("value") or {}
+            existing = admin_store.setting("llm") or {}
             if isinstance(existing, str):
                 try:
                     existing = json.loads(existing)
                 except json.JSONDecodeError:
                     existing = {}
             value = llm.preserve_masked(existing, value)
-        exec_("""INSERT INTO settings (key, value) VALUES (%s, %s)
-                 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value""", (key, json.dumps(value)))
+        admin_store.save_setting(key, value)
         audit("updated setting", key, actor["name"],
               [("Setting", key), ("Fields", ", ".join(sorted(value)) if isinstance(value, dict) else "value")])
         # `llm` caches the model/provider rows for 30s. Without this, Settings →
@@ -221,12 +186,9 @@ class MutAdmin:
         new = name.strip()
         if not new:
             raise ValueError("Workspace name cannot be empty")
-        before = q1("SELECT value->>'name' AS name FROM settings WHERE key = 'workspace'")
-        exec_("""INSERT INTO settings (key, value) VALUES ('workspace', %s)
-                 ON CONFLICT (key) DO UPDATE SET value = settings.value || EXCLUDED.value""",
-              (json.dumps({"name": new}),))
+        before = admin_store.merge_setting("workspace", {"name": new}) or {}
         audit("renamed workspace", new, actor["name"],
-              [("Previous name", (before or {}).get("name") or "(unnamed)"), ("New name", new)])
+              [("Previous name", before.get("name") or "(unnamed)"), ("New name", new)])
         return True
 
     @strawberry.mutation
@@ -245,9 +207,7 @@ class MutAdmin:
                 if not github.team_is_valid(
                         github.configured_token(), org, name):
                     raise ValueError(f"GitHub team {slug} not found, or this token cannot see it")
-        exec_("""INSERT INTO settings (key, value) VALUES ('provisioning', %s)
-                 ON CONFLICT (key) DO UPDATE SET value = settings.value || EXCLUDED.value""",
-              (json.dumps({"github_team": slug}),))
+        admin_store.merge_setting("provisioning", {"github_team": slug})
         audit("configured GitHub team sync" if slug else "disabled GitHub team sync",
               slug or "GitHub team", actor["name"],
               [("Team", slug or "(none)"), ("Verified against GitHub", "yes" if slug and github.configured_token() else "no")])
@@ -261,27 +221,17 @@ class MutAdmin:
     ) -> int:
         """Create a real GitHub source and start the initial sync in the background."""
         actor = _require_admin(info)
-        project_id = access.require_current_access().project_id
         repo = repo.strip().strip("/")
         if repo.count("/") != 1 or any(not part.strip() for part in repo.split("/")):
             raise ValueError("Repository must be in owner/name form")
         requested_token = (token or "").strip()
         if not requested_token:
             raise ValueError("GitHub token is required")
-        if q1("""SELECT id FROM sources
-                 WHERE project_id = %s AND kind = 'connector'
-                   AND split_part(provider, ':', 1) = 'github'
-                   AND lower(config->>'repo') = lower(%s)""", (project_id, repo)):
-            raise ValueError(f"Repository {repo} is already connected")
         branch = github.default_branch(requested_token, repo)
         cfg = {"provider_key": "github", "repo": repo, "branch": branch, "paths": paths or "",
                "token": requested_token, "cursor": "", "last_sync_at": "",
                "last_error": "", "item_hashes": {}}
-        exec_("""INSERT INTO sources (project_id, provider, display_name, kind, status, stat_num, stat_unit, bars,
-                                      config, docs_count, health)
-                 VALUES (%s, %s, %s, 'connector', 'active', '0', 'docs', '{}', %s, 0, 'Syncing')""",
-              (project_id, f"github:{repo}", repo, json.dumps(cfg)))
-        source_id = q1("SELECT id FROM sources WHERE project_id = %s AND provider = %s", (project_id, f"github:{repo}"))["id"]
+        source_id = admin_store.add_github_source(repo, cfg)
         audit("connected GitHub repo", repo, actor["name"],
               detail=[("Branch", branch), ("Paths", paths or "(whole repository)")])
         # every github source gets a scheduled sync flow (Flows UI owns cadence)
@@ -320,8 +270,7 @@ class MutAdmin:
         # Connector sources delegate to the shared sync engine; anything else has no sync
         # implementation, so we say so instead of faking progress.
         _require_manager(info)
-        project_id = access.require_current_access().project_id
-        src = q1("SELECT id, kind FROM sources WHERE project_id = %s AND provider = %s", (project_id, provider))
+        src = admin_store.source(provider)
         if src and src.get("kind") == "connector":
             ingest.start_sync(src["id"])
             audit("triggered sync", provider)
@@ -334,10 +283,9 @@ class MutAdmin:
     @strawberry.mutation
     def update_source_config(self, info: strawberry.Info, provider: str, config: JSON) -> bool:
         actor = _require_admin(info)
-        project_id = access.require_current_access().project_id
         if not isinstance(config, dict):
             raise ValueError("config must be an object")
-        before = q1("SELECT config FROM sources WHERE project_id = %s AND provider = %s", (project_id, provider))
+        before = admin_store.source(provider)
         if not before:
             raise ValueError(f"No source '{provider}' to configure")
         current = before["config"] if isinstance(before["config"], dict) else json.loads(before["config"] or "{}")
@@ -346,7 +294,7 @@ class MutAdmin:
                 raise ValueError(
                     f"'{key}' identifies this source and cannot be changed here — "
                     "connect the new target as its own source instead.")
-        exec_("UPDATE sources SET config = config || %s::jsonb WHERE project_id = %s AND provider = %s", (json.dumps(config), project_id, provider))
+        admin_store.update_source_config(provider, config)
         audit("updated source config", provider, actor["name"],
               detail=[("Fields", ", ".join(sorted(config)) or "(none)")])
         return True
@@ -365,14 +313,14 @@ class MutAdmin:
     @strawberry.mutation
     def fix_all_audit_findings(self, info: strawberry.Info, run_id: int, kind: str) -> int:
         actor = _require_manager(info)
-        rows = q("SELECT id FROM audit_findings WHERE run_id = %s AND kind = %s AND status = 'open'", (run_id, kind))
-        for r in rows:
-            repoaudit.fix_finding(r["id"], actor["name"])
-        return len(rows)
+        ids = admin_store.open_audit_finding_ids(run_id, kind)
+        for finding_id in ids:
+            repoaudit.fix_finding(finding_id, actor["name"])
+        return len(ids)
 
     @strawberry.mutation
     def dismiss_audit_finding(self, info: strawberry.Info, id: int) -> bool:
         actor = _require_manager(info)
-        exec_("UPDATE audit_findings SET status = 'dismissed' WHERE id = %s", (id,))
+        admin_store.dismiss_audit_finding(id)
         audit("dismissed audit finding", f"#{id}", actor["name"])
         return True
