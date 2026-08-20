@@ -14,7 +14,7 @@ import tomllib
 import typing as t
 
 _DEFAULTS: dict[str, t.Any] = {
-    "database": {"url": "postgresql://localhost/mari_cloud"},
+    "database": {"url": "postgresql://localhost/mari_cloud", "pool_max": 10},
     "server": {"host": "0.0.0.0", "port": 8000,
                "cors_origins": ["http://localhost:5173"], "trusted_proxies": []},
     "ollama": {"host": "http://localhost:11434", "embed_model": "nomic-embed-text", "gen_model": "gemma3:4b"},
@@ -56,6 +56,7 @@ _DEFAULTS: dict[str, t.Any] = {
     "s3": {"bucket": "", "region": "", "endpoint_url": ""},
     "audit": {"languages": ["es", "fr"], "default_tag": "customer-facing"},
     "github": {"token": "", "webhook_secret": ""},
+    "runtime": {"flow_workers": 4},
 }
 
 
@@ -93,6 +94,7 @@ def _load() -> dict:
     # env overrides (12-factor for the compose file)
     env_map = {
         "MARI_DB": ("database", "url"),
+        "MARI_DB_POOL_MAX": ("database", "pool_max"),
         "MARI_OLLAMA_HOST": ("ollama", "host"),
         "MARI_OLLAMA_EMBED_MODEL": ("ollama", "embed_model"),
         "MARI_OLLAMA_GEN_MODEL": ("ollama", "gen_model"),
@@ -129,6 +131,7 @@ def _load() -> dict:
         "MARI_TRUSTED_PROXIES": ("server", "trusted_proxies"),
         "MARI_GITHUB_TOKEN": ("github", "token"),
         "MARI_GITHUB_WEBHOOK_SECRET": ("github", "webhook_secret"),
+        "MARI_FLOW_WORKERS": ("runtime", "flow_workers"),
     }
     for env, (section, key) in env_map.items():
         if os.environ.get(env):
@@ -144,7 +147,7 @@ def _load() -> dict:
                     continue
                 if not isinstance(value, dict):
                     continue
-            elif key == "max_retries":
+            elif key in ("max_retries", "pool_max", "flow_workers"):
                 try:
                     value = int(value)
                 except ValueError:

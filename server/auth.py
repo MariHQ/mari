@@ -19,19 +19,17 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-import psycopg
 from fastapi import APIRouter, HTTPException, Request, Response
-from psycopg.rows import dict_row
 from pydantic import BaseModel
 
 import config
 import access as access_module
 import control_store
+from mari_server.infrastructure import postgres
 
 log = logging.getLogger("mari.auth")
 router = APIRouter(prefix="/auth")
 
-DB_URL_REF: dict = {"url": config.get("database", "url")}
 COOKIE = "mari_session"
 
 # Invitations are bearer credentials, not merely rows with a recognizable
@@ -75,7 +73,7 @@ def actor_name() -> str:
 
 
 def _conn():
-    return psycopg.connect(DB_URL_REF["url"], row_factory=dict_row)
+    return postgres.connect()
 
 
 # ————— rate limiting —————

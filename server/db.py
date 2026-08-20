@@ -1,34 +1,19 @@
 """Mari — database helpers (shared by all API modules).
 
-DB_URL comes from MARI_DB (default local Postgres); the DB_URL_REF dicts in
-flowengine/auth/repoaudit are injected here so every module talks to the same
-database. db.py must stay import-cycle-free: it never imports app/queries/mutations.
+Connection ownership lives in ``mari_server.infrastructure.postgres``.  This
+module remains the small query/audit facade while legacy callers are migrated.
 """
 
 from __future__ import annotations
 
-import atexit
 import json
-import os
 import typing as t
-
-import psycopg
-from psycopg.rows import dict_row
-from psycopg_pool import ConnectionPool
 
 import auth as auth_module
 import access as access_module
-import flowengine
-import ingest
-import repoaudit
 import observability
 from mari_server.domain.audit import AuditEvent, chained_row
-
-DB_URL = os.environ.get("MARI_DB", "postgresql://localhost/mari_cloud")
-flowengine.DB_URL_REF["url"] = DB_URL
-ingest.DB_URL_REF["url"] = DB_URL
-auth_module.DB_URL_REF["url"] = DB_URL
-repoaudit.DB_URL_REF["url"] = DB_URL
+from mari_server.infrastructure import postgres
 
 # ————— who did this —————
 #
@@ -45,33 +30,20 @@ caller = auth_module.caller
 # Shared pool for the request path (q/q1/exec_). Long-lived background workers
 # (ingest/connect_sync/flowengine) keep their own dedicated connections — they
 # hold transactions open for minutes and must not starve the pool.
-POOL = ConnectionPool(
-    DB_URL,
-    min_size=1,
-    max_size=int(os.environ.get("MARI_DB_POOL_MAX", "10")),
-    kwargs={"row_factory": dict_row},
-    open=True,
-    name="mari-api",
-)
-
-
 def open_pool() -> None:
-    """Open the request pool after a prior lifespan/test shutdown."""
-    if POOL.closed:
-        POOL.open()
+    postgres.pool()
 
 
 def close_pool() -> None:
-    """Release worker threads and connections deterministically."""
-    if not POOL.closed:
-        POOL.close()
+    postgres.close_pool()
 
 
-atexit.register(close_pool)
+def connect():
+    return postgres.connect()
 
 
 def q(sql: str, args: tuple = ()) -> list[dict]:
-    with POOL.connection() as conn:
+    with postgres.pool().connection() as conn:
         return conn.execute(sql, args).fetchall()
 
 
@@ -81,15 +53,13 @@ def q1(sql: str, args: tuple = ()) -> dict | None:
 
 
 def exec_(sql: str, args: tuple = ()) -> None:
-    with POOL.connection() as conn:
+    with postgres.pool().connection() as conn:
         conn.execute(sql, args)
 
 
 def transaction(fn: t.Callable[[t.Any], t.Any]) -> t.Any:
     """Run a small unit of work atomically on one pooled connection."""
-    with POOL.connection() as conn:
-        with conn.transaction():
-            return fn(conn)
+    return postgres.transaction(fn)
 
 
 def project_id() -> int:
@@ -190,4 +160,4 @@ def jload(v: t.Any) -> t.Any:
 def ensure_schema() -> None:
     """Apply serialized, checksum-verified migrations before serving traffic."""
     from schema_migrations import migrate
-    migrate(DB_URL)
+    migrate(postgres.database_url())

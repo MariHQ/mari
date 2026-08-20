@@ -9,7 +9,10 @@ import psycopg
 
 class EventLedger:
     def __init__(self, db_url: str | None = None, retention_seconds: int = 7 * 86400):
-        self.db_url = db_url or os.environ.get("MARI_DB", "postgresql://localhost/mari_cloud")
+        if db_url is None:
+            from mari_server.infrastructure.postgres import database_url
+            db_url = database_url()
+        self.db_url = db_url
         self.retention_seconds = retention_seconds
 
     def _connect(self):

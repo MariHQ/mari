@@ -37,7 +37,8 @@ class IcebergWarehouse:
             self.warehouse = warehouse_path.as_uri()
             catalog_uri = os.environ.get("MARI_ICEBERG_CATALOG_URI", "").strip()
             if not catalog_uri:
-                database_uri = os.environ.get("MARI_DB", "postgresql://localhost/mari_cloud")
+                from mari_server.infrastructure.postgres import database_url
+                database_uri = database_url()
                 catalog_uri = database_uri.replace("postgresql://", "postgresql+psycopg://", 1)
             self.catalog = SqlCatalog("mari", uri=catalog_uri, warehouse=self.warehouse)
         self.catalog.create_namespace_if_not_exists(NAMESPACE)

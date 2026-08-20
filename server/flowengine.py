@@ -12,21 +12,17 @@ from __future__ import annotations
 import concurrent.futures as cf
 import fnmatch
 import json
-import os
 import threading
 import time
 import typing as t
 
-import psycopg
-from psycopg.rows import dict_row
-
 import llm
-
-DB_URL_REF: dict = {"url": "postgresql://localhost/mari_cloud"}
+import config
+from mari_server.infrastructure import postgres
 
 
 def _conn():
-    return psycopg.connect(DB_URL_REF["url"], row_factory=dict_row)
+    return postgres.connect()
 
 
 def _now_label() -> str:
@@ -408,7 +404,7 @@ def _public_stats(ctx: dict) -> dict:
 # the ceiling wait their turn rather than being dropped; an approval step frees
 # its worker immediately, because a waiting run returns from execute_run and is
 # resumed later by approveRun.
-FLOW_WORKERS = max(1, int(os.environ.get("MARI_FLOW_WORKERS", "4")))
+FLOW_WORKERS = max(1, int(config.get("runtime", "flow_workers", 4)))
 _run_pool = cf.ThreadPoolExecutor(max_workers=FLOW_WORKERS, thread_name_prefix="mari-flow")
 
 

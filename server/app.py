@@ -49,7 +49,7 @@ import observability
 import enterprise_identity
 import gdrive_events
 
-from db import DB_URL, close_pool, ensure_schema, exec_, open_pool, q, q1
+from db import close_pool, ensure_schema, exec_, open_pool, q, q1
 from queries import Query, hybrid_search, like_pattern
 from mutations_knowledge import MutKnowledge
 from mutations_admin import MutAdmin
@@ -201,7 +201,8 @@ def _chat_for_access(body: ChatIn, access: access_module.AccessContext, usage_de
     project_id = access.project_id
     session_id = body.session_id
     if not session_id:
-        with psycopg.connect(DB_URL) as conn:
+        from mari_server.infrastructure import postgres
+        with postgres.connect() as conn:
             session_id = conn.execute(
                 """INSERT INTO chat_sessions (project_id, owner_user_id, title)
                    VALUES (%s, %s, %s) RETURNING id""",

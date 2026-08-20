@@ -9,16 +9,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
-import os
 from pathlib import Path
 import re
 import time
 
 import psycopg
 from psycopg.rows import dict_row
-
-
-DB_URL = os.environ.get("MARI_DB", "postgresql://localhost/mari_cloud")
+from mari_server.infrastructure import postgres
 _NAME = re.compile(r"^[0-9]{4}_[a-z0-9_]+\.sql$")
 _LOCK_KEY = 6_878_277_758  # stable application-level advisory lock key
 
@@ -66,7 +63,7 @@ def pending(migrations: list[Migration], applied: dict[str, str]) -> list[Migrat
 def migrate(db_url: str | None = None) -> list[str]:
     migrations = discover()
     applied_now: list[str] = []
-    with psycopg.connect(db_url or DB_URL, row_factory=dict_row) as conn:
+    with psycopg.connect(db_url or postgres.database_url(), row_factory=dict_row) as conn:
         # A transaction-scoped lock is automatically released on commit,
         # rollback, connection loss, or a killed deploy.
         conn.execute("SELECT pg_advisory_xact_lock(%s)", (_LOCK_KEY,))

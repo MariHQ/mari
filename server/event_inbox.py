@@ -26,7 +26,10 @@ log = logging.getLogger("mari.event_inbox")
 class EventInbox:
     def __init__(self, db_url: str | None = None, *, lease_seconds: int = 60,
                  max_attempts: int = 12):
-        self.db_url = db_url or os.environ.get("MARI_DB", "postgresql://localhost/mari_cloud")
+        if db_url is None:
+            from mari_server.infrastructure.postgres import database_url
+            db_url = database_url()
+        self.db_url = db_url
         self.lease_seconds = max(5, lease_seconds)
         self.max_attempts = max(1, max_attempts)
 

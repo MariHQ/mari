@@ -32,7 +32,8 @@ OIDC_VERIFIER = "mari_oidc_verifier"
 
 
 def _conn():
-    return psycopg.connect(auth.DB_URL_REF["url"], row_factory=dict_row)
+    from mari_server.infrastructure import postgres
+    return postgres.connect()
 
 
 def _json_request(url: str, *, data: dict | None = None, headers: dict | None = None) -> dict:

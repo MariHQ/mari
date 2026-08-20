@@ -30,14 +30,14 @@ from mari_components.knowledge import (
     derive_links, extract_explicit_links,
 )
 
-DB_URL = os.environ.get("MARI_DB", "postgresql://localhost/mari_cloud")
+from mari_server.infrastructure import postgres
 
 SIM_THRESHOLD = DEFAULT_SIMILARITY_THRESHOLD
 SIM_TOP_K = DEFAULT_SIMILARITY_LIMIT
 SIM_CAP_PER_SOURCE = 1000
 
 def _conn():
-    return psycopg.connect(DB_URL, row_factory=dict_row)
+    return postgres.connect()
 
 
 # How many edges go in one INSERT. Large enough that a full extraction is a

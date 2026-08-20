@@ -9,18 +9,12 @@ path as the rest of the product. Connections are intentionally independent of
 from __future__ import annotations
 
 import datetime as dt
-import os
 import typing as t
-
-import psycopg
-from psycopg.rows import dict_row
-
-
-DB_URL = os.environ.get("MARI_DB", "postgresql://localhost/mari_cloud")
+from mari_server.infrastructure import postgres
 
 
 def _connect():
-    return psycopg.connect(DB_URL, row_factory=dict_row)
+    return postgres.connect()
 
 
 def _instant(value: int | float | None = None) -> dt.datetime:

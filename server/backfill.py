@@ -6,17 +6,12 @@ Idempotent and resumable (per-row commit = the checkpointing seam).
 
 from __future__ import annotations
 
-import os
-
-import psycopg
-
 import llm
-
-DB_URL = os.environ.get("MARI_DB", "postgresql://localhost/mari_cloud")
+from mari_server.infrastructure import postgres
 
 
 def main() -> None:
-    with psycopg.connect(DB_URL) as conn:
+    with postgres.connect() as conn:
         rows = conn.execute(
             "SELECT id, title, snippet, body FROM documents WHERE embedding IS NULL ORDER BY id"
         ).fetchall()

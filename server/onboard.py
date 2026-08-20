@@ -29,7 +29,7 @@ from mari_components.knowledge import harvest_glossary as component_harvest_glos
 # (hardcodes source='github'), so the document upsert lives here instead.
 from ingest import _chunk_settings, _sha, _sync_chunks, _title_of
 
-from db import DB_URL
+from mari_server.infrastructure import postgres
 from excerpt import excerpt
 
 router = APIRouter(prefix="/onboard")
@@ -41,7 +41,7 @@ ACTOR = "Upload"
 
 
 def _conn():
-    return psycopg.connect(DB_URL, row_factory=dict_row)
+    return postgres.connect()
 
 
 # ————————————————— 1. file upload ingestion —————————————————

@@ -11,7 +11,8 @@ import psycopg
 import access
 import llm
 import trajectory
-from db import DB_URL, exec_, log_usage, q, q1
+from db import exec_, log_usage, q, q1
+from mari_server.infrastructure import postgres
 from mari_components.connectors import connector_definitions
 from queries import hybrid_search
 
@@ -36,7 +37,7 @@ class ProductionAgentRuntime:
         return self.project_access.project_id
 
     def create_session(self, title: str) -> int:
-        with psycopg.connect(DB_URL) as connection:
+        with postgres.connect() as connection:
             row = connection.execute(
                 """INSERT INTO chat_sessions (project_id, owner_user_id, title)
                      VALUES (%s, %s, %s) RETURNING id""",

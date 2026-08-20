@@ -15,16 +15,12 @@ import pathlib
 import re
 import subprocess
 
-import psycopg
-from psycopg.rows import dict_row
-
 import config
-
-DB_URL_REF: dict = {"url": config.get("database", "url")}
+from mari_server.infrastructure import postgres
 
 
 def _conn():
-    return psycopg.connect(DB_URL_REF["url"], row_factory=dict_row)
+    return postgres.connect()
 
 
 def ensure_schema() -> None:

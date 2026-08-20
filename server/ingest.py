@@ -20,9 +20,6 @@ import statistics
 import threading
 import time
 
-import psycopg
-from psycopg.rows import dict_row
-
 import flowengine
 import github
 import links
@@ -32,8 +29,7 @@ import access
 from mari_server.application import documents as document_application
 from mari_server.domain.documents import DocumentVersion
 from mari_server.infrastructure import document_repository
-
-DB_URL_REF: dict = {"url": "postgresql://localhost/mari_cloud"}
+from mari_server.infrastructure import postgres
 
 ACTOR = "GitHub sync"
 PROCESS_START_TS = time.time()  # for startup reconciliation — never touch newer rows
@@ -43,7 +39,7 @@ COMMENT_CAP = 30  # latest N comments per issue/PR
 
 
 def _conn():
-    return psycopg.connect(DB_URL_REF["url"], row_factory=dict_row)
+    return postgres.connect()
 
 
 # ————————————————— status registry —————————————————
