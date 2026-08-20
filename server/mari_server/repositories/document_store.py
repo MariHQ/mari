@@ -16,7 +16,7 @@ import pyarrow as pa
 from pyiceberg.expressions import EqualTo
 
 from mari_server.repositories.iceberg_warehouse import IcebergWarehouse, warehouse
-from mari_server.domain.documents import DocumentVersion, document_key
+from mari_components.documents import DocumentVersion, document_key
 
 
 TABLE = "mari.knowledge_versions"

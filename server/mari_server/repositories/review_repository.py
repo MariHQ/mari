@@ -5,8 +5,8 @@ from __future__ import annotations
 from mari_server.domain import access
 from mari_server.repositories.database import audit, exec_, q, q1
 
-from mari_server.services.review import ReviewPorts
-from mari_server.domain.review import POLICY_VERSION, PolicyResult, ReviewRecord
+from mari_components.review import ReviewPorts
+from mari_components.review_types import POLICY_VERSION, PolicyResult, ReviewRecord
 
 
 def _record(row: dict) -> ReviewRecord:

@@ -11,7 +11,6 @@ from __future__ import annotations
 import json
 import hashlib
 import logging
-import re
 from typing import Any
 
 from fastapi import APIRouter, Header, HTTPException, Request, Response
@@ -20,6 +19,7 @@ from mari_server.api import bots
 from mari_server.api import access
 from mari_server.repositories import mcp_repository
 from mari_server.services.search import hybrid_search
+from mari_components.knowledge import slug
 
 router = APIRouter(prefix="/mcp")
 PROTOCOL_VERSION = "2025-06-18"
@@ -46,7 +46,7 @@ CAPABILITY_TOOLS: dict[str, list[dict[str, Any]]] = {
 
 
 def _slug(name: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "server"
+    return slug(name) or "server"
 
 
 def _caps(server: dict) -> list[str]:

@@ -15,6 +15,7 @@ from mari_server.integrations import llm
 from mari_server.integrations import vector_index as retrieval
 from mari_server.repositories.database import jload
 from mari_server.repositories import search as search_store
+from mari_components.retrieval import keyword_patterns, like_pattern
 
 # ————————————————— hybrid search ranking constants —————————————————
 
@@ -43,38 +44,6 @@ ANN_CANDIDATES = 400
 # clamp rather than an error: a caller asking past the end of the corpus should
 # get the end of the corpus, not a failure.
 MAX_K = 500
-
-# LIKE/ILIKE metacharacters. Unescaped, a query of "%" matches every row and
-# `searchTotal` reports the whole corpus as a match for one character (SRCH-6).
-_LIKE_ESCAPE = str.maketrans({"\\": "\\\\", "%": "\\%", "_": "\\_"})
-
-
-def like_pattern(query: str) -> str:
-    """`query` as a LIKE pattern that matches it literally. Backslash is the
-    default LIKE escape character in Postgres, so escaping it first (then % and
-    _) needs no ESCAPE clause."""
-    return f"%{query.translate(_LIKE_ESCAPE)}%"
-
-
-_SEARCH_STOP_WORDS = frozenset({
-    "and", "are", "can", "does", "for", "from", "how", "into", "our",
-    "the", "their", "this", "was", "what", "when", "where", "which", "who",
-    "why", "with", "you", "your",
-})
-
-
-def keyword_patterns(query: str) -> list[str]:
-    """Literal LIKE patterns for meaningful words in a natural-language query.
-
-    Requiring the entire question as one substring made chat retrieval miss a
-    document that plainly contained several of its terms whenever the vector
-    snapshot had not been built yet. Keyword search is the reliable fallback,
-    so it must understand questions as words rather than exact prose.
-    """
-    words = [word for word in re.findall(r"[a-z0-9][a-z0-9_-]*", query.lower())
-             if len(word) > 2 and word not in _SEARCH_STOP_WORDS]
-    return [like_pattern(word) for word in dict.fromkeys(words)] or [like_pattern(query.strip())]
-
 
 # ————————————————— one embedding per query (SRCH-1) —————————————————
 #

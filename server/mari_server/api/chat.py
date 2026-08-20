@@ -10,7 +10,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from mari_server.api import access
-from mari_server.services.chat import stream_answer
+from mari_components.destinations.chat import stream_answer
 from mari_server.services.chat_runtime import live_destination, ports
 
 

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from mari_server.repositories.database import audit, transaction
-from mari_server.services.knowledge_chat import KnowledgeChatPorts
+from mari_components.destinations.knowledge_chat import KnowledgeChatPorts
 
 
 def list_destinations(project_id: int) -> tuple[str, list[dict]]:

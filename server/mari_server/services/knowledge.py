@@ -4,9 +4,7 @@ tags, tasks, lineage, digest, insights, watches."""
 from __future__ import annotations
 
 import concurrent.futures as cf
-import datetime as dt
 import json
-import re
 import time
 import typing as t
 
@@ -22,55 +20,8 @@ from mari_components.knowledge import (
     extract_facts as component_extract_facts,
     refine_document as component_refine_document,
     summarize_digest as component_summarize_digest,
+    is_claim,
 )
-
-
-# A document's metadata line is not a claim. The scanner is fed
-# "[source] title: body", and for a GitHub PR the body IS the header line, so
-# the model happily returned "PR #340 · petk · closed · updated
-# 2016-01-17T01:57:54Z" as a fact — a row nobody can verify, and one the
-# contradiction detector then compares digit by digit against its neighbour.
-_META_CLAIM = re.compile(
-    r"""(^\s*(PR|MR|Issue|Commit)\s*\#?\d)   # starts as a PR/issue/commit header
-      | (\d{4}-\d{2}-\d{2}T\d{2}:\d{2})      # carries a raw ISO timestamp
-      | (^[^.!?]*·[^.!?]*·)                  # a "a · b · c" pill line, not a sentence
-    """,
-    re.IGNORECASE | re.VERBOSE)
-
-
-def is_claim(text: str) -> bool:
-    """Is this a sentence someone could agree or disagree with? Guards the
-    ledger against metadata the extractor echoed back at us."""
-    claim = (text or "").strip()
-    return bool(claim) and len(claim.split()) >= 4 and not _META_CLAIM.search(claim)
-
-def _iso_date(value: str | None) -> str | None:
-    """Accept an ISO date (or an ISO timestamp) and return YYYY-MM-DD; None for
-    empty. Anything else is rejected loudly rather than stored as a string the
-    console would later fail to sort."""
-    if value is None or not str(value).strip():
-        return None
-    text = str(value).strip()
-    try:
-        return dt.date.fromisoformat(text[:10]).isoformat()
-    except ValueError:
-        raise ValueError(f"Due date must be an ISO date (YYYY-MM-DD), got {text!r}") from None
-
-
-# Vocabularies the editorial surfaces are allowed to store. Each mirrors a
-# union the component library renders: a value outside one draws an unlabelled
-# chip or a missing glyph, so it is rejected at write time rather than filtered
-# out at read time.
-_TONES = {"ink", "ok", "attention", "blocked", "info"}
-_SEVERITIES = {"error", "warn", "advisory"}
-_TEMPLATE_ICONS = {"clipboard", "git-fork", "shield-check", "file-text",
-                   "sprout", "book-open", "megaphone"}
-
-
-def _slug(value: str) -> str:
-    """A stable url-safe key. Keys are addressed by mutations and stored on
-    settings rows, so they must not carry whitespace or punctuation."""
-    return re.sub(r"[^a-z0-9]+", "-", value.strip().lower()).strip("-")[:64]
 
 
 # ————————————————— the corpus scanners —————————————————

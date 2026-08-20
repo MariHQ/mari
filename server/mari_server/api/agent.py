@@ -10,7 +10,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from mari_server.api import access
-from mari_server.services.agent import AgentOutput, stream_agent_turn
+from mari_components.agents.runtime import AgentOutput, stream_agent_turn
 from mari_server.services.agent_runtime import production_runtime
 
 

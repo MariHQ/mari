@@ -7,7 +7,8 @@ from strawberry.scalars import JSON
 
 from mari_server import config
 from mari_server.api.graphql_admin import _require_admin
-from mari_server.services import knowledge_chat, mcp
+from mari_components.destinations import knowledge_chat
+from mari_components.destinations import mcp_lifecycle as mcp
 from mari_server.repositories import knowledge_chat_repository, mcp_repository
 
 

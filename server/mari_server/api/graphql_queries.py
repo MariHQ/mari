@@ -24,7 +24,7 @@ from mari_server.integrations import github
 from mari_server.services import sync as ingest
 from mari_server.integrations import llm
 from mari_server.integrations import vector_index as retrieval
-from mari_server.services import review as review_application
+from mari_components import review as review_application
 from mari_server.repositories import review_repository
 from mari_server.repositories import knowledge as knowledge_store
 from mari_server.repositories import document_repository, lineage_repository as lineage_store
@@ -34,7 +34,7 @@ from mari_server.repositories import sources as source_store, audit as audit_sto
 from mari_server.repositories import settings as settings_store, analytics as analytics_store
 from mari_server.repositories import chat as chat_store
 from mari_server.repositories.database import actor_name, jload
-from mari_server.services.excerpt import excerpt
+from mari_components.knowledge.excerpt import excerpt
 from mari_server.api.graphql_types import (
     ActivityBucket, ActivityItem, ApiKey, ApprovedAnswer,
     AuditDetail, AuditEvent, AuditFinding, AuditRun, Change, ChatMessage,

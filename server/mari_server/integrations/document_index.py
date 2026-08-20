@@ -9,7 +9,7 @@ from mari_server.integrations import llm
 from mari_server.integrations import vector_index as retrieval
 from mari_server.domain import access
 from mari_server.services import documents as document_application
-from mari_server.domain.documents import DocumentVersion
+from mari_components.documents import DocumentVersion
 from mari_server.repositories import document_repository
 from mari_server import db as postgres
 

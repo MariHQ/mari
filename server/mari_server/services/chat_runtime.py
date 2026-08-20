@@ -8,7 +8,7 @@ from mari_server.domain import access
 from mari_server.integrations import llm
 from mari_server.repositories.database import exec_, log_usage, q, q1
 from mari_server.services.search import hybrid_search, like_pattern
-from mari_server.services.chat import ChatContext, ChatPorts
+from mari_components.destinations.chat import ChatContext, ChatPorts
 from mari_server import db as postgres
 
 

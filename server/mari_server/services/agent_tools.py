@@ -6,7 +6,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from mari_server.services.agent import ToolBinding, ToolOutcome
+from mari_components.agents.runtime import ToolBinding, ToolOutcome
 from mari_server.domain.navigation import PRODUCT_SURFACES, valid_navigation
 
 

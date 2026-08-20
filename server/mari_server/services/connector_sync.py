@@ -27,7 +27,7 @@ from mari_server.repositories import lineage_repository as links
 from mari_components import IncompleteSnapshot, SyncMode
 from mari_components.sync import ManifestEntry, SyncState
 from mari_components.connectors import CONNECTOR_CATALOG, call_with_retry, connector_definition
-from mari_server.services.connector_ingestion import AppliedPage, consume_connector_pages
+from mari_components.sync.ingestion import AppliedPage, consume_connector_pages
 from mari_server.integrations import connector_provider
 
 # internal config keys the worker owns (never provider credential fields)

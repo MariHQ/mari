@@ -5,7 +5,7 @@ from __future__ import annotations
 from mari_server import db
 from mari_server.domain import access
 from mari_server.integrations.document_index import content_hash, title_of
-from mari_server.services.excerpt import excerpt
+from mari_components.knowledge.excerpt import excerpt
 
 
 def connection():

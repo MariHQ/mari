@@ -15,8 +15,8 @@ import strawberry
 from mari_server.services import workflow_runtime as flowengine
 from mari_server.integrations import llm
 from mari_server.repositories import lineage_repository as links
-from mari_server.services import review as review_application
-from mari_server.domain.review import ReviewRecord
+from mari_components import review as review_application
+from mari_components.review_types import ReviewRecord
 from mari_server.repositories import review_repository
 from mari_server.repositories import knowledge as knowledge_store
 from mari_server.repositories import settings as settings_store, workflows as workflow_store
@@ -33,13 +33,18 @@ from mari_components.knowledge import (
     mine_answers as component_mine_answers,
     refine_document as component_refine_document,
     summarize_digest as component_summarize_digest,
+    SEVERITIES,
+    TEMPLATE_ICONS,
+    TONES,
+    iso_date,
+    slug as make_slug,
 )
 
 
 # Knowledge operations are implemented by the service layer.
 from mari_server.services.knowledge import (
-    _SEVERITIES, _TEMPLATE_ICONS, _TONES, _component_document, _iso_date, _slug,
-    derive_links as derive_knowledge_links, fact_check_document, is_claim, llm_refine,
+    _component_document, derive_links as derive_knowledge_links, fact_check_document,
+    is_claim, llm_refine,
     regenerate_digest as regenerate_knowledge_digest, scan_decisions_for, scan_facts_for,
 )
 
@@ -130,7 +135,7 @@ class MutKnowledge:
         initials = "".join(w[0].upper() for w in assignee.split()[:2])
         subject = tuple((value or "").strip() for value in
                         (subject_type, subject_id, subject_title, subject_href))
-        due_date = _iso_date(due)
+        due_date = iso_date(due)
         knowledge_store.create_task(
             title=title, assignee=assignee, initials=initials, kind=kind,
             kind_label=kind_label, due_date=due_date, subject=subject,
@@ -146,7 +151,7 @@ class MutKnowledge:
     def set_task_due(self, id: int, due: str | None = None) -> bool:
         """Set or (with null/empty) clear a task's deadline. ISO date in, ISO
         date out — the console formats and sorts on the raw value."""
-        value = _iso_date(due)
+        value = iso_date(due)
         before = knowledge_store.set_task_due(id, value)
         if not before:
             return False
@@ -209,11 +214,11 @@ class MutKnowledge:
         """Create or edit a style pack. Packs written here are `builtin = false`
         — the guides tab distinguishes what the workspace wrote from what the
         product ships, and an edit to a shipped pack does not launder it."""
-        slug = _slug(key)
+        slug = make_slug(key)
         if not slug or not name.strip():
             raise ValueError("A style guide needs a key and a name")
-        if tone not in _TONES:
-            raise ValueError(f"tone must be one of {', '.join(sorted(_TONES))}")
+        if tone not in TONES:
+            raise ValueError(f"tone must be one of {', '.join(sorted(TONES))}")
         knowledge_store.save_style_guide(slug, name.strip(), description.strip(), tone)
         audit("saved style guide", name.strip(), detail=[("Key", slug), ("Tone", tone)])
         return True
@@ -236,8 +241,8 @@ class MutKnowledge:
         """Add or edit one rule in the registry. The rule must belong to a pack
         that exists — the count on the Library's tab strip is this table's row
         count, and an orphan rule would inflate it."""
-        if severity not in _SEVERITIES:
-            raise ValueError(f"severity must be one of {', '.join(sorted(_SEVERITIES))}")
+        if severity not in SEVERITIES:
+            raise ValueError(f"severity must be one of {', '.join(sorted(SEVERITIES))}")
         if not id.strip() or not description.strip():
             raise ValueError("A rule needs an id and a description")
         if not knowledge_store.save_style_rule(id.strip(), guide_key, family.strip(), severity,
@@ -286,11 +291,11 @@ class MutKnowledge:
                                  icon: str = "file-text") -> bool:
         """Create or edit a document scaffold. Templates saved here are
         `standard = false`; the shipped set stays labelled as shipped."""
-        slug = _slug(key)
+        slug = make_slug(key)
         if not slug or not name.strip():
             raise ValueError("A template needs a key and a name")
-        if icon not in _TEMPLATE_ICONS:
-            raise ValueError(f"icon must be one of {', '.join(sorted(_TEMPLATE_ICONS))}")
+        if icon not in TEMPLATE_ICONS:
+            raise ValueError(f"icon must be one of {', '.join(sorted(TEMPLATE_ICONS))}")
         rows = [s.strip() for s in (sections or []) if s.strip()]
         knowledge_store.save_template(slug, name.strip(), category.strip(), description.strip(), rows, icon)
         audit("saved document template", name.strip(),

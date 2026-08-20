@@ -12,7 +12,7 @@ import typing as t
 from mari_server.domain import access as access_module
 from mari_server.domain.identity import SERVICE_ACTOR, actor_name, caller
 from mari_server import observability
-from mari_server.domain.audit import AuditEvent, chained_row
+from mari_components.audit import AuditEvent, chained_row
 from mari_server import db as postgres
 
 # ————— who did this —————

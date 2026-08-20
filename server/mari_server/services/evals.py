@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import json
 import typing as t
-from mari_components.agents import OutcomeEvalCase, evaluate_outcome
+from mari_components.agents import OutcomeEvalCase, evaluate_outcome, parse_sse_events
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,7 +135,7 @@ TOOL_CASES = (
 
 
 def score_tool(case: AgentToolEvalCase, chunks: t.Iterable[str]) -> dict[str, t.Any]:
-    events = parse_events(chunks)
+    events = parse_sse_events(chunks)
     answer = "".join(str(data.get("token", "")) for event, data in events if event == "token").lower()
     result = evaluate_outcome(
         OutcomeEvalCase(case.name, case.answer_terms, expected_tools=(case.expected_tool,)),
@@ -149,23 +148,8 @@ def score_tool(case: AgentToolEvalCase, chunks: t.Iterable[str]) -> dict[str, t.
             "answer": answer}
 
 
-def parse_events(chunks: t.Iterable[str]) -> list[tuple[str, dict]]:
-    events: list[tuple[str, dict]] = []
-    for chunk in chunks:
-        event = ""
-        data = ""
-        for line in chunk.splitlines():
-            if line.startswith("event:"):
-                event = line.partition(":")[2].strip()
-            elif line.startswith("data:"):
-                data += line.partition(":")[2].strip()
-        if event and data:
-            events.append((event, json.loads(data)))
-    return events
-
-
 def score(case: AgentEvalCase, chunks: t.Iterable[str]) -> dict[str, t.Any]:
-    events = parse_events(chunks)
+    events = parse_sse_events(chunks)
     paths = [data.get("path") for event, data in events if event == "navigate"]
     answer = "".join(
         str(data.get("token", "")) for event, data in events if event == "token"

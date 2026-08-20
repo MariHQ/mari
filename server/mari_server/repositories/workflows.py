@@ -8,7 +8,7 @@ from mari_server import db
 from mari_server.domain import access
 from mari_server.services import workflow_runtime as flowengine
 from mari_server.repositories.database import audit, jload, transaction
-from mari_server.services.workflows import WorkflowPorts
+from mari_components.workflows import WorkflowPorts
 
 
 _ROTATION_COLUMNS = {"facts": "facts_scanned_at", "decisions": "decisions_scanned_at"}

@@ -6,8 +6,8 @@ import json
 import secrets
 
 from mari_server.repositories.database import audit, exec_, jload, q1
-from mari_server.services.mcp import McpPorts
-from mari_server.domain.mcp import McpServerSpec
+from mari_components.destinations.mcp_lifecycle import McpPorts
+from mari_components.destinations.mcp import McpServerSpec
 
 
 def list_servers(project_id: int) -> list[dict]:

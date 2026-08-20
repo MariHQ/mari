@@ -7,9 +7,9 @@ import threading
 
 from mari_server import db
 from mari_server.domain import access
-from mari_server.services.excerpt import excerpt
-from mari_server.services.documents import DocumentPorts, ProjectionFields
-from mari_server.domain.documents import DocumentVersion
+from mari_components.knowledge.excerpt import excerpt
+from mari_components.knowledge.lifecycle import DocumentPorts, ProjectionFields
+from mari_components.documents import DocumentVersion
 from mari_server.repositories.document_store import IcebergDocumentStore
 
 
