@@ -20,7 +20,7 @@ from mari_server.integrations import document_index
 from mari_server import config
 from mari_server.services import sync as ingest
 from mari_server.integrations import connector_provider as component_connectors
-from mari_server.integrations.event_inbox import DEFAULT_INBOX
+from mari_server.repositories.event_inbox import DEFAULT_INBOX
 from mari_server.repositories.database import exec_, q, q1
 from mari_components import PollRequest
 from mari_components.connectors import (

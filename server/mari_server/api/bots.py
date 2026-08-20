@@ -40,7 +40,7 @@ from mari_components.connectors.events import (
 )
 from mari_components import KnowledgeDocument
 from mari_components.knowledge import answer_question as component_answer_question
-from mari_server.integrations.event_inbox import DEFAULT_INBOX, EventDispatcher
+from mari_server.repositories.event_inbox import DEFAULT_INBOX, EventDispatcher
 from mari_server.repositories.database import exec_, pq, pq1, q, q1
 from mari_server.services.search import hybrid_search
 

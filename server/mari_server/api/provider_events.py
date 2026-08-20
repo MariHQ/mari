@@ -19,7 +19,7 @@ from mari_server.integrations import connector_provider as component_connectors
 from mari_server.services import sync as ingest
 from mari_server.integrations import document_index
 from mari_server.repositories.database import q1
-from mari_server.integrations.event_inbox import DEFAULT_INBOX
+from mari_server.repositories.event_inbox import DEFAULT_INBOX
 from mari_components.connectors import ConfluenceConfig, fetch_confluence_page
 from mari_components.connectors.events import (
     MAX_DIRTY_PATHS, confluence_change_hint, github_change_hint,
