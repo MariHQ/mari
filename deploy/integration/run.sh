@@ -9,6 +9,7 @@ trap cleanup EXIT INT TERM
 docker compose -f docker-compose.yml -f deploy/integration/docker-compose.yml up -d --build --wait --wait-timeout 900
 docker compose -f docker-compose.yml -f deploy/integration/docker-compose.yml exec -T \
   -e MARI_INTEGRATION_STACK=1 api python -m unittest tests.test_integration_stack -v
+./deploy/integration/resilience.sh
 (
   cd web
   MARI_E2E_EXTERNAL_SERVER=1 \

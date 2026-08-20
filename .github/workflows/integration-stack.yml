@@ -35,6 +35,8 @@ jobs:
         run: $COMPOSE up -d --build --wait --wait-timeout 900
       - name: Probe Postgres, Iceberg, MinIO, and Ollama
         run: $COMPOSE exec -T -e MARI_INTEGRATION_STACK=1 api python -m unittest tests.test_integration_stack -v
+      - name: Exercise load, restart, and dependency failure recovery
+        run: ./deploy/integration/resilience.sh
       - name: Run Playwright against production images
         working-directory: web
         env:

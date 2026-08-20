@@ -16,3 +16,6 @@ test-live-ollama:
 
 test-integration:
 	./deploy/integration/run.sh
+
+test-reliability:
+	./deploy/integration/resilience.sh
