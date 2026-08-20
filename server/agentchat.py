@@ -139,10 +139,10 @@ def guided_workflow(message: str) -> GuidedWorkflow | None:
     if re.search(r"\bmcp\b", text):
         return GuidedWorkflow(
             "Set up MCP", "/publish?tab=mcp",
-            "I opened Destinations → MCP servers. Choose New MCP server, set its name, scope, "
+            "I opened Destinations → MCP servers. Choose New server, set its name, scope, "
             "and enabled tools, then create it. Copy the bearer token when it is shown—it is "
             "displayed once—put the displayed MCP URL and token into your client, and finish "
-            "with Test connection.",
+            "with Test.",
         )
     if "slack bot" in text or "github bot" in text:
         return GuidedWorkflow(

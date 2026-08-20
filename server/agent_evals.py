@@ -34,7 +34,7 @@ CASES = (
     ),
     AgentEvalCase(
         "mcp_setup", "Help me set up MCP for my client", "/publish?tab=mcp",
-        ("new mcp server", "bearer token", "mcp url", "test connection"),
+        ("new server", "bearer token", "mcp url", "with test"),
     ),
     AgentEvalCase(
         "confluence_setup", "Connect our Confluence knowledge source", "/sources",
