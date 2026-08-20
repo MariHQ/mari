@@ -83,3 +83,14 @@ test("project identity and audit data survive a new browser context", async ({ b
   await expect(second.getByRole("heading", { name: "Access log" })).toBeVisible();
   await context.close();
 });
+
+test("agent setup help reaches the real MCP workflow with actionable instructions", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "Open the Mari agent" }).click();
+  await page.getByPlaceholder("Ask Mari…").fill("Help me set up MCP for my client");
+  await page.getByRole("button", { name: /Send/ }).click();
+  await expect(page).toHaveURL(/\/publish\?tab=mcp$/);
+  await expect(page.getByText(/Choose New MCP server/)).toBeVisible();
+  await expect(page.getByText(/bearer token.*shown.*once/i)).toBeVisible();
+  await expect(page.getByText(/Test connection/)).toBeVisible();
+});

@@ -18,8 +18,8 @@ const OFFLINE_MSG = "I can't reach the Mari API right now — start the server a
 
 const SUGGESTIONS = [
   "What sources are connected?",
-  "Find docs about connecting a source",
-  "Take me to the repository audit",
+  "Help me set up MCP",
+  "Which review tasks are open?",
 ];
 
 export function AgentDock() {
@@ -129,7 +129,7 @@ export function AgentDock() {
         onSend={send}
         onStop={() => abortRef.current?.abort()}
         suggestions={messages.length === 0 ? SUGGESTIONS : undefined}
-        hint="The agent can search, read and edit documents, tag, sync, and navigate. Every action lands in the audit trail."
+        hint="The agent can search and read knowledge, explain product workflows, and take you to the right screen. Governed changes happen in Review and Automations."
         placeholder="Ask Mari…"
         headerActions={
           <button

@@ -1,4 +1,4 @@
-.PHONY: test test-server test-web test-browser test-contracts test-live-ollama test-integration test-reliability test-restore
+.PHONY: test test-server test-web test-browser test-contracts test-agent-evals test-live-ollama test-integration test-reliability test-restore
 
 test: test-server test-web test-browser
 
@@ -13,6 +13,9 @@ test-browser:
 
 test-contracts:
 	PYTHONPATH=server server/.venv/bin/python -m export_graphql_schema
+
+test-agent-evals:
+	PYTHONPATH=server server/.venv/bin/python -m unittest server.tests.test_agent_evals -v
 
 test-live-ollama:
 	MARI_TEST_LIVE_OLLAMA=1 PYTHONPATH=server server/.venv/bin/python -m unittest server.tests.test_llm_ollama.LiveOllamaTests -v
