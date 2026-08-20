@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 
 
 @unittest.skipUnless(os.environ.get("MARI_INTEGRATION_STACK") == "1", "integration stack only")
@@ -76,6 +77,24 @@ class IntegrationStackTests(unittest.TestCase):
         self.assertFalse(restarted.claim("slack", "integration-event"))
 
         control_store.revoke_session("integration-session")
+
+    def test_migrations_and_event_claims_are_safe_under_concurrency(self):
+        import schema_migrations
+        from event_dedupe import EventLedger
+
+        with ThreadPoolExecutor(max_workers=8) as workers:
+            migration_results = list(workers.map(lambda _index: schema_migrations.migrate(), range(16)))
+        self.assertEqual(migration_results, [[] for _index in range(16)])
+
+        ledger = EventLedger()
+        ledger.release("slack", "concurrent-integration-event")
+        with ThreadPoolExecutor(max_workers=16) as workers:
+            claims = list(workers.map(
+                lambda _index: EventLedger().claim("slack", "concurrent-integration-event"),
+                range(32),
+            ))
+        self.assertEqual(claims.count(True), 1)
+        ledger.complete("slack", "concurrent-integration-event")
 
 
 if __name__ == "__main__":

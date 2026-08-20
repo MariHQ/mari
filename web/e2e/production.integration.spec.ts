@@ -1,5 +1,18 @@
 import { expect, test, type Page } from "@playwright/test";
 
+const PRODUCTION_ROUTES = [
+  ["/", null], ["/tasks", "Review"], ["/facts", "Facts"],
+  ["/decisions", "Decisions"], ["/knowledge", "Knowledge"],
+  ["/knowledge/doc?id=1", "Retention runbook"], ["/answers", "Approved answers"],
+  ["/insights", "Insights"], ["/audit", "Repository audit"], ["/lineage", "Lineage"],
+  ["/flows", "Automations"], ["/library", "Library"], ["/publish", "Destinations"],
+  ["/trajectories", "Agent trajectories"], ["/sources", "Sources"],
+  ["/settings/general", "General"], ["/settings/models", "Models"],
+  ["/settings/design", "Design & brand"], ["/settings/members", "Members"],
+  ["/settings/api-keys", "API keys"], ["/settings/audit", "Audit log"],
+  ["/preferences", "Preferences"], ["/welcome", "Welcome"],
+] as const;
+
 async function signIn(page: Page) {
   await page.goto("/login");
   const bypass = page.getByRole("button", { name: /Continue as workspace admin/ });
@@ -9,6 +22,28 @@ async function signIn(page: Page) {
 }
 
 test.beforeEach(async ({ page }) => { await signIn(page); });
+
+test("every shipped route renders against production services without runtime failures", async ({ page }) => {
+  const failures: string[] = [];
+  page.on("pageerror", (error) => failures.push(`pageerror: ${error.message}`));
+  page.on("console", (message) => {
+    if (message.type() === "error") failures.push(`console: ${message.text()}`);
+  });
+  page.on("requestfailed", (request) => {
+    failures.push(`request: ${request.method()} ${request.url()} ${request.failure()?.errorText ?? "failed"}`);
+  });
+  page.on("response", (response) => {
+    if (response.status() >= 500) failures.push(`response: ${response.status()} ${response.url()}`);
+  });
+
+  for (const [path, heading] of PRODUCTION_ROUTES) {
+    failures.length = 0;
+    await page.goto(path);
+    await expect(page.locator("#main-content")).toBeVisible();
+    if (heading) await expect(page.getByText(heading, { exact: true }).first()).toBeVisible();
+    expect(failures, `runtime failures while rendering ${path}`).toEqual([]);
+  }
+});
 
 test("assembled stack serves health and hardened web responses", async ({ page }) => {
   const health = await page.request.get("/readyz");

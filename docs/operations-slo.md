@@ -48,3 +48,16 @@ owned by an in-process scheduler. Scaling it horizontally would duplicate
 scheduled executions. The web tier can autoscale independently. Before raising
 the API replica count, introduce a single scheduler leader or external scheduler
 and verify exactly-once claim behavior under a two-pod failure test.
+
+## Reliability verification
+
+Pull requests run a production-image stack with real Postgres, a PostgreSQL
+Iceberg catalog, MinIO, and Ollama. The gate applies migrations concurrently,
+exercises webhook claim contention, drives sustained HTTP load, restarts the API,
+removes and restores required and optional dependencies, restores database and
+object snapshots, and then visits every shipped browser route through nginx.
+
+The scheduled `Production reliability soak` workflow repeats that gate weekly
+with three minutes of 24-client load. Treat an SLO regression, restore mismatch,
+runtime browser error, or flake that exhausts Playwright retries as a release
+failure; do not simply raise its latency/error budget without a measured reason.
