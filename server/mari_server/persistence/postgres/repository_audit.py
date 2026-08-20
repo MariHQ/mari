@@ -16,6 +16,7 @@ import re
 import subprocess
 
 from mari_server import settings as config
+from mari_server.identity import context as access
 from mari_server.persistence.postgres import connection as postgres
 
 
@@ -26,11 +27,13 @@ def _conn():
 def ensure_schema() -> None:
     with _conn() as conn:
         conn.execute("""CREATE TABLE IF NOT EXISTS audit_runs (
-            id serial PRIMARY KEY, provider text NOT NULL DEFAULT 'github',
+            id serial PRIMARY KEY, project_id bigint NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            provider text NOT NULL DEFAULT 'github',
             repo text NOT NULL DEFAULT '', findings int NOT NULL DEFAULT 0,
             fixed int NOT NULL DEFAULT 0, ran_at timestamptz NOT NULL DEFAULT now())""")
         conn.execute("""CREATE TABLE IF NOT EXISTS audit_findings (
-            id serial PRIMARY KEY, run_id int NOT NULL REFERENCES audit_runs(id) ON DELETE CASCADE,
+            id serial PRIMARY KEY, project_id bigint NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            run_id int NOT NULL REFERENCES audit_runs(id) ON DELETE CASCADE,
             kind text NOT NULL, title text NOT NULL, detail text NOT NULL DEFAULT '',
             fix_action text NOT NULL DEFAULT '', fix_payload jsonb NOT NULL DEFAULT '{}',
             status text NOT NULL DEFAULT 'open',
@@ -42,11 +45,14 @@ def ensure_schema() -> None:
         # an existing member; 'suggested' means the audit put it forward and
         # nobody has acted yet. Only inviteMember creates members.
         conn.execute("""CREATE TABLE IF NOT EXISTS audit_author_map (
-            id serial PRIMARY KEY, email text NOT NULL UNIQUE,
+            id serial PRIMARY KEY, project_id bigint NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            email text NOT NULL,
             git_name text NOT NULL DEFAULT '', member_name text NOT NULL DEFAULT '',
             status text NOT NULL DEFAULT 'suggested',   -- suggested|mapped
             decided_by text NOT NULL DEFAULT '',
             decided_at timestamptz NOT NULL DEFAULT now())""")
+        conn.execute("""CREATE UNIQUE INDEX IF NOT EXISTS audit_author_map_project_email_uniq
+                        ON audit_author_map(project_id, lower(email))""")
 
 
 # ——— real GitHub repository connector resolution ———
@@ -61,11 +67,12 @@ BUILDS_DIR = pathlib.Path(
 
 def _github_source() -> dict | None:
     """First connected GitHub source (lowest id) with a repo configured."""
+    project_id = access.require_current_access().project_id
     with _conn() as conn:
         return conn.execute(
             """SELECT id, provider, config FROM sources WHERE kind = 'connector'
-                 AND split_part(provider, ':', 1) = 'github' """
-            "AND coalesce(config->>'repo', '') <> '' ORDER BY id LIMIT 1").fetchone()
+                 AND project_id = %s AND split_part(provider, ':', 1) = 'github' """
+            "AND coalesce(config->>'repo', '') <> '' ORDER BY id LIMIT 1", (project_id,)).fetchone()
 
 
 def _git(args: list[str], cwd: pathlib.Path | None = None, timeout: int = 120,
@@ -149,6 +156,7 @@ LOC_RE = re.compile(r"^(?P<stem>.+)\.(?P<lang>[a-z]{2})\.md$")
 
 def run_audit(provider: str = "github") -> int:
     """Scan the repo; returns the audit run id."""
+    project_id = access.require_current_access().project_id
     languages = config.get("audit", "languages", ["es", "fr"])
     default_tag = config.get("audit", "default_tag", "customer-facing")
 
@@ -181,10 +189,14 @@ def run_audit(provider: str = "github") -> int:
     with _conn() as conn:
         indexed = {r["external_id"]: r for r in conn.execute(
             "SELECT d.*, array_remove(array_agg(t.tag), NULL) AS tags FROM documents d "
-            "LEFT JOIN tags t ON t.document_id = d.id WHERE d.source = 'github' GROUP BY d.id").fetchall()}
-        members = {r["email"]: r["name"] for r in conn.execute("SELECT name, email FROM users").fetchall()}
+            "LEFT JOIN tags t ON t.project_id = d.project_id AND t.document_id = d.id "
+            "WHERE d.project_id = %s AND d.source = 'github' GROUP BY d.id", (project_id,)).fetchall()}
+        members = {r["email"]: r["name"] for r in conn.execute(
+            """SELECT u.name, u.email FROM users u JOIN project_members pm ON pm.user_id = u.id
+               WHERE pm.project_id = %s AND pm.status = 'active'""", (project_id,)).fetchall()}
         author_map = {r["email"].lower(): r for r in conn.execute(
-            "SELECT email, member_name, status FROM audit_author_map").fetchall()}
+            "SELECT email, member_name, status FROM audit_author_map WHERE project_id = %s",
+            (project_id,)).fetchall()}
 
     # 1. coverage: repo files not indexed
     for stem, f in base_docs.items():
@@ -237,14 +249,18 @@ def run_audit(provider: str = "github") -> int:
                                  detail=why, fix_action="hygiene_task", fix_payload={"file": required}))
 
     with _conn() as conn:
-        run = conn.execute("INSERT INTO audit_runs (provider, repo, findings) VALUES (%s, %s, %s) RETURNING id",
-                           (provider, repo_label, len(findings))).fetchone()
+        run = conn.execute("""INSERT INTO audit_runs (project_id, provider, repo, findings)
+                            VALUES (%s, %s, %s, %s) RETURNING id""",
+                           (project_id, provider, repo_label, len(findings))).fetchone()
         for f in findings:
-            conn.execute("""INSERT INTO audit_findings (run_id, kind, title, detail, fix_action, fix_payload)
-                            VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING""",
-                         (run["id"], f["kind"], f["title"], f["detail"], f["fix_action"], json.dumps(f["fix_payload"])))
-        conn.execute("INSERT INTO events (actor, verb, target) VALUES ('Mari', 'ran repository audit', %s)",
-                     (f"{repo_label}: {len(findings)} findings",))
+            conn.execute("""INSERT INTO audit_findings
+                            (project_id, run_id, kind, title, detail, fix_action, fix_payload)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING""",
+                         (project_id, run["id"], f["kind"], f["title"], f["detail"],
+                          f["fix_action"], json.dumps(f["fix_payload"])))
+        conn.execute("""INSERT INTO events (project_id, actor, verb, target)
+                        VALUES (%s, 'Mari', 'ran repository audit', %s)""",
+                     (project_id, f"{repo_label}: {len(findings)} findings"))
     return run["id"]
 
 
