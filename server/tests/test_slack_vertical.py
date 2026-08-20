@@ -289,6 +289,42 @@ class SlackSetupToAnswerTests(unittest.TestCase):
         self.assertEqual(inbox.rows[1]["coalesce_key"], "5:C1:posted.1")
         self.assertEqual(installation["installationId"], row["id"])
 
+    def test_thread_followup_loads_context_and_replies_in_the_same_thread(self):
+        self._setup()
+        row = {
+            "project_id": 7,
+            "delivery_id": "Ev-followup",
+            "payload": {
+                "installation_id": 5,
+                "event": {"type": "message", "text": "and production?", "channel": "C1",
+                          "thread_ts": "posted.1", "ts": "posted.2"},
+            },
+        }
+        installation = self._installed_row()
+        answered = []
+        writes = []
+        with patch.object(bots, "SLACK_API", self.slack_api), \
+             patch.object(bots, "q1", return_value=installation), \
+             patch.object(bots, "exec_", side_effect=lambda sql, args=(): writes.append((sql, args))), \
+             patch.object(bots, "_refresh_slack_aggregate") as refresh, \
+             patch.object(bots, "answer_question",
+                          side_effect=lambda question, context: answered.append((question, context)) or "Production is ready [1]."):
+            bots._process_slack_delivery(row)
+
+        replies = [call for call in FakeSlackHandler.calls
+                   if call["path"] == "/api/conversations.replies"]
+        posts = [call for call in FakeSlackHandler.calls
+                 if call["path"] == "/api/chat.postMessage"]
+        self.assertEqual(len(replies), 1)
+        self.assertEqual(replies[0]["body"]["ts"], "posted.1")
+        self.assertEqual(replies[0]["body"]["limit"], 15)
+        self.assertEqual(answered[0][0], "and production?")
+        self.assertIn("use the production checklist", answered[0][1])
+        self.assertEqual(posts[0]["body"]["thread_ts"], "posted.1")
+        refresh.assert_called_once_with(7, "xoxb-valid", "C1", "posted.1")
+        self.assertTrue(any(args[3] == "posted.1" for sql, args in writes
+                            if "INSERT INTO slack_bot_threads" in sql))
+
 
 if __name__ == "__main__":
     unittest.main()
