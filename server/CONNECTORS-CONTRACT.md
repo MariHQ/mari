@@ -6,13 +6,13 @@ poll result shape.
 
 Add and test connectors in:
 
-- `vendor/mari-components/src/mari_components/connectors/`
-- `vendor/mari-components/tests/test_*connectors.py`
+- `mari-components/src/mari_components/connectors/`
+- `mari-components/tests/test_*connectors.py`
 
 The public contract is `ConnectorDefinition.validate()` and
 `ConnectorDefinition.poll()`, yielding native `PollPage` values. The shared
 `plan_sync()` function owns replay, cursor, checkpoint, tombstone, ACL-change,
-and incomplete-snapshot semantics. See `vendor/mari-components/README.md` and
+and incomplete-snapshot semantics. See `mari-components/README.md` and
 `SCOPE.md` for authoring and invariants.
 
 Mari Cloud owns only host concerns:

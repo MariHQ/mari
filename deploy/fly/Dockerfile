@@ -16,8 +16,8 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app/server
-COPY vendor/mari-components/ /app/vendor/mari-components/
-RUN python3 -m pip install --break-system-packages --no-cache-dir /app/vendor/mari-components
+COPY mari-components/ /app/mari-components/
+RUN python3 -m pip install --break-system-packages --no-cache-dir /app/mari-components
 COPY server/requirements.txt ./requirements.txt
 RUN python3 -m pip install --break-system-packages --no-cache-dir \
       --index-url https://download.pytorch.org/whl/cpu \
