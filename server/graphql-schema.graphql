@@ -410,17 +410,6 @@ type Mutation {
   createKnowledgeChatDestination(name: String!, slug: String!, title: String!, welcome: String! = ""): Int!
   updateKnowledgeChatDestination(id: Int!, name: String!, title: String!, welcome: String!): Boolean!
   deployKnowledgeChatDestination(id: Int!): String!
-  buildSite(id: Int!, generator: String = null): String!
-  buildSiteEx(id: Int!, generator: String = null): JSON!
-  aiCustomizeSite(id: Int!, instruction: String!): JSON!
-  createSite(name: String!, domain: String!, sources: JSON!): Int!
-  renameSite(id: Int!, name: String!): Boolean!
-  updateSiteTheme(id: Int!, theme: JSON!): Boolean!
-  setSiteNav(id: Int!, nav: JSON!): Boolean!
-  setSiteFeature(id: Int!, key: String!, on: Boolean!): Boolean!
-  deploySite(id: Int!): String!
-  rollbackRelease(id: Int!): Boolean!
-  importBrand(url: String!): JSON!
   createMcpServer(name: String!, scope: String!, capabilities: JSON!): String!
   updateMcpServer(id: Int!, scope: String = null, capabilities: JSON!): Boolean!
   deleteMcpServer(id: Int!): Boolean!
@@ -503,8 +492,6 @@ type Query {
   voiceLayer: VoiceLayer!
   documentTemplates: [DocumentTemplate!]!
   uploadManifest: UploadManifest!
-  siteThemePresets: [SiteThemePreset!]!
-  siteFeatures(siteId: Int = null): [SiteFeature!]!
   apiKeys: [ApiKey!]!
   mcpServers: [McpServer!]!
   checkpoints: [Checkpoint!]!
@@ -515,9 +502,7 @@ type Query {
   workflows: [Workflow!]!
   workflowRuns(workflowId: Int = null): [WorkflowRun!]!
   workflowRun(id: Int!): WorkflowRun
-  sites: [Site!]!
   knowledgeChatDestinations: [KnowledgeChatDestination!]!
-  releases(siteId: Int = null): [Release!]!
   notifications: [Notification!]!
   workspace: Workspace!
   provisioning: Provisioning!
@@ -553,16 +538,6 @@ type RelatedDoc {
   title: String!
   rel: String!
   direction: String!
-}
-
-type Release {
-  id: Int!
-  siteId: Int!
-  version: String!
-  status: String!
-  deployed: String!
-  docs: Int!
-  notes: String!
 }
 
 type ReviewConnection {
@@ -605,33 +580,6 @@ type ReviewPolicyDecision {
 type Setting {
   key: String!
   value: JSON!
-}
-
-type Site {
-  id: Int!
-  name: String!
-  domain: String!
-  status: String!
-  theme: JSON!
-  sources: JSON!
-  nav: JSON!
-  gates: JSON!
-  docs: Int!
-  warnings: Int!
-}
-
-type SiteFeature {
-  key: String!
-  label: String!
-  hint: String!
-  on: Boolean!
-}
-
-type SiteThemePreset {
-  key: String!
-  name: String!
-  accent: String!
-  bg: String!
 }
 
 type SourcePulse {

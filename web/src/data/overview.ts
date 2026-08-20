@@ -72,7 +72,7 @@ type Res = {
    separately), and rendering an unknown kind blanks the node. Drop it instead. */
 const STEP_KINDS = new Set([
   "trigger", "fetch_docs", "refine", "fact_check", "condition", "tag",
-  "derive_links", "create_task", "approval", "deploy_site", "notify",
+  "derive_links", "create_task", "approval", "notify",
   "summarize", "sync_source", "refresh_digest",
 ]);
 

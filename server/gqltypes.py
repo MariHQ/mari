@@ -367,26 +367,6 @@ class UploadManifest:
 
 
 @strawberry.type
-class SiteThemePreset:
-    """A theme the site generator can actually render. `accent` is the colour a
-    build ships when the site has not overridden it."""
-    key: str
-    name: str
-    accent: str
-    bg: str
-
-
-@strawberry.type
-class SiteFeature:
-    """A generator switch, resolved for one site: the shipped default overlaid
-    with whatever that site stored. Every key here is read by sitebuilder."""
-    key: str
-    label: str
-    hint: str
-    on: bool
-
-
-@strawberry.type
 class TagDef:
     tag: str
     label: str
@@ -544,20 +524,6 @@ class WorkflowRun:
 
 
 @strawberry.type
-class Site:
-    id: int
-    name: str
-    domain: str
-    status: str
-    theme: JSON
-    sources: JSON
-    nav: JSON
-    gates: JSON
-    docs: int
-    warnings: int
-
-
-@strawberry.type
 class KnowledgeChatDestination:
     id: int
     name: str
@@ -566,17 +532,6 @@ class KnowledgeChatDestination:
     welcome: str
     status: str
     url: str
-
-
-@strawberry.type
-class Release:
-    id: int
-    site_id: int
-    version: str
-    status: str
-    deployed: str
-    docs: int
-    notes: str
 
 
 @strawberry.type

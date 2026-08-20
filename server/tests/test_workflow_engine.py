@@ -16,13 +16,6 @@ class WorkflowStepTests(unittest.TestCase):
         self.assertEqual(updates, {"facts": 2})
         self.assertEqual(impl.call_count, 2)
 
-    def test_non_idempotent_deploy_is_never_retried(self) -> None:
-        impl = Mock(side_effect=RuntimeError("upload uncertain"))
-        status, detail, _ = flowengine._run_step("deploy_site", impl, {}, {})
-        self.assertEqual(status, "failed")
-        self.assertIn("upload uncertain", detail)
-        impl.assert_called_once()
-
     def test_condition_and_approval_preserve_dry_run_semantics(self) -> None:
         self.assertTrue(flowengine._step_condition({"field": "facts", "greater_than": 1}, {"facts": 2})[2]["branch_taken"])
         status, detail, updates = flowengine._step_approval({"assignee": "Reviewer"}, {})

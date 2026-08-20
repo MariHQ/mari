@@ -166,17 +166,6 @@ def _step_approval(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
     return "waiting", f"awaiting {assignee}", {"pause": True}
 
 
-def _step_deploy(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
-    site_id = int(cfg.get("site_id") or 0)
-    if site_id <= 0:
-        return "failed", "deploy step requires a site", {}
-    if ctx.get("dry_run"):
-        return "passed", "would deploy the site (dry run)", {}
-    from app import Mutation
-    version = Mutation.deploy_site(None, site_id)  # type: ignore[arg-type]
-    return "passed", f"deployed {version}", {"version": version}
-
-
 def _step_notify(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
     recipient = str(cfg.get("user") or cfg.get("assignee") or "").strip()
     if not recipient:
@@ -299,7 +288,6 @@ STEP_IMPLS: dict[str, t.Callable] = {
     "derive_links": _step_derive_links,
     "create_task": _step_create_task,
     "approval": _step_approval,
-    "deploy_site": _step_deploy,
     "notify": _step_notify,
     "summarize": _step_summarize,
     "sync_source": _step_sync_source,
@@ -320,9 +308,8 @@ LLM_STEPS = {"refine", "fact_check", "derive_links", "summarize", "refresh_diges
 # reads only, or writes through ON CONFLICT DO NOTHING / an idempotent upsert, so
 # running it twice lands the database where running it once would have.
 #
-# Deliberately absent: `deploy_site` (mints a release and uploads), `approval`
-# (pauses rather than fails), and `condition` (cannot fail transiently). Retrying
-# a deploy would publish twice, and a second site is not a recovered site.
+# Deliberately absent: `approval` (pauses rather than fails) and `condition`
+# (cannot fail transiently).
 RETRYABLE_STEPS = {"fetch_docs", "tag", "create_task", "notify", "summarize",
                    "derive_links", "sync_source", "scan_facts", "scan_decisions",
                    "fact_check", "refine", "refresh_digest"}

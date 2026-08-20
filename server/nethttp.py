@@ -5,7 +5,7 @@ Zendesk subdomains, brand-import homepages, crawled websites — goes through
 `fetch()` here. Nothing else in the codebase should call `urllib.request.urlopen`
 on a user-supplied URL.
 
-The guard (extracted from brandimport.py / connectors/website.py, which had two
+The guard (extracted from duplicated connector HTTP clients, which had two
 near-identical copies of it):
 
 * **Scheme allowlist** — http/https only, so `file://`, `gopher://`, `ftp://`

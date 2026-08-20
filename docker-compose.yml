@@ -60,12 +60,8 @@ services:
       # MARI_GITHUB_CLIENT_ID / MARI_GITHUB_CLIENT_SECRET
       # MARI_GOOGLE_CLIENT_ID / MARI_GOOGLE_CLIENT_SECRET
       #
-      # Publishing. With a bucket set, Publish uploads the build and the site is
-      # live; without one it builds locally and says so. The distribution is
-      # what makes a deploy visible: skip it and readers keep being served the
-      # previous build from the CDN, which looks like a deploy that failed.
+      # Object storage for backups and rebuildable artifacts.
       MARI_S3_BUCKET: ${MARI_S3_BUCKET:-}
-      MARI_CLOUDFRONT_DISTRIBUTION_ID: ${MARI_CLOUDFRONT_DISTRIBUTION_ID:-}
       # Credentials come from the standard AWS chain. In production that is the
       # task or instance role and none of this applies. Locally it is the ~/.aws
       # mount below, which needs a profile named to pick from it.

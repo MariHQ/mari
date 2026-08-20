@@ -32,7 +32,7 @@ import { buildAnswers, EMPTY as ANSWERS_EMPTY, mapAnswers, mapHarvestSources } f
 import { buildFlows, EMPTY as FLOWS_EMPTY } from "../src/data/flows";
 import { buildLibrary, EMPTY as LIBRARY_EMPTY } from "../src/data/library";
 import { buildLineage, EMPTY as LINEAGE_EMPTY } from "../src/data/lineage";
-import { buildPublish, pickSiteRow, EMPTY as PUBLISH_EMPTY } from "../src/data/publish";
+import { buildPublish, EMPTY as PUBLISH_EMPTY } from "../src/data/publish";
 import { RULE_COUNT } from "@mari-design/components/features/LibraryRulesPanel";
 import { buildSettingsGeneral, EMPTY as GENERAL_EMPTY } from "../src/data/settings-general";
 import { buildSettingsModels, EMPTY as MODELS_EMPTY } from "../src/data/settings-models";
@@ -683,68 +683,26 @@ states(library, LIBRARY_EMPTY);
 
 console.log("publish");
 const PUBLISH_RES: any = {
-  sites: [{ id: 1, name: "Acme Docs", domain: "docs.acme.com", status: "live",
-    theme: { theme: "Mari Editorial", accent: "#b04e2c" }, sources: ["customer-facing", "canonical"],
-    nav: [{ label: "Guides", docs: 74 }, { docs: 3 }],
-    gates: [{ gate: "Fact check", status: "pass" }, { gate: "Glossary coverage", status: "fail" }],
-    docs: 148, warnings: 2 }],
-  releases: [
-    { id: 9, siteId: 1, version: "v14", status: "live", deployed: "Jul 20", docs: 148, notes: "Deployed to S3" },
-    { id: 8, siteId: 1, version: "v13", status: "previous", deployed: "Jul 13", docs: 140, notes: "" },
-    { id: 7, siteId: 2, version: "v1", status: "live", deployed: "Jul 01", docs: 3, notes: "" },
-  ],
   mcpServers: [
     { id: 1, name: "support-kb", url: "https://mcp/1", scope: "product", status: "connected", tools: 7,
       config: { capabilities: ["search", "facts"] } },
     { id: 2, name: "from-a-newer-build", url: "https://mcp/2", scope: "galaxy", status: "idle", tools: 1, config: null },
   ],
-  siteThemePresets: [
-    { key: "editorial", name: "Mari Editorial", accent: "#b04e2c", bg: "#faf7f2" },
-    { key: "slate", name: "Slate", accent: "#3d5a80", bg: "#f4f6f8" },
-  ],
-  settings: [{ key: "deploy", value: { bucket: "acme-docs-prod", region: "us-east-1" } }],
+  knowledgeChatDestinations: [{ id: 3, name: "Company knowledge", slug: "company",
+    title: "Ask Acme", welcome: "How can I help?", status: "live", url: "/knowledge-chat/acme/company" }],
   botsStatus: {
     slack: { configured: true, teamName: "Acme", lastEventAt: "2026-07-21T13:00:00", lastError: null },
     github: { webhookConfigured: false, lastDeliveryAt: null, sources: [{ id: 1, repo: "acme/handbook" }] },
   },
 };
-const PUBLISH_FEATURES: any[] = [
-  { key: "search", label: "Search", hint: "Client-side index.", on: true },
-  { key: "feedback", label: "Was this helpful?", hint: "Per-page rating.", on: false },
-];
-// `?site=1` is the editor route; the list is what the same response
-// renders without one.
-const publishData = buildPublish(PUBLISH_RES, 1, false, PUBLISH_FEATURES);
-check("publish: the theme catalog is what the generator can render",
-  publishData.site?.themes.length === 2 && publishData.site?.themes[0].accent === "#b04e2c");
-check("publish: the feature switches carry the site's resolved state",
-  publishData.site?.features.length === 2
-  && publishData.site?.features[0].on === true && publishData.site?.features[1].on === false);
-check("publish: features asked for by the routed site's id", pickSiteRow(PUBLISH_RES, 1)?.id === 1);
-check("publish: no ?site= opens the list, not an editor", buildPublish(PUBLISH_RES).view === "site-list");
-check("publish: the list carries every site", buildPublish(PUBLISH_RES).sites.length === 1);
-check("publish: a site whose switches have not arrived shows none, not defaults",
-  buildPublish(PUBLISH_RES, 1).site?.features.length === 0);
+const publishData = buildPublish(PUBLISH_RES);
+check("publish: defaults to interactive knowledge chat", publishData.view === "chat");
+check("publish: carries live knowledge chat destinations", publishData.chats[0]?.status === "live");
 check("publish: a scope this build cannot label is dropped", publishData.servers.length === 1);
-check("publish: releases are scoped to the site", publishData.site?.releases.length === 2);
-check("publish: the version is the newest release", publishData.site?.version === "v14");
-check("publish: a nav section with no label is dropped", publishData.site?.nav.length === 1);
-check("publish: gates carry their real outcome",
-  publishData.site?.gates[0].ok === true && publishData.site?.gates[1].ok === false);
-check("publish: the deploy target comes off the settings row",
-  publishData.site?.bucket === "acme-docs-prod");
-check("publish: a live site is published, not a draft", publishData.phase === "published");
 check("publish: bot destinations report the repositories their webhook covers",
   publishData.github.repos.join() === "acme/handbook");
-check("publish: no sites means nothing to publish", buildPublish({
-  sites: [], releases: [], mcpServers: [], siteThemePresets: [], settings: [],
-} as any, 1).site === null);
 const publishHtml = render(publish, { data: publishData, loading: false, error: null });
-check("publish: renders the site", publishHtml.includes("docs.acme.com"));
-// The preset list lives on the editor's Theme tab, not its Content tab.
-check("publish: renders the theme catalog",
-  render(publish, { data: { ...publishData, editorTab: "theme" }, loading: false, error: null }).includes("Slate"));
-check("publish: renders the feature switches", publishHtml.includes("Was this helpful?"));
+check("publish: renders the knowledge chat", publishHtml.includes("Company knowledge"));
 states(publish, PUBLISH_EMPTY);
 
 /* ── Sources ────────────────────────────────────────────────────────────── */

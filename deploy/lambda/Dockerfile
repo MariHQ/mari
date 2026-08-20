@@ -48,7 +48,6 @@ ENV AWS_LWA_PORT=8080 \
     AWS_LWA_ENABLE_GRACEFUL_SHUTDOWN=true \
     MARI_DB=postgresql://postgres@127.0.0.1:5432/mari_cloud \
     MARI_STATIC_DIR=/app/web \
-    MARI_BUILDS_DIR=/tmp/mari/builds \
     MARI_PGDATA=/tmp/mari/pgdata \
     PYTHONUNBUFFERED=1
 

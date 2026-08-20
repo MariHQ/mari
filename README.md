@@ -51,7 +51,7 @@ Everything runs on your infrastructure: Postgres for transactional state, Iceber
 - Link extraction is real: `#123` cross-references (PR ↔ issue ↔ commit), resolved markdown links between pages, and capped embedding-similarity edges.
 
 ### ⚙️ Flows (automation)
-- A visual pipeline editor with real execution: fetch → refine (LLM) → fact-check → tag → approve → deploy → notify.
+- A visual pipeline editor with real execution: fetch → refine (LLM) → fact-check → tag → approve → notify.
 - **Document triggers**: run a flow when a document is added/changed, filtered by source, tag, or path glob.
 - **Schedule triggers**: repo syncs and the weekly digest are flows you can see and edit, not hidden config.
 - Runs carry provenance: *"Triggered by: docs/auth.md updated"*, *"Scheduled · every 10 min"*.
@@ -65,10 +65,9 @@ Everything runs on your infrastructure: Postgres for transactional state, Iceber
 ### 🧑‍💻 Codebase intelligence
 - **Repo audit**: clones your connected repos (token never persisted to disk) and scans for documentation drift — coverage gaps, unmapped commit authors, stale localization — with one-click fixes that ingest the missing docs. An unmapped commit author becomes a suggestion or a mapping onto an existing member — the audit never creates an account, since a commit address is evidence that someone committed, not that they belong in your workspace.
 
-### 🚀 Publishing
-- Turn tagged documents into a deployed docs site under `/sites/<slug>`: the native handcrafted generator, or a real **Docusaurus** build (warm builds in seconds).
-- Site editor with theme controls, navigation, release gates, and an AI customizer.
-- Deploy a project-scoped interactive **Knowledge chat** destination with streamed answers and evidence links, or expose the same corpus through MCP and the scoped Search API.
+### 🚀 Destinations
+- Deploy a project-scoped interactive **Knowledge chat** destination with streamed answers and evidence links.
+- Expose the same corpus through MCP, the scoped Search API, Slack, and GitHub bots.
 
 ### 💬 Bots (self-serve)
 - **Slack bot**: copy a generated app manifest, paste your bot token, verify — then @mention Mari in any channel and it answers from your knowledge base.
@@ -76,7 +75,6 @@ Everything runs on your infrastructure: Postgres for transactional state, Iceber
 
 ### 🎨 Bring your own branding
 - The entire UI is driven by design tokens; workspace branding (accent palette, logo, display/body fonts) re-skins every component with **zero page changes**.
-- **LLM brand import**: point at your homepage and Mari harvests your colors, logo, and fonts (Google Fonts auto-loaded) for review before saving.
 - A living design system, exhibited at **Settings → Design & brand** — one Card, one Button, one Chip family across the whole product.
 
 ### 🔐 Auth & workspace
@@ -121,7 +119,7 @@ connect a source, pick a style guide, and seed your glossary.
 
 After that the workspace is **invite-only**: admins invite members from Settings → Members, and only an invited address can register.
 
-**Optional — local LLM features** (chat, refine, fact-check, digest, brand import): run [ollama](https://ollama.com) with `nomic-embed-text` and `gemma3:4b` pulled. Without it, search falls back to keyword ranking and LLM features degrade to deterministic fallbacks — the product stays functional.
+**Local model configuration:** generation can use Ollama or an OpenAI-compatible gateway; derived embeddings can use Sentence Transformers locally. Provider selection is explicit and unavailable providers surface an error instead of silently changing behavior.
 
 ### Testing
 
@@ -168,7 +166,7 @@ Everything is env-driven (`.env.example` documents the full list; env overrides 
 | `MARI_VECTOR_FLUSH_SECONDS` | Debounce interval for flushing changed derived vectors (default 30 seconds) |
 | `MARI_ICEBERG_WAREHOUSE` | Iceberg warehouse location; local filesystem by default, S3 in production |
 | `MARI_ICEBERG_CATALOG` | Named PyIceberg REST/Glue catalog for shared multi-writer deployments |
-| `MARI_S3_BUCKET` | S3 site publishing |
+| `MARI_S3_BUCKET` | Object storage for backups and derived artifacts |
 | `MARI_AUTH_BYPASS` | One-click demo login, off unless you set it to `true`. It signs anyone who can reach the port in as the workspace admin, with no credential — turn it on only for throwaway demo instances. The server logs a warning at startup while it is on |
 | `MARI_AUTH_REGISTRATION` | Open sign-up (default off — the workspace is invite-only). Invited people can always register whether or not this is set |
 | `MARI_CRAWL_ALLOW_LOOPBACK` | Allow the website connector to crawl localhost (dev only) |
@@ -212,26 +210,25 @@ npm run dist    # self-contained installer for the current platform
 ┌───────────────┴─────────────────────────────────────────────────┐
 │  API (FastAPI + Strawberry GraphQL)                             │
 │                                                                 │
-│  connectors/* ─→ connect_sync ─┐   flowengine ── scheduler      │
-│  github.py    ─→ ingest ───────┼─→ chunk → hash → embed         │
-│  onboard.py (uploads)  ────────┘   links.py (edge extraction)   │
-│  agentchat.py (agent loop)         repoaudit · sitebuilder      │
-│  bots.py (Slack/GitHub)            brandimport (LLM harvest)    │
+│  api/ → application/ → domain ports                            │
+│                 ↓                                               │
+│  infrastructure/ (Postgres · Iceberg · providers · models)     │
+│  connectors → canonical document versions → query projection   │
+│  bots/webhooks → durable inbox → connector reconciliation      │
 └───────┬────────────────────────────────────┬────────────────────┘
         │                                    │
-┌───────┴───────────────┐          ┌─────────┴─────────┐
-│  Postgres + pgvector  │          │  ollama (optional) │
-│  documents · chunks   │          │  nomic-embed-text  │
-│  edges · flows · ...  │          │  gemma3:4b         │
-└───────────────────────┘          └───────────────────┘
+┌───────┴───────────────┐  ┌──────────────┐  ┌──────────────────┐
+│ Postgres control/read │  │ Iceberg docs │  │ derived vectors  │
+│ state + projections   │  │ + versions   │  │ filesystem / S3  │
+└───────────────────────┘  └──────────────┘  └──────────────────┘
 ```
 
 Design principles:
 
-- **Postgres is the whole data plane** — documents, chunk embeddings (pgvector), lineage edges, flows, sessions. No extra queue, vector DB, or cache to operate.
-- **One ingestion pipeline** — every connector, upload, and crawl feeds the same chunk → content-hash → embed path, so incremental sync semantics are identical everywhere.
+- **Explicit storage ownership** — Iceberg is canonical for document content and immutable versions; Postgres owns transactional control state and query projections; vector snapshots are derived and rebuildable.
+- **One ingestion pipeline** — every connector feeds the same version → projection → chunk → embed path, so incremental sync semantics are identical everywhere.
 - **Honest by construction** — no canned data in the UI, no fake integrations, metrics count real events, and failures surface verbatim.
-- **LLM-optional** — every LLM feature has a deterministic fallback; the system degrades, never breaks.
+- **Explicit model behavior** — configured providers are used as configured; model failures are observable and never masquerade as another implementation.
 
 ---
 

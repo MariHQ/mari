@@ -92,11 +92,8 @@ function initialData() {
     styleGuides: [{ key: "plain", name: "Plain language", description: "Direct writing.", tone: "ok", builtin: true, rules: 2, preview: ["Use active voice"] }],
     defaultStylePack: "plain", voiceLayer: { voice: "Direct", terms: "workspace", banned: "", inclusive: true, jargon: false, sentenceCase: true },
     documentTemplates: [{ key: "runbook", name: "Runbook", category: "Operations", description: "Operational procedure", sections: ["Purpose", "Steps"], icon: "clipboard", standard: true }],
-    sites: [{ id: 1, name: "Acme Docs", domain: "docs.example.test", status: "live", theme: { theme: "Mari Editorial", accent: "#b04e2c" }, sources: ["canonical"], nav: [{ label: "Guides", docs: 1 }], gates: [{ gate: "Fact check", status: "pass" }], docs: 1, warnings: 0 }],
-    releases: [{ id: 1, siteId: 1, version: "v1.0.0", status: "live", deployed: "Aug 19", docs: 1, notes: "Published" }],
     mcpServers: [{ id: 1, name: "support-kb", url: "http://localhost:8000/mcp/support-kb", scope: "workspace", status: "connected", tools: 2, config: { capabilities: ["search", "facts"] } }],
     knowledgeChatDestinations: [],
-    siteThemePresets: [{ key: "editorial", name: "Mari Editorial", accent: "#b04e2c", bg: "#faf7f2" }],
     siteFeatures: [{ key: "search", label: "Search", hint: "Client-side index", on: true }],
     settings: [
       { key: "deploy", value: { bucket: "acme-docs", region: "us-west-2" } },
@@ -283,8 +280,6 @@ export async function installMockApi(page: Page, options: {
       data = { createApiKey: "mari_browser_secret_once" };
     } else if (/revokeApiKey/.test(query)) {
       data = { revokeApiKey: true };
-    } else if (/importBrand/.test(query)) {
-      data = { importBrand: { title: "Acme", themeColor: "#5c7a4c", cssColors: [["#5c7a4c", 8]], fonts: ["Inter"], logo: null, warnings: [] } };
     } else if (/scanAnswerCandidates/.test(query)) {
       data = { scanAnswerCandidates: [{ question: "How long is deletion?", draftAnswer: "Seven days.", sourceLabel: "Slack", confidence: "high" }] };
     } else if (/decisionImpact/.test(query)) {

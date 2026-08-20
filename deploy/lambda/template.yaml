@@ -72,7 +72,6 @@ Resources:
           MARI_SEED_ADMINS: !Ref SeedAdmins
           MARI_OLLAMA_HOST: http://127.0.0.1:11434
           MARI_PGDATA: /tmp/mari/pgdata
-          MARI_BUILDS_DIR: /tmp/mari/builds
           MARI_LLM_DEFAULT: !Ref LlmDefault
           MARI_LLM_KEY: !Ref LlmKey
       Tags:

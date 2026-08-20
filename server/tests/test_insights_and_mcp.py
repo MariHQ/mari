@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import mutations_knowledge
-import mutations_publish
+from mari_server.api import graphql_destinations
 from mari_server.infrastructure import mcp_repository
 import mcp
 
@@ -66,12 +66,14 @@ class McpLifecycleTests(unittest.TestCase):
         writes = []
         project = SimpleNamespace(project_id=7, allows=lambda capability: capability == "destination.manage")
         info = SimpleNamespace(context={"user": {"name": "Admin", "role": "admin"}, "access": project})
-        with patch.object(mutations_publish, "_require_admin", return_value={"name": "Admin"}), \
-             patch.object(mutations_publish.config, "get", return_value="https://cloud.example.test"), \
+        with patch.object(graphql_destinations, "_require_admin", return_value={"name": "Admin"}), \
+             patch.object(graphql_destinations.config, "get", return_value="https://cloud.example.test"), \
              patch.object(mcp_repository, "q1", return_value=None), \
              patch.object(mcp_repository, "exec_", side_effect=lambda sql, args=(): writes.append((sql, args))), \
              patch.object(mcp_repository, "audit"):
-            token = mutations_publish.MutPublish().create_mcp_server(info, "Support KB", "workspace", ["search", "facts"])
+            token = graphql_destinations.DestinationMutations().create_mcp_server(
+                info, "Support KB", "workspace", ["search", "facts"],
+            )
         self.assertTrue(token.startswith("mari_mcp_"))
         inserted = writes[0][1]
         self.assertEqual(inserted[0], 7)
@@ -89,7 +91,7 @@ class McpLifecycleTests(unittest.TestCase):
             return {"n": next(v for table, v in counts.items() if f"FROM {table}" in sql)}
         with patch.object(mcp_repository, "q1", side_effect=q1), patch.object(mcp_repository, "exec_"):
             info = SimpleNamespace(context={"access": SimpleNamespace(project_id=7)})
-            result = mutations_publish.MutPublish().test_mcp_server(info, 1)
+            result = graphql_destinations.DestinationMutations().test_mcp_server(info, 1)
         self.assertTrue(result["ok"])
         self.assertEqual(result["checks"], {"search": 8, "facts": 3, "glossary": 2, "answers": 4, "lineage": 5, "chat": 1})
 

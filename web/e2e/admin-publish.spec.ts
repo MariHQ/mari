@@ -24,18 +24,21 @@ test("workspace admins can invite a user and configure GitHub team provisioning"
   await expect(page.getByText("Enterprise", { exact: true })).toBeVisible();
 });
 
-test("deployment target settings and site deploy are wired through the browser", async ({ page }) => {
-  await page.goto("/publish?site=1");
-  await page.getByRole("button", { name: "Domains" }).click();
-  await page.getByLabel("Bucket").fill("rippling-docs-e2e");
-  await page.getByLabel("Region").fill("us-west-2");
-  await page.getByRole("button", { name: "Save deploy config" }).click();
-  await expect(page.getByText("✓ Saved", { exact: true })).toBeVisible();
-  expect(api.calls.some((c) => c.query.includes("updateSetting") && c.variables.key === "deploy")).toBeTruthy();
+test("destinations exposes only supported delivery workflows", async ({ page }) => {
+  await page.goto("/publish");
+  await expect(page.getByRole("button", { name: "Knowledge chat", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "MCP servers", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Bots", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Doc sites", exact: true })).toHaveCount(0);
+  await expect(page.getByText(/documentation websites/i)).toHaveCount(0);
 
-  await page.getByRole("button", { name: "Deploy", exact: true }).click();
-  await expect(page.getByRole("button", { name: "Deployed" })).toBeVisible();
-  expect(api.calls.some((c) => c.query.includes("deploySite") && c.variables.id === 1)).toBeTruthy();
+  await page.getByRole("button", { name: "MCP servers", exact: true }).click();
+  await expect(page).toHaveURL(/tab=mcp/);
+  await expect(page.getByText(/AI tools and agents/).first()).toBeVisible();
+
+  await page.getByRole("button", { name: "Bots", exact: true }).click();
+  await expect(page).toHaveURL(/tab=bots/);
+  await expect(page.getByText("Slack bot", { exact: true })).toBeVisible();
 });
 
 test("OSS browser messaging exposes standard MCP and does not promote a Claude plugin", async ({ page }) => {

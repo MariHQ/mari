@@ -33,7 +33,7 @@ from db import audit, exec_, q, q1
 #              the repo audit and resolving its findings. These cost CPU and
 #              write documents; they cannot exfiltrate a token.
 #   user     — the knowledge and editorial surface (mutations_knowledge /
-#              mutations_publish), unchanged.
+#              destination/workflow transports), unchanged.
 #
 # Anything unlisted stays at "any authenticated user", which is what it was.
 ROLES = ("admin", "manager", "user")

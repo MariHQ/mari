@@ -34,8 +34,9 @@ from strawberry.fastapi import GraphQLRouter
 import config
 import ingest
 import llm
-import sitebuilder
 from mari_server.api import agent as agent_api
+from mari_server.api.graphql_destinations import DestinationMutations
+from mari_server.api.graphql_workflows import WorkflowMutations
 import access as access_module
 import auth as auth_module
 import bots
@@ -47,17 +48,15 @@ import provider_events
 import observability
 import enterprise_identity
 import gdrive_events
-from sitefiles import PublishedSiteFiles
 
 from db import DB_URL, close_pool, ensure_schema, exec_, open_pool, q, q1
 from queries import Query, hybrid_search, like_pattern
 from mutations_knowledge import MutKnowledge
-from mutations_publish import MutPublish
 from mutations_admin import MutAdmin
 
 
 @strawberry.type
-class Mutation(MutKnowledge, MutPublish, MutAdmin):
+class Mutation(MutKnowledge, WorkflowMutations, DestinationMutations, MutAdmin):
     pass
 
 
@@ -129,30 +128,6 @@ app.include_router(mcp.router)  # published MCP servers authenticate with their 
 app.include_router(connectors_api.router, dependencies=_authed)
 app.include_router(agent_api.router, dependencies=_authed)
 app.include_router(onboard.router, dependencies=_authed)
-
-sitebuilder.BUILDS.mkdir(exist_ok=True)
-
-
-def _site_preview_authenticated(scope: dict[str, t.Any], site: dict[str, t.Any]) -> bool:
-    try:
-        request = Request(scope)
-        if auth_module.current_user(request) is None:
-            return False
-        return auth_module.require_project(request).project_id == int(site.get("project_id") or 0)
-    except Exception:
-        return False
-
-
-app.mount(
-    "/sites",
-    PublishedSiteFiles(
-        directory=str(sitebuilder.BUILDS),
-        lookup=lambda site_id: q1("SELECT status, project_id FROM sites WHERE id = %s", (site_id,)),
-        authenticated=_site_preview_authenticated,
-    ),
-    name="sites",
-)
-
 
 class ApiSearchIn(BaseModel):
     query: str

@@ -35,9 +35,8 @@ from gqltypes import (
     DocHistory, Document, DocumentTemplate, Fact, FactContradiction, Finding,
     FreshnessRow, GithubRepo, GithubTeamSync, GlossaryCandidate, GlossaryTerm,
     GraphStats, GraphView, InsightStats, LineageEdge, LineageNode, McpServer,
-    Member, Notification, Provisioning, ReadabilityRow, RelatedDoc, Release, Setting, Site,
-    KnowledgeChatDestination,
-    SiteFeature, SiteThemePreset, SourcePulse, StyleGuide, StyleRule, SyncEvent,
+    Member, Notification, Provisioning, ReadabilityRow, RelatedDoc, Setting,
+    KnowledgeChatDestination, SourcePulse, StyleGuide, StyleRule, SyncEvent,
     SyncStatus, TagDef, Task, TaskSummary, ReviewConnection, ReviewItem, ReviewPageInfo,
     TopCited, UploadFile, UploadManifest,
     Trajectory, TrajectoryStep, VoiceLayer, Workflow, WorkflowRun, Workspace,
@@ -1340,32 +1339,6 @@ class Query:
         return UploadManifest(files=files, file_count=len(files), chunk_count=total_chunks,
                               embedded_count=total_embedded, summary=summary)
 
-    # ——— doc-site presentation: theme presets, generator switches ———
-
-    @strawberry.field
-    def site_theme_presets(self) -> list[SiteThemePreset]:
-        """Themes the generator can render, with the accent each one ships when
-        a site has not overridden it. sitebuilder reads the same rows."""
-        return [SiteThemePreset(key=r["key"], name=r["name"], accent=r["accent"], bg=r["bg"])
-                for r in q("SELECT * FROM site_theme_presets ORDER BY sort, key")]
-
-    @strawberry.field
-    def site_features(self, site_id: int | None = None) -> list[SiteFeature]:
-        """The generator's switches. Without a site id, `on` is the shipped
-        default; with one, the site's stored override wins. Every key here is
-        read by sitebuilder — the page never offers a toggle that changes
-        nothing about the built site."""
-        overrides: dict = {}
-        if site_id:
-            project_id = access.require_current_access().project_id
-            row = q1("SELECT features FROM sites WHERE project_id = %s AND id = %s",
-                     (project_id, site_id))
-            if row:
-                overrides = jload(row["features"]) or {}
-        return [SiteFeature(key=r["key"], label=r["label"], hint=r["hint"],
-                            on=bool(overrides.get(r["key"], r["default_on"])))
-                for r in q("SELECT * FROM site_feature_defs ORDER BY sort, key")]
-
     @strawberry.field
     def api_keys(self) -> list[ApiKey]:
         project_id = access.require_current_access().project_id
@@ -1484,14 +1457,6 @@ class Query:
                            triggered_by=r.get("triggered_by") or "")
 
     @strawberry.field
-    def sites(self) -> list[Site]:
-        project_id = access.require_current_access().project_id
-        return [Site(id=r["id"], name=r["name"], domain=r["domain"], status=r["status"],
-                     theme=jload(r["theme"]), sources=jload(r["sources"]), nav=jload(r["nav"]),
-                     gates=jload(r["gates"]), docs=r["docs"], warnings=r["warnings"])
-                for r in q("SELECT * FROM sites WHERE project_id = %s ORDER BY id", (project_id,))]
-
-    @strawberry.field
     def knowledge_chat_destinations(self) -> list[KnowledgeChatDestination]:
         project_id = access.require_current_access().project_id
         project = q1("SELECT slug FROM projects WHERE id = %s", (project_id,)) or {"slug": ""}
@@ -1502,18 +1467,6 @@ class Query:
                 for r in q("""SELECT id, name, slug, title, welcome, status
                              FROM knowledge_chat_destinations
                              WHERE project_id = %s ORDER BY id""", (project_id,))]
-
-    @strawberry.field
-    def releases(self, site_id: int | None = None) -> list[Release]:
-        """Release history. Omit site_id for every site's, so the Publish page
-        can fetch sites and their releases in one document instead of chaining
-        a second round trip on the first site's id."""
-        project_id = access.require_current_access().project_id
-        where = "WHERE project_id = %s" + (" AND site_id = %s" if site_id else "")
-        return [Release(id=r["id"], site_id=r["site_id"], version=r["version"], status=r["status"],
-                        deployed=r["deployed"], docs=r["docs"], notes=r["notes"])
-                for r in q(f"SELECT * FROM releases {where} ORDER BY site_id, id DESC",
-                           (project_id, site_id) if site_id else (project_id,))]
 
     @strawberry.field
     def notifications(self) -> list[Notification]:
