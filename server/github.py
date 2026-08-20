@@ -16,7 +16,6 @@ import urllib.parse
 import urllib.request
 
 import config
-from connectors._protocol import call_with_retry
 from mari_components.connectors import (
     GitHubConfig as ComponentGitHubConfig,
     github_blob as component_github_blob,
@@ -27,6 +26,7 @@ from mari_components.connectors import (
     github_repository as component_github_repository,
     github_tree as component_github_tree,
     list_github_repositories as component_list_github_repositories,
+    call_with_retry,
 )
 from mari_components.http import HttpRequest as ComponentHttpRequest, HttpResponse as ComponentHttpResponse
 

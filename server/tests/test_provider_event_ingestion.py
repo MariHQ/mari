@@ -11,7 +11,6 @@ from fastapi import HTTPException, Request
 
 import provider_events
 from mari_components import KnowledgeDocument
-from connectors import confluence
 
 
 def request_for(payload: dict, headers: dict[str, str]) -> Request:
@@ -156,21 +155,6 @@ class ConfluenceEventTests(unittest.TestCase):
              patch.object(provider_events.ingest, "run_sync", return_value={}) as run:
             provider_events.process_confluence_delivery(row)
         run.assert_called_once_with(8, False)
-
-    def test_fetch_page_turns_canonical_404_into_tombstone(self):
-        with patch.object(confluence, "_get", side_effect=confluence.ConfluenceError("gone", 404)):
-            self.assertIsNone(confluence.fetch_page({}, "123"))
-
-    def test_fetch_page_returns_canonical_content_and_acl(self):
-        page = {"id": "123", "type": "page", "title": "Canonical",
-                "body": {"storage": {"value": "<p>Trusted</p>"}},
-                "version": {"number": 4}, "space": {"key": "ENG"}}
-        with patch.object(confluence, "_get", return_value=page):
-            item = confluence.fetch_page({}, "123")
-        self.assertEqual(item["body"], "Trusted")
-        self.assertEqual(item["hash_hint"], "4")
-        self.assertEqual(item["space_key"], "ENG")
-        self.assertEqual(item["acl"].visibility, "connector_scope")
 
     def test_targeted_tombstone_deletes_only_the_routed_source_document(self):
         source = {"id": 8, "project_id": 3, "config": {

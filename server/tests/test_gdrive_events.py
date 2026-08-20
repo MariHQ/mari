@@ -9,8 +9,6 @@ from unittest.mock import Mock, patch
 from fastapi import HTTPException
 
 import access
-from connectors import gdrive
-from connectors._protocol import ACLMetadata, PollResult
 import gdrive_events
 from mari_components import PollPage
 from mari_components.connectors import GoogleDriveWatch
@@ -123,34 +121,6 @@ class DriveWatchSetupTests(unittest.TestCase):
 
 
 class DriveChangesTests(unittest.TestCase):
-    def test_changes_include_removed_items_and_acl_updates(self):
-        response = {"changes": [
-            {"fileId": "gone", "removed": True},
-            {"fileId": "doc", "file": {"id": "doc", "name": "Plan",
-                "mimeType": gdrive._DOC_MIME, "modifiedTime": "2026-08-19T10:00:00Z",
-                "parents": ["folder"], "permissions": [
-                    {"type": "group", "emailAddress": "ENG@EXAMPLE.TEST"},
-                    {"type": "domain", "domain": "example.test"},
-                ]}},
-        ], "newStartPageToken": "next"}
-        with patch.object(gdrive, "_request", return_value=(200, json.dumps(response).encode())), \
-             patch.object(gdrive, "_fetch_body", return_value="canonical content"):
-            poll = gdrive.list_changes({"access_token": "token", "folder_id": "folder"}, "start")
-        self.assertEqual(poll.tombstones, ["gone"])
-        self.assertEqual(poll.cursor, "changes:next")
-        self.assertEqual(poll.items[0]["acl"], ACLMetadata(
-            visibility="restricted", principals=("domain:example.test", "group:eng@example.test")))
-
-    def test_moved_out_of_scope_becomes_tombstone_and_410_is_explicit(self):
-        moved = {"changes": [{"fileId": "doc", "file": {"id": "doc", "name": "Plan",
-            "mimeType": gdrive._DOC_MIME, "parents": ["other"]}}], "newStartPageToken": "next"}
-        with patch.object(gdrive, "_request", return_value=(200, json.dumps(moved).encode())):
-            poll = gdrive.list_changes({"access_token": "token", "folder_id": "folder"}, "start")
-        self.assertEqual(poll.tombstones, ["doc"])
-        with patch.object(gdrive, "_request", return_value=(410, b"gone")), \
-             self.assertRaises(gdrive.DrivePageTokenExpired):
-            gdrive.list_changes({"access_token": "token"}, "expired")
-
     def test_worker_drains_all_pages_and_persists_each_checkpoint(self):
         channel = {"channel_id": "channel-1", "source_id": 5, "project_id": 9,
                    "config": {"cursor": "changes:start"}, "provider": "gdrive",

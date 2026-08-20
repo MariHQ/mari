@@ -19,22 +19,15 @@ import datetime as dt
 import json
 import time
 
-import connectors
-from connectors._protocol import (
-    ConnectorCallError, ErrorKind, FullResyncRequired, PollItem, adapt_poll_result,
-    call_with_retry,
-)
 import flowengine
 import ingest
 import access
 import links
-from mari_components import (
-    DocumentACL, KnowledgeDocument, PollPage as ComponentPollPage, Principal,
-    SyncMode, Tombstone,
-)
+from mari_components import IncompleteSnapshot, SyncMode
 from mari_components.sync import ManifestEntry, SyncState
-from mari_components.connectors import CONNECTOR_CATALOG
+from mari_components.connectors import CONNECTOR_CATALOG, call_with_retry, connector_definition
 from mari_server.application.connector_ingestion import AppliedPage, consume_connector_pages
+from mari_server.infrastructure import connector_provider
 
 # internal config keys the worker owns (never provider credential fields)
 INTERNAL_KEYS = ("provider_key", "cursor", "item_hashes", "last_sync_at", "last_error",
@@ -110,22 +103,6 @@ def deletion_ids(rows: list[dict], provider_key: str, seen_paths: set[str],
     return gone
 
 
-def _component_document(item: dict) -> KnowledgeDocument:
-    acl = item.get("acl")
-    principals = []
-    for value in tuple(getattr(acl, "principals", ()) or ()):
-        kind, separator, identifier = str(value).partition(":")
-        principals.append(Principal(kind if separator else "provider", identifier if separator else kind))
-    return KnowledgeDocument(
-        str(item.get("path") or ""), str(item.get("title") or item.get("path") or ""),
-        str(item.get("body") or ""), revision=str(item.get("hash_hint") or ""),
-        updated_at=str(item.get("updated_at") or ""),
-        source_url=str(item.get("source_url") or ""),
-        acl=DocumentACL(getattr(acl, "visibility", "connector_scope"), tuple(principals)),
-        metadata={"unchanged": bool(item.get("unchanged"))},
-    )
-
-
 def _sync_worker(source_id: int, full: bool) -> dict:
     """Run one connector sync. Returns honest stats (plus 'error' on failure) —
     the same shape flowengine's sync_source step reads from ingest.run_sync."""
@@ -152,13 +129,12 @@ def _sync_worker(source_id: int, full: bool) -> dict:
     sync_start_iso = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     try:
-        entry = connectors.REGISTRY.get(key)
-        if not entry or not entry.get("provider"):
-            raise RuntimeError((entry or {}).get("error") or f"unknown connector provider '{key}'")
+        definition = connector_definition(key)
 
         max_tokens, overlap = ingest._chunk_settings()
         stored_hashes: dict = dict(cfg.get("item_hashes") or {})
         stored_cursor = cfg.get("cursor") or None
+        stored_checkpoint = cfg.get("checkpoint") or None
         hashes = dict(stored_hashes)
         cursor = stored_cursor
         authoritative_full = full or bool(cfg.get("full_snapshot_pending"))
@@ -173,40 +149,20 @@ def _sync_worker(source_id: int, full: bool) -> dict:
         # —— validate (cheap, honest) ——
         ingest._set(source_id, state="running", phase="listing", done=0, total=0, error="")
         def validate_once() -> None:
-            verr = entry["validate"](cfg)
-            if not verr:
-                return
-            text = str(verr)
-            low = text.lower()
-            kind = (ErrorKind.RATE_LIMIT if "rate limit" in low or "ratelimited" in low
-                    else ErrorKind.TRANSIENT if any(x in low for x in
-                        ("unreachable", "network error", "timeout", "temporarily unavailable"))
-                    else ErrorKind.PERMANENT)
-            raise ConnectorCallError(text, kind)
-
-        call_with_retry(validate_once)
+            result = definition.validate(cfg, http=connector_provider._http)
+            if not result.ok:
+                raise ValueError(result.message)
+        call_with_retry(validate_once, sleep=time.sleep)
 
         # —— poll and apply one page at a time ——
-        # Components yield native pages. Website remains on the temporary
-        # compatibility path until it moves to mari-components.
         def provider_pages():
-            if entry.get("poll_pages"):
-                yield from entry["poll_pages"](cfg, cursor, full=authoritative_full)
-                return
-            poll = adapt_poll_result(call_with_retry(lambda: entry["list_items"](cfg, cursor)))
-            items = [item.as_dict() if isinstance(item, PollItem) else item for item in poll.items]
-            yield ComponentPollPage(
-                upserts=tuple(_component_document(item) for item in items if item.get("path")),
-                tombstones=tuple(Tombstone(str(path)) for path in poll.tombstones if str(path)),
-                next_cursor=poll.cursor,
-                next_checkpoint=poll.checkpoint,
-                snapshot_complete=poll.snapshot_complete,
-            )
+            yield from connector_provider.poll_pages(
+                key, cfg, cursor, stored_checkpoint, full=authoritative_full)
 
         done = 0
         total = 0
         initials = (key[:2] or "??").upper()
-        author = entry["provider"].get("name", key)
+        author = definition.name
 
         def apply_page(plan, _page_number):
             nonlocal done, total
@@ -264,6 +220,7 @@ def _sync_worker(source_id: int, full: bool) -> dict:
                 }
                 cfg.update({
                     "provider_key": key, "cursor": durable_cursor, "item_hashes": hashes,
+                    "checkpoint": plan.state.checkpoint or "",
                     "last_sync_at": sync_start_iso, "last_error": "",
                     "full_snapshot_pending": bool(authoritative_full and not plan.snapshot_complete),
                     "full_snapshot_seen_paths": (
@@ -300,7 +257,7 @@ def _sync_worker(source_id: int, full: bool) -> dict:
                 SyncMode.FULL if authoritative_full else SyncMode.INCREMENTAL,
                 apply_page=apply_page,
             )
-        except FullResyncRequired:
+        except IncompleteSnapshot:
             if full:
                 raise
             return _sync_worker(source_id, True)

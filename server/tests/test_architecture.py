@@ -91,6 +91,10 @@ class ArchitectureTests(unittest.TestCase):
         ]
         self.assertEqual(retired, [])
 
+    def test_connectors_have_one_implementation(self) -> None:
+        self.assertFalse((ROOT.parent / "connectors").exists(),
+                         "provider implementations belong in mari-components only")
+
 
 if __name__ == "__main__":
     unittest.main()
