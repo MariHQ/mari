@@ -72,6 +72,11 @@ class FakeSlackHandler(BaseHTTPRequestHandler):
                        else {"ok": False, "error": "invalid_auth"})
         elif self.path == "/api/chat.postMessage":
             payload = {"ok": True, "ts": "posted.1"}
+        elif self.path == "/api/conversations.replies":
+            payload = {"ok": True, "messages": [
+                {"type": "message", "user": "U1", "text": "deploy?", "ts": body["ts"]},
+                {"type": "message", "user": "U2", "text": "use the production checklist", "ts": "9.2"},
+            ]}
         else:
             payload = {"ok": False, "error": "unknown_method"}
         encoded = json.dumps(payload).encode()
@@ -85,21 +90,32 @@ class FakeSlackHandler(BaseHTTPRequestHandler):
         pass
 
 
-class InlineExecutor:
-    def submit(self, function, *args):
-        function(*args)
-        return True
-
-
-class MemoryLedger:
-    def __init__(self): self.claimed = set()
-    def claim(self, provider, event_id):
-        key = (provider, event_id)
-        if key in self.claimed: return False
-        self.claimed.add(key)
-        return True
-    def complete(self, _provider, _event_id): pass
-    def release(self, provider, event_id): self.claimed.discard((provider, event_id))
+class MemoryInbox:
+    def __init__(self):
+        self.rows = []
+        self.keys = set()
+    def enqueue(self, provider, project_id, delivery_id, payload, *, coalesce_key=""):
+        key = (provider, project_id, delivery_id)
+        if key in self.keys:
+            row = next(row for row in self.rows if row["key"] == key)
+            return row["id"], False
+        self.keys.add(key)
+        row = {"id": len(self.rows) + 1, "key": key, "provider": provider,
+               "project_id": project_id, "delivery_id": delivery_id,
+               "payload": payload, "coalesce_key": coalesce_key, "attempts": 0,
+               "status": "pending"}
+        self.rows.append(row)
+        return row["id"], True
+    def claim(self):
+        row = next((row for row in self.rows if row["status"] == "pending"), None)
+        if row:
+            row["status"] = "processing"
+            row["attempts"] += 1
+        return row
+    def complete(self, row_id):
+        self.rows[row_id - 1]["status"] = "completed"
+    def retry(self, row_id, _error, _attempts):
+        self.rows[row_id - 1]["status"] = "pending"
 
 
 class SlackSetupToAnswerTests(unittest.TestCase):
@@ -200,11 +216,12 @@ class SlackSetupToAnswerTests(unittest.TestCase):
         dm = {"type": "event_callback", "team_id": "T-ACME", "event_id": "Ev-dm",
               "event": {"type": "message", "channel_type": "im", "text": "deploy?",
                         "channel": "C-ALLOWED", "ts": "2.0"}}
+        inbox = MemoryInbox()
         with patch.object(bots, "SLACK_API", self.slack_api), \
              patch.object(bots, "q1", return_value=self._installed_row()), \
              patch.object(bots, "exec_"), patch.object(bots, "pq", return_value=[]), \
-             patch.object(bots, "_SLACK_EXECUTOR", InlineExecutor()), \
-             patch.object(bots, "_SLACK_EVENTS", MemoryLedger()), \
+             patch.object(bots, "_EVENT_INBOX", inbox), \
+             patch.object(bots, "_refresh_slack_aggregate"), \
              patch.object(queries, "q", return_value=documents), \
              patch.object(queries.llm, "embed", return_value=None), \
              patch.object(bots.llm, "generate", side_effect=lambda prompt, _system: prompts.append(prompt) or "Use the runbook [1]."):
@@ -212,15 +229,56 @@ class SlackSetupToAnswerTests(unittest.TestCase):
             self.assertEqual(asyncio.run(bots.slack_webhook(self._request(dm))), {"ok": True})
             self.assertEqual(asyncio.run(bots.slack_webhook(self._request(mention))),
                              {"ok": True, "duplicate": True})
+            # HTTP ACK means durable acceptance, not in-process completion.
+            self.assertFalse([call for call in FakeSlackHandler.calls
+                              if call["path"] == "/api/chat.postMessage"])
+            dispatcher = bots.EventDispatcher(inbox, {"slack": bots._process_slack_delivery})
+            self.assertTrue(dispatcher.drain_once())
+            self.assertTrue(dispatcher.drain_once())
 
         posts = [call for call in FakeSlackHandler.calls if call["path"] == "/api/chat.postMessage"]
         self.assertEqual(len(posts), 2)
         self.assertTrue(all(call["authorization"] == "Bearer xoxb-valid" for call in posts))
         self.assertEqual(posts[0]["body"]["thread_ts"], "1.0")
-        self.assertIsNone(posts[1]["body"]["thread_ts"])
+        self.assertEqual(posts[1]["body"]["thread_ts"], "2.0")
         self.assertTrue(all("Allowed runbook" in prompt for prompt in prompts))
+        self.assertTrue(all("use the production checklist" in prompt for prompt in prompts))
         self.assertTrue(all("Forbidden plan" not in prompt and "Never reveal this" not in prompt
                             for prompt in prompts))
+
+    def test_fast_unmentioned_followup_is_durable_before_first_answer_runs(self):
+        inbox = MemoryInbox()
+        joined = set()
+        installation = self._setup()
+        row = self._installed_row()
+
+        def lookup(sql, args=()):
+            if "FROM bot_installations" in sql:
+                return row
+            if "FROM slack_bot_threads" in sql:
+                return {"?column?": 1} if (args[0], args[2], args[3]) in joined else None
+            return None
+
+        def execute(sql, args=()):
+            if "INSERT INTO slack_bot_threads" in sql:
+                joined.add((args[0], args[2], args[3]))
+
+        mention = {"type": "event_callback", "team_id": "T-ACME", "event_id": "Ev-root",
+                   "event": {"type": "app_mention", "text": "<@B> start", "channel": "C1", "ts": "10.0"}}
+        followup = {"type": "event_callback", "team_id": "T-ACME", "event_id": "Ev-reply",
+                    "event": {"type": "message", "text": "and production?", "channel": "C1",
+                              "thread_ts": "10.0", "ts": "10.1"}}
+        unrelated = {"type": "event_callback", "team_id": "T-ACME", "event_id": "Ev-other",
+                     "event": {"type": "message", "text": "private conversation", "channel": "C1",
+                               "thread_ts": "99.0", "ts": "99.1"}}
+        with patch.object(bots, "q1", side_effect=lookup), patch.object(bots, "exec_", side_effect=execute), \
+             patch.object(bots, "_EVENT_INBOX", inbox):
+            self.assertEqual(asyncio.run(bots.slack_webhook(self._request(mention))), {"ok": True})
+            self.assertEqual(asyncio.run(bots.slack_webhook(self._request(followup))), {"ok": True})
+            self.assertEqual(asyncio.run(bots.slack_webhook(self._request(unrelated))), {"ok": True})
+        self.assertEqual([item["delivery_id"] for item in inbox.rows], ["Ev-root", "Ev-reply"])
+        self.assertEqual(inbox.rows[0]["coalesce_key"], inbox.rows[1]["coalesce_key"])
+        self.assertEqual(installation["installationId"], row["id"])
 
 
 if __name__ == "__main__":

@@ -87,6 +87,21 @@ class GoogleDrivePollingTests(unittest.TestCase):
 
 
 class SlackPollingTests(unittest.TestCase):
+    def test_event_refresh_refetches_complete_thread_as_one_acl_aggregate(self) -> None:
+        response = {"ok": True, "messages": [
+            {"type": "message", "ts": "100.0", "user": "U1", "text": "Root question"},
+            {"type": "message", "ts": "101.0", "thread_ts": "100.0",
+             "user": "U2", "text": "Follow-up answer"},
+        ]}
+        with patch.object(slack, "_call", return_value=response), \
+             patch.object(slack, "_user_map", return_value={"U1": "Ana", "U2": "Ben"}):
+            item = slack.thread_item("xoxb", "C1", "100.0")
+        self.assertEqual(item["path"], "thread/C1/100.0")
+        self.assertIn("@Ana: Root question", item["body"])
+        self.assertIn("@Ben: Follow-up answer", item["body"])
+        self.assertEqual(item["acl"].principals, ("channel:C1",))
+        self.assertEqual(item["hash_hint"], "101.000000")
+
     def test_incremental_poll_rebuilds_cursor_day_and_skips_bot_messages(self) -> None:
         old = 1_723_680_000.0
         new = old + 120

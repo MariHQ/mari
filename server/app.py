@@ -86,11 +86,13 @@ async def lifespan(application: FastAPI):
         repoaudit.ensure_schema()
         auth_module.first_run_check()
         ingest.start_poller()
+        bots.start_event_dispatcher()
         application.state.ready = True
         logging.getLogger("mari.lifecycle").info("application ready")
         yield
     finally:
         application.state.ready = False
+        bots.stop_event_dispatcher()
         ingest.stop_poller()
         close_pool()
         logging.getLogger("mari.lifecycle").info("application stopped")

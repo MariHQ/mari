@@ -64,35 +64,33 @@ class SlackExecutionTests(unittest.TestCase):
         return {"id": 5, "project_id": 7, "project_slug": "acme", "project_name": "Acme",
                 "config": {"signing_secret": "secret", "bot_token": "xoxb"}}
 
-    def test_duplicate_event_is_acknowledged_without_second_submit(self):
+    def test_duplicate_event_is_acknowledged_after_one_durable_insert(self):
         payload = {"type": "event_callback", "team_id": "T1", "event_id": "Ev1",
                    "event": {"type": "app_mention", "text": "hello", "channel": "C1", "ts": "1"}}
-        class Capture:
+        class Inbox:
             calls = []
-            def submit(self, *args):
-                self.calls.append(args)
-                return True
-        ledger, executor = _MemoryLedger(), Capture()
+            def enqueue(self, provider, project_id, delivery_id, payload, **kwargs):
+                self.calls.append((provider, project_id, delivery_id, payload, kwargs))
+                return 1, len(self.calls) == 1
+        inbox = Inbox()
         with patch.object(bots, "q1", return_value=self._installation()), \
-             patch.object(bots, "_SLACK_EVENTS", ledger), patch.object(bots, "_SLACK_EXECUTOR", executor):
+             patch.object(bots, "exec_"), patch.object(bots, "_EVENT_INBOX", inbox):
             first = asyncio.run(bots.slack_webhook(self._request(payload)))
             duplicate = asyncio.run(bots.slack_webhook(self._request(payload)))
         self.assertEqual(first, {"ok": True})
         self.assertEqual(duplicate, {"ok": True, "duplicate": True})
-        self.assertEqual(len(executor.calls), 1)
-        self.assertEqual(executor.calls[0][-1], "Ev1")
+        self.assertEqual(len(inbox.calls), 2)
+        self.assertEqual(inbox.calls[0][2], "Ev1")
 
-    def test_full_executor_releases_claim_and_requests_provider_retry(self):
+    def test_failed_durable_insert_requests_provider_retry(self):
         payload = {"type": "event_callback", "team_id": "T1", "event_id": "Ev-full",
                    "event": {"type": "app_mention", "text": "hello", "channel": "C1", "ts": "1"}}
-        class Full:
-            def submit(self, *_args): return False
-        ledger = _MemoryLedger()
+        class FailedInbox:
+            def enqueue(self, *_args, **_kwargs): raise OSError("database unavailable")
         with patch.object(bots, "q1", return_value=self._installation()), \
-             patch.object(bots, "_SLACK_EVENTS", ledger), patch.object(bots, "_SLACK_EXECUTOR", Full()):
+             patch.object(bots, "_EVENT_INBOX", FailedInbox()):
             response = asyncio.run(bots.slack_webhook(self._request(payload)))
         self.assertEqual(response.status_code, 503)
-        self.assertTrue(ledger.claim("slack", "Ev-full"))
 
 
 class TrajectoryOperationsTests(unittest.TestCase):

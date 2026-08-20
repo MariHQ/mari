@@ -221,6 +221,56 @@ def _effective_ts(message: dict) -> float:
     return max(parsed) if parsed else 0.0
 
 
+def thread_item(token: str, channel_id: str, thread_ts: str) -> dict:
+    """Refetch one canonical thread aggregate for event-driven refreshes.
+
+    Polling remains the repair path. Webhook workers use this narrow function
+    as a dirty hint so retrieval sees a new reply immediately instead of
+    waiting for the next scheduled poll.
+    """
+    data = _call("conversations.replies", token, {
+        "channel": channel_id, "ts": thread_ts, "limit": HISTORY_PAGE,
+    })
+    messages = list(data.get("messages") or [])
+    if data.get("has_more") or (data.get("response_metadata") or {}).get("next_cursor"):
+        replies = _thread_replies(token, channel_id, thread_ts)
+        root = messages[:1]
+        messages = root + list(replies)
+        if not replies.complete:
+            raise SlackError("Slack thread exceeded the retrieval safety cap")
+    users = _user_map(token)
+    kept: list[tuple[float, dict]] = []
+    for message in messages:
+        if message.get("subtype") or not (message.get("text") or "").strip():
+            continue
+        try:
+            ts = float(message["ts"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        kept.append((ts, message))
+    if not kept:
+        raise SlackError("Slack returned no readable messages for the thread")
+    kept.sort(key=lambda pair: pair[0])
+    lines = []
+    for ts, message in kept:
+        who = users.get(message.get("user", ""), message.get("user") or
+                        ("Mari" if message.get("bot_id") else "unknown"))
+        timestamp = datetime.datetime.fromtimestamp(ts, tz=datetime.timezone.utc)
+        lines.append(f"{timestamp.strftime('%Y-%m-%d %H:%M')} @{who}: "
+                     f"{_clean_text(message.get('text', ''), users)}")
+    latest = max(_effective_ts(message) for _, message in kept)
+    root_text = _clean_text(kept[0][1].get("text", ""), users)
+    return {
+        "path": f"thread/{channel_id}/{thread_ts}",
+        "title": (root_text[:120] or f"Slack thread {thread_ts}"),
+        "body": "\n".join(lines),
+        "updated_at": datetime.datetime.fromtimestamp(
+            latest, tz=datetime.timezone.utc).isoformat(),
+        "hash_hint": f"{latest:.6f}",
+        "acl": ACLMetadata(visibility="restricted", principals=(f"channel:{channel_id}",)),
+    }
+
+
 def list_items(config: dict, cursor: str | None) -> PollResult:
     token = (config.get("bot_token") or "").strip()
     if not token:

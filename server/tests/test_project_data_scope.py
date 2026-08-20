@@ -178,26 +178,19 @@ class ProjectDataScopeTests(unittest.TestCase):
 
         installation = {"id": 5, "project_id": 7, "project_slug": "acme", "project_name": "Acme",
                         "config": {"signing_secret": "acme-secret", "bot_token": "xoxb"}}
-        submitted = []
-
-        class Executor:
-            def submit(self, *args):
-                submitted.append(args)
-                return True
-
-        class Ledger:
-            def claim(self, *_args): return True
-            def release(self, *_args): pass
+        accepted = []
+        class Inbox:
+            def enqueue(self, provider, project_id, delivery_id, payload, **kwargs):
+                accepted.append((provider, project_id, delivery_id, payload, kwargs))
+                return 1, True
 
         with patch.object(bots, "q1", return_value=installation) as lookup, \
-             patch.object(bots, "_SLACK_EXECUTOR", Executor()), \
-             patch.object(bots, "_SLACK_EVENTS", Ledger()):
+             patch.object(bots, "exec_"), patch.object(bots, "_EVENT_INBOX", Inbox()):
             result = asyncio.run(bots.slack_webhook(Request()))
         self.assertEqual(result, {"ok": True})
         self.assertEqual(lookup.call_args.args[1], ("T-ACME",))
-        routed = submitted[0][3]
-        self.assertEqual(routed.project_id, 7)
-        self.assertEqual(routed.principal_type, "slack")
+        self.assertEqual(accepted[0][1], 7)
+        self.assertEqual(accepted[0][3]["installation_id"], 5)
 
 
 if __name__ == "__main__":

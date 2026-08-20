@@ -16,13 +16,13 @@ Settings keys (existing settings CRUD; jsonb values):
 from __future__ import annotations
 
 import datetime
-import concurrent.futures as cf
 import hashlib
 import hmac
 import json
 import time
 import urllib.error
 import urllib.request
+import uuid
 
 import psycopg
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -33,7 +33,7 @@ import auth
 import access
 import config
 import llm
-from event_dedupe import EventLedger
+from event_inbox import EventDispatcher, EventInbox
 from db import exec_, pq, pq1, q, q1
 from queries import hybrid_search
 
@@ -41,31 +41,8 @@ router = APIRouter()
 
 SLACK_API = "https://slack.com/api"
 SLACK_WORKERS = max(1, int(config.get("bots", "slack_workers", 4)))
-SLACK_PENDING = max(SLACK_WORKERS, int(config.get("bots", "slack_pending", 64)))
-
-
-class _BoundedExecutor:
-    """Thread pool whose pending queue has an explicit non-blocking ceiling."""
-
-    def __init__(self, workers: int, pending: int):
-        import threading
-        self._slots = threading.BoundedSemaphore(pending)
-        self._pool = cf.ThreadPoolExecutor(max_workers=workers, thread_name_prefix="mari-slack")
-
-    def submit(self, function, *args) -> bool:
-        if not self._slots.acquire(blocking=False):
-            return False
-        try:
-            future = self._pool.submit(function, *args)
-        except Exception:
-            self._slots.release()
-            raise
-        future.add_done_callback(lambda _future: self._slots.release())
-        return True
-
-
-_SLACK_EXECUTOR = _BoundedExecutor(SLACK_WORKERS, SLACK_PENDING)
-_SLACK_EVENTS = EventLedger()
+_EVENT_INBOX = EventInbox()
+_EVENT_DISPATCHER: EventDispatcher | None = None
 
 
 class SlackSetupIn(BaseModel):
@@ -143,7 +120,7 @@ BOT_SYSTEM = (
 )
 
 
-def answer_question(question: str) -> str:
+def answer_question(question: str, supplemental_context: str = "") -> str:
     """Hybrid search + LLM answer with the same deterministic fallback as /chat."""
     caller_access = access.require_current_access()
     # Curated answers beat generation (same canon as /chat).
@@ -168,6 +145,8 @@ def answer_question(question: str) -> str:
     if facts:
         context += "\n\nVerified facts:\n" + "\n".join(f"- {f['claim']}" for f in facts)
 
+    if supplemental_context:
+        context = f"{context}\n\nSlack conversation so far:\n{supplemental_context}".strip()
     answer = llm.generate(f"Context:\n{context}\n\nQuestion: {question}", BOT_SYSTEM)
     if not answer:
         if docs:
@@ -198,6 +177,7 @@ oauth_config:
   scopes:
     bot:
       - app_mentions:read
+      - channels:history
       - chat:write
       - im:history
       - im:read
@@ -207,6 +187,7 @@ settings:
     request_url: {base}/webhooks/slack
     bot_events:
       - app_mention
+      - message.channels
       - message.im
   interactivity:
     is_enabled: false
@@ -252,51 +233,158 @@ def verify_github_signature(raw: bytes, signature: str, secrets: list[str]) -> b
     )
 
 
+def _strip_mentions(text: str) -> str:
+    while "<@" in text and ">" in text:
+        start = text.find("<@")
+        end = text.find(">", start)
+        if end < 0:
+            break
+        text = (text[:start] + text[end + 1:]).strip()
+    return text.strip()
+
+
 def _handle_slack_event(event: dict, token: str, project_access=None,
                         installation_id: int | None = None,
                         event_id: str = "") -> None:
-    """Background worker: answer the question and post back into Slack."""
-    error = ""
-    try:
-        text = (event.get("text") or "").strip()
-        # Strip <@UBOT> mention tokens from app_mention text.
-        while "<@" in text and ">" in text:
-            i = text.find("<@")
-            j = text.find(">", i)
-            if j == -1:
-                break
-            text = (text[:i] + text[j + 1:]).strip()
-        if not text:
-            text = "What can you help with?"
+    """Compatibility entry point for direct/internal callers.
 
-        if project_access is None:
-            answer = answer_question(text)
-        else:
-            with access.use_access(project_access):
-                answer = answer_question(text)
-        _log_usage("chat_answer", "slack")
+    Provider webhooks never call this function; they always use the durable
+    inbox. Keeping the narrow helper avoids breaking local diagnostics.
+    """
+    question = _strip_mentions((event.get("text") or "").strip()) or "What can you help with?"
+    if project_access is None:
+        answer = answer_question(question)
+    else:
+        with access.use_access(project_access):
+            answer = answer_question(question)
+    out = slack_call("chat.postMessage", token, {
+        "channel": event.get("channel"), "text": answer,
+        "thread_ts": event.get("thread_ts") or (
+            event.get("ts") if event.get("type") == "app_mention" else None),
+    })
+    if not out.get("ok"):
+        raise RuntimeError(f"chat.postMessage: {out.get('error', 'unknown error')}")
+    if installation_id is not None:
+        exec_("UPDATE bot_installations SET updated_at=now() WHERE id=%s", (installation_id,))
+    else:
+        merge_setting("slack_bot", {"last_event_at": _now_iso(), "last_error": ""})
 
-        out = slack_call("chat.postMessage", token, {
-            "channel": event.get("channel"),
-            "text": answer,
-            "thread_ts": event.get("thread_ts") or (
-                event.get("ts") if event.get("type") == "app_mention" else None
-            ),
-        })
-        if not out.get("ok"):
-            error = f"chat.postMessage: {out.get('error', 'unknown error')}"
-    except Exception as e:  # noqa: BLE001 — record, never crash the thread
-        error = f"{type(e).__name__}: {e}"
-    patch = {"last_event_at": _now_iso(), "last_error": error}
-    try:
-        if installation_id is None:  # compatibility for direct/internal callers
-            merge_setting("slack_bot", patch)
-        else:
-            exec_("""UPDATE bot_installations SET config = config || %s, updated_at = now()
-                     WHERE id = %s""", (json.dumps(patch), installation_id))
-    finally:
-        if event_id:
-            _SLACK_EVENTS.complete("slack", event_id)
+
+def _slack_thread_context(token: str, channel: str, thread_ts: str) -> str:
+    out = slack_call("conversations.replies", token, {"channel": channel, "ts": thread_ts,
+                                                       "limit": 100})
+    if not out.get("ok"):
+        raise RuntimeError(f"conversations.replies: {out.get('error', 'unknown error')}")
+    lines = []
+    for message in out.get("messages") or []:
+        if message.get("subtype") or not (message.get("text") or "").strip():
+            continue
+        who = message.get("user") or ("Mari" if message.get("bot_id") else "unknown")
+        lines.append(f"{who}: {message['text'].strip()}")
+    return "\n".join(lines[-100:])
+
+
+def _refresh_slack_aggregate(project_id: int, token: str, channel: str,
+                             thread_ts: str) -> None:
+    """Refetch the canonical thread and update every matching Slack source."""
+    from connectors import slack as slack_connector
+    import ingest
+
+    sources = q(
+        """SELECT id, config FROM sources
+             WHERE project_id=%s AND kind='connector'
+               AND split_part(provider, ':', 1)='slack' AND status='active'""",
+        (project_id,),
+    )
+    if not sources:
+        return
+    item = slack_connector.thread_item(token, channel, thread_ts)
+    max_tokens, overlap = ingest._chunk_settings()
+    for source in sources:
+        with ingest._conn() as conn:
+            path = item["path"]
+            content_hash = str(item["hash_hint"])
+            doc_id, _inserted = ingest._upsert_document(
+                conn, source["id"], f"slack:{source['id']}:{path}", item["title"],
+                item["body"], f"slack/{path}", "page", content_hash, "Slack",
+                source="slack", initials="SL", acl_visibility="restricted",
+                acl_principals=(f"channel:{channel}",),
+            )
+            ingest._sync_chunks(conn, doc_id, item["title"], item["body"],
+                                max_tokens, overlap)
+            cfg = source["config"] if isinstance(source["config"], dict) else json.loads(source["config"] or "{}")
+            hashes = dict(cfg.get("item_hashes") or {})
+            hashes[path] = content_hash
+            cfg["item_hashes"] = hashes
+            conn.execute("UPDATE sources SET config=%s, last_sync_at=now() WHERE id=%s",
+                         (json.dumps(cfg), source["id"]))
+            conn.commit()
+
+
+def _process_slack_delivery(row: dict) -> None:
+    envelope = row["payload"] if isinstance(row["payload"], dict) else json.loads(row["payload"])
+    installation_id = int(envelope["installation_id"])
+    installation = q1(
+        """SELECT b.*, p.slug AS project_slug, p.name AS project_name
+             FROM bot_installations b JOIN projects p ON p.id=b.project_id
+            WHERE b.id=%s AND b.project_id=%s AND b.provider='slack'
+              AND b.status='connected' AND p.status='active'""",
+        (installation_id, row["project_id"]),
+    )
+    if not installation:
+        raise RuntimeError("Slack installation is no longer active")
+    cfg = installation["config"] if isinstance(installation["config"], dict) else json.loads(installation["config"])
+    token = (cfg.get("bot_token") or "").strip()
+    event = envelope["event"]
+    channel = str(event.get("channel") or "")
+    root_ts = str(event.get("thread_ts") or event.get("ts") or "")
+    if not token or not channel or not root_ts:
+        raise RuntimeError("Slack delivery is missing token, channel, or timestamp")
+
+    project_access = access.external_access(
+        installation["project_id"], installation["project_slug"], installation["project_name"],
+        "slack", str(installation_id), frozenset({"knowledge.read"}),
+        frozenset({f"channel:{channel}"}),
+    )
+    _refresh_slack_aggregate(installation["project_id"], token, channel, root_ts)
+    context = _slack_thread_context(token, channel, root_ts)
+    question = _strip_mentions((event.get("text") or "").strip()) or "What can you help with?"
+    with access.use_access(project_access):
+        answer = answer_question(question, context)
+    _log_usage("chat_answer", "slack")
+    client_msg_id = str(uuid.uuid5(uuid.NAMESPACE_URL,
+                                   f"mari:slack:{row['project_id']}:{row['delivery_id']}"))
+    out = slack_call("chat.postMessage", token, {
+        "channel": channel, "text": answer, "thread_ts": root_ts,
+        "client_msg_id": client_msg_id,
+    })
+    if not out.get("ok"):
+        raise RuntimeError(f"chat.postMessage: {out.get('error', 'unknown error')}")
+    exec_(
+        """INSERT INTO slack_bot_threads
+               (installation_id, project_id, channel_id, thread_ts, bot_message_ts)
+             VALUES (%s, %s, %s, %s, %s)
+             ON CONFLICT (installation_id, channel_id, thread_ts) DO UPDATE
+               SET bot_message_ts=EXCLUDED.bot_message_ts, last_event_at=now()""",
+        (installation_id, installation["project_id"], channel, root_ts, str(out.get("ts") or "")),
+    )
+    exec_("""UPDATE bot_installations SET config=config || %s, updated_at=now() WHERE id=%s""",
+          (json.dumps({"last_event_at": _now_iso(), "last_error": ""}), installation_id))
+
+
+def start_event_dispatcher() -> None:
+    global _EVENT_DISPATCHER
+    if _EVENT_DISPATCHER is None:
+        _EVENT_DISPATCHER = EventDispatcher(_EVENT_INBOX, {"slack": _process_slack_delivery},
+                                            workers=SLACK_WORKERS)
+    _EVENT_DISPATCHER.start()
+
+
+def stop_event_dispatcher() -> None:
+    global _EVENT_DISPATCHER
+    if _EVENT_DISPATCHER is not None:
+        _EVENT_DISPATCHER.stop()
+        _EVENT_DISPATCHER = None
 
 
 @router.post("/webhooks/slack")
@@ -335,8 +423,16 @@ async def slack_webhook(request: Request):
         etype = event.get("type", "")
         is_mention = etype == "app_mention"
         is_dm = etype == "message" and event.get("channel_type") == "im"
+        is_thread_reply = bool(
+            etype == "message" and event.get("thread_ts") and
+            q1("""SELECT 1 FROM slack_bot_threads
+                   WHERE installation_id=%s AND project_id=%s
+                     AND channel_id=%s AND thread_ts=%s""",
+               (installation["id"], installation["project_id"], event.get("channel"),
+                event.get("thread_ts")))
+        )
         # Skip our own echoes and edits/joins (message_changed etc.).
-        if (is_mention or is_dm) and not event.get("bot_id") and not event.get("subtype"):
+        if (is_mention or is_dm or is_thread_reply) and not event.get("bot_id") and not event.get("subtype"):
             event_id = str(payload.get("event_id") or "").strip()
             if not event_id:
                 # Slack normally provides event_id.  The deterministic fallback
@@ -344,19 +440,30 @@ async def slack_webhook(request: Request):
                 identity = json.dumps({"team": team_id, "event": event},
                                       sort_keys=True, separators=(",", ":"))
                 event_id = "derived:" + hashlib.sha256(identity.encode()).hexdigest()
-            if not _SLACK_EVENTS.claim("slack", event_id):
+            root_ts = str(event.get("thread_ts") or event.get("ts") or "")
+            try:
+                _row_id, inserted = _EVENT_INBOX.enqueue(
+                    "slack", installation["project_id"], event_id,
+                    {"installation_id": installation["id"], "event": event},
+                    coalesce_key=f"{installation['id']}:{event.get('channel', '')}:{root_ts}",
+                )
+            except Exception:
+                # No ACK when durability is unavailable: Slack will retry.
+                return Response(status_code=503, content="Slack delivery could not be persisted")
+            # Persist participation as soon as the root event is durable. This
+            # lets a fast/out-of-order human follow-up enter the same queue.
+            # Do this even on replay: if the process died between the durable
+            # inbox insert and this write, Slack's retry repairs the mapping.
+            if is_mention or is_dm:
+                exec_(
+                    """INSERT INTO slack_bot_threads
+                           (installation_id, project_id, channel_id, thread_ts)
+                         VALUES (%s, %s, %s, %s) ON CONFLICT DO NOTHING""",
+                    (installation["id"], installation["project_id"],
+                     str(event.get("channel") or ""), root_ts),
+                )
+            if not inserted:
                 return {"ok": True, "duplicate": True}
-            token = (cfg.get("bot_token") or "").strip()
-            project_access = access.external_access(
-                installation["project_id"], installation["project_slug"], installation["project_name"],
-                "slack", str(installation["id"]), frozenset({"knowledge.read"}),
-                frozenset({f"channel:{event.get('channel')}"}) if event.get("channel") else frozenset())
-            if not _SLACK_EXECUTOR.submit(
-                    _handle_slack_event, event, token, project_access, installation["id"], event_id):
-                _SLACK_EVENTS.release("slack", event_id)
-                # Non-2xx asks Slack to retry later; no work was accepted and
-                # the idempotency claim was released.
-                return Response(status_code=503, content="Slack worker queue is full")
 
     return {"ok": True}  # ack within 3s; work continues on the thread
 
