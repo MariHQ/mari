@@ -138,7 +138,10 @@ class SlackBotTests(unittest.TestCase):
         with access.use_access(ctx), patch.object(bots.llm, "embed", return_value=None), \
              patch.object(bots, "hybrid_search", return_value=docs), \
              patch.object(bots, "pq", return_value=[]), \
-             patch.object(bots.llm, "generate", return_value="Follow the deploy runbook [1].") as generate:
+             patch.object(bots.llm, "generate_json", return_value={
+                 "answer": "Follow the deploy runbook [1].", "confidence": .99,
+                 "evidence": [{"document_id": "document:1", "quote": "Run make deploy"}],
+             }) as generate:
             out = bots.answer_question("How do I deploy?")
         self.assertIn("Follow the deploy runbook", out)
         self.assertIn("Sources: [1] Deploy", out)

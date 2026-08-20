@@ -15,10 +15,22 @@ import strawberry
 import access
 import flowengine
 import llm
+import links
 import review
 from db import actor_name, audit, exec_, jload, q, q1, transaction
 from gqltypes import AnswerCandidate, ImpactDoc, ImpactResult, ReviewPolicyDecision
 from queries import hybrid_search, like_pattern
+from mari_components import KnowledgeDocument
+from mari_components.knowledge import (
+    assess_impact as component_assess_impact,
+    check_claims as component_check_claims,
+    extract_decisions as component_extract_decisions,
+    extract_facts as component_extract_facts,
+    harvest_glossary as component_harvest_glossary,
+    mine_answers as component_mine_answers,
+    refine_document as component_refine_document,
+    summarize_digest as component_summarize_digest,
+)
 
 
 # A document's metadata line is not a claim. The scanner is fed
@@ -133,7 +145,7 @@ def _mark_scanned(column: str, doc_ids: list[int]) -> None:
         exec_(f"UPDATE documents SET {column} = now() WHERE id = ANY(%s)", (list(doc_ids),))
 
 
-def _scan_concurrently(docs: list[dict], build_prompt, system: str) -> tuple[list[tuple[dict, t.Any]], int]:
+def _scan_concurrently(docs: list[dict], operation) -> tuple[list[tuple[dict, t.Any]], int]:
     """Run one model call per document, at most SCAN_WORKERS at a time, and
     stop accepting new work once SCAN_DEADLINE has passed.
 
@@ -147,8 +159,7 @@ def _scan_concurrently(docs: list[dict], build_prompt, system: str) -> tuple[lis
     deadline = time.monotonic() + SCAN_DEADLINE
     with cf.ThreadPoolExecutor(max_workers=min(SCAN_WORKERS, len(docs)),
                                thread_name_prefix="mari-scan") as pool:
-        futures = {pool.submit(llm.generate_json, build_prompt(d), system,
-                               SCAN_CALL_TIMEOUT): d for d in docs}
+        futures = {pool.submit(operation, d): d for d in docs}
         for future in cf.as_completed(futures):
             doc = futures[future]
             try:
@@ -166,6 +177,13 @@ def _scan_concurrently(docs: list[dict], build_prompt, system: str) -> tuple[lis
     return results, len(docs) - len(results)
 
 
+def _component_document(doc: dict) -> KnowledgeDocument:
+    return KnowledgeDocument(
+        str(doc["id"]), str(doc["title"]), str(doc.get("body") or doc.get("snippet") or ""),
+        revision=str(doc.get("updated_src") or ""), metadata={"source": str(doc.get("source") or "")},
+    )
+
+
 # ————————————————— LLM helpers for mutations —————————————————
 
 SKILL_PROMPTS = {
@@ -178,26 +196,15 @@ SKILL_PROMPTS = {
     "translate": "Translate the passage to French, keeping technical terms.",
 }
 
-FALLBACK_CHANGES = {
-    "tighten": [("in order to enable rotation", "to enable rotation", "Tighten")],
-    "plain": [("utilize the new endpoint", "use the new endpoint", "Plain language")],
-}
-
-
 def llm_refine(doc: dict, skill: str) -> list[tuple[str, str, str]]:
-    prompt = (
-        f"{SKILL_PROMPTS.get(skill, SKILL_PROMPTS['tighten'])}\n\n"
-        f"Document:\n{doc['title']}\n{doc['body'] or doc['snippet']}\n\n"
-        'Return a JSON array of edits: [{"original": "...", "replacement": "...", "reason": "..."}]. '
-        "original must be an exact substring of the document. At most 4 edits."
+    document = _component_document(doc)
+    edits = component_refine_document(
+        document,
+        SKILL_PROMPTS.get(skill, SKILL_PROMPTS["tighten"]),
+        generate_json=lambda prompt, _version: llm.generate_json(
+            prompt, system="You are Mari, a precise technical editor."),
     )
-    out = llm.generate_json(prompt, system="You are Mari, a precise technical editor.")
-    edits = []
-    if isinstance(out, list):
-        for e in out:
-            if isinstance(e, dict) and e.get("original") and e.get("replacement"):
-                edits.append((str(e["original"])[:300], str(e["replacement"])[:300], str(e.get("reason", skill))[:120]))
-    return edits or FALLBACK_CHANGES.get(skill, FALLBACK_CHANGES["tighten"])
+    return [(edit.original[:300], edit.replacement[:300], edit.reason[:120]) for edit in edits]
 
 
 # ——— LLM scanners: mine the doc graph for candidates ———
@@ -217,35 +224,27 @@ def scan_decisions_for(doc_ids: list[int] | None = None,
         return 0, 0, ""
     existing = {r["statement"].lower() for r in q("SELECT statement FROM decisions")}
 
-    def prompt_for(d: dict) -> str:
-        text = (d["body"] or d["snippet"] or "").strip()
-        return (
-            f"Team document [{d['source']} · {d['updated_src']}] {d['title']}:\n{text[:1500]}\n\n"
-            "Extract DECISIONS this document records the team making — things chosen, "
-            "changed, or committed to. "
-            'JSON: [{"statement": "declarative one-liner", "context": "1 sentence of why"}]. '
-            f"At most {CLAIMS_PER_DOC}; skip anything that is already obvious policy. "
-            "An empty list is the right answer for a document that records none."
+    def extract(doc: dict):
+        return component_extract_decisions(
+            [_component_document(doc)],
+            generate_json=lambda prompt, _version: llm.generate_json(
+                prompt, "You mine team knowledge for decisions worth ratifying.", SCAN_CALL_TIMEOUT),
+            maximum_documents=1, maximum_characters=1500,
         )
 
-    results, unread = _scan_concurrently(
-        docs, prompt_for, "You mine team knowledge for decisions worth ratifying.")
+    results, unread = _scan_concurrently(docs, extract)
 
     added = 0
     for doc, out in results:
-        if not isinstance(out, list):
-            continue
         for item in out[:CLAIMS_PER_DOC]:
-            # FACT-3: a model that answers with a list of strings is not a
-            # crash, it is a model answering in a shape we did not ask for.
-            if not isinstance(item, dict):
-                continue
-            stmt = str(item.get("statement", "")).strip()[:200]
+            stmt = (item.statement if hasattr(item, "statement")
+                    else str(item.get("statement", ""))).strip()[:200]
             if not stmt or stmt.lower() in existing:
                 continue
             exec_("""INSERT INTO decisions (statement, context, status, source_label, owners)
                      VALUES (%s, %s, 'proposed', %s, %s) ON CONFLICT (statement) DO NOTHING""",
-                  (stmt, str(item.get("context", ""))[:400],
+                  (stmt, ((item.evidence[0].quote if item.evidence else "")
+                          if hasattr(item, "evidence") else str(item.get("context", "")))[:400],
                    ("Mari scan · " + doc["title"])[:120], [actor_name()]))
             existing.add(stmt.lower())
             added += 1
@@ -277,20 +276,15 @@ def scan_facts_for(doc_ids: list[int] | None = None,
         return 0, 0, ""
     existing = {r["claim"].lower() for r in q("SELECT claim FROM facts")}
 
-    def prompt_for(d: dict) -> str:
-        text = (d["body"] or d["snippet"] or "").strip()
-        return (
-            f"Team document [{d['source']}] {d['title']}:\n{text[:1500]}\n\n"
-            "Extract atomic, checkable FACTS (numbers, limits, defaults, policies) "
-            "stated by THIS document. "
-            "Write each claim as a plain English sentence a person could agree or disagree with; "
-            "never copy a document's metadata line (PR/issue headers, authors, timestamps, status). "
-            f'JSON: [{{"claim": "one factual sentence"}}]. At most {CLAIMS_PER_DOC}; no opinions. '
-            "An empty list is the right answer for a document that states none."
+    def extract(doc: dict):
+        return component_extract_facts(
+            [_component_document(doc)],
+            generate_json=lambda prompt, _version: llm.generate_json(
+                prompt, "You extract verifiable facts from documentation.", SCAN_CALL_TIMEOUT),
+            maximum_documents=1, maximum_characters=1500,
         )
 
-    results, unread = _scan_concurrently(
-        docs, prompt_for, "You extract verifiable facts from documentation.")
+    results, unread = _scan_concurrently(docs, extract)
 
     # The ceiling is per document (FACT-2). A shared budget meant the first
     # document's claims displaced the fifth document's, and the fifth
@@ -298,12 +292,9 @@ def scan_facts_for(doc_ids: list[int] | None = None,
     # looked exactly like a document that had no claims in it.
     added = 0
     for doc, out in results:
-        if not isinstance(out, list):
-            continue
         for item in out[:CLAIMS_PER_DOC]:
-            if not isinstance(item, dict):  # FACT-3
-                continue
-            claim = str(item.get("claim", "")).strip()[:200]
+            claim = (item.claim if hasattr(item, "claim")
+                     else str(item.get("claim", ""))).strip()[:200]
             if not is_claim(claim) or claim.lower() in existing:
                 continue
             # `source` stays the human label it always was; `document_id`
@@ -677,50 +668,30 @@ class MutKnowledge:
         if not doc:
             return 0
         facts = q("SELECT claim FROM facts WHERE status = 'Verified'")
-        prompt = (
-            f"Document:\n{doc['title']}\n{doc['body'] or doc['snippet']}\n\n"
-            "Verified facts:\n" + "\n".join(f"- {f['claim']}" for f in facts) + "\n\n"
-            'List contradictions between the document and the facts as JSON: '
-            '[{"text": "exact phrase from document", "note": "which fact it contradicts"}]. Empty array if none.'
+        assessments = component_check_claims(
+            [fact["claim"] for fact in facts],
+            [_component_document(doc)],
+            generate_json=lambda prompt, _version: llm.generate_json(
+                prompt, system="You are Mari, a rigorous fact checker."),
+            maximum_documents=1,
         )
-        out = llm.generate_json(prompt, system="You are Mari, a rigorous fact checker.")
         found = 0
-        if isinstance(out, list):
-            for f in out[:5]:
-                if isinstance(f, dict) and f.get("text"):
-                    exec_("""INSERT INTO findings (document_id, kind, severity, text, note)
-                             VALUES (%s, 'fact', 'error', %s, %s) ON CONFLICT (document_id, text) DO NOTHING""",
-                          (document_id, str(f["text"])[:200], str(f.get("note", ""))[:300]))
-                    found += 1
+        for assessment in assessments[:5]:
+            if assessment.verdict != "contradicted" or not assessment.evidence:
+                continue
+            exec_("""INSERT INTO findings (document_id, kind, severity, text, note)
+                     VALUES (%s, 'fact', 'error', %s, %s) ON CONFLICT (document_id, text) DO NOTHING""",
+                  (document_id, assessment.evidence[0].quote[:200],
+                   f"{assessment.claim}: {assessment.explanation}"[:300]))
+            found += 1
         audit("ran fact check", doc["title"])
         return found
 
     # ——— lineage / semantic links ———
     @strawberry.mutation
     def derive_links(self) -> int:
-        docs = q("SELECT external_id, title, snippet FROM documents ORDER BY id")
-        existing = {(r["f"], r["t"]) for r in q(
-            """SELECT f.external_id AS f, t.external_id AS t FROM edges e
-               JOIN documents f ON f.id = e.from_doc JOIN documents t ON t.id = e.to_doc""")}
-        listing = "\n".join(f"- {d['external_id']}: {d['title']} — {d['snippet'][:100]}" for d in docs)
-        prompt = (
-            f"Documents:\n{listing}\n\n"
-            'Propose semantic links between related documents as JSON: '
-            '[{"from": "external_id", "to": "external_id", "rel": "reference"}]. '
-            "Only strong topical relationships. At most 3."
-        )
-        out = llm.generate_json(prompt, system="You derive knowledge-graph edges.")
-        added = 0
-        if isinstance(out, list):
-            ids = {d["external_id"] for d in docs}
-            for e in out:
-                f_, t_ = e.get("from"), e.get("to")
-                if f_ in ids and t_ in ids and f_ != t_ and (f_, t_) not in existing:
-                    exec_("""INSERT INTO edges (from_doc, to_doc, rel, day, curve, meta, created_at)
-                             SELECT f.id, t.id, 'reference', 14, 20, '{"derived":"llm","confidence":0.7}', CURRENT_DATE
-                             FROM documents f, documents t WHERE f.external_id = %s AND t.external_id = %s""",
-                          (f_, t_))
-                    added += 1
+        project_id = access.require_current_access().project_id
+        added = links.extract_all(project_id)
         audit("derived semantic links", f"{added} new edges")
         return added
 
@@ -776,56 +747,62 @@ class MutKnowledge:
     @strawberry.mutation
     def regenerate_digest(self) -> bool:
         project_id = access.require_current_access().project_id
-        docs = q("""SELECT title, snippet, source FROM documents
+        docs = q("""SELECT id, external_id, title, body, snippet, source, updated_src FROM documents
                     WHERE project_id = %s ORDER BY updated_src DESC LIMIT 8""", (project_id,))
-        facts = q("SELECT claim, status FROM facts WHERE project_id = %s", (project_id,))
-        prompt = (
-            "Recent documents:\n" + "\n".join(f"- [{d['source']}] {d['title']}: {d['snippet'][:80]}" for d in docs)
-            + "\n\nFacts:\n" + "\n".join(f"- {f['claim']} ({f['status']})" for f in facts)
-            + '\n\nWrite this week\'s digest as JSON: [{"title": "...", "summary": "2 sentences", '
-            '"wheres": [{"source": "github|slack|docs|notion|granola|gdocs", "label": "..."}], '
-            '"impact": [{"name": "service or doc", "tone": "#bf4f2e|#35549d|#5c7a4c|#c8973a"}]}]. Exactly 3 topics.'
+        documents = [_component_document(doc) for doc in docs]
+        result = component_summarize_digest(
+            documents,
+            generate_json=lambda prompt, _version: llm.generate_json(
+                prompt, system="You are Mari, summarizing the team's week."),
+            maximum_documents=8,
         )
-        out = llm.generate_json(prompt, system="You are Mari, summarizing the team's week.")
-        if isinstance(out, list) and out and all(isinstance(topic, dict) for topic in out[:3]):
-            topics = [(str(topic.get("title", "Untitled"))[:120],
-                       str(topic.get("summary", ""))[:500],
-                       json.dumps(topic.get("wheres", [])), json.dumps(topic.get("impact", [])))
-                      for topic in out[:3]]
-            def replace(conn):
-                conn.execute("DELETE FROM digest_topics WHERE project_id = %s", (project_id,))
-                for title, summary, wheres, impact in topics:
-                    conn.execute("""INSERT INTO digest_topics
-                                 (project_id, title, summary, wheres, impact)
-                                 VALUES (%s, %s, %s, %s, %s)""",
-                                 (project_id, title, summary, wheres, impact))
-            transaction(replace)
-            audit("regenerated digest", f"{len(topics)} topics")
-            return True
-        audit("digest regeneration failed (LLM unavailable)", "kept previous digest")
-        return False
+        by_id = {document.external_id: row for document, row in zip(documents, docs)}
+        topics = []
+        for topic in result.topics[:3]:
+            wheres = []
+            seen = set()
+            for evidence in topic.evidence:
+                row = by_id[evidence.document_id]
+                key = (row["source"], row["title"])
+                if key not in seen:
+                    seen.add(key)
+                    wheres.append({"source": row["source"], "label": row["title"]})
+            topics.append((topic.title[:120], topic.summary[:500], json.dumps(wheres), "[]"))
+        def replace(conn):
+            conn.execute("DELETE FROM digest_topics WHERE project_id = %s", (project_id,))
+            for title, summary, wheres, impact in topics:
+                conn.execute("""INSERT INTO digest_topics
+                             (project_id, title, summary, wheres, impact)
+                             VALUES (%s, %s, %s, %s, %s)""",
+                             (project_id, title, summary, wheres, impact))
+        transaction(replace)
+        audit("regenerated digest", f"{len(topics)} topics")
+        return True
 
     # ——— impact analysis ———
     @strawberry.mutation
     def impact_analysis(self, claim: str) -> ImpactResult:
         rows = hybrid_search(claim, 6)
-        listing = "\n".join(f"- [{r['source']}] {r['title']}: {r['snippet'][:90]}" for r in rows)
-        prompt = (
-            f'Asserted fact: "{claim}"\n\nDocuments:\n{listing}\n\n'
-            'Which documents does this assertion impact? JSON: {"summary": "1 sentence", '
-            '"docs": [{"title": "...", "source": "...", "severity": "update-required|review|minor", "reason": "..."}]}'
+        documents = [KnowledgeDocument(
+            str(row.get("id") or row.get("external_id") or index), row["title"],
+            row.get("body") or row.get("snippet") or "", metadata={"source": row["source"]},
+        ) for index, row in enumerate(rows, 1)]
+        result = component_assess_impact(
+            claim,
+            documents,
+            generate_json=lambda prompt, _version: llm.generate_json(
+                prompt, system="You analyze the blast radius of a changed fact."),
         )
-        out = llm.generate_json(prompt, system="You analyze the blast radius of a changed fact.")
         audit("ran impact analysis", claim)
-        if isinstance(out, dict) and out.get("docs"):
-            return ImpactResult(
-                claim=claim, summary=str(out.get("summary", "")),
-                docs=[ImpactDoc(title=str(d.get("title", ""))[:120], source=str(d.get("source", "docs")),
-                                severity=str(d.get("severity", "review")), reason=str(d.get("reason", ""))[:200])
-                      for d in out["docs"][:8] if isinstance(d, dict)])
-        return ImpactResult(claim=claim, summary=f"{len(rows)} related documents found by search.",
-                            docs=[ImpactDoc(title=r["title"], source=r["source"], severity="review",
-                                            reason="Matched by hybrid search") for r in rows])
+        by_id = {document.external_id: row for document, row in zip(documents, rows)}
+        return ImpactResult(
+            claim=claim,
+            summary=result.summary,
+            docs=[ImpactDoc(
+                title=by_id[identifier]["title"], source=by_id[identifier]["source"],
+                severity="review", reason="Evidence-linked impact",
+            ) for identifier in result.affected_document_ids[:8]],
+        )
 
     # ——— approved answers ———
     @strawberry.mutation
@@ -944,38 +921,28 @@ class MutKnowledge:
 
     @strawberry.mutation
     def harvest_glossary(self) -> int:
-        docs = q("SELECT title, snippet, body FROM documents")
-        corpus = "\n".join(f"{d['title']}: {d['snippet']} {d['body'][:200]}" for d in docs)
-        prompt = (
-            f"Corpus:\n{corpus}\n\n"
-            'Find terms used inconsistently (spelling/hyphenation/casing variants) or undefined jargon. '
-            'JSON: [{"term": "...", "variants": "a · b · c", "definition": "one line"}]. At most 3.'
+        docs = q("SELECT id, title, snippet, body, source, updated_src FROM documents")
+        components = [_component_document(doc) for doc in docs]
+        candidates = component_harvest_glossary(
+            components,
+            generate_json=lambda prompt, _version: llm.generate_json(
+                prompt, system="You harvest glossary terms from a documentation corpus."),
         )
-        out = llm.generate_json(prompt, system="You harvest glossary terms from a documentation corpus.")
         added = 0
-        if isinstance(out, list):
-            for t in out[:3]:
-                if not (isinstance(t, dict) and t.get("term")):
-                    continue
-                term = str(t["term"])[:80]
-                project_id = access.require_current_access().project_id
-                # Provenance, established here rather than asked of the model:
-                # the document that actually contains the term. A term no
-                # document contains was invented, so it is dropped — the review
-                # step must be able to open the source it came from.
-                doc = q1("""SELECT id, title FROM documents
-                            WHERE project_id = %s AND (title ILIKE %s OR body ILIKE %s)
-                            ORDER BY id LIMIT 1""",
-                         (project_id, like_pattern(term), like_pattern(term)))
-                if not doc:
-                    continue
-                exec_("""INSERT INTO glossary (project_id, term, definition, owner_name, updated, candidate,
-                                               variants, evidence, evidence_doc_id)
-                         VALUES (%s, %s, %s, 'Mari (harvest)', now(), true, %s, %s, %s)
-                         ON CONFLICT (project_id, term) DO NOTHING""",
-                      (project_id, term, str(t.get("definition", ""))[:300], str(t.get("variants", ""))[:200],
-                       doc["title"], doc["id"]))
-                added += 1
+        by_id = {str(doc["id"]): doc for doc in docs}
+        project_id = access.require_current_access().project_id
+        for candidate in candidates[:3]:
+            evidence = candidate.evidence[0]
+            doc = by_id.get(evidence.document_id)
+            if not doc:
+                continue
+            exec_("""INSERT INTO glossary (project_id, term, definition, owner_name, updated, candidate,
+                                           variants, evidence, evidence_doc_id)
+                     VALUES (%s, %s, %s, 'Mari (harvest)', now(), true, %s, %s, %s)
+                     ON CONFLICT (project_id, term) DO NOTHING""",
+                  (project_id, candidate.term[:80], candidate.definition[:300],
+                   " · ".join(candidate.aliases)[:200], doc["title"], doc["id"]))
+            added += 1
         audit("harvested glossary terms", f"{added} candidates")
         return added
 
@@ -1054,61 +1021,35 @@ class MutKnowledge:
         for FAQ answer candidates. Inserts NOTHING — the wizard's review step
         decides what becomes an approved answer."""
         existing = {r["question"].lower() for r in q("SELECT question FROM approved_answers")}
-        candidates: list[AnswerCandidate] = []
-
-        def collect(out, default_label: str) -> None:
-            if not isinstance(out, list):
-                return
-            for c in out[:4]:
-                if not isinstance(c, dict):
-                    continue
-                question = str(c.get("question", "")).strip()[:200]
-                if not question or question.lower() in existing:
-                    continue
-                existing.add(question.lower())
-                confidence = str(c.get("confidence", "medium")).lower()
-                candidates.append(AnswerCandidate(
-                    question=question,
-                    draft_answer=str(c.get("draft_answer", ""))[:1000],
-                    source_label=str(c.get("source_label") or default_label)[:120],
-                    confidence=confidence if confidence in ("high", "medium", "low") else "medium"))
-
-        def doc_corpus(where: str) -> str:
-            docs = q(f"""SELECT title, snippet, body, source FROM documents {where}
-                         ORDER BY updated_src DESC NULLS LAST LIMIT 8""")
-            return "\n".join(f"[{d['source']}] {d['title']}: {(d['body'] or d['snippet'])[:300]}" for d in docs)
-
-        for src in ("slack", "docs"):
-            if src not in sources:
-                continue
-            corpus = doc_corpus("WHERE source = 'slack'" if src == "slack" else "WHERE source <> 'slack'")
-            if not corpus:
-                continue
-            prompt = (
-                f"Recent team documents:\n{corpus}\n\n"
-                "Extract QUESTIONS a customer or teammate would plausibly ask that these documents answer. "
-                "For each, draft a concise answer grounded in the text. "
-                'JSON: [{"question": "...", "draft_answer": "...", "source_label": "which doc it came from", '
-                '"confidence": "high|medium|low"}]. At most 4.'
-            )
-            collect(llm.generate_json(prompt, system="You mine team knowledge for FAQ answer candidates."),
-                    f"Mari scan · {src}")
-
+        selected = {"slack", "docs"} & set(sources)
+        clause = ("" if selected == {"slack", "docs"} else
+                  "WHERE source = 'slack'" if selected == {"slack"} else
+                  "WHERE source <> 'slack'")
+        docs = q(f"""SELECT id, title, snippet, body, source, updated_src FROM documents
+                     {clause} ORDER BY updated_src DESC NULLS LAST LIMIT 16""") if selected else []
+        components = [_component_document(doc) for doc in docs]
         if "chat" in sources:
-            msgs = q("SELECT content FROM chat_messages WHERE role = 'user' ORDER BY id DESC LIMIT 10")
-            if msgs:
-                corpus = doc_corpus("")
-                asked = "\n".join(f"- {m['content'][:200]}" for m in msgs)
-                prompt = (
-                    f"Questions users recently asked in chat:\n{asked}\n\n"
-                    f"Team documents (for grounding answers):\n{corpus}\n\n"
-                    "Cluster the asked questions into candidate FAQ questions and draft a concise "
-                    "answer for each, grounded in the documents. "
-                    'JSON: [{"question": "...", "draft_answer": "...", "source_label": "chat history", '
-                    '"confidence": "high|medium|low"}]. At most 4.'
-                )
-                collect(llm.generate_json(prompt, system="You cluster user questions into FAQ answer candidates."),
-                        "Mari scan · chat")
+            for index, message in enumerate(q(
+                    "SELECT content FROM chat_messages WHERE role = 'user' ORDER BY id DESC LIMIT 10"), 1):
+                components.append(KnowledgeDocument(
+                    f"chat:{index}", "Recent user question", str(message["content"])[:200],
+                    revision="recent-chat"))
+        mined = component_mine_answers(
+            components,
+            generate_json=lambda prompt, _version: llm.generate_json(
+                prompt, system="You mine team knowledge for FAQ answer candidates."),
+        ) if components else ()
+        candidates: list[AnswerCandidate] = []
+        titles = {str(doc["id"]): doc["title"] for doc in docs}
+        for candidate in mined[:8]:
+            if candidate.question.casefold() in existing:
+                continue
+            existing.add(candidate.question.casefold())
+            source_label = titles.get(candidate.evidence[0].document_id, "Recent chat")
+            confidence = "high" if candidate.confidence >= .85 else "medium" if candidate.confidence >= .6 else "low"
+            candidates.append(AnswerCandidate(
+                question=candidate.question[:200], draft_answer=candidate.answer[:1000],
+                source_label=source_label[:120], confidence=confidence))
 
         audit("scanned for answer candidates", f"{len(candidates)} candidates")
         return candidates

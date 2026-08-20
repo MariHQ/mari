@@ -229,7 +229,10 @@ class SlackSetupToAnswerTests(unittest.TestCase):
              patch.object(bots, "_refresh_slack_aggregate"), \
              patch.object(queries, "q", return_value=documents), \
              patch.object(queries.llm, "embed", return_value=None), \
-             patch.object(bots.llm, "generate", side_effect=lambda prompt, _system: prompts.append(prompt) or "Use the runbook [1]."):
+             patch.object(bots.llm, "generate_json", side_effect=lambda prompt, **_kwargs: prompts.append(prompt) or {
+                 "answer": "Use the runbook [1].", "confidence": 0.9,
+                 "evidence": [{"document_id": "document:1", "quote": "Use the production checklist"}],
+             }):
             self.assertEqual(asyncio.run(bots.slack_webhook(self._request(mention))), {"ok": True})
             self.assertEqual(asyncio.run(bots.slack_webhook(self._request(dm))), {"ok": True})
             self.assertEqual(asyncio.run(bots.slack_webhook(self._request(mention))),

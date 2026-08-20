@@ -45,7 +45,13 @@ class FactInsightTests(unittest.TestCase):
             return doc
         with patch.object(mutations_knowledge, "q1", side_effect=q1), \
              patch.object(mutations_knowledge, "q", return_value=[{"claim": "Retention is 30 days."}]), \
-             patch.object(mutations_knowledge.llm, "generate_json", return_value=[{"text": "Retention is 10 days", "note": "contradicts 30 days"}]) as model, \
+             patch.object(mutations_knowledge.llm, "generate_json", return_value={
+                 "assessments": [{
+                     "claim": "Retention is 30 days.", "verdict": "contradicted",
+                     "explanation": "The document says 10 days.", "confidence": .99,
+                     "evidence": [{"document_id": "4", "quote": "Retention is 10 days"}],
+                 }],
+             }) as model, \
              patch.object(mutations_knowledge, "exec_", side_effect=lambda sql, args=(): writes.append((sql, args))), \
              patch.object(mutations_knowledge, "audit"):
             count = mutations_knowledge.MutKnowledge().fact_check(4)

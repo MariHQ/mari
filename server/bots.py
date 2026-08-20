@@ -17,9 +17,7 @@ from __future__ import annotations
 
 import datetime
 import hashlib
-import hmac
 import json
-import time
 import urllib.error
 import urllib.request
 import uuid
@@ -33,6 +31,12 @@ import auth
 import access
 import config
 import llm
+from mari_components.connectors.events import (
+    verify_hmac_sha256 as component_verify_hmac_sha256,
+    verify_slack_signature as component_verify_slack_signature,
+)
+from mari_components import KnowledgeDocument
+from mari_components.knowledge import answer_question as component_answer_question
 from event_inbox import DEFAULT_INBOX, EventDispatcher
 from db import exec_, pq, pq1, q, q1
 from queries import hybrid_search
@@ -121,7 +125,7 @@ BOT_SYSTEM = (
 
 
 def answer_question(question: str, supplemental_context: str = "") -> str:
-    """Hybrid search + LLM answer with the same deterministic fallback as /chat."""
+    """Hybrid search + strict, evidence-preserving component answer recipe."""
     caller_access = access.require_current_access()
     # Curated answers beat generation (same canon as /chat).
     qvec = llm.embed(question)
@@ -137,30 +141,41 @@ def answer_question(question: str, supplemental_context: str = "") -> str:
             return f"{approved['answer']}\n\n_Approved answer · served verbatim_"
 
     docs = hybrid_search(question, 4)
-    context = "\n\n".join(
-        f"[{i + 1}] {d['title']} ({d['source']})\n{d['body'] or d['snippet']}"
-        for i, d in enumerate(docs)
-    )
+    knowledge = [
+        KnowledgeDocument(
+            f"document:{d.get('id') or d.get('external_id') or index}",
+            d["title"], d["body"] or d["snippet"],
+            revision=str(d.get("updated") or ""),
+            metadata={"source": d["source"]},
+        )
+        for index, d in enumerate(docs, 1)
+    ]
     facts = pq("SELECT claim FROM facts WHERE project_id = %s AND status = 'Verified' LIMIT 8")
     if facts:
-        context += "\n\nVerified facts:\n" + "\n".join(f"- {f['claim']}" for f in facts)
+        knowledge.append(KnowledgeDocument(
+            "verified-facts", "Verified facts", "\n".join(f"- {f['claim']}" for f in facts),
+            revision="verified",
+        ))
 
     if supplemental_context:
-        context = f"{context}\n\nSlack conversation so far:\n{supplemental_context}".strip()
-    answer = llm.generate(f"Context:\n{context}\n\nQuestion: {question}", BOT_SYSTEM)
-    if not answer:
-        if docs:
-            answer = (
-                "I couldn't reach the local model, but hybrid search found: "
-                + "; ".join(d["title"] for d in docs) + "."
-            )
-        else:
-            answer = "I couldn't reach the local model and found no matching documents."
-    if docs:
-        answer += "\n\nSources: " + " · ".join(
-            f"[{i + 1}] {d['title']}" for i, d in enumerate(docs)
-        )
-    return answer
+        knowledge.append(KnowledgeDocument(
+            "slack-conversation", "Slack conversation so far", supplemental_context,
+            revision="current-thread",
+        ))
+    result = component_answer_question(
+        question,
+        knowledge,
+        generate_json=lambda prompt, _version: llm.generate_json(prompt, system=BOT_SYSTEM),
+    )
+    by_id = {document.external_id: document for document in knowledge}
+    cited = []
+    for evidence in result.evidence:
+        title = by_id[evidence.document_id].title
+        if title not in cited:
+            cited.append(title)
+    suffix = "\n\nSources: " + " · ".join(
+        f"[{index + 1}] {title}" for index, title in enumerate(cited)) if cited else ""
+    return result.answer + suffix
 
 
 # ————————————————— GET /bots/slack/manifest —————————————————
@@ -213,28 +228,22 @@ def slack_manifest() -> str:
 
 def verify_slack_signature(raw: bytes, timestamp: str, signature: str, secret: str) -> bool:
     """Slack v0 request signing: hex hmac-sha256 of `v0:{ts}:{body}`, 5-min window."""
-    if not (secret and timestamp and signature):
-        return False
     try:
-        ts = int(timestamp)
-    except ValueError:
+        component_verify_slack_signature(raw, timestamp, signature, secret)
+        return True
+    except Exception:
         return False
-    if abs(time.time() - ts) > 300:
-        return False
-    base = f"v0:{timestamp}:".encode() + raw
-    expect = "v0=" + hmac.new(secret.encode(), base, hashlib.sha256).hexdigest()
-    return hmac.compare_digest(expect, signature)
 
 
 def verify_github_signature(raw: bytes, signature: str, secrets: list[str]) -> bool:
     """Accept a GitHub sha256 delivery signed by any configured webhook secret."""
-    return bool(secrets) and any(
-        hmac.compare_digest(
-            signature,
-            "sha256=" + hmac.new(secret.encode(), raw, hashlib.sha256).hexdigest(),
-        )
-        for secret in secrets if secret
-    )
+    for secret in secrets:
+        try:
+            component_verify_hmac_sha256(raw, signature, secret)
+            return True
+        except Exception:
+            continue
+    return False
 
 
 def _strip_mentions(text: str) -> str:
