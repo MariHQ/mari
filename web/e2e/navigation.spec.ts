@@ -91,6 +91,30 @@ test("primary navigation exposes only the consolidated information architecture"
   }
 });
 
+test("SPA navigation moves keyboard context to main content", async ({ page }) => {
+  await page.goto("/");
+  const navigation = await primaryNavigation(page);
+  await navigation.getByRole("button", { name: "Knowledge", exact: true }).click();
+  await expect(page).toHaveURL(/\/knowledge$/);
+  await expect(page.locator("#main-content")).toBeFocused();
+});
+
+test("reduced-motion preference suppresses application animation and transitions", async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.goto("/");
+  const durations = await page.evaluate(() => {
+    const probe = document.createElement("div");
+    probe.className = "animate-spin transition-all";
+    document.body.appendChild(probe);
+    const style = getComputedStyle(probe);
+    const result = { animation: style.animationDuration, transition: style.transitionDuration };
+    probe.remove();
+    return result;
+  });
+  expect(parseFloat(durations.animation)).toBeLessThanOrEqual(0.001);
+  expect(parseFloat(durations.transition)).toBeLessThanOrEqual(0.001);
+});
+
 test("unknown routes recover to the authenticated overview", async ({ page }) => {
   await page.goto("/does-not-exist");
   await expect(page).toHaveURL(/\/$/);

@@ -33,11 +33,6 @@ function splitQualified(v: string, fallback: unknown): { provider: unknown; mode
     : { provider: v.slice(0, i), model: v.slice(i + 1) };
 }
 
-/** Provider keys come back from the server MASKED ("••••…1234"). A field the
- *  user never touched still holds that mask, and writing it back would replace
- *  a working credential with bullet characters. A masked value therefore means
- *  "leave this key alone", not "set it to this". */
-const isMasked = (v: string) => v.includes("•");
 function jsonObject(label: string, raw: string): Record<string, unknown> {
   let value: unknown;
   try { value = JSON.parse(raw || "{}"); } catch { throw new Error(`${label} must be valid JSON.`); }
@@ -63,15 +58,15 @@ export function settingsModelsActions(): SettingsModelsActions {
         value: { ...rest, provider, model: name, ...(dims === null ? {} : { dims }) },
       });
     },
-    saveLlm: async ({ model, openai, anthropic }) => {
+    saveLlm: async ({ model, openai, anthropic, openaiDirty, anthropicDirty }) => {
       const row = await settingRow("llm");
       const { provider, model: name } = splitQualified(model, row.provider);
       const stored = (row.keys && typeof row.keys === "object" ? row.keys : {}) as Record<string, unknown>;
       const keys = { ...stored };
-      // Only a key the user actually typed is written. An untouched (masked)
-      // field leaves the stored credential exactly as it was.
-      if (openai && !isMasked(openai)) keys.openai = openai;
-      if (anthropic && !isMasked(anthropic)) keys.anthropic = anthropic;
+      // Dirty flags come from the fields themselves. Character inspection is
+      // unsafe: a legitimate secret may contain any Unicode character.
+      if (openaiDirty) keys.openai = openai;
+      if (anthropicDirty) keys.anthropic = anthropic;
       await mutate(UPDATE_SETTING, {
         key: "llm",
         value: { ...row, provider, model: name, keys },

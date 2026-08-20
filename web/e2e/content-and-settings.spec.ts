@@ -100,6 +100,21 @@ test("profile, password, and notification settings reach their account endpoints
   await expect.poll(() => api.restCalls.filter((call) => call.path.startsWith("/auth/preferences/")).length).toBeGreaterThanOrEqual(3);
 });
 
+test("preferences retries one expired-session response through shared recovery", async ({ page }) => {
+  let first = true;
+  await page.route("**/auth/preferences", async (route) => {
+    if (first) {
+      first = false;
+      await route.fulfill({ status: 401, json: { detail: "expired" } });
+    } else {
+      await route.fallback();
+    }
+  });
+  await page.goto("/preferences");
+  await expect(page.getByLabel("Display name")).toHaveValue("Dana Rodriguez");
+  await expect(page.getByText(/The API answered 401/)).toHaveCount(0);
+});
+
 test("an unowned fact defaults to the confirmed signed-in member, never demo identity", async ({ page }) => {
   await page.goto("/facts");
   await page.getByRole("button", { name: "New fact" }).click();

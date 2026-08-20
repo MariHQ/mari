@@ -1,5 +1,5 @@
-import { useMemo } from "react";
-import { BrowserRouter, Navigate, Route, Routes, useNavigate } from "react-router-dom";
+import { useEffect, useMemo, useRef } from "react";
+import { BrowserRouter, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { PAGES, type PageModule } from "@mari-design/components/pages";
 import { landingPageFor, type ShellChrome } from "@mari-design/components/pages/PageFrame";
 import { NavProvider } from "@mari-design/components/navigation/Link";
@@ -161,6 +161,7 @@ function Routed() {
   const navigate = useNavigate();
   return (
     <NavProvider navigate={navigate}>
+      <RouteFocus />
       <Routes>
           {ROUTES.map(({ page, Element }) => (
             <Route
@@ -183,6 +184,19 @@ function Routed() {
       <AgentDock />
     </NavProvider>
   );
+}
+
+/** Move keyboard/screen-reader context after an SPA page navigation. Skip the
+ * first render so a direct load keeps the browser's normal starting point. */
+function RouteFocus() {
+  const { pathname } = useLocation();
+  const first = useRef(true);
+  useEffect(() => {
+    if (first.current) { first.current = false; return; }
+    const frame = requestAnimationFrame(() => document.getElementById("main-content")?.focus());
+    return () => cancelAnimationFrame(frame);
+  }, [pathname]);
+  return null;
 }
 
 export default function App() {

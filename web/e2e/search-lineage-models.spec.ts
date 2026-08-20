@@ -91,6 +91,14 @@ test("Ollama embedding and generation settings save without cloud keys", async (
   expect(api.calls.some((c) => c.variables.key === "llm" && (c.variables.value as any).provider === "ollama")).toBeTruthy();
 });
 
+test("provider keys use explicit edits, including legitimate bullet characters", async ({ page }) => {
+  await page.goto("/settings/models");
+  await page.getByLabel("OpenAI (sk-…)").fill("sk-live-•-valid");
+  await page.getByRole("button", { name: "Save changes" }).click();
+  await expect.poll(() => api.calls.some((call) => call.query.includes("updateSetting") &&
+    call.variables.key === "llm" && (call.variables.value as any).keys?.openai === "sk-live-•-valid")).toBeTruthy();
+});
+
 test("enterprise gateway validates, saves masked credentials, and runs prompt-free health", async ({ page }) => {
   await page.goto("/settings/models");
   await expect(page.getByText("Enterprise LLM gateway", { exact: true })).toBeVisible();

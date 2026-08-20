@@ -5,6 +5,7 @@
  * root fields answer in one document, so the whole workspace gets one loading
  * state instead of five racing panels. */
 
+import { useMemo } from "react";
 import { useSearchParams } from "react-router-dom";
 import type { DocReviewData, ReviewDoc, ReviewPane } from "@mari-design/components/pages/DocReviewPage";
 import type { DocRevision } from "@mari-design/components/features/DocReviewOutlinePanel";
@@ -175,13 +176,14 @@ export function useDocReview(): PageData<DocReviewData> {
     variables: { id: valid ? id : 0 },
     map: mapDocReview,
   });
+  const data = useMemo(() => ({ ...(q.data ?? EMPTY), pane, bottomTab }), [q.data, pane, bottomTab]);
 
   return {
     // The pane and the bottom tab are applied here rather than inside the
     // mapper: the query cache is keyed on the GraphQL variables, and neither of
     // these is one of them, so a mapped-in value would be frozen at whatever
     // the first visit asked for.
-    data: { ...(q.data ?? EMPTY), pane, bottomTab },
+    data,
     loading: valid ? q.loading : false,
     error: q.error ? (q.errorText ?? "This document is temporarily unavailable.") : null,
   };

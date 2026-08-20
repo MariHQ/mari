@@ -66,6 +66,15 @@ function recoverSession(): Promise<boolean> {
   return recoveryInFlight;
 }
 
+/** REST companion to gqlResult's session recovery. It retries one rejected
+ * request after AuthProvider re-checks the cookie; network/5xx responses pass
+ * through untouched so callers can render their real failure. */
+export async function authenticatedFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  const response = await fetch(input, init);
+  if (response.status !== 401 || !await recoverSession()) return response;
+  return fetch(input, init);
+}
+
 /** Like gql(), but keeps the real failure: network error, HTTP status, or the
  *  first GraphQL error message. Use it wherever the UI must say *why*. */
 export async function gqlResult<T = any>(query: string, variables?: Record<string, unknown>): Promise<GqlResult<T>> {

@@ -10,8 +10,13 @@ test("global search opens from the shell and supports keyboard result selection"
     .or(page.getByRole("button", { name: "Search", exact: true })).click();
   const dialog = page.getByRole("dialog", { name: "Global search" });
   await expect(dialog).toBeVisible();
-  await dialog.getByRole("textbox", { name: "Search" }).fill("retention");
-  await expect(dialog.getByRole("option", { name: /Retention runbook/ })).toBeVisible();
+  const search = dialog.getByRole("combobox", { name: "Search" });
+  await expect(search).toHaveAttribute("aria-expanded", "true");
+  await search.fill("retention");
+  const option = dialog.getByRole("option", { name: /Retention runbook/ });
+  await expect(option).toBeVisible();
+  await expect(search).toHaveAttribute("aria-controls", await dialog.getByRole("listbox", { name: "Search results" }).getAttribute("id") ?? "");
+  await expect(search).toHaveAttribute("aria-activedescendant", await option.getAttribute("id") ?? "");
   await page.keyboard.press("Enter");
   await expect(page).toHaveURL(/\/knowledge\/doc\?id=1$/);
   await expect(page.getByRole("heading", { name: "Retention runbook" })).toBeVisible();

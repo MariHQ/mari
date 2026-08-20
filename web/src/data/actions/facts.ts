@@ -34,6 +34,14 @@ type RunRes = {
  * reads as still running rather than as a state the run never reported. */
 const RUN_STATUS = new Set<RunStatus>(["passed", "running", "waiting", "failed", "skipped", "pending"]);
 const asStatus = (s: string): RunStatus => (RUN_STATUS.has(s as RunStatus) ? (s as RunStatus) : "running");
+const invalidatedRuns = new Set<string>();
+
+function invalidateFactsOnce(id: string, status: RunStatus) {
+  if ((status === "running" || status === "pending") || invalidatedRuns.has(id)) return;
+  invalidatedRuns.add(id);
+  factsChanged();
+  if (invalidatedRuns.size > 200) invalidatedRuns.delete(invalidatedRuns.values().next().value!);
+}
 
 function mapRun(res: RunRes | null, id: string): FactScan {
   const run = res?.workflowRun;
@@ -41,7 +49,7 @@ function mapRun(res: RunRes | null, id: string): FactScan {
   const status = asStatus(run.status);
   // A run that has stopped has landed whatever it was going to land, so the
   // ledger under the page re-reads instead of showing yesterday's rows.
-  if (status !== "running" && status !== "pending") factsChanged();
+  invalidateFactsOnce(id, status);
   return {
     id,
     label: `${run.workflowName} · run #${run.number}`,
