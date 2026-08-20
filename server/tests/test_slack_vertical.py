@@ -240,9 +240,12 @@ class SlackSetupToAnswerTests(unittest.TestCase):
         self.assertEqual(len(posts), 2)
         self.assertTrue(all(call["authorization"] == "Bearer xoxb-valid" for call in posts))
         self.assertEqual(posts[0]["body"]["thread_ts"], "1.0")
-        self.assertEqual(posts[1]["body"]["thread_ts"], "2.0")
+        self.assertNotIn("thread_ts", posts[1]["body"])
         self.assertTrue(all("Allowed runbook" in prompt for prompt in prompts))
-        self.assertTrue(all("use the production checklist" in prompt for prompt in prompts))
+        self.assertTrue(all("use the production checklist" not in prompt for prompt in prompts))
+        self.assertTrue(all("deploy?" in prompt for prompt in prompts))
+        self.assertFalse([call for call in FakeSlackHandler.calls
+                          if call["path"] == "/api/conversations.replies"])
         self.assertTrue(all("Forbidden plan" not in prompt and "Never reveal this" not in prompt
                             for prompt in prompts))
 

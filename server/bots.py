@@ -276,7 +276,7 @@ def _handle_slack_event(event: dict, token: str, project_access=None,
 
 def _slack_thread_context(token: str, channel: str, thread_ts: str) -> str:
     out = slack_call("conversations.replies", token, {"channel": channel, "ts": thread_ts,
-                                                       "limit": 100})
+                                                       "limit": 15})
     if not out.get("ok"):
         raise RuntimeError(f"conversations.replies: {out.get('error', 'unknown error')}")
     lines = []
@@ -341,7 +341,9 @@ def _process_slack_delivery(row: dict) -> None:
     token = (cfg.get("bot_token") or "").strip()
     event = envelope["event"]
     channel = str(event.get("channel") or "")
-    root_ts = str(event.get("thread_ts") or event.get("ts") or "")
+    event_ts = str(event.get("ts") or "")
+    thread_ts = str(event.get("thread_ts") or "")
+    root_ts = thread_ts or event_ts
     if not token or not channel or not root_ts:
         raise RuntimeError("Slack delivery is missing token, channel, or timestamp")
 
@@ -350,18 +352,23 @@ def _process_slack_delivery(row: dict) -> None:
         "slack", str(installation_id), frozenset({"knowledge.read"}),
         frozenset({f"channel:{channel}"}),
     )
-    _refresh_slack_aggregate(installation["project_id"], token, channel, root_ts)
-    context = _slack_thread_context(token, channel, root_ts)
     question = _strip_mentions((event.get("text") or "").strip()) or "What can you help with?"
+    # A new Slack message is not a thread yet. conversations.replies rejects
+    # these root timestamps, so use the event itself until Slack supplies a
+    # thread_ts on a follow-up. This also makes a first DM independent of the
+    # history scopes that are only needed for real thread context.
+    context = _slack_thread_context(token, channel, thread_ts) if thread_ts else question
     with access.use_access(project_access):
         answer = answer_question(question, context)
     _log_usage("chat_answer", "slack")
     client_msg_id = str(uuid.uuid5(uuid.NAMESPACE_URL,
                                    f"mari:slack:{row['project_id']}:{row['delivery_id']}"))
-    out = slack_call("chat.postMessage", token, {
-        "channel": channel, "text": answer, "thread_ts": root_ts,
-        "client_msg_id": client_msg_id,
-    })
+    post = {"channel": channel, "text": answer, "client_msg_id": client_msg_id}
+    # Channel mentions start a thread. A root DM gets a normal visible reply;
+    # actual DM/channel thread follow-ups stay in their existing thread.
+    if thread_ts or event.get("type") == "app_mention":
+        post["thread_ts"] = root_ts
+    out = slack_call("chat.postMessage", token, post)
     if not out.get("ok"):
         raise RuntimeError(f"chat.postMessage: {out.get('error', 'unknown error')}")
     exec_(
@@ -374,6 +381,14 @@ def _process_slack_delivery(row: dict) -> None:
     )
     exec_("""UPDATE bot_installations SET config=config || %s, updated_at=now() WHERE id=%s""",
           (json.dumps({"last_event_at": _now_iso(), "last_error": ""}), installation_id))
+    # Event-driven ingestion is a repair/latency optimization, never a gate on
+    # answering the user. Once a real Slack thread exists, refresh it after the
+    # response has been posted and let scheduled polling repair any API error.
+    if thread_ts or event.get("type") == "app_mention":
+        try:
+            _refresh_slack_aggregate(installation["project_id"], token, channel, root_ts)
+        except Exception:
+            pass
 
 
 def start_event_dispatcher() -> None:
