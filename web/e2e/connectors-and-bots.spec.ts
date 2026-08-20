@@ -6,6 +6,12 @@ test.beforeEach(async ({ page }) => {
   api = await installMockApi(page);
 });
 
+test("Sources exposes connector ingestion without the removed upload workflow", async ({ page }) => {
+  await page.goto("/sources");
+  await expect(page.getByText("Upload files", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Add source" })).toBeVisible();
+});
+
 async function openSources(page: import("@playwright/test").Page) {
   await page.goto("/sources");
   await expect(page.getByRole("heading", { name: "Sources" })).toBeVisible();
