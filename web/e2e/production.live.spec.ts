@@ -13,7 +13,7 @@ async function signIn(page: Page) {
     return;
   }
   if (env.MARI_E2E_EMAIL && env.MARI_E2E_PASSWORD) {
-    await page.getByLabel("Email").fill(env.MARI_E2E_EMAIL);
+    await page.getByLabel("Email or username").fill(env.MARI_E2E_EMAIL);
     await page.getByLabel("Password").fill(env.MARI_E2E_PASSWORD);
     await page.getByRole("button", { name: /^Sign in/ }).click();
   } else if (await page.getByRole("button", { name: /Continue as workspace admin/ }).isVisible().catch(() => false)) {

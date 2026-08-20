@@ -9,7 +9,7 @@ test("workspace admins can invite a user and configure GitHub team provisioning"
   await expect(page.getByText(/Members of/)).toContainText("acme/docs");
   await page.getByRole("button", { name: "Invite member" }).click();
   await page.getByLabel("Name").fill("Rippling Test User");
-  await page.getByLabel("Email").fill("rippling-test@example.test");
+  await page.getByLabel("Email or username").fill("rippling-test@example.test");
   await page.getByLabel("Role", { exact: true }).selectOption("user");
   await page.getByRole("button", { name: "Send invite" }).click();
   await expect(page.getByTitle("rippling-test@example.test")).toBeVisible();
