@@ -1,3 +1,4 @@
+import { createHmac } from "node:crypto";
 import { expect, test, type Page } from "@playwright/test";
 
 const env = process.env;
@@ -145,6 +146,70 @@ test("LIVE Slack bot token reaches Slack auth.test", async ({ page }) => {
   await drawer.getByRole("button", { name: "Next" }).click();
   await drawer.getByRole("button", { name: "Test connection" }).click();
   await expect(drawer.getByText(/Connected in/)).toBeVisible({ timeout: 30_000 });
+});
+
+test("LIVE Slack signed event is answered through the installed bot", async ({ page }) => {
+  test.skip(!mutations, "Set MARI_E2E_MUTATIONS=1 to allow a sandbox bot event.");
+  test.skip(
+    !env.MARI_E2E_SLACK_BOT_TOKEN || !env.MARI_E2E_SLACK_SIGNING_SECRET || !env.MARI_E2E_SLACK_CHANNEL_ID,
+    "Missing Slack bot token, signing secret, or canary channel id.",
+  );
+  await signIn(page);
+
+  const slackCall = async (method: string, values: Record<string, string>) => {
+    const response = await page.request.post(`https://slack.com/api/${method}`, {
+      headers: {
+        Authorization: `Bearer ${env.MARI_E2E_SLACK_BOT_TOKEN}`,
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      form: values,
+    });
+    expect(response.ok(), `Slack ${method} HTTP response`).toBeTruthy();
+    const result = await response.json();
+    expect(result.ok, `Slack ${method}: ${result.error || "unknown error"}`).toBe(true);
+    return result;
+  };
+
+  const auth = await slackCall("auth.test", {});
+  const root = await slackCall("chat.postMessage", {
+    channel: env.MARI_E2E_SLACK_CHANNEL_ID!,
+    text: `Mari connector canary ${Date.now()}`,
+  });
+  try {
+    const before = await page.request.get("/bots/status").then((response) => response.json());
+    const payload = JSON.stringify({
+      type: "event_callback",
+      team_id: auth.team_id,
+      event_id: `EvMariCanary${Date.now()}`,
+      event: {
+        type: "app_mention",
+        user: "U_MARI_CANARY",
+        text: `<@${auth.user_id}> What does our product knowledge say about retention?`,
+        channel: env.MARI_E2E_SLACK_CHANNEL_ID,
+        ts: root.ts,
+      },
+    });
+    const timestamp = String(Math.floor(Date.now() / 1_000));
+    const signature = "v0=" + createHmac("sha256", env.MARI_E2E_SLACK_SIGNING_SECRET!)
+      .update(`v0:${timestamp}:${payload}`).digest("hex");
+    const delivery = await page.request.post("/webhooks/slack", {
+      headers: {
+        "Content-Type": "application/json",
+        "X-Slack-Request-Timestamp": timestamp,
+        "X-Slack-Signature": signature,
+      },
+      data: payload,
+    });
+    expect(delivery.ok(), `Mari Slack webhook: ${await delivery.text()}`).toBeTruthy();
+
+    await expect.poll(async () => {
+      const status = await page.request.get("/bots/status").then((response) => response.json());
+      if (status.slack?.lastError) throw new Error(`Slack reply failed: ${status.slack.lastError}`);
+      return status.slack?.lastEventAt && status.slack.lastEventAt !== before.slack?.lastEventAt;
+    }, { timeout: 60_000, intervals: [500, 1_000, 2_000] }).toBeTruthy();
+  } finally {
+    await slackCall("chat.delete", { channel: env.MARI_E2E_SLACK_CHANNEL_ID!, ts: root.ts });
+  }
 });
 
 test("LIVE Ollama-backed fact scan completes through the browser", async ({ page }) => {
