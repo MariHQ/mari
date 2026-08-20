@@ -35,7 +35,7 @@ import config
 import ingest
 import llm
 import sitebuilder
-import agentchat
+from mari_server.api import agent as agent_api
 import access as access_module
 import auth as auth_module
 import bots
@@ -127,7 +127,7 @@ app.include_router(gdrive_events.router)
 app.include_router(provider_events.router)
 app.include_router(mcp.router)  # published MCP servers authenticate with their own bearer tokens
 app.include_router(connectors_api.router, dependencies=_authed)
-app.include_router(agentchat.router, dependencies=_authed)
+app.include_router(agent_api.router, dependencies=_authed)
 app.include_router(onboard.router, dependencies=_authed)
 
 sitebuilder.BUILDS.mkdir(exist_ok=True)

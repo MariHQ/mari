@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import unittest
 
-import agentchat
 from app import schema
+from mari_server.infrastructure.agent_tools import ToolDependencies, build_tool_bindings
 
 
 class ReadOnlyDocumentTests(unittest.TestCase):
@@ -15,7 +15,12 @@ class ReadOnlyDocumentTests(unittest.TestCase):
             self.assertNotIn(name, fields)
 
     def test_agent_has_no_document_replacement_tool(self):
-        self.assertNotIn("edit_document", agentchat.TOOLS)
+        bindings = build_tool_bindings(ToolDependencies(
+            project_id=1, query=lambda *_args: (), query_one=lambda *_args: None,
+            search=lambda *_args: (), record_search=lambda _text: None,
+            review_items=lambda: (), connector_definitions=lambda: (),
+        ))
+        self.assertNotIn("edit_document", bindings)
 
 
 if __name__ == "__main__":
