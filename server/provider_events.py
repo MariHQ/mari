@@ -20,11 +20,11 @@ import auth
 import ingest
 from connectors import confluence
 from db import q1
-from event_inbox import EventInbox
+from event_inbox import DEFAULT_INBOX
 
 
 router = APIRouter()
-INBOX = EventInbox()
+INBOX = DEFAULT_INBOX
 MAX_WEBHOOK_BYTES = 1_048_576
 MAX_DIRTY_PATHS = 500
 
