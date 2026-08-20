@@ -167,6 +167,10 @@ test("LIVE ingested source is searchable, inspectable, and represented in lineag
     expect(date, "GitHub source time must retain time-of-day and an explicit UTC offset")
       .toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|\+00:00)$/);
   }
+  expect(new Set(githubDates).size, "GitHub source times must not collapse to one import date")
+    .toBeGreaterThan(1);
+  expect(githubDates.some((date) => !date.includes("T00:00:00")),
+    "GitHub source times must retain time-of-day instead of date truncation").toBeTruthy();
 
   await page.goto("/knowledge");
   const main = page.getByRole("main", { name: "Main content" });

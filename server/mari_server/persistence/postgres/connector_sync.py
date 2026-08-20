@@ -26,7 +26,7 @@ from mari_components import IncompleteSnapshot, SyncMode
 from mari_components.sync import ManifestEntry, SyncState
 from mari_components.connectors import CONNECTOR_CATALOG, call_with_retry, connector_definition
 from mari_components.sync.ingestion import AppliedPage, consume_connector_pages
-from mari_server.providers import connectors
+from mari_server.providers import connectors as connector_provider
 
 # internal config keys the worker owns (never provider credential fields)
 INTERNAL_KEYS = ("provider_key", "cursor", "item_hashes", "last_sync_at", "last_error",
