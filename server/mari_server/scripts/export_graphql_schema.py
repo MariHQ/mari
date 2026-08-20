@@ -12,7 +12,7 @@ from pathlib import Path
 import sys
 
 
-SCHEMA_PATH = Path(__file__).with_name("graphql-schema.graphql")
+SCHEMA_PATH = Path(__file__).resolve().parents[2] / "graphql-schema.graphql"
 
 
 def rendered_schema() -> str:
@@ -35,10 +35,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Wrote {SCHEMA_PATH}")
         return 0
     if not SCHEMA_PATH.exists():
-        print(f"Missing {SCHEMA_PATH}; run python -m export_graphql_schema --write", file=sys.stderr)
+        print(f"Missing {SCHEMA_PATH}; run python -m mari_server.scripts.export_graphql_schema --write", file=sys.stderr)
         return 1
     if SCHEMA_PATH.read_text(encoding="utf-8") != actual:
-        print("GraphQL schema drifted; review it and run python -m export_graphql_schema --write", file=sys.stderr)
+        print("GraphQL schema drifted; review it and run python -m mari_server.scripts.export_graphql_schema --write", file=sys.stderr)
         return 1
     print("GraphQL schema matches the committed contract")
     return 0

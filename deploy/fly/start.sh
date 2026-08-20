@@ -39,7 +39,7 @@ if ! gosu postgres psql -h 127.0.0.1 -U mari -d postgres -tAc \
   gosu postgres createdb -h 127.0.0.1 -U mari mari_cloud
 fi
 
-gosu mari python3 -m schema_migrations
+gosu mari python3 -m mari_server.repositories.schema
 
 backup_loop() {
   while :; do

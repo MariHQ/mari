@@ -12,7 +12,7 @@ test-browser:
 	npm --prefix web run e2e
 
 test-contracts:
-	PYTHONPATH=server server/.venv/bin/python -m export_graphql_schema
+	PYTHONPATH=server server/.venv/bin/python -m mari_server.scripts.export_graphql_schema
 
 test-agent-evals:
 	PYTHONPATH=server server/.venv/bin/python -m unittest server.tests.test_agent_evals -v

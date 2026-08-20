@@ -52,7 +52,10 @@ def ensure_schema() -> None:
 # ——— real GitHub repository connector resolution ———
 
 BUILDS_DIR = pathlib.Path(
-    os.environ.get("MARI_REPO_AUDIT_DIR", pathlib.Path(__file__).parent / "data" / "repo-audit")
+    os.environ.get(
+        "MARI_REPO_AUDIT_DIR",
+        pathlib.Path(__file__).resolve().parents[2] / "data" / "repo-audit",
+    )
 )
 
 

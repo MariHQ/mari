@@ -18,7 +18,7 @@ const args = [
   "--distpath", "vendor/api",
   "--workpath", "build/pyinstaller",
   "--specpath", "build/pyinstaller",
-  path.join(server, "desktop_entry.py"),
+  path.join(server, "mari_server", "scripts", "desktop_entry.py"),
 ];
 const result = spawnSync(python, args, { stdio: "inherit", shell: false });
 if (result.error) throw result.error;
