@@ -32,14 +32,13 @@ import numpy as np
 
 import config
 from mari_components.retrieval import (
-    FDEConfig as ComponentFDEConfig,
+    FDEConfig,
     PolarCodec,
-    encode_fde as component_encode_fde,
-    encode_polar as component_encode_polar,
-    exact_maxsim as component_exact_maxsim,
-    polar_scores as component_polar_scores,
-    projection_parameters as component_projection_parameters,
-    train_polar as component_train_polar,
+    encode_fde,
+    exact_maxsim,
+    polar_scores,
+    projection_parameters,
+    train_polar,
 )
 
 
@@ -61,34 +60,8 @@ def _file_digest(path: pathlib.Path) -> str:
     return digest.hexdigest()
 
 
-@dataclasses.dataclass(frozen=True)
-class FDEConfig:
-    repetitions: int = 20
-    simhash_bits: int = 5
-    projection_dimension: int = 8
-    seed: int = 1
-    fill_empty_partitions: bool = True
-
-    @property
-    def partitions(self) -> int:
-        return 1 << self.simhash_bits
-
-    @property
-    def dimension(self) -> int:
-        return self.repetitions * self.partitions * self.projection_dimension
-
-
-def projection_parameters(config: FDEConfig, input_dimension: int):
-    return component_projection_parameters(ComponentFDEConfig(**dataclasses.asdict(config)), input_dimension)
-
-
-def encode_fde(points: np.ndarray, config: FDEConfig, parameters, *, query: bool) -> np.ndarray:
-    return component_encode_fde(
-        points, ComponentFDEConfig(**dataclasses.asdict(config)), tuple(parameters), query=query)
-
-
-def train_polar(fdes: np.ndarray) -> tuple[dict, np.ndarray]:
-    codec, packed = component_train_polar(fdes)
+def _train_for_artifact(fdes: np.ndarray) -> tuple[dict, np.ndarray]:
+    codec, packed = train_polar(fdes)
     return {
         "name": codec.name,
         "dimension": codec.dimension,
@@ -110,18 +83,6 @@ def _component_codec(codec: dict) -> PolarCodec:
         name=str(codec.get("name") or "polar_ultra_1bit_block2_r0"),
         bits_per_fde_coordinate=float(codec.get("bits_per_fde_coordinate", 0.5)),
     )
-
-
-def encode_polar(fde: np.ndarray, codec: dict) -> np.ndarray:
-    return component_encode_polar(fde, _component_codec(codec))
-
-
-def polar_scores(index: np.ndarray, query_fde: np.ndarray, codec: dict) -> np.ndarray:
-    return component_polar_scores(index, query_fde, _component_codec(codec))
-
-
-def exact_maxsim(query_points: np.ndarray, document_points: np.ndarray) -> float:
-    return component_exact_maxsim(query_points, document_points)
 
 
 class DerivedVectorIndex:
@@ -153,7 +114,7 @@ class DerivedVectorIndex:
         parameters = projection_parameters(self.config, next(iter(dims)))
         fdes = np.stack([encode_fde(clean[int(i)], self.config, parameters, query=False)
                          for i in ids]).astype(np.float32)
-        codec, packed = train_polar(fdes)
+        codec, packed = _train_for_artifact(fdes)
         offsets = np.zeros(len(ids) + 1, np.int64)
         offsets[1:] = np.cumsum([len(clean[int(i)]) for i in ids])
         vectors = np.concatenate([clean[int(i)] for i in ids]).astype(np.float32)
@@ -183,7 +144,8 @@ class DerivedVectorIndex:
         query_points = np.asarray(query_points, np.float32)
         params = projection_parameters(self.config, int(snap["metadata"]["input_dimension"]))
         query_fde = encode_fde(query_points, self.config, params, query=True)
-        approx = polar_scores(snap["packed"], query_fde, snap["metadata"]["polar"])
+        approx = polar_scores(snap["packed"], query_fde,
+                              _component_codec(snap["metadata"]["polar"]))
         take = min(max(k, candidate_k), len(approx))
         positions = np.argpartition(-approx, take - 1)[:take] if take < len(approx) else np.arange(len(approx))
         exact = []

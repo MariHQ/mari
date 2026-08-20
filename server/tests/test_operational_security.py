@@ -19,7 +19,8 @@ import numpy as np
 import access
 import bots
 import trajectory
-from retrieval import DerivedVectorIndex, FDEConfig
+from retrieval import DerivedVectorIndex
+from mari_components.retrieval import FDEConfig
 
 
 class _MemoryLedger:
