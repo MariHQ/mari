@@ -8,8 +8,6 @@ remain the reconciliation path for missed or out-of-order deliveries.
 
 from __future__ import annotations
 
-import hashlib
-import hmac
 import json
 import typing as t
 
@@ -21,12 +19,15 @@ import ingest
 from connectors import confluence
 from db import q1
 from event_inbox import DEFAULT_INBOX
+from mari_components.connectors.events import (
+    MAX_DIRTY_PATHS, confluence_change_hint, github_change_hint,
+    verify_hmac_sha256,
+)
 
 
 router = APIRouter()
 INBOX = DEFAULT_INBOX
 MAX_WEBHOOK_BYTES = 1_048_576
-MAX_DIRTY_PATHS = 500
 
 
 def _json(value: t.Any) -> dict[str, t.Any]:
@@ -40,10 +41,11 @@ def _json(value: t.Any) -> dict[str, t.Any]:
 
 
 def _signed(raw: bytes, supplied: str, secret: str) -> bool:
-    if not secret or not supplied.startswith("sha256="):
+    try:
+        verify_hmac_sha256(raw, supplied, secret)
+        return True
+    except Exception:
         return False
-    expected = "sha256=" + hmac.new(secret.encode(), raw, hashlib.sha256).hexdigest()
-    return hmac.compare_digest(expected, supplied)
 
 
 async def _body(request: Request) -> bytes:
@@ -71,39 +73,15 @@ def _payload(raw: bytes) -> dict[str, t.Any]:
 
 
 def _github_hint(event: str, payload: dict[str, t.Any]) -> dict[str, t.Any]:
-    repository = _json(payload.get("repository"))
+    component = github_change_hint(event, payload)
+    repository = str(_json(payload.get("repository")).get("full_name") or "")[:300]
     hint: dict[str, t.Any] = {
-        "event": event[:80],
-        "repository": str(repository.get("full_name") or "")[:300],
-        "action": str(payload.get("action") or "")[:80],
+        "event": component.event_type,
+        "repository": repository,
+        **dict(component.metadata),
     }
-    issue = _json(payload.get("issue"))
-    pull = _json(payload.get("pull_request"))
-    number = issue.get("number") or pull.get("number") or payload.get("number")
-    if number is not None:
-        try:
-            hint["number"] = int(number)
-        except (TypeError, ValueError):
-            pass
-    if event == "push":
-        paths: list[str] = []
-        for commit in list(payload.get("commits") or [])[:250]:
-            if not isinstance(commit, dict):
-                continue
-            for key in ("added", "modified", "removed"):
-                for path in list(commit.get(key) or []):
-                    path = str(path)[:1000]
-                    if path and path not in paths:
-                        paths.append(path)
-                    if len(paths) >= MAX_DIRTY_PATHS:
-                        break
-                if len(paths) >= MAX_DIRTY_PATHS:
-                    break
-            if len(paths) >= MAX_DIRTY_PATHS:
-                break
-        hint["paths"] = paths
-        hint["paths_truncated"] = len(paths) >= MAX_DIRTY_PATHS
-        hint["ref"] = str(payload.get("ref") or "")[:500]
+    if isinstance(hint.get("paths"), tuple):
+        hint["paths"] = list(hint["paths"])
     return hint
 
 
@@ -160,12 +138,11 @@ async def github_webhook(request: Request):
 
 
 def _confluence_hint(payload: dict[str, t.Any]) -> dict[str, str]:
-    content = _json(payload.get("page") or payload.get("content"))
-    space = _json(content.get("space") or payload.get("space"))
+    component = confluence_change_hint(payload)
     return {
-        "event": str(payload.get("webhookEvent") or payload.get("event") or "")[:120],
-        "page_id": str(content.get("id") or payload.get("pageId") or "")[:200],
-        "space_key": str(space.get("key") or payload.get("spaceKey") or "")[:200],
+        "event": component.event_type,
+        "page_id": component.external_id,
+        "space_key": str(component.metadata.get("space_key") or ""),
     }
 
 

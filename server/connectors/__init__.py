@@ -46,6 +46,12 @@ def _discover() -> dict:
             print(f"[connectors] WARNING: {msg}", file=sys.stderr)
             out[name] = {"key": name, "provider": None, "error": msg}
             continue
+        # Provider modules retain their catalog metadata and a temporary
+        # direct-call compatibility surface; production registry calls use the
+        # infrastructure-neutral mari-components implementations.
+        import component_connectors
+        validate, list_items = component_connectors.functions(
+            str(provider["key"]), validate, list_items)
         out[provider["key"]] = {
             "key": provider["key"],
             "provider": provider,

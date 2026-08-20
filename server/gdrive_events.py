@@ -22,10 +22,10 @@ import ingest
 from connectors import gdrive
 from event_inbox import DEFAULT_INBOX
 from db import exec_, q, q1
+from mari_components.connectors.events import gdrive_change_hint
 
 
 router = APIRouter()
-_VALID_STATES = {"sync", "change", "changed"}
 _WATCH_DAYS = 6
 _RENEW_BEFORE = dt.timedelta(hours=24)
 _RENEW_INTERVAL_SECONDS = 3600
@@ -137,13 +137,13 @@ async def gdrive_webhook(request: Request):
     if len(channel_id) > 64 or len(channel_token) > 256 or len(resource_id) > 1000:
         return Response(status_code=400, content="invalid Google Drive notification headers")
     try:
-        message_number = int(raw_number)
-        if message_number < 1 or message_number > 9_223_372_036_854_775_807:
+        hint = gdrive_change_hint(dict(request.headers))
+        message_number = int(hint.metadata["message_number"])
+        resource_state = hint.event_type
+        if message_number > 9_223_372_036_854_775_807:
             raise ValueError
-    except ValueError:
+    except Exception:
         return Response(status_code=400, content="invalid Google Drive message number")
-    if resource_state not in _VALID_STATES:
-        return Response(status_code=400, content="unsupported Google Drive resource state")
     channel = q1(
         """SELECT c.*, s.status AS source_status, p.status AS project_status
              FROM gdrive_watch_channels c

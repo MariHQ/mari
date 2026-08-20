@@ -7,7 +7,6 @@ decide whether to degrade. Rate limits surface as GithubError too.
 
 from __future__ import annotations
 
-import base64
 import contextvars
 import json
 import time
@@ -18,6 +17,18 @@ import urllib.request
 
 import config
 from connectors._protocol import call_with_retry
+from mari_components.connectors import (
+    GitHubConfig as ComponentGitHubConfig,
+    github_blob as component_github_blob,
+    github_commits as component_github_commits,
+    github_head as component_github_head,
+    github_issue_comments as component_github_issue_comments,
+    github_issues as component_github_issues,
+    github_repository as component_github_repository,
+    github_tree as component_github_tree,
+    list_github_repositories as component_list_github_repositories,
+)
+from mari_components.http import HttpRequest as ComponentHttpRequest, HttpResponse as ComponentHttpResponse
 
 API = "https://api.github.com"
 _TOKEN_OVERRIDE: contextvars.ContextVar[str] = contextvars.ContextVar(
@@ -99,22 +110,31 @@ def _paginate(path: str, params: dict, max_pages: int = 10) -> tuple[list[dict],
     return out, True
 
 
+def _component_http(request: ComponentHttpRequest) -> ComponentHttpResponse:
+    parsed = urllib.parse.urlparse(request.url)
+    params = {key: values[-1] for key, values in urllib.parse.parse_qs(parsed.query).items()}
+    value, headers = _request(parsed.path, params or None)
+    return ComponentHttpResponse(200, headers, json.dumps(value).encode())
+
+
+def _component_config(repo: str, branch: str = "") -> ComponentGitHubConfig:
+    return ComponentGitHubConfig(token(), repo, branch)
+
+
 # ————— repos / tree / blobs —————
 
 
 def list_repos() -> list[dict]:
     """Repos visible to the token, most recently updated first."""
-    rows, _ = _paginate("/user/repos", {"sort": "updated", "direction": "desc"}, max_pages=3)
-    return rows
+    return list(component_list_github_repositories(token(), http=_component_http, page_limit=3))
 
 
 def head_sha(repo: str, branch: str) -> str:
-    data, _ = _request(f"/repos/{repo}/commits/{urllib.parse.quote(branch)}")
-    return data["sha"]
+    return component_github_head(_component_config(repo, branch), branch, http=_component_http)
 
 
 def default_branch(repo: str) -> str:
-    data, _ = _request(f"/repos/{repo}")
+    data = component_github_repository(_component_config(repo), http=_component_http)
     return data.get("default_branch") or "main"
 
 
@@ -136,37 +156,16 @@ class TreeListing(list):
 def get_tree(repo: str, ref: str, request_cap: int = 2000,
              entry_cap: int = 250_000) -> TreeListing:
     """Enumerate a tree without trusting GitHub's truncated recursive result."""
-    data, _ = _request(f"/repos/{repo}/git/trees/{urllib.parse.quote(ref)}", {"recursive": "1"})
-    if not data.get("truncated"):
-        return TreeListing((n for n in data.get("tree", []) if n.get("type") == "blob"))
-
-    blobs: list[dict] = []
-    stack = [(ref, "")]
-    requests = 0
-    while stack and requests < request_cap and len(blobs) < entry_cap:
-        sha, prefix = stack.pop()
-        page, _ = _request(f"/repos/{repo}/git/trees/{urllib.parse.quote(sha)}")
-        requests += 1
-        if page.get("truncated"):
-            return TreeListing(blobs, complete=False)
-        for node in page.get("tree", []):
-            path = f"{prefix}/{node.get('path', '')}".strip("/")
-            normalized = {**node, "path": path}
-            if node.get("type") == "blob":
-                blobs.append(normalized)
-            elif node.get("type") == "tree" and node.get("sha"):
-                stack.append((node["sha"], path))
-    return TreeListing(blobs, complete=not stack and len(blobs) < entry_cap)
+    rows, complete = component_github_tree(
+        _component_config(repo), ref, http=_component_http, request_limit=request_cap)
+    if len(rows) >= entry_cap:
+        rows, complete = rows[:entry_cap], False
+    return TreeListing(rows, complete=complete)
 
 
 def get_blob(repo: str, sha: str) -> str:
     """Blob content decoded to text ('' for binary)."""
-    data, _ = _request(f"/repos/{repo}/git/blobs/{sha}")
-    raw = base64.b64decode(data.get("content", "") or "")
-    try:
-        return raw.decode("utf-8")
-    except UnicodeDecodeError:
-        return ""
+    return component_github_blob(_component_config(repo), sha, http=_component_http)
 
 
 # ————— issues / PRs / comments / commits —————
@@ -176,21 +175,19 @@ def list_issues(repo: str, since: str = "") -> tuple[list[dict], bool]:
     """Issues AND pull requests (GitHub lists PRs as issues), updated since ts.
     Returns (rows, truncated) — truncated means the 50-page safety cap was hit
     and the caller must not advance its cursor past the newest row fetched."""
-    params: dict = {"state": "all", "sort": "updated", "direction": "asc"}
-    if since:
-        params["since"] = since
-    return _paginate(f"/repos/{repo}/issues", params, max_pages=50)
+    rows, complete = component_github_issues(
+        _component_config(repo), since, http=_component_http, page_limit=50)
+    return list(rows), not complete
 
 
 def list_issue_comments(repo: str, number: int, limit: int = 30) -> list[dict]:
-    rows, _ = _paginate(f"/repos/{repo}/issues/{number}/comments", {}, max_pages=(limit + 99) // 100)
-    return rows[-limit:]  # latest N
+    return list(component_github_issue_comments(
+        _component_config(repo), number, http=_component_http, limit=limit))
 
 
 def list_commits(repo: str, branch: str, since: str = "") -> tuple[list[dict], bool]:
     """Commits on branch since ts (newest first). Returns (rows, truncated) —
     same cursor contract as list_issues."""
-    params: dict = {"sha": branch}
-    if since:
-        params["since"] = since
-    return _paginate(f"/repos/{repo}/commits", params, max_pages=50)
+    rows, complete = component_github_commits(
+        _component_config(repo, branch), branch, since, http=_component_http, page_limit=50)
+    return list(rows), not complete
