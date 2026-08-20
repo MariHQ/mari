@@ -41,7 +41,7 @@ from mari_components.connectors.events import (
 from mari_components import KnowledgeDocument
 from mari_components.knowledge import answer_question as component_answer_question
 from mari_server.repositories.event_inbox import DEFAULT_INBOX, EventDispatcher
-from mari_server.repositories.database import exec_, pq, pq1, q, q1
+from mari_server.repositories import bots as bot_store
 from mari_server.services.search import hybrid_search
 
 router = APIRouter()
@@ -61,25 +61,12 @@ class SlackSetupIn(BaseModel):
 
 
 def get_setting(key: str) -> dict:
-    row = q1("SELECT value FROM settings WHERE key = %s", (key,))
-    if not row:
-        return {}
-    val = row["value"]
-    if isinstance(val, str):
-        try:
-            val = json.loads(val)
-        except json.JSONDecodeError:
-            return {}
-    return val if isinstance(val, dict) else {}
+    return bot_store.setting(key)
 
 
 def merge_setting(key: str, patch: dict) -> None:
     """Shallow-merge patch into settings[key], creating the row if absent."""
-    exec_(
-        """INSERT INTO settings (key, value) VALUES (%s, %s)
-           ON CONFLICT (key) DO UPDATE SET value = settings.value || EXCLUDED.value""",
-        (key, json.dumps(patch)),
-    )
+    bot_store.merge_setting(key, patch)
 
 
 def _now_iso() -> str:
@@ -89,12 +76,7 @@ def _now_iso() -> str:
 def _log_usage(kind: str, detail: str = "") -> None:
     """Honest-telemetry hook (contract §A). Tolerates db.log_usage not existing yet."""
     try:
-        from mari_server.repositories import database as _db
-
-        if hasattr(_db, "log_usage"):
-            _db.log_usage(kind, detail)
-        else:
-            exec_("INSERT INTO usage_log (kind, detail) VALUES (%s, %s)", (kind, detail))
+        bot_store.log_usage(kind, detail)
     except Exception:
         pass
 
@@ -133,13 +115,7 @@ def answer_question(question: str, supplemental_context: str = "") -> str:
     # Curated answers beat generation (same canon as /chat).
     qvec = llm.embed(question)
     if qvec:
-        approved = q1(
-            """SELECT question, answer, 1 - (embedding <=> %s::vector) AS sim
-               FROM approved_answers
-               WHERE project_id = %s AND status = 'approved' AND embedding IS NOT NULL
-               ORDER BY embedding <=> %s::vector LIMIT 1""",
-            (str(qvec), caller_access.project_id, str(qvec)),
-        )
+        approved = bot_store.approved_answer(qvec)
         if approved and approved["sim"] >= 0.62:
             return f"{approved['answer']}\n\n_Approved answer · served verbatim_"
 
@@ -153,10 +129,10 @@ def answer_question(question: str, supplemental_context: str = "") -> str:
         )
         for index, d in enumerate(docs, 1)
     ]
-    facts = pq("SELECT claim FROM facts WHERE project_id = %s AND status = 'Verified' LIMIT 8")
+    facts = bot_store.verified_facts()
     if facts:
         knowledge.append(KnowledgeDocument(
-            "verified-facts", "Verified facts", "\n".join(f"- {f['claim']}" for f in facts),
+            "verified-facts", "Verified facts", "\n".join(f"- {claim}" for claim in facts),
             revision="verified",
         ))
 
@@ -280,7 +256,7 @@ def _handle_slack_event(event: dict, token: str, project_access=None,
     if not out.get("ok"):
         raise RuntimeError(f"chat.postMessage: {out.get('error', 'unknown error')}")
     if installation_id is not None:
-        exec_("UPDATE bot_installations SET updated_at=now() WHERE id=%s", (installation_id,))
+        bot_store.touch_installation(installation_id)
     else:
         merge_setting("slack_bot", {"last_event_at": _now_iso(), "last_error": ""})
 
@@ -325,12 +301,7 @@ def _refresh_slack_aggregate(project_id: int, token: str, channel: str,
     """Refetch the canonical thread and update every matching Slack source."""
     from mari_server.services import sync as ingest
 
-    sources = q(
-        """SELECT id, config FROM sources
-             WHERE project_id=%s AND kind='connector'
-               AND split_part(provider, ':', 1)='slack' AND status='active'""",
-        (project_id,),
-    )
+    sources = bot_store.slack_sources(project_id)
     if not sources:
         return
     document, complete = fetch_slack_thread_by_id(
@@ -359,21 +330,14 @@ def _refresh_slack_aggregate(project_id: int, token: str, channel: str,
             hashes = dict(cfg.get("item_hashes") or {})
             hashes[path] = content_hash
             cfg["item_hashes"] = hashes
-            conn.execute("UPDATE sources SET config=%s, last_sync_at=now() WHERE id=%s",
-                         (json.dumps(cfg), source["id"]))
             conn.commit()
+            bot_store.save_source_config(source["id"], cfg)
 
 
 def _process_slack_delivery(row: dict) -> None:
     envelope = row["payload"] if isinstance(row["payload"], dict) else json.loads(row["payload"])
     installation_id = int(envelope["installation_id"])
-    installation = q1(
-        """SELECT b.*, p.slug AS project_slug, p.name AS project_name
-             FROM bot_installations b JOIN projects p ON p.id=b.project_id
-            WHERE b.id=%s AND b.project_id=%s AND b.provider='slack'
-              AND b.status='connected' AND p.status='active'""",
-        (installation_id, row["project_id"]),
-    )
+    installation = bot_store.installation(installation_id, row["project_id"])
     if not installation:
         raise RuntimeError("Slack installation is no longer active")
     cfg = installation["config"] if isinstance(installation["config"], dict) else json.loads(installation["config"])
@@ -394,12 +358,7 @@ def _process_slack_delivery(row: dict) -> None:
     question = _strip_mentions((event.get("text") or "").strip()) or "What can you help with?"
     turns: list[dict[str, str]] = []
     if thread_ts:
-        thread = q1(
-            """SELECT conversation FROM slack_bot_threads
-                WHERE installation_id=%s AND project_id=%s
-                  AND channel_id=%s AND thread_ts=%s""",
-            (installation_id, installation["project_id"], channel, thread_ts),
-        ) or {}
+        thread = bot_store.thread(installation_id, installation["project_id"], channel, thread_ts) or {}
         turns = _conversation(thread.get("conversation"))
         # Rows created before durable conversation storage still have their
         # visible Mari root in Slack. Bootstrap it once via conversations.history,
@@ -426,18 +385,9 @@ def _process_slack_delivery(row: dict) -> None:
     bot_message_ts = str(out.get("ts") or "")
     participation_ts = thread_ts or bot_message_ts
     turns = _with_turn(turns, "assistant", answer, bot_message_ts)
-    exec_(
-        """INSERT INTO slack_bot_threads
-               (installation_id, project_id, channel_id, thread_ts, bot_message_ts, conversation)
-             VALUES (%s, %s, %s, %s, %s, %s)
-             ON CONFLICT (installation_id, channel_id, thread_ts) DO UPDATE
-               SET bot_message_ts=EXCLUDED.bot_message_ts,
-                   conversation=EXCLUDED.conversation, last_event_at=now()""",
-        (installation_id, installation["project_id"], channel, participation_ts,
-         bot_message_ts, json.dumps(turns)),
-    )
-    exec_("""UPDATE bot_installations SET config=config || %s, updated_at=now() WHERE id=%s""",
-          (json.dumps({"last_event_at": _now_iso(), "last_error": ""}), installation_id))
+    bot_store.save_thread(installation_id, installation["project_id"], channel,
+                          participation_ts, bot_message_ts, turns)
+    bot_store.touch_installation(installation_id, {"last_event_at": _now_iso(), "last_error": ""})
     # Event-driven ingestion is a repair/latency optimization, never a gate on
     # answering the user. Once a real Slack thread exists, refresh it after the
     # response has been posted and let scheduled polling repair any API error.
@@ -482,10 +432,7 @@ async def slack_webhook(request: Request):
         return {"challenge": payload.get("challenge", "")}
 
     team_id = str(payload.get("team_id") or (payload.get("team") or {}).get("id") or "")
-    installation = q1("""SELECT b.*, p.slug AS project_slug, p.name AS project_name
-                           FROM bot_installations b JOIN projects p ON p.id = b.project_id
-                          WHERE b.provider = 'slack' AND b.external_team_id = %s
-                            AND b.status = 'connected' AND p.status = 'active'""", (team_id,))
+    installation = bot_store.installation_by_team(team_id)
     if not installation:
         return Response(status_code=401, content="unknown Slack team")
     cfg = installation.get("config") or {}
@@ -507,11 +454,8 @@ async def slack_webhook(request: Request):
         is_dm = etype == "message" and event.get("channel_type") == "im"
         is_thread_reply = bool(
             etype == "message" and event.get("thread_ts") and
-            q1("""SELECT 1 FROM slack_bot_threads
-                   WHERE installation_id=%s AND project_id=%s
-                     AND channel_id=%s AND thread_ts=%s""",
-               (installation["id"], installation["project_id"], event.get("channel"),
-                event.get("thread_ts")))
+            bot_store.thread_exists(installation["id"], installation["project_id"],
+                                    event.get("channel"), event.get("thread_ts"))
         )
         # Skip our own echoes and edits/joins (message_changed etc.).
         if (is_mention or is_dm or is_thread_reply) and not event.get("bot_id") and not event.get("subtype"):
@@ -544,22 +488,8 @@ async def slack_webhook(request: Request):
 @router.get("/bots/status")
 def bots_status(current: access.AccessContext = Depends(auth.require_project)) -> dict:
     project_id = current.project_id
-    slack_row = q1("""SELECT config FROM bot_installations
-                       WHERE project_id = %s AND provider = 'slack' AND status = 'connected'
-                       ORDER BY id LIMIT 1""", (project_id,))
-    gh_row = q1("""SELECT config FROM bot_installations
-                    WHERE project_id = %s AND provider = 'github' AND status = 'connected'
-                    ORDER BY id LIMIT 1""", (project_id,))
-    slack = (slack_row or {}).get("config") or {}
-    gh = (gh_row or {}).get("config") or {}
+    slack, gh, repos = bot_store.status(project_id)
     env_secret = (config.get("github", "webhook_secret") or "").strip()
-    repos = q(
-        "SELECT id, config->>'repo' AS repo FROM sources "
-        """WHERE project_id = %s AND kind = 'connector'
-             AND split_part(provider, ':', 1) = 'github'
-             AND config->>'repo' IS NOT NULL ORDER BY id""",
-        (project_id,),
-    )
     return {
         "slack": {
             "configured": bool(slack.get("bot_token") and slack.get("signing_secret")),
@@ -612,34 +542,13 @@ def slack_setup(
         "last_error": "",
     }
     try:
-        with auth._conn() as conn:
-            current = conn.execute(
-                """SELECT id, external_team_id FROM bot_installations
-                    WHERE project_id = %s AND provider = 'slack'
-                    ORDER BY id LIMIT 1 FOR UPDATE""", (project_id,)).fetchone()
-            owner = conn.execute(
-                """SELECT id, project_id FROM bot_installations
-                    WHERE provider = 'slack' AND external_team_id = %s
-                      AND external_installation_id = '' FOR UPDATE""", (team_id,)).fetchone()
-            if owner and owner["project_id"] != project_id:
-                raise HTTPException(409, "That Slack workspace is already connected to another project.")
-            if current:
-                row = conn.execute(
-                    """UPDATE bot_installations
-                          SET external_team_id = %s, external_installation_id = '',
-                              config = config || %s, status = 'connected', updated_at = now()
-                        WHERE id = %s AND project_id = %s RETURNING id""",
-                    (team_id, json.dumps(config_patch), current["id"], project_id)).fetchone()
-            else:
-                row = conn.execute(
-                    """INSERT INTO bot_installations
-                         (project_id, provider, external_team_id, external_installation_id, config, status)
-                       VALUES (%s, 'slack', %s, '', %s, 'connected') RETURNING id""",
-                    (project_id, team_id, json.dumps(config_patch))).fetchone()
+        installation_id = bot_store.configure_slack(project_id, team_id, config_patch)
+    except ValueError as error:
+        raise HTTPException(409, str(error)) from None
     except psycopg.errors.UniqueViolation:
         raise HTTPException(409, "That Slack workspace was connected concurrently; retry setup.") from None
     return {"ok": True, "team": team_name, "teamId": team_id,
-            "botUser": bot_user, "installationId": row["id"]}
+            "botUser": bot_user, "installationId": installation_id}
 
 
 # ————————————————— POST /bots/slack/test —————————————————
@@ -650,9 +559,7 @@ def slack_test(
     current: access.AccessContext = Depends(auth.require_capability("destination.manage")),
 ) -> dict:
     project_id = current.project_id
-    row = q1("""SELECT id, config FROM bot_installations
-                 WHERE project_id = %s AND provider = 'slack' AND status = 'connected'
-                 ORDER BY id LIMIT 1""", (project_id,))
+    row = bot_store.project_slack(project_id)
     cfg = (row or {}).get("config") or {}
     token = (cfg.get("bot_token") or "").strip()
     if not token:
@@ -660,8 +567,5 @@ def slack_test(
     out = slack_call("auth.test", token)
     if not out.get("ok"):
         return {"ok": False, "error": out.get("error", "unknown error")}
-    exec_("""UPDATE bot_installations SET config = config || %s, updated_at = now()
-             WHERE id = %s AND project_id = %s""",
-          (json.dumps({"team_name": out.get("team", ""), "connected_at": _now_iso()}),
-           row["id"], project_id))
+    bot_store.touch_installation(row["id"], {"team_name": out.get("team", ""), "connected_at": _now_iso()})
     return {"ok": True, "team": out.get("team", ""), "botUser": out.get("user", "")}
