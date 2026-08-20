@@ -2,7 +2,7 @@
 
 from mari_server.persistence.postgres import connection as db
 from mari_server.identity import context as access
-from mari_components.retrieval import like_pattern
+from mari_server.persistence.postgres.search import like_pattern
 
 
 def live_destination(project_slug: str, destination_slug: str):

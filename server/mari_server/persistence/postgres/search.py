@@ -3,6 +3,27 @@
 from __future__ import annotations
 
 from mari_server.persistence.postgres import connection as db
+import re
+
+
+_LIKE_ESCAPE = str.maketrans({"\\": "\\\\", "%": "\\%", "_": "\\_"})
+_STOP_WORDS = frozenset({
+    "and", "are", "can", "does", "for", "from", "how", "into", "our",
+    "the", "their", "this", "was", "what", "when", "where", "which", "who",
+    "why", "with", "you", "your",
+})
+
+
+def like_pattern(query: str) -> str:
+    return f"%{query.translate(_LIKE_ESCAPE)}%"
+
+
+def keyword_patterns(query: str) -> list[str]:
+    words = [
+        word for word in re.findall(r"[a-z0-9][a-z0-9_-]*", query.lower())
+        if len(word) > 2 and word not in _STOP_WORDS
+    ]
+    return [like_pattern(word) for word in dict.fromkeys(words)] or [like_pattern(query.strip())]
 
 
 def document_count(project_id: int, patterns: list[str] | None = None) -> int:

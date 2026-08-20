@@ -16,7 +16,8 @@ from mari_server.providers import vectors as retrieval
 from mari_server.persistence.postgres.database import jload
 from mari_server.persistence.postgres import search as search_store
 from mari_components.acl import document_visible
-from mari_components.retrieval import keyword_patterns, keyword_score, like_pattern
+from mari_components.retrieval import keyword_score
+from mari_server.persistence.postgres.search import keyword_patterns, like_pattern
 
 # ————————————————— hybrid search ranking constants —————————————————
 
