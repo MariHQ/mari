@@ -3,11 +3,11 @@ from __future__ import annotations
 import unittest
 from types import SimpleNamespace
 
-import agent_evals
-from mari_server.api.agent import serialize_sse
-from mari_server.application.agent import AgentPorts, stream_agent_turn
-from mari_server.domain.navigation import valid_navigation
-from mari_server.infrastructure.agent_tools import ToolDependencies, build_tool_bindings
+from mari_server.conversations import evals as agent_evals
+from mari_server.conversations.routes import serialize_sse
+from mari_components.agents.runtime import AgentPorts, stream_agent_turn
+from mari_server.product.navigation import valid_navigation
+from mari_server.conversations.tools import ToolDependencies, build_tool_bindings
 
 
 def dependencies(*, query=lambda _sql, _args: (), query_one=lambda _sql, _args: None,

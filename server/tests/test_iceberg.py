@@ -3,8 +3,8 @@ from __future__ import annotations
 import tempfile
 import unittest
 
-from mari_server.domain.documents import DocumentVersion
-from mari_server.infrastructure.document_store import IcebergDocumentStore
+from mari_components.documents import DocumentVersion
+from mari_server.persistence.iceberg.documents import IcebergDocumentStore
 from tests.iceberg_fixture import temporary_warehouse
 
 

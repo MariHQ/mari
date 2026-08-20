@@ -4,7 +4,7 @@ import os
 import unittest
 from unittest.mock import patch
 
-import llm
+from mari_server.providers import models as llm
 
 
 class OllamaContractTests(unittest.TestCase):

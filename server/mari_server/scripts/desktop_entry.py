@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 
 import uvicorn
-from mari_server.api.app import app
+from mari_server.app import app
 
 
 if __name__ == "__main__":

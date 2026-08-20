@@ -7,8 +7,8 @@ import unittest
 import urllib.error
 from unittest.mock import Mock, patch
 
-import llm
-import observability
+from mari_server.providers import models as llm
+from mari_server.operations import telemetry as observability
 
 
 class Response:

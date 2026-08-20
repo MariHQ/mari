@@ -2,7 +2,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from schema_migrations import Migration, discover, pending
+from mari_server.persistence.postgres.schema import Migration, discover, pending
 
 
 class SchemaMigrationTests(unittest.TestCase):

@@ -9,7 +9,7 @@ from unittest.mock import patch
 from fastapi import HTTPException
 from starlette.requests import Request
 
-import access
+from mari_server.identity import access
 
 
 PROJECTS = {
@@ -137,7 +137,7 @@ class ProjectAccessTests(unittest.TestCase):
         context = access.AccessContext(
             1, 7, "acme", "Acme", "admin", access.capabilities_for_role("admin"))
         request = Request({"type": "http", "method": "POST", "path": "/chat", "headers": []})
-        with patch("auth.require_user", return_value={"id": 1}), \
+        with patch("mari_server.identity.routes.require_user", return_value={"id": 1}), \
              patch.object(access, "resolve_access", return_value=(context, [])):
             self.assertIs(access.require_project(request), context)
         self.assertIs(access.current_access(), context)

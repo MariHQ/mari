@@ -4,9 +4,9 @@ import hashlib
 import unittest
 from unittest.mock import patch
 
-import access
-import app
-import mutations_admin
+from mari_server.identity import access
+from mari_server import app
+from mari_server.identity import graphql as mutations_admin
 
 
 def context() -> access.AccessContext:

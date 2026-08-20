@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 import numpy as np
 
-import llm
+from mari_server.providers import models as llm
 
 
 class _Model:

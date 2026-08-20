@@ -4,8 +4,8 @@ import json
 import unittest
 from unittest.mock import patch
 
-import trajectory
-import access
+from mari_server.persistence.postgres import trajectories as trajectory
+from mari_server.identity import access
 
 
 class TrajectoryHarvestTests(unittest.TestCase):

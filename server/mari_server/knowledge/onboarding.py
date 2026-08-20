@@ -1,0 +1,225 @@
+"""Mari — onboarding endpoints (file upload ingestion + glossary harvest).
+
+POST /onboard/upload            multipart .md/.mdx/.markdown/.txt files → the same
+                                document→chunk→hash→embed pipeline GitHub sync uses
+                                (helpers imported from ingest.py; nothing faked).
+POST /onboard/glossary-harvest  LLM (ollama JSON mode) proposes glossary candidates
+                                grounded in the most-connected page documents;
+                                malformed or unavailable model output returns no
+                                candidates. Persists NOTHING — the UI reviews candidates
+                                and calls the existing upsertGlossary mutation.
+"""
+
+from __future__ import annotations
+
+import concurrent.futures as cf
+import time
+
+from fastapi import APIRouter, File, HTTPException, UploadFile
+from pydantic import BaseModel
+
+from mari_server.providers import models as llm
+from mari_components import KnowledgeDocument
+from mari_components.knowledge import harvest_glossary as component_harvest_glossary
+# Reuse the real GitHub ingestion pipeline pieces (chunk + content-hash + embed +
+# mean-pooled doc embedding). ingest._upsert_document is github-specific
+# (hardcodes source='github'), so the document upsert lives here instead.
+from mari_server.persistence.postgres.document_index import chunk_settings, sync_chunks, title_of
+
+from mari_server.persistence.postgres import onboarding as onboarding_store
+
+router = APIRouter(prefix="/onboard")
+
+ALLOWED_EXT = {".md", ".mdx", ".markdown", ".txt"}
+MAX_FILES = 20
+MAX_BYTES = 1_000_000
+ACTOR = "Upload"
+
+
+def _conn():
+    return onboarding_store.connection()
+
+
+# ————————————————— 1. file upload ingestion —————————————————
+
+
+def _upload_source(conn) -> int:
+    """Create or reuse the single 'upload' source (sources.provider is UNIQUE)."""
+    return onboarding_store.upload_source(conn)
+
+
+def _upsert_upload_document(conn, source_id: int, filename: str, text: str) -> int:
+    """Same shape as ingest._upsert_document, with source='upload'."""
+    return onboarding_store.upsert_upload_document(conn, source_id, filename, text)
+
+
+@router.post("/upload")
+async def upload(files: list[UploadFile] = File(...)):
+    if len(files) > MAX_FILES:
+        raise HTTPException(400, f"at most {MAX_FILES} files per upload")
+    max_tokens, overlap = chunk_settings()
+    results: list[dict] = []
+    # A document is keyed on its flattened filename (the endpoint never sees
+    # the client's folder structure), so two files from different folders that
+    # happen to share a name — e.g. guides/rules.md and reference/rules.md —
+    # are indistinguishable to it. Across separate uploads that is the desired
+    # "resync the same file" behaviour; within ONE batch it can only mean two
+    # different files collided, and upserting both in turn would silently
+    # discard the first one's content with no sign anything was lost.
+    seen_names: set[str] = set()
+    with _conn() as conn:
+        source_id = _upload_source(conn)
+        for f in files:
+            name = (f.filename or "").strip().replace("\\", "/").rsplit("/", 1)[-1]
+            ext = ("." + name.rsplit(".", 1)[-1].lower()) if "." in name else ""
+            if not name or ext not in ALLOWED_EXT:
+                results.append({"name": name or "?", "docId": None, "chunks": 0,
+                                "embedded": 0, "error": f"unsupported type (allowed: {', '.join(sorted(ALLOWED_EXT))})"})
+                continue
+            if name in seen_names:
+                results.append({"name": name, "docId": None, "chunks": 0, "embedded": 0,
+                                "error": "duplicate filename in this upload (files are matched by name only, "
+                                         "with no folder path) — rename one and upload it separately"})
+                continue
+            seen_names.add(name)
+            # Bound memory before decoding. UploadFile may be backed by disk,
+            # but an unrestricted read still materializes attacker-controlled
+            # input in the API process.
+            raw = await f.read(MAX_BYTES + 1)
+            if len(raw) > MAX_BYTES:
+                results.append({"name": name, "docId": None, "chunks": 0,
+                                "embedded": 0, "error": "file exceeds 1MB"})
+                continue
+            text = raw.decode("utf-8", errors="replace")
+            if not text.strip():
+                results.append({"name": name, "docId": None, "chunks": 0,
+                                "embedded": 0, "error": "empty file"})
+                continue
+            doc_id = _upsert_upload_document(conn, source_id, name, text)
+            # chunk + per-chunk content hash + embed only changed (ingest pipeline):
+            # re-uploading unchanged content embeds nothing.
+            n, e = sync_chunks(conn, doc_id, title_of(text, name), text, max_tokens, overlap)
+            results.append({"name": name, "docId": doc_id, "chunks": n, "embedded": e})
+
+        onboarding_store.finish_upload(conn, source_id, len(files), results)
+    return {"ok": True, "sourceId": source_id, "files": results}
+
+
+# ————————————————— 2. LLM glossary harvest —————————————————
+
+
+class HarvestIn(BaseModel):
+    sourceId: int | None = None
+    limit: int = 15
+
+
+HARVEST_SYSTEM = (
+    "You extract glossary candidates from a team's documentation. A good glossary "
+    "term is a domain-specific concept, product name, or piece of jargon a new "
+    "teammate would need defined — not a generic word. Definitions must be one "
+    "sentence and grounded ONLY in what the provided text says."
+)
+
+_BATCH = 4          # docs per LLM call
+_EXCERPT = 1500     # chars of body per doc
+
+# FLOW-8: `limit` defaults to 15 and accepts up to 50, so at 4 documents per
+# call this made up to 13 model calls — sequentially, at the 120-second default
+# timeout, inside one HTTP request. Twenty-six minutes, on a POST the browser
+# gave up on long before.
+#
+# The calls are independent (each reads its own batch of documents), so they run
+# concurrently on a small bounded pool, each with its own shorter timeout, under
+# a wall-clock deadline for the whole endpoint. The response says which batches
+# were read, so a harvest that hit the deadline is a harvest someone can re-run
+# knowing that — not a shorter list of candidates that looks like a thin corpus.
+_HARVEST_WORKERS = 4
+_HARVEST_CALL_TIMEOUT = 45.0
+_HARVEST_DEADLINE = 90.0
+
+
+def _harvest_docs(source_id: int | None, limit: int) -> list[dict]:
+    """Most-connected, then most-recent, page documents (optionally one source).
+
+    The degree used to be a correlated `count(*)` over `edges` evaluated once
+    per document, and because the ORDER BY sorts on it, the LIMIT could not push
+    down: every page document paid a full edge scan before the first row was
+    discarded (SQL-4). `degree` aggregates the edge table once, in a single pass
+    over both endpoints, and joins in. A document nothing links to is absent
+    from it and coalesces to 0 — the same answer count(*) gave it."""
+    return onboarding_store.harvest_documents(source_id, limit)
+
+
+def _existing_terms() -> set[str]:
+    return onboarding_store.existing_terms()
+
+
+def _llm_batch(docs: list[dict]) -> list[dict]:
+    """Run the reusable strict glossary recipe over one bounded batch."""
+    documents = [KnowledgeDocument(
+        str(doc["id"]), doc["title"], doc["body"][:_EXCERPT],
+    ) for doc in docs]
+    by_id = {str(doc["id"]): doc for doc in docs}
+    candidates = component_harvest_glossary(
+        documents,
+        generate_json=lambda prompt, _version: llm.generate_json(
+            prompt, HARVEST_SYSTEM, _HARVEST_CALL_TIMEOUT),
+        maximum_documents=len(documents),
+        maximum_characters=len(documents) * _EXCERPT,
+    )
+    return [{
+        "term": candidate.term,
+        "definition": candidate.definition,
+        "evidence": by_id[candidate.evidence[0].document_id]["title"],
+    } for candidate in candidates]
+
+
+@router.post("/glossary-harvest")
+def glossary_harvest(body: HarvestIn):
+    limit = max(1, min(body.limit, 50))
+    docs = _harvest_docs(body.sourceId, limit)
+    if not docs:
+        return {"candidates": [], "llm": False}
+    existing = _existing_terms()
+
+    candidates: list[dict] = []
+    seen: set[str] = set()
+    llm_ok = False
+
+    def keep(c: dict) -> None:
+        key = c["term"].lower()
+        if key in existing or key in seen:  # dedupe: glossary rows + within-batch
+            return
+        seen.add(key)
+        candidates.append(c)
+
+    batches = [docs[i:i + _BATCH] for i in range(0, len(docs), _BATCH)]
+    documents_read = 0
+    deadline = time.monotonic() + _HARVEST_DEADLINE
+    with cf.ThreadPoolExecutor(max_workers=min(_HARVEST_WORKERS, len(batches)),
+                               thread_name_prefix="mari-harvest") as pool:
+        futures = {pool.submit(_llm_batch, batch): batch for batch in batches}
+        for future in cf.as_completed(futures):
+            batch = futures[future]
+            documents_read += len(batch)
+            try:
+                raw = future.result()
+            except Exception:  # noqa: BLE001 — one bad batch is not a failed harvest
+                raw = None
+            llm_ok = True
+            for cand in raw[:12]:
+                keep(cand)
+            if time.monotonic() >= deadline:
+                for pending in futures:
+                    if not pending.done():
+                        pending.cancel()
+                break
+
+    if not llm_ok:
+        return {"candidates": candidates[:25], "llm": False,
+                "documentsRead": 0, "documentsTotal": len(docs)}
+    # documentsRead vs documentsTotal is how the caller can tell a corpus with
+    # few terms in it from a harvest the deadline cut short.
+    return {"candidates": candidates[:25], "llm": True,
+            "documentsRead": documents_read,
+            "documentsTotal": len(docs)}

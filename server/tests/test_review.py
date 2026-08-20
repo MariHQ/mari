@@ -4,10 +4,10 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-import queries
-from mari_server.application import review
-from mari_server.domain.review import ReviewRecord
-from mari_server.infrastructure import review_repository
+from mari_server.product import queries
+from mari_components import review
+from mari_components.review_types import ReviewRecord
+from mari_server.persistence.postgres import review as review_repository
 
 
 def item(**overrides) -> ReviewRecord:

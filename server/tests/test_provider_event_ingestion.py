@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 
 from fastapi import HTTPException, Request
 
-import provider_events
+from mari_server.sources import provider_events
 from mari_components import KnowledgeDocument
 
 

@@ -17,9 +17,9 @@ class IntegrationStackTests(unittest.TestCase):
         import llm
         import retrieval
         import schema_migrations
-        from mari_server.domain.documents import DocumentVersion
-        from mari_server.infrastructure.document_store import IcebergDocumentStore
-        from mari_server.infrastructure.iceberg_warehouse import warehouse
+        from mari_components.documents import DocumentVersion
+        from mari_server.persistence.iceberg.documents import IcebergDocumentStore
+        from mari_server.persistence.iceberg.warehouse import warehouse
         from db import q1
 
         context = access.AccessContext(

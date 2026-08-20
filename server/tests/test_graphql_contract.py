@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import export_graphql_schema
+from mari_server.scripts import export_graphql_schema
 
 
 class GraphQLContractTests(unittest.TestCase):

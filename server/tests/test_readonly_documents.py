@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import unittest
 
-from app import schema
-from mari_server.infrastructure.agent_tools import ToolDependencies, build_tool_bindings
+from mari_server.app import schema
+from mari_server.conversations.tools import ToolDependencies, build_tool_bindings
 
 
 class ReadOnlyDocumentTests(unittest.TestCase):

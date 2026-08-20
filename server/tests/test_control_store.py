@@ -4,7 +4,7 @@ import datetime as dt
 import unittest
 from unittest.mock import MagicMock, patch
 
-import control_store
+from mari_server.persistence.postgres import control_store
 
 
 class ControlStoreTests(unittest.TestCase):

@@ -3,8 +3,8 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-from mari_server.infrastructure import connector_runtime as connect_sync
-import connectors_api
+from mari_server.persistence.postgres import connector_sync as connect_sync
+from mari_server.sources import routes as connectors_api
 from mari_components.connectors import CONNECTOR_CATALOG
 
 

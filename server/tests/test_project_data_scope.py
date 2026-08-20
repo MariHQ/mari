@@ -12,13 +12,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import access
-import bots
-import db
-import mcp
-import queries
-import retrieval
-import mutations_knowledge
+from mari_server.identity import access
+from mari_server.destinations import slack as bots
+from mari_server.persistence.postgres import database as db
+from mari_server.destinations import mcp
+from mari_server.product import queries
+from mari_server.providers import vectors as retrieval
+from mari_server.knowledge import graphql as mutations_knowledge
 
 
 def context(project_id: int, slug: str) -> access.AccessContext:

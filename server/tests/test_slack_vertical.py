@@ -12,9 +12,9 @@ from unittest.mock import patch
 
 from fastapi import HTTPException
 
-import access
-import bots
-import queries
+from mari_server.identity import access
+from mari_server.destinations import slack as bots
+from mari_server.product import queries
 
 
 class Result:

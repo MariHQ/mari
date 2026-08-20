@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import Mock, patch
 
-import flowengine
+from mari_server.automations import runtime as flowengine
 
 
 class WorkflowStepTests(unittest.TestCase):
@@ -42,7 +42,7 @@ class WorkflowStepTests(unittest.TestCase):
         self.assertGreaterEqual(flowengine.FLOW_WORKERS, 1)
 
     def test_scan_steps_use_document_ids_selected_by_fetch_step(self) -> None:
-        with patch("mutations_knowledge.scan_facts_for", return_value=(3, 2, "")) as scan:
+        with patch("mari_server.knowledge.graphql.scan_facts_for", return_value=(3, 2, "")) as scan:
             status, _, updates = flowengine._step_scan_facts({}, {"doc_ids": [7, 8]})
         self.assertEqual(status, "passed")
         self.assertEqual(updates["facts"], 3)

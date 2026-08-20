@@ -9,10 +9,10 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-import bots
-import github
-import access
-import mutations_admin
+from mari_server.destinations import slack as bots
+from mari_server.providers import github
+from mari_server.identity import access
+from mari_server.identity import graphql as mutations_admin
 
 
 class GitHubPollingTests(unittest.TestCase):

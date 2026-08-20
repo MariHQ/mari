@@ -5,7 +5,7 @@ import unittest
 
 import numpy as np
 
-from retrieval import DerivedVectorIndex
+from mari_server.providers.vectors import DerivedVectorIndex
 from mari_components.retrieval import FDEConfig
 
 

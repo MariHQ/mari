@@ -6,8 +6,8 @@ from unittest.mock import patch
 
 from fastapi import HTTPException
 
-from mari_server.api import chat as chat_api, graphql_destinations
-from mari_server.application import knowledge_chat
+from mari_server.destinations import chat as chat_api, graphql_destinations
+from mari_components.destinations import knowledge_chat
 
 
 def info(project_id: int = 7):
@@ -23,7 +23,7 @@ class KnowledgeChatDestinationTests(unittest.TestCase):
             audit=lambda *_args: None,
         )
         with patch.object(graphql_destinations, "_require_admin"), \
-             patch.object(graphql_destinations.knowledge_chat_repository, "ports", return_value=ports):
+             patch.object(graphql_destinations.knowledge_chats as knowledge_chat_repository, "ports", return_value=ports):
             mut = graphql_destinations.DestinationMutations()
             self.assertEqual(
                 mut.create_knowledge_chat_destination(
@@ -44,7 +44,7 @@ class KnowledgeChatDestinationTests(unittest.TestCase):
             audit=lambda *_args: None,
         )
         with patch.object(graphql_destinations, "_require_admin"), \
-             patch.object(graphql_destinations.knowledge_chat_repository, "ports", return_value=ports):
+             patch.object(graphql_destinations.knowledge_chats as knowledge_chat_repository, "ports", return_value=ports):
             mut = graphql_destinations.DestinationMutations()
             self.assertFalse(mut.update_knowledge_chat_destination(info(7), 99, "Name", "Title", "Welcome"))
             with self.assertRaisesRegex(ValueError, "not found"):
@@ -59,7 +59,7 @@ class KnowledgeChatDestinationTests(unittest.TestCase):
             audit=lambda verb, target: audits.append((verb, target)),
         )
         with patch.object(graphql_destinations, "_require_admin"), \
-             patch.object(graphql_destinations.knowledge_chat_repository, "ports", return_value=ports):
+             patch.object(graphql_destinations.knowledge_chats as knowledge_chat_repository, "ports", return_value=ports):
             result = graphql_destinations.DestinationMutations().deploy_knowledge_chat_destination(info(), 12)
         self.assertEqual(result, "/knowledge-chat/acme/company-kb")
         self.assertEqual(audits, [("deployed knowledge chat", "Company KB")])

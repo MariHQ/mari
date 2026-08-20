@@ -6,10 +6,10 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-import mutations_knowledge
-from mari_server.api import graphql_destinations
-from mari_server.infrastructure import mcp_repository
-import mcp
+from mari_server.knowledge import graphql as mutations_knowledge
+from mari_server.destinations import graphql as graphql_destinations
+from mari_server.persistence.postgres import mcp as mcp_repository
+from mari_server.destinations import mcp
 
 
 def tearDownModule() -> None:

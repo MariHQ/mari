@@ -8,8 +8,8 @@ from unittest.mock import Mock, patch
 
 from fastapi import HTTPException
 
-import access
-import gdrive_events
+from mari_server.identity import access
+from mari_server.sources import gdrive_events
 from mari_components import PollPage
 from mari_components.connectors import GoogleDriveWatch
 

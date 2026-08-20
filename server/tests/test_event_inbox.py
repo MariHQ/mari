@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from event_inbox import EventDispatcher
+from mari_server.persistence.postgres.event_inbox import EventDispatcher
 
 
 class MemoryInbox:

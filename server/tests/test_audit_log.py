@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from mari_server.domain.audit import AuditEvent, chained_row, verify_chain
+from mari_components.audit import AuditEvent, chained_row, verify_chain
 
 
 class AuditTrailTests(unittest.TestCase):

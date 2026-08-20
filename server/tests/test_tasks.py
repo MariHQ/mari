@@ -4,9 +4,9 @@ import datetime as dt
 import unittest
 from unittest.mock import patch
 
-import mutations_knowledge
-import queries
-import access
+from mari_server.knowledge import graphql as mutations_knowledge
+from mari_server.product import queries
+from mari_server.identity import access
 
 
 PROJECT = access.AccessContext(1, 7, "acme", "Acme", "admin", access.CAPABILITIES)

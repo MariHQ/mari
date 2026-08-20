@@ -16,10 +16,10 @@ from unittest.mock import patch
 
 import numpy as np
 
-import access
-import bots
-import trajectory
-from retrieval import DerivedVectorIndex
+from mari_server.identity import access
+from mari_server.destinations import slack as bots
+from mari_server.persistence.postgres import trajectories as trajectory
+from mari_server.providers.vectors import DerivedVectorIndex
 from mari_components.retrieval import FDEConfig
 
 

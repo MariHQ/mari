@@ -6,7 +6,7 @@ import logging
 import unittest
 from io import StringIO
 
-import observability
+from mari_server.operations import telemetry as observability
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 

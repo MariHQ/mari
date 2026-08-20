@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import MagicMock, patch
 
-import links
+from mari_server.persistence.postgres import lineage as links
 
 
 class LinkProjectScopeTests(unittest.TestCase):

@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import unittest
 
-from mari_server.application.agent import planner_instructions
-from mari_server.infrastructure.agent_tools import (
+from mari_server.conversations.agent import planner_instructions
+from mari_server.conversations.tools import (
     UNTRUSTED_CLOSE,
     ToolDependencies,
     build_tool_bindings,

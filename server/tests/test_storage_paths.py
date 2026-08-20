@@ -3,9 +3,9 @@ from __future__ import annotations
 import pathlib
 import unittest
 
-import config
-import retrieval
-from mari_server.infrastructure import iceberg_warehouse
+from mari_server import settings as config
+from mari_server.providers import vectors as retrieval
+from mari_server.persistence.iceberg import warehouse as iceberg_warehouse
 
 
 class StoragePathTests(unittest.TestCase):

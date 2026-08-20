@@ -39,7 +39,7 @@ if ! gosu postgres psql -h 127.0.0.1 -U mari -d postgres -tAc \
   gosu postgres createdb -h 127.0.0.1 -U mari mari_cloud
 fi
 
-gosu mari python3 -m mari_server.repositories.schema
+gosu mari python3 -m mari_server.persistence.postgres.schema
 
 backup_loop() {
   while :; do
@@ -62,6 +62,6 @@ backup_loop() {
 backup_loop &
 backup_pid=$!
 
-gosu mari uvicorn mari_server.api.app:app --host 0.0.0.0 --port 8080 &
+gosu mari uvicorn mari_server.app:app --host 0.0.0.0 --port 8080 &
 api_pid=$!
 wait "$api_pid"

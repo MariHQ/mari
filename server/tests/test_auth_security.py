@@ -8,7 +8,7 @@ from unittest.mock import patch
 from fastapi import HTTPException, Response
 from starlette.requests import Request
 
-import auth
+from mari_server.identity import routes as auth
 
 
 class Result:

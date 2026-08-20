@@ -4,7 +4,7 @@ from pathlib import Path
 
 from pyiceberg.catalog.sql import SqlCatalog
 
-from mari_server.infrastructure.iceberg_warehouse import IcebergWarehouse
+from mari_server.persistence.iceberg.warehouse import IcebergWarehouse
 
 
 def temporary_warehouse(directory: str) -> IcebergWarehouse:

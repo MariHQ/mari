@@ -3,8 +3,8 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-import access
-import bots
+from mari_server.identity import access
+from mari_server.destinations import slack as bots
 
 
 def slack_context() -> access.AccessContext:
