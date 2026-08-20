@@ -1,8 +1,10 @@
 """Serialized, checksum-verified PostgreSQL schema migrations.
 
-`init.sql` is the compatibility baseline for installs that predate a migration
-ledger.  Once recorded, its checksum is immutable; subsequent changes belong
-in `migrations/NNNN_description.sql` so deploys have an auditable history.
+`init.sql` is the idempotent compatibility baseline for installs that predate
+a migration ledger. Existing installations may have recorded an older
+baseline while the application was still consolidating its schema. The runner
+reapplies that baseline transactionally before accepting its new checksum;
+numbered migrations remain immutable.
 """
 
 from __future__ import annotations
@@ -77,6 +79,19 @@ def migrate(db_url: str | None = None) -> list[str]:
         """)
         rows = conn.execute("SELECT version, checksum FROM schema_migrations").fetchall()
         applied = {str(row["version"]): str(row["checksum"]) for row in rows}
+        baseline = migrations[0]
+        recorded_baseline = applied.get(baseline.version)
+        if recorded_baseline is not None and recorded_baseline != baseline.checksum:
+            started = time.monotonic()
+            conn.execute(baseline.sql)
+            elapsed_ms = max(0, round((time.monotonic() - started) * 1000))
+            conn.execute(
+                "UPDATE schema_migrations SET checksum = %s, applied_at = now(), execution_ms = %s "
+                "WHERE version = %s",
+                (baseline.checksum, elapsed_ms, baseline.version),
+            )
+            applied[baseline.version] = baseline.checksum
+            applied_now.append(baseline.version)
         for migration in pending(migrations, applied):
             started = time.monotonic()
             conn.execute(migration.sql)
