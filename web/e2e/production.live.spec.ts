@@ -171,6 +171,29 @@ test("LIVE ingested source is searchable, inspectable, and represented in lineag
   await expect(main).not.toContainText(/Service unavailable|temporarily unreachable/i);
 });
 
+test("LIVE Knowledge submits a natural-language query and renders real matches", async ({ page }) => {
+  await signIn(page);
+  await page.goto("/knowledge");
+  const search = page.getByPlaceholder("Search knowledge…");
+  await search.fill("what is mari?");
+  await expect(page).toHaveURL(/\/knowledge\?q=what(?:\+|%20)is(?:\+|%20)mari%3F$/);
+  const main = page.getByRole("main", { name: "Main content" });
+  await expect(main).not.toContainText(/Service unavailable|temporarily unreachable|Search is temporarily unavailable/i);
+  await expect(main).toContainText(/[1-9][0-9]*\s*documents? match/, { timeout: 30_000 });
+  await expect(main.getByRole("heading", { level: 3 }).first()).toBeVisible();
+});
+
+test("LIVE global search submits a query even before suggestions finish loading", async ({ page }) => {
+  await signIn(page);
+  await page.goto("/");
+  await page.getByRole("button", { name: /Search knowledge, people, facts/ }).click();
+  const search = page.getByRole("combobox", { name: "Search" });
+  await search.fill("what is mari?");
+  await search.press("Enter");
+  await expect(page).toHaveURL(/\/knowledge\?q=what(?:\+|%20)is(?:\+|%20)mari%3F$/);
+  await expect(page.getByRole("main", { name: "Main content" })).toContainText(/[1-9][0-9]*\s*documents? match/, { timeout: 30_000 });
+});
+
 test("LIVE agent searches indexed knowledge before streaming a grounded answer", async ({ page }) => {
   test.skip(env.MARI_E2E_AGENT === "0", "Live LLM canary explicitly disabled.");
   test.setTimeout(120_000);
