@@ -77,6 +77,11 @@ class FakeSlackHandler(BaseHTTPRequestHandler):
                 {"type": "message", "user": "U1", "text": "deploy?", "ts": body["ts"]},
                 {"type": "message", "user": "U2", "text": "use the production checklist", "ts": "9.2"},
             ]}
+        elif self.path == "/api/conversations.history":
+            payload = {"ok": True, "messages": [
+                {"type": "message", "bot_id": "B1",
+                 "text": "Use the production checklist [3].", "ts": body["latest"]},
+            ]}
         else:
             payload = {"ok": False, "error": "unknown_method"}
         encoded = json.dumps(payload).encode()
@@ -311,15 +316,15 @@ class SlackSetupToAnswerTests(unittest.TestCase):
                           side_effect=lambda question, context: answered.append((question, context)) or "Production is ready [1]."):
             bots._process_slack_delivery(row)
 
-        replies = [call for call in FakeSlackHandler.calls
-                   if call["path"] == "/api/conversations.replies"]
+        history = [call for call in FakeSlackHandler.calls
+                   if call["path"] == "/api/conversations.history"]
         posts = [call for call in FakeSlackHandler.calls
                  if call["path"] == "/api/chat.postMessage"]
-        self.assertEqual(len(replies), 1)
-        self.assertEqual(replies[0]["body"]["ts"], "posted.1")
-        self.assertEqual(replies[0]["body"]["limit"], 15)
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0]["body"]["latest"], "posted.1")
+        self.assertEqual(history[0]["body"]["limit"], 15)
         self.assertEqual(answered[0][0], "and production?")
-        self.assertIn("use the production checklist", answered[0][1])
+        self.assertIn("Use the production checklist [3].", answered[0][1])
         self.assertEqual(posts[0]["body"]["thread_ts"], "posted.1")
         refresh.assert_called_once_with(7, "xoxb-valid", "C1", "posted.1")
         self.assertTrue(any(args[3] == "posted.1" for sql, args in writes

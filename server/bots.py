@@ -273,18 +273,39 @@ def _handle_slack_event(event: dict, token: str, project_access=None,
         merge_setting("slack_bot", {"last_event_at": _now_iso(), "last_error": ""})
 
 
-def _slack_thread_context(token: str, channel: str, thread_ts: str) -> str:
-    out = slack_call("conversations.replies", token, {"channel": channel, "ts": thread_ts,
-                                                       "limit": 15})
+def _slack_root_message(token: str, channel: str, thread_ts: str) -> str:
+    """Read the root message with the bot-token-compatible history API."""
+    out = slack_call("conversations.history", token, {
+        "channel": channel, "oldest": thread_ts, "latest": thread_ts,
+        "inclusive": True, "limit": 15,
+    })
     if not out.get("ok"):
-        raise RuntimeError(f"conversations.replies: {out.get('error', 'unknown error')}")
-    lines = []
-    for message in out.get("messages") or []:
-        if message.get("subtype") or not (message.get("text") or "").strip():
-            continue
-        who = message.get("user") or ("Mari" if message.get("bot_id") else "unknown")
-        lines.append(f"{who}: {message['text'].strip()}")
-    return "\n".join(lines[-100:])
+        raise RuntimeError(f"conversations.history: {out.get('error', 'unknown error')}")
+    messages = out.get("messages") or []
+    return str(messages[0].get("text") or "").strip() if messages else ""
+
+
+def _conversation(value) -> list[dict[str, str]]:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            return []
+    if not isinstance(value, list):
+        return []
+    return [turn for turn in value if isinstance(turn, dict)
+            and turn.get("role") in {"user", "assistant"} and turn.get("text")]
+
+
+def _with_turn(turns: list[dict[str, str]], role: str, text: str, ts: str) -> list[dict[str, str]]:
+    kept = [dict(turn) for turn in turns if str(turn.get("ts") or "") != ts]
+    kept.append({"role": role, "text": text.strip(), "ts": ts})
+    return kept[-40:]
+
+
+def _conversation_context(turns: list[dict[str, str]]) -> str:
+    names = {"user": "User", "assistant": "Mari"}
+    return "\n".join(f"{names[turn['role']]}: {turn['text']}" for turn in turns)
 
 
 def _refresh_slack_aggregate(project_id: int, token: str, channel: str,
@@ -352,11 +373,24 @@ def _process_slack_delivery(row: dict) -> None:
         frozenset({f"channel:{channel}"}),
     )
     question = _strip_mentions((event.get("text") or "").strip()) or "What can you help with?"
-    # A new Slack message is not a thread yet. conversations.replies rejects
-    # these root timestamps, so use the event itself until Slack supplies a
-    # thread_ts on a follow-up. This also makes a first DM independent of the
-    # history scopes that are only needed for real thread context.
-    context = _slack_thread_context(token, channel, thread_ts) if thread_ts else question
+    turns: list[dict[str, str]] = []
+    if thread_ts:
+        thread = q1(
+            """SELECT conversation FROM slack_bot_threads
+                WHERE installation_id=%s AND project_id=%s
+                  AND channel_id=%s AND thread_ts=%s""",
+            (installation_id, installation["project_id"], channel, thread_ts),
+        ) or {}
+        turns = _conversation(thread.get("conversation"))
+        # Rows created before durable conversation storage still have their
+        # visible Mari root in Slack. Bootstrap it once via conversations.history,
+        # which bot tokens may use for public channels.
+        if not turns:
+            root_text = _slack_root_message(token, channel, thread_ts)
+            if root_text:
+                turns = _with_turn(turns, "assistant", root_text, thread_ts)
+    turns = _with_turn(turns, "user", question, event_ts)
+    context = _conversation_context(turns)
     with access.use_access(project_access):
         answer = answer_question(question, context)
     _log_usage("chat_answer", "slack")
@@ -370,15 +404,18 @@ def _process_slack_delivery(row: dict) -> None:
     out = slack_call("chat.postMessage", token, post)
     if not out.get("ok"):
         raise RuntimeError(f"chat.postMessage: {out.get('error', 'unknown error')}")
-    participation_ts = thread_ts or str(out.get("ts") or "")
+    bot_message_ts = str(out.get("ts") or "")
+    participation_ts = thread_ts or bot_message_ts
+    turns = _with_turn(turns, "assistant", answer, bot_message_ts)
     exec_(
         """INSERT INTO slack_bot_threads
-               (installation_id, project_id, channel_id, thread_ts, bot_message_ts)
-             VALUES (%s, %s, %s, %s, %s)
+               (installation_id, project_id, channel_id, thread_ts, bot_message_ts, conversation)
+             VALUES (%s, %s, %s, %s, %s, %s)
              ON CONFLICT (installation_id, channel_id, thread_ts) DO UPDATE
-               SET bot_message_ts=EXCLUDED.bot_message_ts, last_event_at=now()""",
+               SET bot_message_ts=EXCLUDED.bot_message_ts,
+                   conversation=EXCLUDED.conversation, last_event_at=now()""",
         (installation_id, installation["project_id"], channel, participation_ts,
-         str(out.get("ts") or "")),
+         bot_message_ts, json.dumps(turns)),
     )
     exec_("""UPDATE bot_installations SET config=config || %s, updated_at=now() WHERE id=%s""",
           (json.dumps({"last_event_at": _now_iso(), "last_error": ""}), installation_id))
