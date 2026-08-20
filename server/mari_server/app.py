@@ -15,23 +15,17 @@ root, merged below via inheritance). This file wires the app together.
 
 from __future__ import annotations
 
-import logging
 import os
 import pathlib
-import time
 import typing as t
-from contextlib import asynccontextmanager
 
-import psycopg
 import strawberry
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from strawberry.fastapi import GraphQLRouter
 
 from mari_server import settings as config
-from mari_server.sources import sync as ingest
-from mari_server.providers import models as llm
 from mari_server.conversations import routes as agent_api
 from mari_server.destinations import chat as chat_api
 from mari_server.destinations.graphql import DestinationMutations
@@ -42,17 +36,17 @@ from mari_server.destinations import slack as bots
 from mari_server.destinations import mcp
 from mari_server.sources import routes as connectors_api
 from mari_server.knowledge import onboarding as onboard
-from mari_server.persistence.postgres import repository_audit as repoaudit
 from mari_server.sources import provider_events
 from mari_server.operations import telemetry as observability
 from mari_server.identity import enterprise
 from mari_server.sources import gdrive_events
 
-from mari_server.persistence.postgres.database import close_pool, ensure_schema, open_pool
+from mari_server.bootstrap import lifespan
+from mari_server.operations import routes as operation_routes
 from mari_server.product.queries import Query
 from mari_server.knowledge.graphql import MutKnowledge
 from mari_server.identity.graphql import MutAdmin
-from mari_server.search.service import hybrid_search
+from mari_server.search import routes as search_routes
 
 
 @strawberry.type
@@ -74,33 +68,6 @@ def graphql_context(request: Request) -> dict[str, t.Any]:
     return {"user": user, "access": access, "request": request}
 
 
-@asynccontextmanager
-async def lifespan(application: FastAPI):
-    """Own schema initialization and background services for this ASGI process."""
-    observability.configure_logging(os.environ.get("MARI_LOG_LEVEL", "INFO"))
-    application.state.ready = False
-    application.state.started_at = time.time()
-    try:
-        open_pool()
-        ensure_schema()
-        auth_module.ensure_schema()
-        repoaudit.ensure_schema()
-        auth_module.first_run_check()
-        ingest.start_poller()
-        bots.start_event_dispatcher()
-        gdrive_events.start_watch_renewal()
-        application.state.ready = True
-        logging.getLogger("mari.lifecycle").info("application ready")
-        yield
-    finally:
-        application.state.ready = False
-        gdrive_events.stop_watch_renewal()
-        bots.stop_event_dispatcher()
-        ingest.stop_poller()
-        close_pool()
-        logging.getLogger("mari.lifecycle").info("application stopped")
-
-
 app = FastAPI(title="Mari API", lifespan=lifespan)
 # Resolve who is calling once, for the whole request, so every write can record
 # the real actor (AUTH-5) instead of a hardcoded name. Added before CORS so it
@@ -120,7 +87,7 @@ app.add_middleware(observability.RequestTelemetryMiddleware)
 _authed = [Depends(auth_module.require_project)]
 app.include_router(GraphQLRouter(schema, context_getter=graphql_context), prefix="/graphql")
 app.include_router(auth_module.router)
-app.include_router(enterprise_identity.router)
+app.include_router(enterprise.router)
 app.include_router(bots.router)  # setup endpoints guard themselves; webhooks stay signature-verified
 app.include_router(gdrive_events.router)
 app.include_router(provider_events.router)
@@ -129,76 +96,8 @@ app.include_router(connectors_api.router, dependencies=_authed)
 app.include_router(agent_api.router, dependencies=_authed)
 app.include_router(chat_api.router)
 app.include_router(onboard.router, dependencies=_authed)
-
-from pydantic import BaseModel
-
-class ApiSearchIn(BaseModel):
-    query: str
-    limit: int = 10
-
-
-@app.post("/api/search", include_in_schema=True)
-def api_search(body: ApiSearchIn, authorization: str = Header(default="")) -> dict[str, t.Any]:
-    """Project-scoped search target for enterprise gateways and assistants."""
-    import hashlib
-
-    scheme, _, token = authorization.partition(" ")
-    if scheme.lower() != "bearer" or not token:
-        raise HTTPException(401, "Bearer API key required.")
-    from mari_server.persistence.postgres import identity
-    row = identity.authenticate_api_key(hashlib.sha256(token.encode()).hexdigest())
-    if not row:
-        raise HTTPException(401, "Invalid or revoked API key.")
-    scopes = {value.strip() for value in str(row["scopes"] or "").split(",")}
-    if not ({"read", "search"} & scopes):
-        raise HTTPException(403, "This API key does not allow search.")
-    ctx = access_module.external_access(
-        row["project_id"], row["slug"], row["project_name"], "api_key", str(row["id"]),
-        frozenset({"knowledge.read"}),
-    )
-    with access_module.use_access(ctx):
-        rows = hybrid_search(body.query.strip(), max(1, min(body.limit, 50)))
-    identity.touch_api_key(row["id"])
-    return {"results": [{"id": item["id"], "title": item["title"],
-                          "source": item["source"], "snippet": item["snippet"],
-                          "score": item.get("score", 0)} for item in rows]}
-
-
-@app.get("/livez", include_in_schema=False)
-def livez() -> dict[str, t.Any]:
-    return {"ok": True, "service": "mari-api"}
-
-
-@app.get("/readyz", include_in_schema=False)
-def readyz(request: Request) -> dict[str, t.Any]:
-    if not getattr(request.app.state, "ready", False):
-        raise HTTPException(503, "Application startup is not complete.")
-    try:
-        from mari_server.persistence.postgres import system
-        system.ready()
-    except Exception as exc:  # noqa: BLE001 — readiness reports dependency failure
-        logging.getLogger("mari.health").warning("database readiness check failed", exc_info=exc)
-        raise HTTPException(503, "Database is unavailable.") from exc
-    return {"ok": True, "service": "mari-api", "dependencies": {"database": "ok"}}
-
-
-@app.get("/healthz", include_in_schema=False)
-def healthz(request: Request) -> dict[str, t.Any]:
-    """Compatibility alias for orchestration that predates /readyz."""
-    return readyz(request)
-
-
-@app.get("/metrics", response_class=PlainTextResponse, include_in_schema=False)
-def metrics() -> str:
-    # Connector lag is a gauge, refreshed on scrape so idle connectors still age.
-    try:
-        from mari_server.persistence.postgres import system
-        for row in system.connector_lag():
-            provider = str(row["provider"] or "unknown").split(":", 1)[0]
-            observability.observe_connector_lag(provider, float(row["lag"] or 0))
-    except Exception:  # noqa: BLE001 — metrics remain available during DB incidents
-        observability.METRICS.inc("mari_metrics_dependency_errors_total", dependency="database")
-    return observability.METRICS.render()
+app.include_router(search_routes.router)
+app.include_router(operation_routes.router)
 
 
 # In the Lambda container the API also serves the compiled React application.

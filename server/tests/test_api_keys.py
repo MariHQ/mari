@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import patch
 
 from mari_server.identity import access
-from mari_server import app
+from mari_server.search import routes as search_routes
 from mari_server.identity import graphql as mutations_admin
 
 
@@ -44,7 +44,7 @@ class ApiKeyTests(unittest.TestCase):
 
         with patch.object(app, "q1", return_value=row), patch.object(app, "hybrid_search", side_effect=search), \
              patch.object(app, "exec_") as execute:
-            result = app.api_search(app.ApiSearchIn(query="deploy"), "Bearer secret")
+            result = search_routes.api_search(search_routes.ApiSearchIn(query="deploy"), "Bearer secret")
         self.assertEqual(result["results"][0]["title"], "Runbook")
         self.assertEqual(seen[0].project_id, 7)
         self.assertEqual(seen[0].principal_type, "api_key")
