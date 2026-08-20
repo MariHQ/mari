@@ -10,7 +10,6 @@ can poll live. Approval steps pause the run ('waiting'); approveRun resumes it.
 from __future__ import annotations
 
 import concurrent.futures as cf
-import fnmatch
 import json
 import threading
 import time
@@ -19,6 +18,7 @@ import typing as t
 from mari_server.providers import models as llm
 from mari_server import settings as config
 from mari_server.persistence.postgres import workflows as workflow_store
+from mari_components.workflow_runtime import matching_documents, run_step
 
 
 def _now_label() -> str:
@@ -274,22 +274,10 @@ def _run_step(kind: str, impl: t.Callable | None, cfg: dict, ctx: dict) -> tuple
     The retry is recorded in the step's own detail rather than hidden: a run
     that needed two attempts and a run that needed one are different facts about
     the system, and the history is the only place anyone can see the difference."""
-    if impl is None:
-        return "failed", f"unknown step: {kind}", {}
-    attempts = 1 + (STEP_RETRIES if kind in RETRYABLE_STEPS else 0)
-    last: Exception | None = None
-    for attempt in range(attempts):
-        try:
-            status, detail, updates = impl(cfg, ctx)
-            if attempt:
-                detail = f"{detail} (succeeded on retry after: {type(last).__name__}: {last})"[:200]
-            return status, detail, updates
-        except Exception as e:  # noqa: BLE001 — the run reports it; it must not escape
-            last = e
-            if attempt + 1 < attempts:
-                time.sleep(STEP_RETRY_BACKOFF)
-    return "failed", f"{type(last).__name__}: {last}"[:140] + (
-        f" (after {attempts} attempts)" if attempts > 1 else ""), {}
+    return run_step(
+        kind, impl, cfg, ctx, retryable=RETRYABLE_STEPS,
+        retries=STEP_RETRIES, backoff=STEP_RETRY_BACKOFF,
+    )
 
 
 def _persist(run_id: int, rows: list[dict], status: str, progress: int, stats: dict, start: float) -> None:
@@ -394,18 +382,7 @@ def start_run(run_id: int, resume_from: int = 0) -> None:
 
 def _trigger_matches(trig: dict, change: str, docs: list[dict], doc_tags: dict[int, set]) -> list[dict]:
     """Return the subset of changed docs this trigger matches (ANDed filters)."""
-    if (trig.get("on") or "") != change:
-        return []
-    matched = []
-    for d in docs:
-        if trig.get("source_id") is not None and d.get("source_id") != int(trig["source_id"]):
-            continue
-        if trig.get("tag") and trig["tag"] not in doc_tags.get(d["id"], set()):
-            continue
-        if trig.get("path_glob") and not fnmatch.fnmatch(d.get("source_path") or "", trig["path_glob"]):
-            continue
-        matched.append(d)
-    return matched
+    return list(matching_documents(trig, change, docs, doc_tags))
 
 
 def fire_document_triggers(doc_ids: list[int], change: str) -> list[int]:

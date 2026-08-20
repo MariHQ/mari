@@ -33,6 +33,7 @@ from mari_server.identity import access
 from mari_server import settings as config
 from mari_server.providers import connectors as component_connectors
 from mari_server.providers import models as llm
+from mari_server.search.service import invalidate_search
 from mari_components.connectors import SlackConfig, fetch_slack_thread_by_id
 from mari_components.connectors.events import (
     verify_hmac_sha256 as component_verify_hmac_sha256,
@@ -332,6 +333,7 @@ def _refresh_slack_aggregate(project_id: int, token: str, channel: str,
             cfg["item_hashes"] = hashes
             conn.commit()
             bot_store.save_source_config(source["id"], cfg)
+    invalidate_search(project_id)
 
 
 def _process_slack_delivery(row: dict) -> None:

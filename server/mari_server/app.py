@@ -52,6 +52,7 @@ from mari_server.persistence.postgres.database import close_pool, ensure_schema,
 from mari_server.product.queries import Query
 from mari_server.knowledge.graphql import MutKnowledge
 from mari_server.identity.graphql import MutAdmin
+from mari_server.search.service import hybrid_search
 
 
 @strawberry.type

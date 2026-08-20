@@ -60,9 +60,6 @@ def upsert_document(conn, source_id: int, external_id: str, title: str, body: st
         ports=document_repository.ports(conn),
     )
     conn.commit()
-    # Import lazily: queries imports ingest for status resolvers.
-    from mari_server.search.service import invalidate_search
-    invalidate_search(project_id)
     return doc_id, inserted
 
 
@@ -119,5 +116,3 @@ def delete_documents(conn, doc_ids: list[int]) -> None:
         ports=document_repository.ports(conn),
     )
     conn.commit()
-    from mari_server.search.service import invalidate_search
-    invalidate_search(access.require_current_access().project_id)

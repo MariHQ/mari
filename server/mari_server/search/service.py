@@ -15,7 +15,8 @@ from mari_server.providers import models as llm
 from mari_server.providers import vectors as retrieval
 from mari_server.persistence.postgres.database import jload
 from mari_server.persistence.postgres import search as search_store
-from mari_components.retrieval import keyword_patterns, like_pattern
+from mari_components.acl import document_visible
+from mari_components.retrieval import keyword_patterns, keyword_score, like_pattern
 
 # ————————————————— hybrid search ranking constants —————————————————
 
@@ -138,24 +139,16 @@ def _document_visible(row: dict, ctx: access.AccessContext) -> bool:
     base, while documents explicitly marked restricted still require the
     channel principal carried by the incoming event.
     """
-    if ctx.principal_type != "slack":
-        return True
     visibility = str(row.get("acl_visibility") or "project")
-    if visibility in {"public", "project", "connector_scope"}:
-        return True
     principals = row.get("acl_principals") or []
     if isinstance(principals, str):
         principals = jload(principals) or []
-    return bool(ctx.principals.intersection(str(value) for value in principals))
-
-
-def _keyword_score(row: dict, terms: list[str]) -> float:
-    if not terms:
-        return 1.0
-    title = str(row.get("title") or "").lower()
-    text = f"{row.get('snippet') or ''} {row.get('body') or ''}".lower()
-    hits = sum(2 * title.count(term) + min(3, text.count(term)) for term in terms)
-    return min(1.0, hits / max(1.0, len(terms) * 2.0))
+    return document_visible(
+        visibility,
+        [str(value) for value in principals],
+        ctx.principals,
+        project_member=bool(ctx.user_id),
+    )
 
 
 def _rank_hybrid(query: str) -> list[dict]:
@@ -197,7 +190,11 @@ def _rank_hybrid(query: str) -> list[dict]:
     for doc_id, row in rows_by_id.items():
         if not _document_visible(row, ctx):
             continue
-        kw = _keyword_score(row, terms)
+        kw = keyword_score(
+            str(row.get("title") or ""),
+            f"{row.get('snippet') or ''} {row.get('body') or ''}",
+            terms,
+        )
         sim = semantic.get(doc_id, 0.0)
         # Keyword candidates remain eligible even when the tokenizer produced
         # no useful term; semantic-only candidates must clear the shared floor.

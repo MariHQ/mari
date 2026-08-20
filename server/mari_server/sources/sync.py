@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
+from functools import partial
 
 from mari_server.automations import runtime as flowengine
 from mari_server.identity import context as access
@@ -37,7 +38,13 @@ def _worker_for(source_id: int):
     if source_store.source_kind(source_id) != "connector":
         raise RuntimeError("source is not a connector")
     from mari_server.persistence.postgres import connector_sync  # late: runtime imports ingest
-    return connector_sync.sync_source
+    from mari_server.search.service import invalidate_search
+    return partial(
+        connector_sync.sync_source,
+        update_status=update_status,
+        fire_document_triggers=flowengine.fire_document_triggers,
+        invalidate_search=invalidate_search,
+    )
 
 
 def _run_guarded(source_id: int, full: bool, project_access=None) -> dict:

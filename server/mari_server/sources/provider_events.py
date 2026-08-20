@@ -20,6 +20,7 @@ from mari_server.sources import sync as ingest
 from mari_server.persistence.postgres import document_index
 from mari_server.persistence.postgres import provider_events as event_store
 from mari_server.persistence.postgres import documents as document_repository
+from mari_server.search.service import invalidate_search
 from mari_server.persistence.postgres.event_inbox import DEFAULT_INBOX
 from mari_components.connectors import ConfluenceConfig, fetch_confluence_page
 from mari_components.connectors.events import (
@@ -262,6 +263,7 @@ def _sync_confluence_page(source: dict[str, t.Any], page_id: str) -> None:
         cfg["item_hashes"] = hashes
         document_repository.finalize_source(conn, source["project_id"], source["id"], cfg)
         conn.commit()
+    invalidate_search(int(source["project_id"]))
 
 
 def process_confluence_delivery(row: dict[str, t.Any]) -> None:

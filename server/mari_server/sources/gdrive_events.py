@@ -23,6 +23,7 @@ from mari_server.providers import connectors as component_connectors
 from mari_server.persistence.postgres.event_inbox import DEFAULT_INBOX
 from mari_server.persistence.postgres import provider_events as event_store
 from mari_server.persistence.postgres import documents as document_repository
+from mari_server.search.service import invalidate_search
 from mari_components import PollRequest
 from mari_components.connectors import (
     GoogleDriveConfig, connector_definition, start_google_drive_watch,
@@ -180,6 +181,8 @@ def _apply_poll(source: dict, source_config: dict, poll) -> None:
                 hashes.pop(path, None)
         source_config["item_hashes"] = hashes
         conn.commit()
+    if poll.upserts or poll.tombstones:
+        invalidate_search(int(source["project_id"]))
 
 
 def _full_reconcile(source: dict, source_config: dict, channel_id: str) -> None:

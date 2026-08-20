@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from mari_components.agents.runtime import ToolBinding, ToolOutcome
+from mari_components.agents.content import UNTRUSTED_CLOSE, UNTRUSTED_OPEN, untrusted_document
 from mari_server.product.navigation import PRODUCT_SURFACES, valid_navigation
 
 
@@ -30,15 +31,6 @@ class ToolDependencies:
     record_search: Callable[[str], None]
     review_items: Callable[[], Sequence[Any]]
     connector_definitions: Callable[[], Sequence[Any]]
-
-
-UNTRUSTED_OPEN = "<<<UNTRUSTED_DOCUMENT_CONTENT>>>"
-UNTRUSTED_CLOSE = "<<<END_UNTRUSTED_DOCUMENT_CONTENT>>>"
-
-
-def safe_document_body(value: str) -> str:
-    return value.replace(UNTRUSTED_OPEN, "[document delimiter removed]") \
-                .replace(UNTRUSTED_CLOSE, "[document delimiter removed]")
 
 
 def build_tool_bindings(deps: ToolDependencies) -> dict[str, ToolBinding]:
@@ -72,7 +64,7 @@ def build_tool_bindings(deps: ToolDependencies) -> dict[str, ToolBinding]:
             "id": document_id, "title": document["title"], "source": document["source"],
             "author": document["author"], "tags": names,
             "updated": updated.isoformat() if hasattr(updated, "isoformat") else str(updated or ""),
-            "body": f"{UNTRUSTED_OPEN}\n{safe_document_body(raw_body[:4000])}\n{UNTRUSTED_CLOSE}",
+            "body": untrusted_document(raw_body[:4000]),
         }
         summary = (f'read "{document["title"]}" ({len(raw_body)} chars, '
                    f'tags: {", ".join(names) or "none"})')

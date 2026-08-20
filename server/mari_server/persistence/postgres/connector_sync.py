@@ -19,8 +19,6 @@ import datetime as dt
 import json
 import time
 
-from mari_server.automations import runtime as flowengine
-from mari_server.sources import sync as ingest
 from mari_server.persistence.postgres import document_index
 from mari_server.identity import context as access
 from mari_server.persistence.postgres import lineage as links
@@ -104,7 +102,8 @@ def deletion_ids(rows: list[dict], provider_key: str, seen_paths: set[str],
     return gone
 
 
-def sync_source(source_id: int, full: bool) -> dict:
+def sync_source(source_id: int, full: bool, *, update_status, fire_document_triggers,
+                invalidate_search) -> dict:
     """Run one connector sync. Returns honest stats (plus 'error' on failure) —
     the same shape flowengine's sync_source step reads from ingest.run_sync."""
     started = time.time()
@@ -120,7 +119,7 @@ def sync_source(source_id: int, full: bool) -> dict:
                            (source_id, access.require_current_access().project_id)).fetchone()
     if not src or src.get("kind") != "connector":
         # ingest.run_guarded releases the _RUNNING slot for every exit path
-        ingest.update_status(source_id, state="error", phase="", error="not a connector source")
+        update_status(source_id, state="error", phase="", error="not a connector source")
         return {**stats, "error": "not a connector source"}
 
     provider_col = src["provider"]
@@ -148,7 +147,7 @@ def sync_source(source_id: int, full: bool) -> dict:
             cursor = None
 
         # —— validate (cheap, honest) ——
-        ingest.update_status(source_id, state="running", phase="listing", done=0, total=0, error="")
+        update_status(source_id, state="running", phase="listing", done=0, total=0, error="")
         def validate_once() -> None:
             result = definition.validate(cfg, http=connector_provider.http_transport)
             if not result.ok:
@@ -179,7 +178,7 @@ def sync_source(source_id: int, full: bool) -> dict:
                     body = document.body
                     fingerprint = plan.state.manifest[path].fingerprint
                     done += 1
-                    ingest.update_status(source_id, phase="chunking", done=done, total=total)
+                    update_status(source_id, phase="chunking", done=done, total=total)
                     principals = tuple(
                         f"{principal.kind}:{principal.identifier}"
                         for principal in document.acl.principals
@@ -191,7 +190,7 @@ def sync_source(source_id: int, full: bool) -> dict:
                         acl_principals=principals,
                     )
                     (inserted_ids if inserted else updated_ids).append(doc_id)
-                    ingest.update_status(source_id, phase="embedding")
+                    update_status(source_id, phase="embedding")
                     if body.strip():
                         chunks, embedded = document_index.sync_chunks(
                             conn, doc_id, title, body, max_tokens, overlap,
@@ -241,7 +240,7 @@ def sync_source(source_id: int, full: bool) -> dict:
                 _checkpoint(conn, provider_col, display, "embedded", done, total,
                             durable_cursor, "running", started)
                 conn.commit()
-            ingest.update_status(source_id, done=done, total=total)
+            update_status(source_id, done=done, total=total)
             return AppliedPage(
                 tuple(inserted_ids), tuple(updated_ids), len(gone),
                 page_chunks, page_embeddings,
@@ -261,7 +260,11 @@ def sync_source(source_id: int, full: bool) -> dict:
         except IncompleteSnapshot:
             if full:
                 raise
-            return sync_source(source_id, True)
+            return sync_source(
+                source_id, True, update_status=update_status,
+                fire_document_triggers=fire_document_triggers,
+                invalidate_search=invalidate_search,
+            )
 
         added_doc_ids.extend(report.inserted_ids)
         changed_doc_ids.extend(report.updated_ids)
@@ -270,6 +273,8 @@ def sync_source(source_id: int, full: bool) -> dict:
             "chunks": report.chunks, "embedded": report.embeddings,
             "skipped": report.unchanged,
         })
+        if report.changed or report.deleted:
+            invalidate_search(access.require_current_access().project_id)
         durable_cursor = report.state.checkpoint or report.state.cursor or ""
         detail = (f"{report.changed} items changed · {report.deleted} removed · "
                   f"{report.chunks} chunks · {report.embeddings} embedded · "
@@ -299,8 +304,8 @@ def sync_source(source_id: int, full: bool) -> dict:
                 _event(conn, provider_col, f"links error: {display}", str(le)[:300])
                 conn.commit()
         try:
-            fired = (flowengine.fire_document_triggers(added_doc_ids, "document_added") +
-                     flowengine.fire_document_triggers(changed_doc_ids, "document_changed"))
+            fired = (fire_document_triggers(added_doc_ids, "document_added") +
+                     fire_document_triggers(changed_doc_ids, "document_changed"))
             if fired:
                 with document_index.connection() as conn:
                     _event(conn, provider_col, f"triggers: {display}",
@@ -312,12 +317,12 @@ def sync_source(source_id: int, full: bool) -> dict:
                 _event(conn, provider_col, f"trigger error: {display}", str(te)[:300])
                 conn.commit()
 
-        ingest.update_status(source_id, state="idle", phase="done", done=done, total=total, error="")
+        update_status(source_id, state="idle", phase="done", done=done, total=total, error="")
         # flow step reads files_changed too — connectors count everything as items
         return {**stats, "files_changed": 0}
     except Exception as e:  # noqa: BLE001 — a sync must always land in a truthful state
         msg = str(e)[:300]
-        ingest.update_status(source_id, state="error", phase="", error=msg)
+        update_status(source_id, state="error", phase="", error=msg)
         try:
             with document_index.connection() as conn:
                 cfg["last_error"] = msg
