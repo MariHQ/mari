@@ -62,6 +62,12 @@ class ProjectDataScopeTests(unittest.TestCase):
             self.assertIn("project_id", call.args[0])
             self.assertEqual(call.args[1][0], 7)
 
+    def test_graphql_bot_status_passes_the_authorized_project_explicitly(self):
+        project = context(7, "acme")
+        with access.use_access(project), patch.object(bots, "bots_status", return_value={}) as status:
+            self.assertEqual(queries.Query().bots_status(), {})
+        status.assert_called_once_with(project)
+
     def test_foreign_knowledge_ids_fail_closed_before_write(self):
         with access.use_access(context(7, "acme")), \
              patch.object(mutations_knowledge, "q1", return_value=None) as read, \

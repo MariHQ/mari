@@ -1637,7 +1637,7 @@ class Query:
         function, so the console's Sources page and the REST surface can never
         disagree about whether a bot is configured."""
         import bots
-        return bots.bots_status()
+        return bots.bots_status(access.require_current_access())
 
     @strawberry.field
     def connector_catalog(self) -> JSON:
