@@ -14,7 +14,7 @@ import json
 import urllib.parse
 
 from . import _net
-from ._protocol import ACLMetadata, PollResult
+from ._protocol import ACLMetadata, FullResyncRequired, PollResult
 
 API = "https://www.googleapis.com/drive/v3"
 
@@ -62,6 +62,10 @@ _MAX_PAGES = 20
 _TOKEN_API = "https://oauth2.googleapis.com/token"
 
 
+class DrivePageTokenExpired(FullResyncRequired):
+    """The Changes cursor can no longer be used and requires reconciliation."""
+
+
 def _http(method, url, headers=None, body=None, timeout=30):
     """All raw HTTP for this connector. Returns (status, bytes).
 
@@ -100,10 +104,12 @@ def _headers(config):
     return {"Authorization": f"Bearer {config.get('access_token', '')}"}
 
 
-def _request(config, method, url, body=None):
-    status, raw = _http(method, url, headers=_headers(config), body=body)
+def _request(config, method, url, body=None, extra_headers=None):
+    headers = {**_headers(config), **(extra_headers or {})}
+    status, raw = _http(method, url, headers=headers, body=body)
     if status == 401 and config.get("refresh_token") and _refresh(config):
-        status, raw = _http(method, url, headers=_headers(config), body=body)
+        headers = {**_headers(config), **(extra_headers or {})}
+        status, raw = _http(method, url, headers=headers, body=body)
     return status, raw
 
 
@@ -147,38 +153,82 @@ def _fetch_body(config, f):
     return raw.decode("utf-8", "replace")
 
 
+def _acl(file: dict) -> ACLMetadata:
+    principals: set[str] = set()
+    public = False
+    for permission in file.get("permissions") or []:
+        if permission.get("deleted"):
+            continue
+        kind = str(permission.get("type") or "")
+        if kind == "anyone":
+            public = True
+        elif kind in {"user", "group"} and permission.get("emailAddress"):
+            principals.add(f"{kind}:{str(permission['emailAddress']).lower()}")
+        elif kind == "domain" and permission.get("domain"):
+            principals.add(f"domain:{str(permission['domain']).lower()}")
+    return ACLMetadata(visibility="public" if public else "restricted",
+                       principals=tuple(sorted(principals)))
+
+
+def list_changes(config: dict, page_token: str, *, max_pages: int = _MAX_PAGES) -> PollResult:
+    """Drain a bounded portion of Drive Changes, preserving the next token."""
+    if not page_token:
+        raise ValueError("Google Drive changes page token is required")
+    items: list[dict] = []
+    tombstones: list[str] = []
+    next_token = page_token
+    folder = str(config.get("folder_id") or "").strip()
+    for _ in range(max(1, max_pages)):
+        params = {
+            "pageToken": next_token, "pageSize": str(_PAGE_SIZE),
+            "includeRemoved": "true", "includeItemsFromAllDrives": "true",
+            "supportsAllDrives": "true",
+            "fields": "nextPageToken,newStartPageToken,changes(fileId,removed,file(id,name,mimeType,modifiedTime,md5Checksum,trashed,parents,permissions(type,emailAddress,domain,allowFileDiscovery,deleted)))",
+        }
+        status, raw = _request(config, "GET", f"{API}/changes?{urllib.parse.urlencode(params)}")
+        if status == 410:
+            raise DrivePageTokenExpired("Google Drive changes page token expired (HTTP 410)")
+        if status != 200:
+            raise RuntimeError(_vendor_error(status, raw))
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("Google Drive changes returned invalid JSON") from exc
+        for change in data.get("changes") or []:
+            file = change.get("file") or {}
+            file_id = str(change.get("fileId") or file.get("id") or "")
+            if not file_id:
+                continue
+            in_scope = not folder or folder in (file.get("parents") or [])
+            if change.get("removed") or file.get("trashed") or not in_scope:
+                tombstones.append(file_id)
+                continue
+            if file.get("mimeType") not in (_DOC_MIME, *_TEXT_MIMES):
+                continue
+            items.append({
+                "path": file_id, "title": file.get("name", file_id),
+                "body": _fetch_body(config, file),
+                "updated_at": file.get("modifiedTime", ""),
+                "hash_hint": file.get("md5Checksum") or file.get("modifiedTime") or None,
+                "acl": _acl(file),
+            })
+        if data.get("nextPageToken"):
+            next_token = str(data["nextPageToken"])
+            continue
+        new_token = str(data.get("newStartPageToken") or "")
+        if not new_token:
+            raise RuntimeError("Google Drive changes ended without newStartPageToken")
+        return PollResult(items, f"changes:{new_token}", snapshot_complete=True,
+                          tombstones=tombstones)
+    checkpoint = f"changes:{next_token}"
+    return PollResult(items, f"changes:{page_token}", snapshot_complete=False,
+                      tombstones=tombstones, checkpoint=checkpoint)
+
+
 def list_items(config, cursor):
     """cursor = ISO timestamp of the newest modifiedTime seen so far."""
     if cursor and str(cursor).startswith("changes:"):
-        token = str(cursor)[8:]
-        items, tombstones, complete = [], [], False
-        next_token = token
-        for _ in range(_MAX_PAGES):
-            params = {"pageToken": next_token, "pageSize": str(_PAGE_SIZE),
-                      "fields": "nextPageToken,newStartPageToken,changes(fileId,removed,file(id,name,mimeType,modifiedTime,md5Checksum,trashed))"}
-            status, raw = _request(config, "GET", f"{API}/changes?{urllib.parse.urlencode(params)}")
-            if status != 200:
-                raise RuntimeError(_vendor_error(status, raw))
-            data = json.loads(raw)
-            for change in data.get("changes", []):
-                f = change.get("file") or {}
-                fid = str(change.get("fileId") or f.get("id") or "")
-                if fid and (change.get("removed") or f.get("trashed")):
-                    tombstones.append(fid)
-                elif f.get("mimeType") in (_DOC_MIME, *_TEXT_MIMES):
-                    items.append({"path": fid, "title": f.get("name", fid), "body": _fetch_body(config, f),
-                                  "updated_at": f.get("modifiedTime", ""),
-                                  "hash_hint": f.get("md5Checksum") or f.get("modifiedTime") or None,
-                                  "acl": ACLMetadata(visibility="connector_scope")})
-            if data.get("nextPageToken"):
-                next_token = data["nextPageToken"]
-                continue
-            next_token = data.get("newStartPageToken") or next_token
-            complete = True
-            break
-        durable = f"changes:{next_token}"
-        return PollResult(items, durable if complete else cursor, snapshot_complete=complete,
-                          tombstones=tombstones, checkpoint=durable if not complete else None)
+        return list_changes(config, str(cursor)[8:])
 
     q_parts = [
         "trashed = false",
@@ -202,7 +252,7 @@ def list_items(config, cursor):
         params = {
             "q": q,
             "pageSize": str(_PAGE_SIZE),
-            "fields": "nextPageToken,files(id,name,mimeType,modifiedTime,md5Checksum)",
+            "fields": "nextPageToken,files(id,name,mimeType,modifiedTime,md5Checksum,parents,permissions(type,emailAddress,domain,allowFileDiscovery,deleted))",
         }
         if page_token:
             params["pageToken"] = page_token
@@ -228,7 +278,7 @@ def list_items(config, cursor):
             "body": _fetch_body(config, f),
             "updated_at": mod,
             "hash_hint": f.get("md5Checksum") or mod or None,
-            "acl": ACLMetadata(visibility="connector_scope"),
+            "acl": _acl(f),
         })
     new_cursor = f"changes:{start_token}" if complete and start_token else newest
     return PollResult(items, new_cursor if complete else cursor, snapshot_complete=complete)

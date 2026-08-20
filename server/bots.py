@@ -33,7 +33,7 @@ import auth
 import access
 import config
 import llm
-from event_inbox import EventDispatcher, EventInbox
+from event_inbox import DEFAULT_INBOX, EventDispatcher
 from db import exec_, pq, pq1, q, q1
 from queries import hybrid_search
 
@@ -41,7 +41,7 @@ router = APIRouter()
 
 SLACK_API = "https://slack.com/api"
 SLACK_WORKERS = max(1, int(config.get("bots", "slack_workers", 4)))
-_EVENT_INBOX = EventInbox()
+_EVENT_INBOX = DEFAULT_INBOX
 _EVENT_DISPATCHER: EventDispatcher | None = None
 
 
@@ -375,8 +375,14 @@ def _process_slack_delivery(row: dict) -> None:
 def start_event_dispatcher() -> None:
     global _EVENT_DISPATCHER
     if _EVENT_DISPATCHER is None:
-        _EVENT_DISPATCHER = EventDispatcher(_EVENT_INBOX, {"slack": _process_slack_delivery},
-                                            workers=SLACK_WORKERS)
+        from gdrive_events import process_gdrive_delivery
+        import provider_events
+        _EVENT_DISPATCHER = EventDispatcher(
+            _EVENT_INBOX,
+            {"slack": _process_slack_delivery, "gdrive": process_gdrive_delivery,
+             **provider_events.HANDLERS},
+            workers=SLACK_WORKERS,
+        )
     _EVENT_DISPATCHER.start()
 
 

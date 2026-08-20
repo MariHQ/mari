@@ -94,6 +94,10 @@ class ConnectorCallError(RuntimeError):
         self.retry_after = retry_after
 
 
+class FullResyncRequired(RuntimeError):
+    """A durable incremental cursor cannot be resumed authoritatively."""
+
+
 def classify_error(error: BaseException) -> ErrorKind:
     if isinstance(error, ConnectorCallError):
         return error.kind

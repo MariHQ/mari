@@ -21,7 +21,8 @@ import time
 
 import connectors
 from connectors._protocol import (
-    ConnectorCallError, ErrorKind, PollItem, adapt_poll_result, call_with_retry,
+    ConnectorCallError, ErrorKind, FullResyncRequired, PollItem, adapt_poll_result,
+    call_with_retry,
 )
 import flowengine
 import ingest
@@ -165,7 +166,15 @@ def _sync_worker(source_id: int, full: bool) -> dict:
         call_with_retry(validate_once)
 
         # —— list ——
-        poll = adapt_poll_result(call_with_retry(lambda: entry["list_items"](cfg, cursor)))
+        try:
+            poll = adapt_poll_result(call_with_retry(lambda: entry["list_items"](cfg, cursor)))
+        except FullResyncRequired:
+            if full:
+                raise
+            # The provider explicitly declared its incremental checkpoint
+            # unusable (Drive returns HTTP 410). A complete snapshot is the
+            # only safe recovery because it can reconcile removals too.
+            return _sync_worker(source_id, True)
         items = [item.as_dict() if isinstance(item, PollItem) else item for item in poll.items]
         # An incomplete poll may expose a provider-native, resumable checkpoint.
         # Without one we hold the previous durable cursor and safely replay.

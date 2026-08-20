@@ -1,0 +1,183 @@
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import json
+import unittest
+from unittest.mock import patch
+
+from fastapi import HTTPException
+
+import access
+from connectors import gdrive
+from connectors._protocol import ACLMetadata, PollResult
+import gdrive_events
+
+
+class MemoryInbox:
+    def __init__(self):
+        self.keys = set()
+        self.calls = []
+    def enqueue(self, provider, project_id, delivery_id, payload, **kwargs):
+        key = (provider, project_id, delivery_id)
+        inserted = key not in self.keys
+        self.keys.add(key)
+        self.calls.append((provider, project_id, delivery_id, payload, kwargs))
+        return len(self.keys), inserted
+
+
+class Request:
+    def __init__(self, token="watch-token", number="7", state="change",
+                 resource_id="resource-1"):
+        self.headers = {
+            "X-Goog-Channel-ID": "channel-1",
+            "X-Goog-Channel-Token": token,
+            "X-Goog-Resource-ID": resource_id,
+            "X-Goog-Resource-State": state,
+            "X-Goog-Message-Number": number,
+        }
+
+
+class DriveWebhookTests(unittest.TestCase):
+    @staticmethod
+    def channel():
+        return {"id": 3, "project_id": 9, "source_id": 5, "channel_id": "channel-1",
+                "token_hash": hashlib.sha256(b"watch-token").hexdigest(),
+                "resource_id": "resource-1", "source_status": "active",
+                "project_status": "active"}
+
+    def test_authenticated_notification_is_durable_before_204_and_replay_dedupes(self):
+        inbox = MemoryInbox()
+        with patch.object(gdrive_events, "q1", return_value=self.channel()), \
+             patch.object(gdrive_events, "exec_") as execute, \
+             patch.object(gdrive_events, "DEFAULT_INBOX", inbox):
+            first = asyncio.run(gdrive_events.gdrive_webhook(Request()))
+            replay = asyncio.run(gdrive_events.gdrive_webhook(Request()))
+        self.assertEqual(first.status_code, 204)
+        self.assertEqual(replay.status_code, 204)
+        self.assertEqual(replay.headers["x-mari-duplicate"], "true")
+        self.assertEqual(inbox.calls[0][0:3], ("gdrive", 9, "channel-1:7"))
+        self.assertEqual(inbox.calls[0][4]["coalesce_key"], "source:5")
+        self.assertEqual(execute.call_count, 2)
+
+    def test_bad_token_resource_or_message_number_is_rejected(self):
+        with patch.object(gdrive_events, "q1", return_value=self.channel()):
+            self.assertEqual(asyncio.run(gdrive_events.gdrive_webhook(Request(token="wrong"))).status_code, 401)
+            self.assertEqual(asyncio.run(gdrive_events.gdrive_webhook(Request(resource_id="wrong"))).status_code, 401)
+            self.assertEqual(asyncio.run(gdrive_events.gdrive_webhook(Request(number="nope"))).status_code, 400)
+
+    def test_storage_failure_returns_retryable_503(self):
+        class Broken:
+            def enqueue(self, *_args, **_kwargs):
+                raise OSError("postgres unavailable")
+        with patch.object(gdrive_events, "q1", return_value=self.channel()), \
+             patch.object(gdrive_events, "DEFAULT_INBOX", Broken()):
+            response = asyncio.run(gdrive_events.gdrive_webhook(Request()))
+        self.assertEqual(response.status_code, 503)
+
+
+class DriveWatchSetupTests(unittest.TestCase):
+    def setUp(self):
+        self.context = access.AccessContext(1, 9, "acme", "Acme", "admin", access.CAPABILITIES)
+        self.source = {"id": 5, "project_id": 9, "config": {"cursor": "changes:start"}}
+
+    def test_watch_persists_route_before_call_and_uses_https_callback(self):
+        calls = []
+        def execute(sql, args=()):
+            calls.append((" ".join(sql.split()), args))
+        response = json.dumps({"resourceId": "resource-1", "expiration": "1800000000000"}).encode()
+        with access.use_access(self.context), patch.object(gdrive_events, "_source", return_value=self.source), \
+             patch.object(gdrive_events.config, "get", return_value="https://mari.example.test"), \
+             patch.object(gdrive_events, "exec_", side_effect=execute), \
+             patch.object(gdrive_events.gdrive, "_request", return_value=(200, response)) as watch:
+            result = gdrive_events.create_watch(gdrive_events.DriveWatchIn(source_id=5))
+        self.assertTrue(result["ok"])
+        self.assertTrue(calls[0][0].startswith("INSERT INTO gdrive_watch_channels"))
+        body = json.loads(watch.call_args.args[3])
+        self.assertEqual(body["address"], "https://mari.example.test/webhooks/google-drive")
+        self.assertTrue(watch.call_args.args[2].endswith("changes/watch?pageToken=start&supportsAllDrives=true"))
+        self.assertNotIn(body["token"], json.dumps(result))
+
+    def test_watch_fails_explicitly_without_cursor_or_https(self):
+        with access.use_access(self.context), patch.object(gdrive_events, "_source",
+                return_value={**self.source, "config": {"cursor": ""}}), \
+             self.assertRaisesRegex(HTTPException, "initial poll"):
+            gdrive_events.create_watch(gdrive_events.DriveWatchIn(source_id=5))
+        with access.use_access(self.context), patch.object(gdrive_events, "_source", return_value=self.source), \
+             patch.object(gdrive_events.config, "get", return_value="http://localhost:8000"), \
+             self.assertRaisesRegex(HTTPException, "HTTPS"):
+            gdrive_events.create_watch(gdrive_events.DriveWatchIn(source_id=5))
+
+    def test_due_watch_is_replaced_under_project_scope(self):
+        rows = [{"source_id": 5, "project_id": 9, "slug": "acme", "name": "Acme"}]
+        seen = []
+        def renew(body):
+            seen.append((body.source_id, access.require_current_access().project_id))
+            return {"ok": True}
+        with patch.object(gdrive_events, "q", return_value=rows), \
+             patch.object(gdrive_events, "exec_"), \
+             patch.object(gdrive_events, "create_watch", side_effect=renew):
+            self.assertEqual(gdrive_events.renew_due_watches(), 1)
+        self.assertEqual(seen, [(5, 9)])
+
+
+class DriveChangesTests(unittest.TestCase):
+    def test_changes_include_removed_items_and_acl_updates(self):
+        response = {"changes": [
+            {"fileId": "gone", "removed": True},
+            {"fileId": "doc", "file": {"id": "doc", "name": "Plan",
+                "mimeType": gdrive._DOC_MIME, "modifiedTime": "2026-08-19T10:00:00Z",
+                "parents": ["folder"], "permissions": [
+                    {"type": "group", "emailAddress": "ENG@EXAMPLE.TEST"},
+                    {"type": "domain", "domain": "example.test"},
+                ]}},
+        ], "newStartPageToken": "next"}
+        with patch.object(gdrive, "_request", return_value=(200, json.dumps(response).encode())), \
+             patch.object(gdrive, "_fetch_body", return_value="canonical content"):
+            poll = gdrive.list_changes({"access_token": "token", "folder_id": "folder"}, "start")
+        self.assertEqual(poll.tombstones, ["gone"])
+        self.assertEqual(poll.cursor, "changes:next")
+        self.assertEqual(poll.items[0]["acl"], ACLMetadata(
+            visibility="restricted", principals=("domain:example.test", "group:eng@example.test")))
+
+    def test_moved_out_of_scope_becomes_tombstone_and_410_is_explicit(self):
+        moved = {"changes": [{"fileId": "doc", "file": {"id": "doc", "name": "Plan",
+            "mimeType": gdrive._DOC_MIME, "parents": ["other"]}}], "newStartPageToken": "next"}
+        with patch.object(gdrive, "_request", return_value=(200, json.dumps(moved).encode())):
+            poll = gdrive.list_changes({"access_token": "token", "folder_id": "folder"}, "start")
+        self.assertEqual(poll.tombstones, ["doc"])
+        with patch.object(gdrive, "_request", return_value=(410, b"gone")), \
+             self.assertRaises(gdrive.DrivePageTokenExpired):
+            gdrive.list_changes({"access_token": "token"}, "expired")
+
+    def test_worker_drains_all_pages_and_persists_each_checkpoint(self):
+        channel = {"channel_id": "channel-1", "source_id": 5, "project_id": 9,
+                   "config": {"cursor": "changes:start"}, "provider": "gdrive",
+                   "display_name": "Drive", "source_status": "active", "project_status": "active",
+                   "project_slug": "acme", "project_name": "Acme"}
+        pages = [
+            PollResult([], "changes:start", snapshot_complete=False, checkpoint="changes:middle"),
+            PollResult([], "changes:end", snapshot_complete=True),
+        ]
+        with patch.object(gdrive_events, "q1", return_value=channel), \
+             patch.object(gdrive_events.gdrive, "list_changes", side_effect=pages) as changes, \
+             patch.object(gdrive_events, "_apply_poll") as apply_poll, \
+             patch.object(gdrive_events, "exec_"):
+            gdrive_events.process_gdrive_delivery({"project_id": 9,
+                "payload": {"channel_id": "channel-1"}})
+        self.assertEqual([call.args[1] for call in changes.call_args_list], ["start", "middle"])
+        self.assertEqual(apply_poll.call_count, 2)
+
+    def test_410_runs_full_poll_reconciliation_and_replaces_cursor(self):
+        source = {"id": 5, "source_id": 5, "project_id": 9, "channel_id": "channel-1"}
+        refreshed = {"id": 5, "project_id": 9, "config": {"cursor": "changes:fresh"}}
+        with patch.object(gdrive_events, "exec_") as execute, \
+             patch.object(gdrive_events.ingest, "run_sync", return_value={}), \
+             patch.object(gdrive_events, "_source", return_value=refreshed):
+            gdrive_events._full_reconcile(source, {}, "channel-1")
+        self.assertIn("needs_full_resync", execute.call_args_list[0].args[0])
+        self.assertEqual(execute.call_args_list[-1].args[1], ("fresh", 5))
+
+
+if __name__ == "__main__":
+    unittest.main()

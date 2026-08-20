@@ -43,8 +43,10 @@ import mcp
 import connectors_api
 import onboard
 import repoaudit
+import provider_events
 import observability
 import enterprise_identity
+import gdrive_events
 from sitefiles import PublishedSiteFiles
 
 from db import DB_URL, close_pool, ensure_schema, exec_, open_pool, q, q1
@@ -87,11 +89,13 @@ async def lifespan(application: FastAPI):
         auth_module.first_run_check()
         ingest.start_poller()
         bots.start_event_dispatcher()
+        gdrive_events.start_watch_renewal()
         application.state.ready = True
         logging.getLogger("mari.lifecycle").info("application ready")
         yield
     finally:
         application.state.ready = False
+        gdrive_events.stop_watch_renewal()
         bots.stop_event_dispatcher()
         ingest.stop_poller()
         close_pool()
@@ -119,6 +123,8 @@ app.include_router(GraphQLRouter(schema, context_getter=graphql_context), prefix
 app.include_router(auth_module.router)
 app.include_router(enterprise_identity.router)
 app.include_router(bots.router)  # setup endpoints guard themselves; webhooks stay signature-verified
+app.include_router(gdrive_events.router)
+app.include_router(provider_events.router)
 app.include_router(mcp.router)  # published MCP servers authenticate with their own bearer tokens
 app.include_router(connectors_api.router, dependencies=_authed)
 app.include_router(agentchat.router, dependencies=_authed)
@@ -306,47 +312,6 @@ def chat(body: ChatIn, access: t.Any = Depends(auth_module.require_project)):
         yield "event: done\ndata: {}\n\n"
 
     return StreamingResponse(stream(), media_type="text/event-stream")
-
-
-# ————————————————— GitHub webhook (GITHUB-SYNC-CONTRACT.md) —————————————————
-
-
-@app.post("/webhooks/github")
-async def github_webhook(request: "Request"):
-    raw = await request.body()
-    try:
-        payload = json.loads(raw or b"{}")
-    except json.JSONDecodeError:
-        return {"ok": False, "error": "bad payload"}
-    installation_id = str((payload.get("installation") or {}).get("id") or "")
-    installation = q1("""SELECT b.*, p.slug AS project_slug, p.name AS project_name
-                           FROM bot_installations b JOIN projects p ON p.id = b.project_id
-                          WHERE b.provider = 'github' AND b.external_installation_id = %s
-                            AND b.status = 'connected' AND p.status = 'active'""", (installation_id,))
-    if not installation:
-        raise HTTPException(401, "unknown GitHub installation")
-    bot_config = installation.get("config") or {}
-    if isinstance(bot_config, str):
-        bot_config = json.loads(bot_config)
-    if not bots.verify_github_signature(
-            raw, request.headers.get("X-Hub-Signature-256", ""),
-            [str(bot_config.get("webhook_secret") or "")]):
-        raise HTTPException(401, "bad signature")
-    exec_("""UPDATE bot_installations SET config = config || %s, updated_at = now()
-             WHERE id = %s""", (json.dumps({"last_delivery_at": bots._now_iso()}), installation["id"]))
-    full_name = (payload.get("repository") or {}).get("full_name", "")
-    if not full_name:
-        return {"ok": True, "synced": False}
-    project_access = access_module.external_access(
-        installation["project_id"], installation["project_slug"], installation["project_name"],
-        "github", str(installation["id"]), frozenset({"source.sync"}))
-    with access_module.use_access(project_access):
-        src = q1("""SELECT id FROM sources WHERE project_id = %s AND kind = 'github'
-                    AND config->>'repo' = %s""", (installation["project_id"], full_name))
-        if not src:
-            return {"ok": True, "synced": False, "reason": "repo not connected"}
-        started = ingest.start_sync(src["id"])
-    return {"ok": True, "synced": started, "source_id": src["id"]}
 
 
 @app.get("/livez", include_in_schema=False)

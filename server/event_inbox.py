@@ -100,6 +100,18 @@ class EventInbox:
                           lease_until=NULL, last_error='', updated_at=now()
                     WHERE id=%s AND status='processing'""", (row_id,))
 
+    def extend_lease(self, row_id: int) -> bool:
+        """Keep a legitimately long provider drain from being reclaimed."""
+        with self._connect() as conn:
+            row = conn.execute(
+                """UPDATE event_inbox
+                      SET lease_until=now() + (%s * interval '1 second'), updated_at=now()
+                    WHERE id=%s AND status='processing' AND lease_until >= now()
+                    RETURNING id""",
+                (self.lease_seconds, row_id),
+            ).fetchone()
+            return row is not None
+
     def retry(self, row_id: int, error: str, attempts: int) -> None:
         terminal = attempts >= self.max_attempts
         delay = min(300, 2 ** min(max(attempts, 1), 8))
@@ -112,6 +124,9 @@ class EventInbox:
                     WHERE id=%s""",
                 ("dead" if terminal else "pending", delay, error[:1000], row_id),
             )
+
+
+DEFAULT_INBOX = EventInbox()
 
 
 class EventDispatcher:
@@ -145,6 +160,20 @@ class EventDispatcher:
         row = self.inbox.claim()
         if not row:
             return False
+        heartbeat_stop = threading.Event()
+        heartbeat: threading.Thread | None = None
+        if hasattr(self.inbox, "extend_lease"):
+            def keep_lease() -> None:
+                interval = max(1.0, float(getattr(self.inbox, "lease_seconds", 60)) / 3)
+                while not heartbeat_stop.wait(interval):
+                    try:
+                        if not self.inbox.extend_lease(int(row["id"])):
+                            return
+                    except Exception:
+                        log.exception("event lease heartbeat failed: id=%s", row["id"])
+            heartbeat = threading.Thread(target=keep_lease, daemon=True,
+                                         name=f"mari-event-lease-{row['id']}")
+            heartbeat.start()
         try:
             handler = self.handlers.get(str(row["provider"]))
             if handler is None:
@@ -156,6 +185,10 @@ class EventDispatcher:
                              int(row.get("attempts") or 1))
         else:
             self.inbox.complete(int(row["id"]))
+        finally:
+            heartbeat_stop.set()
+            if heartbeat is not None:
+                heartbeat.join(timeout=1.0)
         return True
 
     def _run(self) -> None:
