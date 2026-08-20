@@ -10,8 +10,8 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from mari_server.api import access
-from mari_server.application.chat import stream_answer
-from mari_server.infrastructure.chat_runtime import live_destination, ports
+from mari_server.services.chat import stream_answer
+from mari_server.services.chat_runtime import live_destination, ports
 
 
 router = APIRouter()

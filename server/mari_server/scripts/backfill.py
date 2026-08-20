@@ -6,8 +6,8 @@ Idempotent and resumable (per-row commit = the checkpointing seam).
 
 from __future__ import annotations
 
-from mari_server.infrastructure import models as llm
-from mari_server.infrastructure import postgres
+from mari_server.integrations import llm
+from mari_server import db as postgres
 
 
 def main() -> None:

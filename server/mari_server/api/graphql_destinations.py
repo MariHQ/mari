@@ -5,10 +5,10 @@ from __future__ import annotations
 import strawberry
 from strawberry.scalars import JSON
 
-from mari_server.infrastructure import config
+from mari_server import config
 from mari_server.api.graphql_admin import _require_admin
-from mari_server.application import knowledge_chat, mcp
-from mari_server.infrastructure import knowledge_chat_repository, mcp_repository
+from mari_server.services import knowledge_chat, mcp
+from mari_server.repositories import knowledge_chat_repository, mcp_repository
 
 
 def _project(info: strawberry.Info):

@@ -15,10 +15,11 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from mari_server.api import access
 from mari_server.api import auth
-from mari_server.infrastructure import connector_provider as component_connectors
-from mari_server.infrastructure import ingestion as ingest
-from mari_server.infrastructure.database import q1
-from mari_server.infrastructure.event_inbox import DEFAULT_INBOX
+from mari_server.integrations import connector_provider as component_connectors
+from mari_server.services import sync as ingest
+from mari_server.integrations import document_index
+from mari_server.repositories.database import q1
+from mari_server.integrations.event_inbox import DEFAULT_INBOX
 from mari_components.connectors import ConfluenceConfig, fetch_confluence_page
 from mari_components.connectors.events import (
     MAX_DIRTY_PATHS, confluence_change_hint, github_change_hint,
@@ -271,26 +272,26 @@ def _sync_confluence_page(source: dict[str, t.Any], page_id: str) -> None:
         document = None
     path = str(page_id)
     hashes = dict(cfg.get("item_hashes") or {})
-    with ingest._conn() as conn:
+    with document_index.connection() as conn:
         if document is None:
             rows = conn.execute(
                 "SELECT id FROM documents WHERE project_id=%s AND source_id=%s AND source_path=%s",
                 (source["project_id"], source["id"], f"confluence/{path}"),
             ).fetchall()
-            ingest._delete_documents(conn, [int(row["id"]) for row in rows])
+            document_index.delete_documents(conn, [int(row["id"]) for row in rows])
             hashes.pop(path, None)
         else:
             title = document.title or path
             body = document.body
-            content_hash = document.revision or ingest._sha(f"{title}\n\n{body}")
-            doc_id, _ = ingest._upsert_document(
+            content_hash = document.revision or document_index.content_hash(f"{title}\n\n{body}")
+            doc_id, _ = document_index.upsert_document(
                 conn, int(source["id"]), f"confluence:{source['id']}:{path}", title, body,
                 f"confluence/{path}", "page", content_hash, "Confluence",
                 source="confluence", initials="CO", acl_visibility="connector_scope",
             )
-            max_tokens, overlap = ingest._chunk_settings()
+            max_tokens, overlap = document_index.chunk_settings()
             if body.strip():
-                ingest._sync_chunks(conn, doc_id, title, body, max_tokens, overlap)
+                document_index.sync_chunks(conn, doc_id, title, body, max_tokens, overlap)
             else:
                 conn.execute("DELETE FROM chunks WHERE document_id=%s", (doc_id,))
                 conn.execute("UPDATE documents SET embedding=NULL WHERE id=%s", (doc_id,))

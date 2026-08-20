@@ -28,10 +28,11 @@ from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 
 from mari_server.api import auth
+from mari_server.integrations import document_index
 from mari_server.api import access
-from mari_server.infrastructure import config
-from mari_server.infrastructure import connector_provider as component_connectors
-from mari_server.infrastructure import models as llm
+from mari_server import config
+from mari_server.integrations import connector_provider as component_connectors
+from mari_server.integrations import llm
 from mari_components.connectors import SlackConfig, fetch_slack_thread_by_id
 from mari_components.connectors.events import (
     verify_hmac_sha256 as component_verify_hmac_sha256,
@@ -39,9 +40,9 @@ from mari_components.connectors.events import (
 )
 from mari_components import KnowledgeDocument
 from mari_components.knowledge import answer_question as component_answer_question
-from mari_server.infrastructure.event_inbox import DEFAULT_INBOX, EventDispatcher
-from mari_server.infrastructure.database import exec_, pq, pq1, q, q1
-from mari_server.api.graphql_queries import hybrid_search
+from mari_server.integrations.event_inbox import DEFAULT_INBOX, EventDispatcher
+from mari_server.repositories.database import exec_, pq, pq1, q, q1
+from mari_server.services.search import hybrid_search
 
 router = APIRouter()
 
@@ -88,7 +89,7 @@ def _now_iso() -> str:
 def _log_usage(kind: str, detail: str = "") -> None:
     """Honest-telemetry hook (contract §A). Tolerates db.log_usage not existing yet."""
     try:
-        from mari_server.infrastructure import database as _db
+        from mari_server.repositories import database as _db
 
         if hasattr(_db, "log_usage"):
             _db.log_usage(kind, detail)
@@ -322,7 +323,7 @@ def _conversation_context(turns: list[dict[str, str]]) -> str:
 def _refresh_slack_aggregate(project_id: int, token: str, channel: str,
                              thread_ts: str) -> None:
     """Refetch the canonical thread and update every matching Slack source."""
-    from mari_server.infrastructure import ingestion as ingest
+    from mari_server.services import sync as ingest
 
     sources = q(
         """SELECT id, config FROM sources
@@ -339,20 +340,20 @@ def _refresh_slack_aggregate(project_id: int, token: str, channel: str,
         raise RuntimeError("Slack thread response was incomplete")
     if document is None:
         return
-    max_tokens, overlap = ingest._chunk_settings()
+    max_tokens, overlap = document_index.chunk_settings()
     for source in sources:
-        with ingest._conn() as conn:
+        with document_index.connection() as conn:
             path = document.external_id
-            content_hash = document.revision or ingest._sha(
+            content_hash = document.revision or document_index.content_hash(
                 f"{document.title}\n\n{document.body}"
             )
-            doc_id, _inserted = ingest._upsert_document(
+            doc_id, _inserted = document_index.upsert_document(
                 conn, source["id"], f"slack:{source['id']}:{path}", document.title,
                 document.body, f"slack/{path}", "page", content_hash, "Slack",
                 source="slack", initials="SL", acl_visibility="restricted",
                 acl_principals=(f"channel:{channel}",),
             )
-            ingest._sync_chunks(conn, doc_id, document.title, document.body,
+            document_index.sync_chunks(conn, doc_id, document.title, document.body,
                                 max_tokens, overlap)
             cfg = source["config"] if isinstance(source["config"], dict) else json.loads(source["config"] or "{}")
             hashes = dict(cfg.get("item_hashes") or {})

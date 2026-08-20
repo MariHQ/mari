@@ -6,8 +6,8 @@ import strawberry
 from strawberry.scalars import JSON
 
 from mari_server.api import access
-from mari_server.application import workflows
-from mari_server.infrastructure import workflow_repository
+from mari_server.services import workflows
+from mari_server.repositories import workflows as workflow_repository
 
 
 @strawberry.type

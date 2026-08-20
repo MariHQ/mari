@@ -10,8 +10,8 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from mari_server.api import access
-from mari_server.application.agent import AgentOutput, stream_agent_turn
-from mari_server.infrastructure.agent_runtime import production_runtime
+from mari_server.services.agent import AgentOutput, stream_agent_turn
+from mari_server.services.agent_runtime import production_runtime
 
 
 router = APIRouter()

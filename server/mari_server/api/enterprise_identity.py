@@ -22,8 +22,8 @@ from fastapi.responses import RedirectResponse, Response
 from psycopg.rows import dict_row
 
 from mari_server.api import auth
-from mari_server.infrastructure import config
-from mari_server.infrastructure import control_store
+from mari_server import config
+from mari_server.repositories import control_store
 
 router = APIRouter()
 OIDC_STATE = "mari_oidc_state"
@@ -32,7 +32,7 @@ OIDC_VERIFIER = "mari_oidc_verifier"
 
 
 def _conn():
-    from mari_server.infrastructure import postgres
+    from mari_server import db as postgres
     return postgres.connect()
 
 

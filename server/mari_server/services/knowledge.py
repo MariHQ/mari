@@ -1,0 +1,374 @@
+"""Mari — knowledge mutations: docs, facts, decisions, answers, glossary,
+tags, tasks, lineage, digest, insights, watches."""
+
+from __future__ import annotations
+
+import concurrent.futures as cf
+import datetime as dt
+import json
+import re
+import time
+import typing as t
+
+from mari_server.integrations import llm
+from mari_server.domain import access
+from mari_server.repositories import lineage_repository as links
+from mari_server.repositories.database import actor_name, audit, exec_, q, q1, transaction
+from mari_components import KnowledgeDocument
+from mari_components.knowledge import (
+    check_claims as component_check_claims,
+    extract_decisions as component_extract_decisions,
+    extract_facts as component_extract_facts,
+    refine_document as component_refine_document,
+    summarize_digest as component_summarize_digest,
+)
+
+
+# A document's metadata line is not a claim. The scanner is fed
+# "[source] title: body", and for a GitHub PR the body IS the header line, so
+# the model happily returned "PR #340 · petk · closed · updated
+# 2016-01-17T01:57:54Z" as a fact — a row nobody can verify, and one the
+# contradiction detector then compares digit by digit against its neighbour.
+_META_CLAIM = re.compile(
+    r"""(^\s*(PR|MR|Issue|Commit)\s*\#?\d)   # starts as a PR/issue/commit header
+      | (\d{4}-\d{2}-\d{2}T\d{2}:\d{2})      # carries a raw ISO timestamp
+      | (^[^.!?]*·[^.!?]*·)                  # a "a · b · c" pill line, not a sentence
+    """,
+    re.IGNORECASE | re.VERBOSE)
+
+
+def is_claim(text: str) -> bool:
+    """Is this a sentence someone could agree or disagree with? Guards the
+    ledger against metadata the extractor echoed back at us."""
+    claim = (text or "").strip()
+    return bool(claim) and len(claim.split()) >= 4 and not _META_CLAIM.search(claim)
+
+def _iso_date(value: str | None) -> str | None:
+    """Accept an ISO date (or an ISO timestamp) and return YYYY-MM-DD; None for
+    empty. Anything else is rejected loudly rather than stored as a string the
+    console would later fail to sort."""
+    if value is None or not str(value).strip():
+        return None
+    text = str(value).strip()
+    try:
+        return dt.date.fromisoformat(text[:10]).isoformat()
+    except ValueError:
+        raise ValueError(f"Due date must be an ISO date (YYYY-MM-DD), got {text!r}") from None
+
+
+# Vocabularies the editorial surfaces are allowed to store. Each mirrors a
+# union the component library renders: a value outside one draws an unlabelled
+# chip or a missing glyph, so it is rejected at write time rather than filtered
+# out at read time.
+_TONES = {"ink", "ok", "attention", "blocked", "info"}
+_SEVERITIES = {"error", "warn", "advisory"}
+_TEMPLATE_ICONS = {"clipboard", "git-fork", "shield-check", "file-text",
+                   "sprout", "book-open", "megaphone"}
+
+
+def _slug(value: str) -> str:
+    """A stable url-safe key. Keys are addressed by mutations and stored on
+    settings rows, so they must not carry whitespace or punctuation."""
+    return re.sub(r"[^a-z0-9]+", "-", value.strip().lower()).strip("-")[:64]
+
+
+# ————————————————— the corpus scanners —————————————————
+#
+# Both scanners read recent documents through a model and file what they find.
+# Four things about how they do it were wrong, and all four are the same shape
+# of mistake — treating "call the model once per document" as free:
+#
+# FACT-1  Eight documents × one 120-second call each, sequentially, on the
+#         thread serving a GraphQL mutation: up to sixteen minutes of a request
+#         that any proxy in front of it would have given up on. The calls are
+#         independent, so they run concurrently now, on a small bounded pool,
+#         under a wall-clock deadline that ends the scan honestly rather than
+#         letting it run until something else times out.
+#
+# FACT-2  A single per-scan claim budget, consumed in document order, meant the
+#         first documents ate it and the rest were read for nothing — and since
+#         documents were picked newest-first, "the rest" was the same set every
+#         time. The ceiling is now per document, so no document's claims are
+#         dropped because another document went first, and selection rotates on
+#         documents.facts_scanned_at / .decisions_scanned_at (init.sql) so a
+#         document that is never the newest is still eventually read.
+#
+# FACT-3  `f.get(...)` on whatever the model returned. A model that answers
+#         with ["claim one", "claim two"] — a list of strings, which is a
+#         perfectly ordinary thing for a model to do — raised AttributeError
+#         and took the whole mutation down. Guarded now, the way the two
+#         sibling scanners in this file already guarded.
+#
+# FACT-4  The flow's "Read recent documents" step computed a document list that
+#         the scan then ignored in favour of re-running its own query. Both
+#         scanners now take the list they are given, so the step means what its
+#         label says and changing `k` in the flow editor changes the scan.
+
+SCAN_DOCS = 8            # documents read per scan when the caller names none
+CLAIMS_PER_DOC = 2       # ceiling per document — never a shared, racing budget
+SCAN_WORKERS = 4         # concurrent model calls; the pool is bounded on purpose
+SCAN_CALL_TIMEOUT = 60.0  # per model call
+SCAN_DEADLINE = 180.0    # wall clock for the whole scan, however many documents
+
+
+def _scan_batch(column: str, doc_ids: list[int] | None, limit: int) -> list[dict]:
+    """The documents this scan should read.
+
+    With `doc_ids` (a flow step's fetch_docs output) those documents, in the
+    order given. Without, the least-recently-scanned documents first, newest
+    breaking the tie — so every document is reached in turn instead of the two
+    newest being re-read on every scan forever."""
+    if doc_ids:
+        rows = q(f"""SELECT id, title, snippet, body, source, updated_src FROM documents
+                     WHERE id = ANY(%s) ORDER BY {column} NULLS FIRST,
+                                                updated_src DESC NULLS LAST, id""",
+                 (list(doc_ids),))
+        return rows[:limit] if limit else rows
+    return q(f"""SELECT id, title, snippet, body, source, updated_src FROM documents
+                 ORDER BY {column} NULLS FIRST, updated_src DESC NULLS LAST, id
+                 LIMIT %s""", (limit,))
+
+
+def _mark_scanned(column: str, doc_ids: list[int]) -> None:
+    """Record that the scanner read these documents. This is what makes the
+    next scan pick different ones; without it the rotation above is a no-op."""
+    if doc_ids:
+        exec_(f"UPDATE documents SET {column} = now() WHERE id = ANY(%s)", (list(doc_ids),))
+
+
+def _scan_concurrently(docs: list[dict], operation) -> tuple[list[tuple[dict, t.Any]], int]:
+    """Run one model call per document, at most SCAN_WORKERS at a time, and
+    stop accepting new work once SCAN_DEADLINE has passed.
+
+    Returns (results, unread) — `unread` is how many documents the deadline cut
+    off. The caller reports it. A scan that ran out of time and said so is a
+    scan someone can re-run; a scan that ran out of time and returned a smaller
+    number is indistinguishable from a corpus with less in it."""
+    if not docs:
+        return [], 0
+    results: list[tuple[dict, t.Any]] = []
+    deadline = time.monotonic() + SCAN_DEADLINE
+    with cf.ThreadPoolExecutor(max_workers=min(SCAN_WORKERS, len(docs)),
+                               thread_name_prefix="mari-scan") as pool:
+        futures = {pool.submit(operation, d): d for d in docs}
+        for future in cf.as_completed(futures):
+            doc = futures[future]
+            try:
+                results.append((doc, future.result()))
+            except Exception:  # noqa: BLE001 — one bad document must not end the scan
+                results.append((doc, None))
+            if time.monotonic() >= deadline:
+                # Stop waiting. Calls already in flight finish into a result
+                # nobody reads, which costs the model's time but not the
+                # caller's; the count below is what the run reports.
+                for pending in futures:
+                    if not pending.done():
+                        pending.cancel()
+                break
+    return results, len(docs) - len(results)
+
+
+def _component_document(doc: dict) -> KnowledgeDocument:
+    return KnowledgeDocument(
+        str(doc["id"]), str(doc["title"]), str(doc.get("body") or doc.get("snippet") or ""),
+        revision=str(doc.get("updated_src") or ""), metadata={"source": str(doc.get("source") or "")},
+    )
+
+
+# ————————————————— LLM helpers for mutations —————————————————
+
+SKILL_PROMPTS = {
+    "tighten": "Tighten the prose: remove filler words and redundancy.",
+    "plain": "Rewrite in plain language: shorter words, no jargon.",
+    "active": "Convert passive voice to active voice.",
+    "inclusive": "Replace non-inclusive or ambiguous terms.",
+    "terminology": "Align terms with the team glossary.",
+    "headings": "Improve headings to be descriptive and parallel.",
+    "translate": "Translate the passage to French, keeping technical terms.",
+}
+
+def llm_refine(doc: dict, skill: str) -> list[tuple[str, str, str]]:
+    document = _component_document(doc)
+    edits = component_refine_document(
+        document,
+        SKILL_PROMPTS.get(skill, SKILL_PROMPTS["tighten"]),
+        generate_json=lambda prompt, _version: llm.generate_json(
+            prompt, system="You are Mari, a precise technical editor."),
+    )
+    return [(edit.original[:300], edit.replacement[:300], edit.reason[:120]) for edit in edits]
+
+
+# ——— LLM scanners: mine the doc graph for candidates ———
+#
+# The `*_for` functions are the scan; the mutations are thin wrappers that
+# supply the default document list. The flow steps call the functions with
+# ctx["doc_ids"], which is what makes the flow's fetch_docs step real
+# (FACT-4) — before, the step computed a list and the scan ignored it.
+
+def scan_decisions_for(doc_ids: list[int] | None = None,
+                       limit: int = SCAN_DOCS) -> tuple[int, int, str]:
+    """Mine `doc_ids` (or the least-recently-scanned documents) for
+    decisions. Returns (added, documents read, note) — the note is '' when
+    the scan finished, and says what was left unread when it did not."""
+    docs = _scan_batch("decisions_scanned_at", doc_ids, limit)
+    if not docs:
+        return 0, 0, ""
+    existing = {r["statement"].lower() for r in q("SELECT statement FROM decisions")}
+
+    def extract(doc: dict):
+        return component_extract_decisions(
+            [_component_document(doc)],
+            generate_json=lambda prompt, _version: llm.generate_json(
+                prompt, "You mine team knowledge for decisions worth ratifying.", SCAN_CALL_TIMEOUT),
+            maximum_documents=1, maximum_characters=1500,
+        )
+
+    results, unread = _scan_concurrently(docs, extract)
+
+    added = 0
+    for doc, out in results:
+        for item in out[:CLAIMS_PER_DOC]:
+            stmt = (item.statement if hasattr(item, "statement")
+                    else str(item.get("statement", ""))).strip()[:200]
+            if not stmt or stmt.lower() in existing:
+                continue
+            exec_("""INSERT INTO decisions (statement, context, status, source_label, owners)
+                     VALUES (%s, %s, 'proposed', %s, %s) ON CONFLICT (statement) DO NOTHING""",
+                  (stmt, ((item.evidence[0].quote if item.evidence else "")
+                          if hasattr(item, "evidence") else str(item.get("context", "")))[:400],
+                   ("Mari scan · " + doc["title"])[:120], [actor_name()]))
+            existing.add(stmt.lower())
+            added += 1
+
+    _mark_scanned("decisions_scanned_at", [doc["id"] for doc, _ in results])
+    note = (f"{unread} document{'' if unread == 1 else 's'} not read — the scan hit its "
+            f"{int(SCAN_DEADLINE)}s budget; run it again to continue") if unread else ""
+    audit("scanned for decisions", f"{added} candidates from {len(results)} documents"
+                                   + (f" ({note})" if note else ""))
+    return added, len(results), note
+
+def scan_facts_for(doc_ids: list[int] | None = None,
+                   limit: int = SCAN_DOCS) -> tuple[int, int, str]:
+    """Mine `doc_ids` (or the least-recently-scanned documents) for atomic,
+    checkable claims; they land as 'Needs review' facts.
+
+    One document per model call, not one call over a pasted-together
+    corpus. The old shape asked the model which document each claim came
+    from and stored the answer as a text label, which meant the provenance
+    was the model's recollection of a title — good enough to print, not
+    good enough to key on, so Doc Review could never list a document's own
+    claims. Reading one document at a time makes `document_id` a fact about
+    the call rather than a guess about the output.
+
+    Returns (added, documents read, note)."""
+    docs = [d for d in _scan_batch("facts_scanned_at", doc_ids, limit)
+            if (d["body"] or d["snippet"] or "").strip()]
+    if not docs:
+        return 0, 0, ""
+    existing = {r["claim"].lower() for r in q("SELECT claim FROM facts")}
+
+    def extract(doc: dict):
+        return component_extract_facts(
+            [_component_document(doc)],
+            generate_json=lambda prompt, _version: llm.generate_json(
+                prompt, "You extract verifiable facts from documentation.", SCAN_CALL_TIMEOUT),
+            maximum_documents=1, maximum_characters=1500,
+        )
+
+    results, unread = _scan_concurrently(docs, extract)
+
+    # The ceiling is per document (FACT-2). A shared budget meant the first
+    # document's claims displaced the fifth document's, and the fifth
+    # document was read for nothing — silently, since the count it returned
+    # looked exactly like a document that had no claims in it.
+    added = 0
+    for doc, out in results:
+        for item in out[:CLAIMS_PER_DOC]:
+            claim = (item.claim if hasattr(item, "claim")
+                     else str(item.get("claim", ""))).strip()[:200]
+            if not is_claim(claim) or claim.lower() in existing:
+                continue
+            # `source` stays the human label it always was; `document_id`
+            # is the key, and it is the document this call actually read.
+            exec_("""INSERT INTO facts (claim, source, owner_name, owner_tint, status, verified, document_id)
+                     VALUES (%s, %s, %s, 1, 'Needs review', '—', %s) ON CONFLICT (claim) DO NOTHING""",
+                  (claim, ("Mari scan · " + doc["title"])[:80], actor_name(), doc["id"]))
+            existing.add(claim.lower())
+            added += 1
+
+    _mark_scanned("facts_scanned_at", [doc["id"] for doc, _ in results])
+    note = (f"{unread} document{'' if unread == 1 else 's'} not read — the scan hit its "
+            f"{int(SCAN_DEADLINE)}s budget; run it again to continue") if unread else ""
+    audit("scanned for facts", f"{added} candidates from {len(results)} documents"
+                               + (f" ({note})" if note else ""))
+    return added, len(results), note
+
+
+def fact_check_document(document_id: int) -> int:
+    doc = q1("SELECT * FROM documents WHERE id = %s", (document_id,))
+    if not doc:
+        return 0
+    facts = q("SELECT claim FROM facts WHERE status = 'Verified'")
+    assessments = component_check_claims(
+        [fact["claim"] for fact in facts], [_component_document(doc)],
+        generate_json=lambda prompt, _version: llm.generate_json(
+            prompt, system="You are Mari, a rigorous fact checker."),
+        maximum_documents=1,
+    )
+    found = 0
+    for assessment in assessments[:5]:
+        if assessment.verdict != "contradicted" or not assessment.evidence:
+            continue
+        exec_("""INSERT INTO findings (document_id, kind, severity, text, note)
+                 VALUES (%s, 'fact', 'error', %s, %s)
+                 ON CONFLICT (document_id, text) DO NOTHING""",
+              (document_id, assessment.evidence[0].quote[:200],
+               f"{assessment.claim}: {assessment.explanation}"[:300]))
+        found += 1
+    audit("ran fact check", doc["title"])
+    return found
+
+
+def derive_links() -> int:
+    project_id = access.require_current_access().project_id
+    added = links.extract_all(project_id)
+    audit("derived semantic links", f"{added} new edges")
+    return added
+
+
+def regenerate_digest() -> bool:
+    project_id = access.require_current_access().project_id
+    docs = q("""SELECT id, external_id, title, body, snippet, source, updated_src
+                  FROM documents WHERE project_id = %s
+                  ORDER BY updated_src DESC LIMIT 8""", (project_id,))
+    documents = [_component_document(doc) for doc in docs]
+    result = component_summarize_digest(
+        documents,
+        generate_json=lambda prompt, _version: llm.generate_json(
+            prompt, system="You are Mari, summarizing the team's week."),
+        maximum_documents=8,
+    )
+    by_id = {document.external_id: row for document, row in zip(documents, docs)}
+    topics = []
+    for topic in result.topics[:3]:
+        wheres, seen = [], set()
+        for evidence in topic.evidence:
+            row = by_id[evidence.document_id]
+            key = (row["source"], row["title"])
+            if key not in seen:
+                seen.add(key)
+                wheres.append({"source": row["source"], "label": row["title"]})
+        topics.append((topic.title[:120], topic.summary[:500], json.dumps(wheres), "[]"))
+
+    def replace(conn):
+        conn.execute("DELETE FROM digest_topics WHERE project_id = %s", (project_id,))
+        for title, summary, wheres, impact in topics:
+            conn.execute("""INSERT INTO digest_topics
+                         (project_id, title, summary, wheres, impact)
+                         VALUES (%s, %s, %s, %s, %s)""",
+                         (project_id, title, summary, wheres, impact))
+
+    transaction(replace)
+    audit("regenerated digest", f"{len(topics)} topics")
+    return True
+

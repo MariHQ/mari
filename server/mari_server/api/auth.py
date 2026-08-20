@@ -22,10 +22,10 @@ import urllib.request
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel
 
-from mari_server.infrastructure import config
+from mari_server import config
 from mari_server.api import access as access_module
-from mari_server.infrastructure import control_store
-from mari_server.infrastructure import postgres
+from mari_server.repositories import control_store
+from mari_server import db as postgres
 
 log = logging.getLogger("mari.auth")
 router = APIRouter(prefix="/auth")

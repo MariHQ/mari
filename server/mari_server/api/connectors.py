@@ -21,11 +21,11 @@ from pydantic import BaseModel
 
 from mari_server.api import auth
 from mari_server.api import access
-from mari_server.infrastructure import connector_runtime as connect_sync
-from mari_server.infrastructure import connector_provider as component_connectors
-from mari_server.infrastructure import workflow_runtime as flowengine
-from mari_server.infrastructure import ingestion as ingest
-from mari_server.infrastructure.database import audit, exec_, q, q1
+from mari_server.services import connector_sync
+from mari_server.integrations import connector_provider as component_connectors
+from mari_server.services import workflow_runtime as flowengine
+from mari_server.services import sync as ingest
+from mari_server.repositories.database import audit, exec_, q, q1
 from mari_components.connectors import connector_definition, connector_definitions
 
 router = APIRouter(prefix="/connectors")
@@ -58,7 +58,7 @@ def _connected_map() -> dict[str, int]:
                (access.require_current_access().project_id,)):
         cfg = r["config"] if isinstance(r["config"], dict) else json.loads(r["config"] or "{}")
         if r["kind"] == "connector":
-            out[connect_sync.provider_key_of(r["provider"], cfg)] = r["id"]
+            out[connector_sync.provider_key_of(r["provider"], cfg)] = r["id"]
     return out
 
 

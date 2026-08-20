@@ -9,13 +9,13 @@ from strawberry.scalars import JSON
 
 from mari_server.api import access
 from mari_server.api import auth
-from mari_server.infrastructure import workflow_runtime as flowengine
-from mari_server.infrastructure import github_runtime
-from mari_server.infrastructure import ingestion as ingest
-from mari_server.infrastructure import lineage_repository as links
-from mari_server.infrastructure import models as llm
-from mari_server.infrastructure import repository_audit as repoaudit
-from mari_server.infrastructure.database import audit, exec_, q, q1
+from mari_server.services import workflow_runtime as flowengine
+from mari_server.integrations import github
+from mari_server.services import sync as ingest
+from mari_server.repositories import lineage_repository as links
+from mari_server.integrations import llm
+from mari_server.services import repository_audit as repoaudit
+from mari_server.repositories.database import audit, exec_, q, q1
 
 # ————— the authorization rule —————
 #
@@ -240,17 +240,17 @@ class MutAdmin:
         if slug:
             if slug.count("/") != 1 or not all(p.strip() for p in slug.split("/")):
                 raise ValueError("Team must be in org/team form, e.g. acme/docs")
-            if github_runtime.configured_token():
+            if github.configured_token():
                 org, name = slug.split("/")
-                if not github_runtime.team_is_valid(
-                        github_runtime.configured_token(), org, name):
+                if not github.team_is_valid(
+                        github.configured_token(), org, name):
                     raise ValueError(f"GitHub team {slug} not found, or this token cannot see it")
         exec_("""INSERT INTO settings (key, value) VALUES ('provisioning', %s)
                  ON CONFLICT (key) DO UPDATE SET value = settings.value || EXCLUDED.value""",
               (json.dumps({"github_team": slug}),))
         audit("configured GitHub team sync" if slug else "disabled GitHub team sync",
               slug or "GitHub team", actor["name"],
-              [("Team", slug or "(none)"), ("Verified against GitHub", "yes" if slug and github_runtime.configured_token() else "no")])
+              [("Team", slug or "(none)"), ("Verified against GitHub", "yes" if slug and github.configured_token() else "no")])
         return True
 
     # ——— GitHub ingestion (real — GITHUB-SYNC-CONTRACT.md) ———
@@ -273,7 +273,7 @@ class MutAdmin:
                    AND split_part(provider, ':', 1) = 'github'
                    AND lower(config->>'repo') = lower(%s)""", (project_id, repo)):
             raise ValueError(f"Repository {repo} is already connected")
-        branch = github_runtime.default_branch(requested_token, repo)
+        branch = github.default_branch(requested_token, repo)
         cfg = {"provider_key": "github", "repo": repo, "branch": branch, "paths": paths or "",
                "token": requested_token, "cursor": "", "last_sync_at": "",
                "last_error": "", "item_hashes": {}}

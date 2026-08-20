@@ -18,8 +18,8 @@ from fastapi import APIRouter, Header, HTTPException, Request, Response
 
 from mari_server.api import bots
 from mari_server.api import access
-from mari_server.infrastructure.database import pq, q1
-from mari_server.api.graphql_queries import hybrid_search
+from mari_server.repositories.database import pq, q1
+from mari_server.services.search import hybrid_search
 
 router = APIRouter(prefix="/mcp")
 PROTOCOL_VERSION = "2025-06-18"

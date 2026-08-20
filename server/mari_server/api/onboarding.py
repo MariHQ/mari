@@ -20,17 +20,17 @@ from fastapi import APIRouter, File, HTTPException, UploadFile
 from psycopg.rows import dict_row
 from pydantic import BaseModel
 
-from mari_server.infrastructure import models as llm
+from mari_server.integrations import llm
 from mari_server.api import access
 from mari_components import KnowledgeDocument
 from mari_components.knowledge import harvest_glossary as component_harvest_glossary
 # Reuse the real GitHub ingestion pipeline pieces (chunk + content-hash + embed +
 # mean-pooled doc embedding). ingest._upsert_document is github-specific
 # (hardcodes source='github'), so the document upsert lives here instead.
-from mari_server.infrastructure.ingestion import _chunk_settings, _sha, _sync_chunks, _title_of
+from mari_server.integrations.document_index import chunk_settings, content_hash, sync_chunks, title_of
 
-from mari_server.infrastructure import postgres
-from mari_server.application.excerpt import excerpt
+from mari_server import db as postgres
+from mari_server.services.excerpt import excerpt
 
 router = APIRouter(prefix="/onboard")
 
@@ -60,7 +60,7 @@ def _upload_source(conn) -> int:
 
 def _upsert_upload_document(conn, source_id: int, filename: str, text: str) -> int:
     """Same shape as ingest._upsert_document, with source='upload'."""
-    title = _title_of(text, filename)
+    title = title_of(text, filename)
     snippet = excerpt(text, title)
     row = conn.execute("""
         INSERT INTO documents (project_id, source, external_id, title, snippet, body, author, author_initials,
@@ -71,7 +71,7 @@ def _upsert_upload_document(conn, source_id: int, filename: str, text: str) -> i
           updated_src = CURRENT_DATE, content_hash = EXCLUDED.content_hash,
           source_path = EXCLUDED.source_path, source_id = EXCLUDED.source_id
         RETURNING id""",
-        (access.require_current_access().project_id, f"upload:{filename}", title, snippet, text, ACTOR, _sha(text),
+        (access.require_current_access().project_id, f"upload:{filename}", title, snippet, text, ACTOR, content_hash(text),
          f"upload/{filename}", source_id)).fetchone()
     conn.commit()
     return row["id"]
@@ -81,7 +81,7 @@ def _upsert_upload_document(conn, source_id: int, filename: str, text: str) -> i
 async def upload(files: list[UploadFile] = File(...)):
     if len(files) > MAX_FILES:
         raise HTTPException(400, f"at most {MAX_FILES} files per upload")
-    max_tokens, overlap = _chunk_settings()
+    max_tokens, overlap = chunk_settings()
     results: list[dict] = []
     # A document is keyed on its flattened filename (the endpoint never sees
     # the client's folder structure), so two files from different folders that
@@ -122,7 +122,7 @@ async def upload(files: list[UploadFile] = File(...)):
             doc_id = _upsert_upload_document(conn, source_id, name, text)
             # chunk + per-chunk content hash + embed only changed (ingest pipeline):
             # re-uploading unchanged content embeds nothing.
-            n, e = _sync_chunks(conn, doc_id, _title_of(text, name), text, max_tokens, overlap)
+            n, e = sync_chunks(conn, doc_id, title_of(text, name), text, max_tokens, overlap)
             results.append({"name": name, "docId": doc_id, "chunks": n, "embedded": e})
 
         ok_files = [r for r in results if r.get("docId")]

@@ -16,11 +16,12 @@ from pydantic import BaseModel
 
 from mari_server.api import access
 from mari_server.api import auth
-from mari_server.infrastructure import config
-from mari_server.infrastructure import ingestion as ingest
-from mari_server.infrastructure import connector_provider as component_connectors
-from mari_server.infrastructure.event_inbox import DEFAULT_INBOX
-from mari_server.infrastructure.database import exec_, q, q1
+from mari_server.integrations import document_index
+from mari_server import config
+from mari_server.services import sync as ingest
+from mari_server.integrations import connector_provider as component_connectors
+from mari_server.integrations.event_inbox import DEFAULT_INBOX
+from mari_server.repositories.database import exec_, q, q1
 from mari_components import PollRequest
 from mari_components.connectors import (
     GoogleDriveConfig, connector_definition, start_google_drive_watch,
@@ -181,16 +182,16 @@ async def gdrive_webhook(request: Request):
 def _apply_poll(source: dict, source_config: dict, poll) -> None:
     source_id = int(source["id"])
     hashes = dict(source_config.get("item_hashes") or {})
-    max_tokens, overlap = ingest._chunk_settings()
-    with ingest._conn() as conn:
+    max_tokens, overlap = document_index.chunk_settings()
+    with document_index.connection() as conn:
         for document in poll.upserts:
             path = document.external_id
             if not path:
                 continue
             title = document.title or path
             body = document.body
-            content_hash = document.revision or ingest._sha(f"{title}\n\n{body}")
-            doc_id, _inserted = ingest._upsert_document(
+            content_hash = document.revision or document_index.content_hash(f"{title}\n\n{body}")
+            doc_id, _inserted = document_index.upsert_document(
                 conn, source_id, f"gdrive:{source_id}:{path}", title, body,
                 f"gdrive/{path}", "page", content_hash, "Google Drive",
                 source="gdrive", initials="GD",
@@ -201,7 +202,7 @@ def _apply_poll(source: dict, source_config: dict, poll) -> None:
                 ),
             )
             if hashes.get(path) != content_hash:
-                ingest._sync_chunks(conn, doc_id, title, body, max_tokens, overlap)
+                document_index.sync_chunks(conn, doc_id, title, body, max_tokens, overlap)
             hashes[path] = content_hash
         tombstones = {value.external_id for value in poll.tombstones if value.external_id}
         if tombstones:
@@ -210,7 +211,7 @@ def _apply_poll(source: dict, source_config: dict, poll) -> None:
             ).fetchall()
             gone = [row["id"] for row in rows
                     if str(row.get("source_path") or "").removeprefix("gdrive/") in tombstones]
-            ingest._delete_documents(conn, gone)
+            document_index.delete_documents(conn, gone)
             for path in tombstones:
                 hashes.pop(path, None)
         source_config["item_hashes"] = hashes

@@ -18,16 +18,16 @@ import strawberry
 import numpy as np
 from strawberry.scalars import JSON
 
-from mari_server.infrastructure import config
+from mari_server import config
 from mari_server.api import access
-from mari_server.infrastructure import github_runtime
-from mari_server.infrastructure import ingestion as ingest
-from mari_server.infrastructure import models as llm
-from mari_server.infrastructure import retrieval
-from mari_server.application import review as review_application
-from mari_server.infrastructure import review_repository
-from mari_server.infrastructure.database import actor_name, exec_, jload, q, q1
-from mari_server.application.excerpt import excerpt
+from mari_server.integrations import github
+from mari_server.services import sync as ingest
+from mari_server.integrations import llm
+from mari_server.integrations import vector_index as retrieval
+from mari_server.services import review as review_application
+from mari_server.repositories import review_repository
+from mari_server.repositories.database import actor_name, exec_, jload, q, q1
+from mari_server.services.excerpt import excerpt
 from mari_server.api.graphql_types import (
     ActivityBucket, ActivityItem, ApiKey, ApprovedAnswer,
     AuditDetail, AuditEvent, AuditFinding, AuditRun, Change, ChatMessage,
@@ -155,7 +155,7 @@ DOC_SQL = """
 """
 
 # Search implementation lives behind the infrastructure boundary.
-from mari_server.infrastructure.search import MAX_K, hybrid_count, hybrid_search, invalidate_search, like_pattern
+from mari_server.services.search import MAX_K, hybrid_count, hybrid_search, invalidate_search, like_pattern
 
 # ————————————————— search telemetry (SRCH-4) —————————————————
 #
@@ -434,10 +434,10 @@ class Query:
         def safe_config(r: dict) -> dict:
             """Never leak connector credentials: secret field values are masked
             and bulky internal hash maps dropped (CONNECTORS-CONTRACT.md)."""
-            from mari_server.infrastructure import connector_runtime as connect_sync
+            from mari_server.services import connector_sync
             cfg = jload(r["config"]) or {}
             if r.get("kind") == "connector":
-                return connect_sync.masked_config(r["provider"], cfg)
+                return connector_sync.masked_config(r["provider"], cfg)
             return {k: v for k, v in cfg.items() if k != "shas"}
 
         # A source's automatic cadence is not a column on `sources`: it is the
@@ -479,11 +479,11 @@ class Query:
                ORDER BY id DESC LIMIT 1"""
         )
         source_cfg = jload(source["config"]) if source else {}
-        available_token = github_runtime.configured_token() or str((source_cfg or {}).get("token") or "")
+        available_token = github.configured_token() or str((source_cfg or {}).get("token") or "")
         if not available_token:
             return []
         try:
-            repos = github_runtime.repositories(available_token)
+            repos = github.repositories(available_token)
         except Exception:
             return []
         connected = {jload(r["config"]).get("repo", "")
@@ -1144,7 +1144,7 @@ class Query:
         if not isinstance(v, dict):
             v = {}
         team = str(v.get("github_team") or "")
-        has_token = bool(github_runtime.configured_token())
+        has_token = bool(github.configured_token())
         synced = int(q1("SELECT count(*) AS n FROM users WHERE provider = 'github'")["n"])
         providers = [name for name, key in (("github", "github_client_id"),
                                             ("google", "google_client_id"))

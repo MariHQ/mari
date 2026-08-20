@@ -29,9 +29,9 @@ from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
 from strawberry.fastapi import GraphQLRouter
 
-from mari_server.infrastructure import config
-from mari_server.infrastructure import ingestion as ingest
-from mari_server.infrastructure import models as llm
+from mari_server import config
+from mari_server.services import sync as ingest
+from mari_server.integrations import llm
 from mari_server.api import agent as agent_api
 from mari_server.api import chat as chat_api
 from mari_server.api.graphql_destinations import DestinationMutations
@@ -42,13 +42,13 @@ from mari_server.api import bots
 from mari_server.api import mcp
 from mari_server.api import connectors as connectors_api
 from mari_server.api import onboarding as onboard
-from mari_server.infrastructure import repository_audit as repoaudit
+from mari_server.services import repository_audit as repoaudit
 from mari_server.api import provider_events
-from mari_server.infrastructure import observability
+from mari_server import observability
 from mari_server.api import enterprise_identity
 from mari_server.api import gdrive_events
 
-from mari_server.infrastructure.database import close_pool, ensure_schema, exec_, open_pool, q, q1
+from mari_server.repositories.database import close_pool, ensure_schema, exec_, open_pool, q, q1
 from mari_server.api.graphql_queries import Query
 from mari_server.api.graphql_knowledge import MutKnowledge
 from mari_server.api.graphql_admin import MutAdmin
