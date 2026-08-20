@@ -8,19 +8,7 @@ from typing import Callable, Iterator
 from connectors import _net
 from connectors._protocol import ACLMetadata, PollResult
 from mari_components import PollRequest, SyncMode
-from mari_components.connectors import (
-    AirtableConfig, AsanaConfig, ConfluenceConfig, DropboxConfig, JiraConfig,
-    LinearConfig, NotionConfig, SlackConfig, TrelloConfig, ZendeskConfig,
-    poll_airtable, poll_asana, poll_confluence, poll_dropbox, poll_jira,
-    poll_linear, poll_notion, poll_slack, poll_trello, poll_zendesk,
-    validate_airtable, validate_asana, validate_confluence, validate_dropbox,
-    validate_jira, validate_linear, validate_notion, validate_slack,
-    validate_trello, validate_zendesk,
-)
-from mari_components.connectors.google_drive import (
-    GoogleDriveConfig, GoogleOAuthRefresh, poll_google_drive,
-    refresh_google_access_token, validate_google_drive,
-)
+from mari_components.connectors import CONNECTOR_CATALOG, connector_definition
 from mari_components.http import HttpRequest, HttpResponse
 
 
@@ -105,79 +93,28 @@ def _request(cursor: str | None, cfg: dict) -> tuple[PollRequest, str | None]:
     ), base_cursor
 
 
-def _gdrive(cfg: dict) -> GoogleDriveConfig:
-    return GoogleDriveConfig(str(cfg.get("access_token") or ""), str(cfg.get("folder_id") or ""))
-
-
-def _refresh_gdrive(cfg: dict) -> GoogleDriveConfig:
-    refreshed = refresh_google_access_token(
-        GoogleOAuthRefresh(
-            str(cfg.get("refresh_token") or ""), str(cfg.get("client_id") or ""),
-            str(cfg.get("client_secret") or "")),
-        http=_http,
-    )
-    cfg["access_token"] = refreshed
-    return _gdrive(cfg)
-
-
-def _configs(key: str, cfg: dict):
-    values = {
-        "airtable": lambda: AirtableConfig(str(cfg.get("pat") or ""), str(cfg.get("base_id") or "")),
-        "asana": lambda: AsanaConfig(str(cfg.get("pat") or ""), str(cfg.get("workspace") or ""), str(cfg.get("project_gid") or "")),
-        "confluence": lambda: ConfluenceConfig(str(cfg.get("site_url") or ""), str(cfg.get("email") or ""), str(cfg.get("api_token") or ""), str(cfg.get("space_key") or "")),
-        "dropbox": lambda: DropboxConfig(str(cfg.get("access_token") or ""), str(cfg.get("folder") or "")),
-        "gdrive": lambda: _gdrive(cfg),
-        "jira": lambda: JiraConfig(str(cfg.get("site_url") or ""), str(cfg.get("email") or ""), str(cfg.get("api_token") or ""), str(cfg.get("project_key") or ""), str(cfg.get("jql") or "")),
-        "linear": lambda: LinearConfig(str(cfg.get("api_key") or ""), str(cfg.get("team_id") or "")),
-        "notion": lambda: NotionConfig(str(cfg.get("token") or "")),
-        "slack": lambda: SlackConfig(str(cfg.get("bot_token") or ""), tuple(value.strip() for value in str(cfg.get("channels") or "").split(",") if value.strip()), str(cfg.get("history_token") or "")),
-        "trello": lambda: TrelloConfig(str(cfg.get("api_key") or ""), str(cfg.get("token") or "")),
-        "zendesk": lambda: ZendeskConfig(str(cfg.get("subdomain") or ""), str(cfg.get("email") or ""), str(cfg.get("api_token") or "")),
-    }
-    return values[key]()
-
-
-_VALIDATE = {
-    "airtable": validate_airtable, "asana": validate_asana,
-    "confluence": validate_confluence, "dropbox": validate_dropbox,
-    "gdrive": validate_google_drive, "jira": validate_jira,
-    "linear": validate_linear, "notion": validate_notion,
-    "slack": validate_slack, "trello": validate_trello,
-    "zendesk": validate_zendesk,
-}
-_POLL = {
-    "airtable": poll_airtable, "asana": poll_asana,
-    "confluence": poll_confluence, "dropbox": poll_dropbox,
-    "gdrive": poll_google_drive, "jira": poll_jira,
-    "linear": poll_linear, "notion": poll_notion,
-    "slack": poll_slack, "trello": poll_trello,
-    "zendesk": poll_zendesk,
-}
-
-
 def functions(key: str, legacy_validate: Callable, legacy_list: Callable) -> tuple[Callable, Callable]:
     """Return component-backed functions or the untouched excluded provider."""
-    if key not in _POLL:
+    if key not in CONNECTOR_CATALOG:
         return legacy_validate, legacy_list
+    definition = connector_definition(key)
 
     def validate(cfg: dict) -> str | None:
         try:
-            result = _VALIDATE[key](_configs(key, cfg), http=_http)
-            if not result.ok and key == "gdrive" and cfg.get("refresh_token"):
-                result = _VALIDATE[key](_refresh_gdrive(cfg), http=_http)
+            result = definition.validate(cfg, http=_http)
             return None if result.ok else result.message
         except Exception as error:
             return str(error)
 
     def list_items(cfg: dict, cursor: str | None) -> PollResult:
         request, base_cursor = _request(cursor, cfg)
-        try:
-            pages = _POLL[key](_configs(key, cfg), request, http=_http)
-            return _collect(pages, base_cursor)
-        except Exception:
-            if key != "gdrive" or not cfg.get("refresh_token"):
-                raise
-            pages = _POLL[key](_refresh_gdrive(cfg), request, http=_http)
-            return _collect(pages, base_cursor)
+        return _collect(definition.poll(cfg, request, http=_http), base_cursor)
 
     return validate, list_items
+
+
+def validate_config(key: str, values: dict) -> str | None:
+    """Validate raw connector values through the shared declarative catalog."""
+    definition = connector_definition(key)
+    result = definition.validate(values, http=_http)
+    return None if result.ok else result.message

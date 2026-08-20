@@ -9,7 +9,6 @@ import json
 import logging
 import secrets
 import threading
-import urllib.parse
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -19,10 +18,15 @@ import access
 import auth
 import config
 import ingest
-from connectors import gdrive
+import component_connectors
 from event_inbox import DEFAULT_INBOX
 from db import exec_, q, q1
+from mari_components import PollRequest
+from mari_components.connectors import (
+    GoogleDriveConfig, connector_definition, start_google_drive_watch,
+)
 from mari_components.connectors.events import gdrive_change_hint
+from mari_components.errors import IncompleteSnapshot
 
 
 router = APIRouter()
@@ -80,36 +84,27 @@ def create_watch(
              VALUES (%s, %s, %s, %s, %s, %s)""",
         (project_id, source["id"], channel_id, token_hash, page_token, expiration),
     )
-    request_body = json.dumps({
-        "id": channel_id, "type": "web_hook",
-        "address": f"{base}/webhooks/google-drive",
-        "token": channel_token,
-        "expiration": str(round(expiration.timestamp() * 1000)),
-    }).encode()
-    watch_query = urllib.parse.urlencode({"pageToken": page_token,
-                                          "supportsAllDrives": "true"})
-    url = f"{gdrive.API}/changes/watch?{watch_query}"
-    status, raw = gdrive._request(source_config, "POST", url, request_body,
-                                  {"Content-Type": "application/json"})
-    if status != 200:
-        error = gdrive._vendor_error(status, raw)
+    try:
+        watched = start_google_drive_watch(
+            GoogleDriveConfig(
+                str(source_config.get("access_token") or ""),
+                str(source_config.get("folder_id") or ""),
+            ),
+            page_token,
+            f"{base}/webhooks/google-drive",
+            channel_id,
+            channel_token,
+            expiration_ms=round(expiration.timestamp() * 1000),
+            http=component_connectors._http,
+        )
+    except Exception as exc:
+        error = str(exc)
         exec_("UPDATE gdrive_watch_channels SET status='error', last_error=%s WHERE channel_id=%s",
               (error[:1000], channel_id))
-        raise HTTPException(502, error)
-    try:
-        watched = json.loads(raw)
-        resource_id = str(watched["resourceId"])
-    except (json.JSONDecodeError, KeyError, TypeError) as exc:
-        exec_("UPDATE gdrive_watch_channels SET status='error', last_error=%s WHERE channel_id=%s",
-              ("Drive watch returned an invalid response", channel_id))
-        raise HTTPException(502, "Google Drive watch returned no resource id.") from exc
-    provider_expiration = watched.get("expiration")
-    if provider_expiration:
-        try:
-            expiration = dt.datetime.fromtimestamp(int(provider_expiration) / 1000,
-                                                   tz=dt.timezone.utc)
-        except (TypeError, ValueError, OverflowError):
-            pass
+        raise HTTPException(502, error) from exc
+    resource_id = watched.resource_id
+    if watched.expiration_ms is not None:
+        expiration = dt.datetime.fromtimestamp(watched.expiration_ms / 1000, tz=dt.timezone.utc)
     exec_(
         """UPDATE gdrive_watch_channels
               SET resource_id=%s, expiration=%s, status='active', updated_at=now()
@@ -188,25 +183,27 @@ def _apply_poll(source: dict, source_config: dict, poll) -> None:
     hashes = dict(source_config.get("item_hashes") or {})
     max_tokens, overlap = ingest._chunk_settings()
     with ingest._conn() as conn:
-        for item in poll.items:
-            path = str(item.get("path") or "")
+        for document in poll.upserts:
+            path = document.external_id
             if not path:
                 continue
-            title = str(item.get("title") or path)
-            body = str(item.get("body") or "")
-            content_hash = str(item.get("hash_hint") or ingest._sha(f"{title}\n\n{body}"))
-            acl = item.get("acl")
+            title = document.title or path
+            body = document.body
+            content_hash = document.revision or ingest._sha(f"{title}\n\n{body}")
             doc_id, _inserted = ingest._upsert_document(
                 conn, source_id, f"gdrive:{source_id}:{path}", title, body,
                 f"gdrive/{path}", "page", content_hash, "Google Drive",
                 source="gdrive", initials="GD",
-                acl_visibility=getattr(acl, "visibility", "restricted"),
-                acl_principals=tuple(getattr(acl, "principals", ()) or ()),
+                acl_visibility=document.acl.visibility,
+                acl_principals=tuple(
+                    f"{principal.kind}:{principal.identifier}"
+                    for principal in document.acl.principals
+                ),
             )
             if hashes.get(path) != content_hash:
                 ingest._sync_chunks(conn, doc_id, title, body, max_tokens, overlap)
             hashes[path] = content_hash
-        tombstones = {str(value) for value in poll.tombstones if str(value)}
+        tombstones = {value.external_id for value in poll.tombstones if value.external_id}
         if tombstones:
             rows = conn.execute(
                 "SELECT id, source_path FROM documents WHERE source_id=%s", (source_id,),
@@ -262,23 +259,27 @@ def process_gdrive_delivery(row: dict) -> None:
         "gdrive", str(channel["source_id"]), frozenset({"knowledge.read", "knowledge.write"}),
     )
     with access.use_access(project_access):
-        token = cursor[8:]
         try:
             while True:
-                poll = gdrive.list_changes(source_config, token)
+                request = PollRequest(cursor=cursor, page_limit=1)
+                pages = connector_definition("gdrive").poll(
+                    source_config, request, http=component_connectors._http,
+                )
+                poll = next(pages)
                 _apply_poll(source, source_config, poll)
-                durable = poll.cursor if poll.snapshot_complete else poll.checkpoint
+                durable = poll.next_cursor if poll.snapshot_complete else poll.next_checkpoint
                 if not durable or not str(durable).startswith("changes:"):
                     raise RuntimeError("Google Drive Changes returned no durable cursor")
-                token = str(durable)[8:]
-                source_config["cursor"] = str(durable)
+                cursor = str(durable)
+                token = cursor[8:]
+                source_config["cursor"] = cursor
                 exec_("UPDATE sources SET config=%s, last_sync_at=now(), health='Healthy' WHERE id=%s",
                       (json.dumps(source_config), source["id"]))
                 exec_("UPDATE gdrive_watch_channels SET page_token=%s, last_error='', updated_at=now() WHERE source_id=%s",
                       (token, source["id"]))
                 if poll.snapshot_complete:
                     break
-        except gdrive.DrivePageTokenExpired:
+        except IncompleteSnapshot:
             _full_reconcile(source, source_config, str(channel["channel_id"]))
 
 

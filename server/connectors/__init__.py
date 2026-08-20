@@ -59,6 +59,43 @@ def _discover() -> dict:
             "list_items": list_items,
             "module": mod,
         }
+    # The shared catalog is authoritative.  Legacy sibling modules may remain
+    # temporarily for migration tests, but they neither define availability
+    # nor duplicate provider metadata.  This also gives GitHub the same generic
+    # worker contract as every other newly connected source.
+    from mari_components.connectors import connector_definitions
+    import component_connectors
+
+    def unavailable(*_args, **_kwargs):
+        raise RuntimeError("legacy connector operation is unavailable")
+
+    for definition in connector_definitions():
+        validate, list_items = component_connectors.functions(
+            definition.key, unavailable, unavailable,
+        )
+        out[definition.key] = {
+            "key": definition.key,
+            "provider": {
+                "key": definition.key,
+                "name": definition.name,
+                "blurb": definition.description,
+                "fields": [
+                    {
+                        "key": field.key,
+                        "label": field.label,
+                        "secret": field.secret,
+                        "required": field.required,
+                        "placeholder": field.placeholder,
+                        "help": field.help,
+                    }
+                    for field in definition.fields
+                ],
+                "docs_url": definition.documentation_url,
+            },
+            "validate": validate,
+            "list_items": list_items,
+            "definition": definition,
+        }
     return out
 
 

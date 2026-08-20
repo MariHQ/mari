@@ -22,11 +22,11 @@ from pydantic import BaseModel
 import auth
 import access
 import connect_sync
-import connectors
+import component_connectors
 import flowengine
-import github
 import ingest
 from db import audit, exec_, q, q1
+from mari_components.connectors import connector_definition, connector_definitions
 
 router = APIRouter(prefix="/connectors")
 
@@ -38,86 +38,50 @@ router = APIRouter(prefix="/connectors")
 # `dependencies=_authed` in app.py stays; this narrows the two that write.
 _admin = [Depends(auth.require_admin)]
 
-# Main-step order (contract): the rest appear under "Show all".
-TOP8 = ["github", "slack", "gdrive", "confluence", "notion", "jira"]
-
-# Existing, fully-live connectors that are not provider modules: github has a
-# dedicated repo-picker path (connectGithubRepo).
-BUILTIN = [
-    {"key": "github", "name": "GitHub", "builtin": True,
-     "blurb": "Markdown docs, issues, PRs and commit messages from your repos.",
-     "fields": [
-         {"key": "token", "label": "Fine-grained personal access token", "secret": True,
-          "placeholder": "github_pat_…",
-          "help": "1. Open “Where do I get these?” above. 2. Choose the resource owner and only the repositories Mari should read. 3. Under Repository permissions, grant read-only Contents, Issues, Pull requests, and Metadata. 4. Generate the token and paste it here."},
-         {"key": "repo", "label": "Repository", "placeholder": "owner/repository",
-          "help": "Enter one repository selected for the token, for example MariHQ/mari."},
-         {"key": "paths", "label": "Paths filter (optional)", "placeholder": "docs/**",
-          "required": False,
-          "help": "Leave blank to ingest all supported files, or narrow the sync with a glob such as docs/**."},
-     ], "docsUrl": "https://github.com/settings/personal-access-tokens/new"},
-]
-
-# Non-secret config fields that identify one instance of a provider — used to
-# qualify sources.provider (UNIQUE) and the display name.
-QUALIFIER_KEYS = ("start_url", "site_url", "base_url", "url", "workspace",
-                  "subdomain", "site", "domain", "team", "space_key", "database_id")
-
-
 class ProviderIn(BaseModel):
     provider: str
     config: dict = {}
 
 
-def _field_specs(provider: dict) -> list[dict]:
+def _field_specs(definition) -> list[dict]:
     """Field SPECS only — never stored values."""
-    return [{"key": f.get("key", ""), "label": f.get("label", ""),
-             "secret": bool(f.get("secret")), "placeholder": f.get("placeholder", ""),
-             "help": f.get("help", ""),
-             # Older provider modules mark optional inputs in their label.
-             # Preserve that contract while exposing a machine-readable flag
-             # so clients never gate Test/Connect on an optional blank.
-             "required": bool(f.get(
-                 "required", "(optional)" not in str(f.get("label", "")).lower()
-             ))} for f in provider.get("fields", [])]
+    return [{"key": field.key, "label": field.label, "secret": field.secret,
+             "placeholder": field.placeholder, "help": field.help,
+             "required": field.required} for field in definition.fields]
 
 
 def _connected_map() -> dict[str, int]:
     """provider key → newest live source id."""
     out: dict[str, int] = {}
     for r in q("""SELECT id, kind, provider, config FROM sources
-                  WHERE project_id = %s AND kind IN ('github', 'upload', 'connector') ORDER BY id""",
+                  WHERE project_id = %s AND kind IN ('github', 'connector') ORDER BY id""",
                (access.require_current_access().project_id,)):
         cfg = r["config"] if isinstance(r["config"], dict) else json.loads(r["config"] or "{}")
         if r["kind"] == "connector":
             out[connect_sync.provider_key_of(r["provider"], cfg)] = r["id"]
-        else:
+        elif r["kind"] == "github":  # legacy rows migrate on their next reconnect
             out[r["kind"]] = r["id"]
     return out
 
 
 @router.get("/catalog")
 def catalog() -> list[dict]:
-    connectors.REGISTRY.refresh()  # pick up provider modules added since startup
-    entries: dict[str, dict] = {}
-    for b in BUILTIN:
-        entries[b["key"]] = dict(b)
-    for e in connectors.REGISTRY.values():
-        prov = e.get("provider")
-        if not prov or e.get("error") or prov.get("key") == "website":
-            continue  # broken module: not real, so not in the catalog
-        entries[prov["key"]] = {
-            "key": prov["key"], "name": prov.get("name", prov["key"]),
-            "blurb": prov.get("blurb", ""), "fields": _field_specs(prov),
-            "docsUrl": prov.get("docs_url", ""), "builtin": False,
+    entries = {
+        definition.key: {
+            "key": definition.key,
+            "name": definition.name,
+            "blurb": definition.description,
+            "fields": _field_specs(definition),
+            "docsUrl": definition.documentation_url,
+            "builtin": False,
         }
+        for definition in connector_definitions()
+    }
     connected = _connected_map()
     for key, item in entries.items():
         item["connected"] = key in connected
         item["sourceId"] = connected.get(key)
-    head = [entries[k] for k in TOP8 if k in entries]
-    tail = sorted((v for k, v in entries.items() if k not in TOP8), key=lambda v: v["name"].lower())
-    return head + tail
+    return list(entries.values())
 
 
 # ——— what a failed validate is allowed to say ———
@@ -162,7 +126,7 @@ def _error_for(provider: str, e: Exception) -> str:
     detail the user needs, so it is scrubbed and shown. Anything else is a bug
     in the connector, not something the user can fix: the type is named (so the
     report is actionable) and the full traceback goes to the server log."""
-    authored = (type(e).__module__ or "").startswith("connectors") or isinstance(
+    authored = (type(e).__module__ or "").startswith(("connectors", "mari_components")) or isinstance(
         e, (ValueError, RuntimeError, ConnectionError, TimeoutError))
     if authored:
         return _clean_error(e) or f"{type(e).__name__} from the {provider} connector"
@@ -173,39 +137,21 @@ def _error_for(provider: str, e: Exception) -> str:
 
 @router.post("/validate", dependencies=_admin)
 def validate(body: ProviderIn) -> dict:
-    if body.provider == "github":
-        cfg = body.config or {}
-        token = str(cfg.get("token") or "").strip()
-        repo = str(cfg.get("repo") or "").strip()
-        if not token:
-            return {"ok": False, "error": "Enter a GitHub personal access token."}
-        if not repo or "/" not in repo:
-            return {"ok": False, "error": "Name the repository as owner/repository."}
-        state = github.push_token(token)
-        try:
-            github.default_branch(repo)
-            return {"ok": True, "error": ""}
-        except github.GithubError as e:
-            return {"ok": False, "error": _clean_error(str(e))}
-        finally:
-            github.pop_token(state)
-    entry = connectors.REGISTRY.get(body.provider)
-    if not entry or not entry.get("provider"):
-        connectors.REGISTRY.refresh()
-        entry = connectors.REGISTRY.get(body.provider)
-    if not entry or not entry.get("provider"):
+    try:
+        connector_definition(body.provider)
+    except KeyError:
         return {"ok": False, "error": f"Unknown connector provider '{body.provider}'"}
     try:
-        err = entry["validate"](body.config or {})
+        err = component_connectors.validate_config(body.provider, body.config or {})
     except Exception as e:  # noqa: BLE001 — an honest error beats a 500
         err = _error_for(body.provider, e)
     return {"ok": err is None, "error": _clean_error(err) if err else ""}
 
 
-def _qualifier(provider: dict, config: dict) -> str:
+def _qualifier(definition, config: dict) -> str:
     """Short instance label from the first identifying non-secret field."""
-    secret = {f["key"] for f in provider.get("fields", []) if f.get("secret")}
-    for k in QUALIFIER_KEYS:
+    secret = {field.key for field in definition.fields if field.secret}
+    for k in definition.qualifier_fields:
         v = (config.get(k) or "").strip() if isinstance(config.get(k), str) else ""
         if v and k not in secret:
             v = v.replace("https://", "").replace("http://", "").rstrip("/")
@@ -218,13 +164,12 @@ def connect(body: ProviderIn) -> dict:
     check = validate(body)
     if not check["ok"]:
         return {"error": check["error"]}  # honest failure; no source row created
-    entry = connectors.REGISTRY[body.provider]
-    prov = entry["provider"]
-    key = prov["key"]
+    definition = connector_definition(body.provider)
+    key = definition.key
 
-    qual = _qualifier(prov, body.config or {})
+    qual = _qualifier(definition, body.config or {})
     provider_col = f"{key}:{qual}" if qual else key
-    display = f"{prov.get('name', key)} — {qual}" if qual else prov.get("name", key)
+    display = f"{definition.name} — {qual}" if qual else definition.name
     project_id = access.require_current_access().project_id
     if q1("SELECT id FROM sources WHERE project_id = %s AND kind = 'connector' AND provider = %s", (project_id, provider_col)):
         return {"error": f"{display} is already connected"}

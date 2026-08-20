@@ -15,10 +15,11 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 import access
 import auth
+import component_connectors
 import ingest
-from connectors import confluence
 from db import q1
 from event_inbox import DEFAULT_INBOX
+from mari_components.connectors import ConfluenceConfig, fetch_confluence_page
 from mari_components.connectors.events import (
     MAX_DIRTY_PATHS, confluence_change_hint, github_change_hint,
     verify_hmac_sha256,
@@ -215,7 +216,7 @@ def _source(source_id: int, project_id: int, *, kind: str, provider: str | None 
                 AND COALESCE(s.status, 'active') <> 'disconnected' AND p.status='active'"""
     params: tuple[t.Any, ...] = (source_id, project_id, kind)
     if provider:
-        sql += " AND s.provider=%s"
+        sql += " AND split_part(s.provider, ':', 1)=%s"
         params += (provider,)
     return q1(sql, params)
 
@@ -252,14 +253,22 @@ def process_github_delivery(row: dict[str, t.Any]) -> None:
 
 def _sync_confluence_page(source: dict[str, t.Any], page_id: str) -> None:
     cfg = _json(source.get("config"))
-    item = confluence.fetch_page(cfg, page_id)
+    document = fetch_confluence_page(
+        ConfluenceConfig(
+            str(cfg.get("site_url") or ""), str(cfg.get("email") or ""),
+            str(cfg.get("api_token") or ""), str(cfg.get("space_key") or ""),
+        ),
+        page_id,
+        http=component_connectors._http,
+    )
     configured_space = str(cfg.get("space_key") or "").strip()
-    if item is not None and configured_space and item.get("space_key") != configured_space:
-        item = None
+    if (document is not None and configured_space
+            and str(document.metadata.get("space_key") or "") != configured_space):
+        document = None
     path = str(page_id)
     hashes = dict(cfg.get("item_hashes") or {})
     with ingest._conn() as conn:
-        if item is None:
+        if document is None:
             rows = conn.execute(
                 "SELECT id FROM documents WHERE project_id=%s AND source_id=%s AND source_path=%s",
                 (source["project_id"], source["id"], f"confluence/{path}"),
@@ -267,9 +276,9 @@ def _sync_confluence_page(source: dict[str, t.Any], page_id: str) -> None:
             ingest._delete_documents(conn, [int(row["id"]) for row in rows])
             hashes.pop(path, None)
         else:
-            title = str(item.get("title") or path)
-            body = str(item.get("body") or "")
-            content_hash = str(item.get("hash_hint") or ingest._sha(f"{title}\n\n{body}"))
+            title = document.title or path
+            body = document.body
+            content_hash = document.revision or ingest._sha(f"{title}\n\n{body}")
             doc_id, _ = ingest._upsert_document(
                 conn, int(source["id"]), f"confluence:{source['id']}:{path}", title, body,
                 f"confluence/{path}", "page", content_hash, "Confluence",

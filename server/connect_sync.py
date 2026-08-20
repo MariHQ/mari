@@ -33,6 +33,7 @@ from mari_components import (
     SyncMode, Tombstone,
 )
 from mari_components.sync import ManifestEntry, SyncState, plan_sync
+from mari_components.connectors import CONNECTOR_CATALOG
 
 # internal config keys the worker owns (never provider credential fields)
 INTERNAL_KEYS = ("provider_key", "cursor", "item_hashes", "last_sync_at", "last_error",
@@ -51,10 +52,8 @@ def provider_key_of(provider: str, cfg: dict) -> str:
 
 
 def secret_fields(key: str) -> set[str]:
-    entry = connectors.REGISTRY.get(key)
-    if entry and entry.get("provider"):
-        return {f["key"] for f in entry["provider"].get("fields", []) if f.get("secret")}
-    return set()
+    definition = CONNECTOR_CATALOG.get(key)
+    return {field.key for field in definition.fields if field.secret} if definition else set()
 
 
 def masked_config(provider: str, cfg: dict) -> dict:

@@ -22,27 +22,19 @@ default as db.py); imports no app modules.
 from __future__ import annotations
 
 import os
-import posixpath
-import re
 
 import psycopg
 from psycopg.rows import dict_row
+from mari_components.knowledge import (
+    DEFAULT_SIMILARITY_LIMIT, DEFAULT_SIMILARITY_THRESHOLD,
+    derive_links, extract_explicit_links,
+)
 
 DB_URL = os.environ.get("MARI_DB", "postgresql://localhost/mari_cloud")
 
-SIM_THRESHOLD = 0.78
-SIM_TOP_K = 3
+SIM_THRESHOLD = DEFAULT_SIMILARITY_THRESHOLD
+SIM_TOP_K = DEFAULT_SIMILARITY_LIMIT
 SIM_CAP_PER_SOURCE = 1000
-
-# "#123" not preceded by a word char, '/', or '&' (avoids URL fragments like
-# /pull/12#issuecomment-..., paths, and HTML entities such as &#39;).
-REF_RE = re.compile(r"(?<![\w/&#])#(\d+)\b")
-
-# [text](target) / [text](target "title") — target captured without ')' or space.
-MD_LINK_RE = re.compile(r"\[[^\]]*\]\(\s*<?([^)\s>]+)>?(?:\s+\"[^\"]*\")?\s*\)")
-
-_SKIP_SCHEMES = ("http://", "https://", "mailto:", "data:", "ftp://", "tel:")
-
 
 def _conn():
     return psycopg.connect(DB_URL, row_factory=dict_row)
@@ -101,42 +93,24 @@ def _extract_references(conn, source_id: int, project_id: int,
     if not docs:
         return 0
     # number → doc id map for this source's issues/PRs
-    num_map: dict[int, int] = {}
+    num_map: dict[str, str] = {}
     for r in conn.execute(
             """SELECT id, source_path FROM documents
                WHERE source_id = %s AND (source_path LIKE 'issues/%%' OR source_path LIKE 'pulls/%%')""",
             (source_id,)).fetchall():
         tail = r["source_path"].split("/", 1)[1]
         if tail.isdigit():
-            num_map[int(tail)] = r["id"]
+            num_map[tail] = str(r["id"])
     triples = []
     for d in docs:
-        seen: set[int] = set()
-        for m in REF_RE.finditer(d["body"] or ""):
-            n = int(m.group(1))
-            target = num_map.get(n)
-            if target and target != d["id"] and n not in seen:
-                seen.add(n)
-                triples.append((d["id"], target, "references", {"ref": f"#{n}"}))
+        for link in extract_explicit_links(
+                str(d["id"]), d["source_path"], d["body"] or "", num_map):
+            if link.kind == "references":
+                triples.append((d["id"], int(link.target_id), "references", {}))
     return _insert_edges(conn, project_id, triples)
 
 
 # ————————————————— links_to (markdown relative links) —————————————————
-
-
-def _resolve(base_path: str, target: str) -> str | None:
-    """Resolve a markdown link target against the linking doc's source_path."""
-    target = target.split("#", 1)[0].split("?", 1)[0].strip()
-    if not target or target.lower().startswith(_SKIP_SCHEMES):
-        return None
-    if target.startswith("/"):  # repo-root absolute
-        resolved = target.lstrip("/")
-    else:
-        resolved = posixpath.join(posixpath.dirname(base_path), target)
-    resolved = posixpath.normpath(resolved)
-    if resolved.startswith(".."):
-        return None
-    return resolved
 
 
 def _extract_links_to(conn, source_id: int, project_id: int,
@@ -149,22 +123,15 @@ def _extract_links_to(conn, source_id: int, project_id: int,
         f"SELECT d.id, d.body, d.source_path FROM documents d WHERE {where}", args).fetchall()
     if not docs:
         return 0
-    path_map = {r["source_path"]: r["id"] for r in conn.execute(
+    path_map = {r["source_path"]: str(r["id"]) for r in conn.execute(
         "SELECT id, source_path FROM documents WHERE source_id = %s AND kind = 'page'",
         (source_id,)).fetchall()}
     triples = []
     for d in docs:
-        seen: set[int] = set()
-        for m in MD_LINK_RE.finditer(d["body"] or ""):
-            resolved = _resolve(d["source_path"], m.group(1))
-            if not resolved:
-                continue
-            target = (path_map.get(resolved)
-                      or path_map.get(resolved + ".md")
-                      or path_map.get(posixpath.join(resolved, "README.md")))
-            if target and target != d["id"] and target not in seen:
-                seen.add(target)
-                triples.append((d["id"], target, "links_to", {"href": m.group(1)}))
+        for link in extract_explicit_links(
+                str(d["id"]), d["source_path"], d["body"] or "", path_map):
+            if link.kind == "links_to":
+                triples.append((d["id"], int(link.target_id), "links_to", {}))
     return _insert_edges(conn, project_id, triples)
 
 
@@ -213,11 +180,21 @@ def _extract_similar(conn, source_id: int, project_id: int,
         ) b ON b.sim >= {SIM_THRESHOLD}
         WHERE {where}
         ORDER BY b.sim DESC""", args).fetchall()
-    # dedupe both directions: canonical (min, max), keep best score
+    # Apply the reusable threshold/top-k policy, then dedupe both directions.
+    by_source: dict[int, dict[int, float]] = {}
+    for row in rows:
+        by_source.setdefault(int(row["src"]), {})[int(row["dst"])] = float(row["sim"])
     pairs: dict[tuple[int, int], float] = {}
-    for r in rows:
-        key = (min(r["src"], r["dst"]), max(r["src"], r["dst"]))
-        pairs[key] = max(pairs.get(key, 0.0), float(r["sim"]))
+    for source, candidates in by_source.items():
+        selected = derive_links(
+            str(source), (str(candidate) for candidate in candidates),
+            score=lambda _source, target: candidates[int(target)],
+            threshold=SIM_THRESHOLD, limit=SIM_TOP_K,
+        )
+        for link in selected:
+            target = int(link.target_id)
+            key = (min(source, target), max(source, target))
+            pairs[key] = max(pairs.get(key, 0.0), link.score)
     existing = conn.execute(
         """SELECT count(*) AS n FROM edges e
            JOIN documents d ON d.id = e.from_doc

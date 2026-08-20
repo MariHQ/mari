@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 from fastapi import HTTPException, Request
 
 import provider_events
+from mari_components import KnowledgeDocument
 from connectors import confluence
 
 
@@ -173,9 +174,11 @@ class ConfluenceEventTests(unittest.TestCase):
 
     def test_targeted_tombstone_deletes_only_the_routed_source_document(self):
         source = {"id": 8, "project_id": 3, "config": {
-            "cursor": "durable-poll-cursor", "item_hashes": {"123": "3", "456": "2"}}}
+            "site_url": "https://example.atlassian.net", "email": "a@example.test",
+            "api_token": "token", "cursor": "durable-poll-cursor",
+            "item_hashes": {"123": "3", "456": "2"}}}
         conn = _PageSyncConn(document_rows=[{"id": 91}], count=1)
-        with patch.object(confluence, "fetch_page", return_value=None), \
+        with patch.object(provider_events, "fetch_confluence_page", return_value=None), \
              patch.object(provider_events.ingest, "_conn", return_value=_Context(conn)), \
              patch.object(provider_events.ingest, "_delete_documents") as delete:
             provider_events._sync_confluence_page(source, "123")
@@ -188,11 +191,13 @@ class ConfluenceEventTests(unittest.TestCase):
 
     def test_targeted_update_indexes_only_canonical_page(self):
         source = {"id": 8, "project_id": 3, "config": {
-            "cursor": "durable-poll-cursor", "item_hashes": {}}}
-        canonical = {"path": "123", "title": "Canonical", "body": "Trusted",
-                     "hash_hint": "9", "space_key": "ENG"}
+            "site_url": "https://example.atlassian.net", "email": "a@example.test",
+            "api_token": "token", "cursor": "durable-poll-cursor", "item_hashes": {}}}
+        canonical = KnowledgeDocument(
+            "123", "Canonical", "Trusted", revision="9", metadata={"space_key": "ENG"},
+        )
         conn = _PageSyncConn(count=1)
-        with patch.object(confluence, "fetch_page", return_value=canonical), \
+        with patch.object(provider_events, "fetch_confluence_page", return_value=canonical), \
              patch.object(provider_events.ingest, "_conn", return_value=_Context(conn)), \
              patch.object(provider_events.ingest, "_upsert_document", return_value=(91, True)) as upsert, \
              patch.object(provider_events.ingest, "_chunk_settings", return_value=(100, 10)), \

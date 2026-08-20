@@ -4,7 +4,7 @@ import asyncio
 import hashlib
 import json
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from fastapi import HTTPException
 
@@ -12,6 +12,8 @@ import access
 from connectors import gdrive
 from connectors._protocol import ACLMetadata, PollResult
 import gdrive_events
+from mari_components import PollPage
+from mari_components.connectors import GoogleDriveWatch
 
 
 class MemoryInbox:
@@ -85,18 +87,17 @@ class DriveWatchSetupTests(unittest.TestCase):
         calls = []
         def execute(sql, args=()):
             calls.append((" ".join(sql.split()), args))
-        response = json.dumps({"resourceId": "resource-1", "expiration": "1800000000000"}).encode()
+        watched = GoogleDriveWatch("channel", "resource-1", 1_800_000_000_000)
         with patch.object(gdrive_events, "_source", return_value=self.source), \
              patch.object(gdrive_events.config, "get", return_value="https://mari.example.test"), \
              patch.object(gdrive_events, "exec_", side_effect=execute), \
-             patch.object(gdrive_events.gdrive, "_request", return_value=(200, response)) as watch:
+             patch.object(gdrive_events, "start_google_drive_watch", return_value=watched) as watch:
             result = gdrive_events.create_watch(gdrive_events.DriveWatchIn(source_id=5), self.context)
         self.assertTrue(result["ok"])
         self.assertTrue(calls[0][0].startswith("INSERT INTO gdrive_watch_channels"))
-        body = json.loads(watch.call_args.args[3])
-        self.assertEqual(body["address"], "https://mari.example.test/webhooks/google-drive")
-        self.assertTrue(watch.call_args.args[2].endswith("changes/watch?pageToken=start&supportsAllDrives=true"))
-        self.assertNotIn(body["token"], json.dumps(result))
+        self.assertEqual(watch.call_args.args[1:3],
+                         ("start", "https://mari.example.test/webhooks/google-drive"))
+        self.assertNotIn(watch.call_args.args[4], json.dumps(result))
 
     def test_watch_fails_explicitly_without_cursor_or_https(self):
         with patch.object(gdrive_events, "_source",
@@ -155,17 +156,19 @@ class DriveChangesTests(unittest.TestCase):
                    "config": {"cursor": "changes:start"}, "provider": "gdrive",
                    "display_name": "Drive", "source_status": "active", "project_status": "active",
                    "project_slug": "acme", "project_name": "Acme"}
-        pages = [
-            PollResult([], "changes:start", snapshot_complete=False, checkpoint="changes:middle"),
-            PollResult([], "changes:end", snapshot_complete=True),
-        ]
+        pages = [PollPage(next_cursor="changes:start", next_checkpoint="changes:middle",
+                          snapshot_complete=False),
+                 PollPage(next_cursor="changes:end", snapshot_complete=True)]
+        definition = Mock()
+        definition.poll.side_effect = lambda _cfg, _request, **_kwargs: iter([pages.pop(0)])
         with patch.object(gdrive_events, "q1", return_value=channel), \
-             patch.object(gdrive_events.gdrive, "list_changes", side_effect=pages) as changes, \
+             patch.object(gdrive_events, "connector_definition", return_value=definition), \
              patch.object(gdrive_events, "_apply_poll") as apply_poll, \
              patch.object(gdrive_events, "exec_"):
             gdrive_events.process_gdrive_delivery({"project_id": 9,
                 "payload": {"channel_id": "channel-1"}})
-        self.assertEqual([call.args[1] for call in changes.call_args_list], ["start", "middle"])
+        self.assertEqual([call.args[1].cursor for call in definition.poll.call_args_list],
+                         ["changes:start", "changes:middle"])
         self.assertEqual(apply_poll.call_count, 2)
 
     def test_410_runs_full_poll_reconciliation_and_replaces_cursor(self):

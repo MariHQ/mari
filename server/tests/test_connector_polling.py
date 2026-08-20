@@ -13,19 +13,12 @@ from connectors import confluence, gdrive, slack
 
 class ConnectorContractTests(unittest.TestCase):
     def test_catalog_hides_upload_and_website(self) -> None:
-        registry = type("Registry", (), {
-            "refresh": lambda self: None,
-            "values": lambda self: [{
-                "provider": {"key": "website", "name": "Website", "fields": []},
-                "error": None,
-            }],
-        })()
-        with patch.object(connectors_api.connectors, "REGISTRY", registry), \
-             patch.object(connectors_api, "_connected_map", return_value={}):
+        with patch.object(connectors_api, "_connected_map", return_value={}):
             keys = [item["key"] for item in connectors_api.catalog()]
         self.assertIn("github", keys)
         self.assertNotIn("upload", keys)
         self.assertNotIn("website", keys)
+        self.assertEqual(keys[:4], ["github", "slack", "gdrive", "confluence"])
 
     def test_requested_poll_connectors_are_discoverable(self) -> None:
         connectors.REGISTRY.refresh()

@@ -30,7 +30,9 @@ from pydantic import BaseModel
 import auth
 import access
 import config
+import component_connectors
 import llm
+from mari_components.connectors import SlackConfig, fetch_slack_thread_by_id
 from mari_components.connectors.events import (
     verify_hmac_sha256 as component_verify_hmac_sha256,
     verify_slack_signature as component_verify_slack_signature,
@@ -320,7 +322,6 @@ def _conversation_context(turns: list[dict[str, str]]) -> str:
 def _refresh_slack_aggregate(project_id: int, token: str, channel: str,
                              thread_ts: str) -> None:
     """Refetch the canonical thread and update every matching Slack source."""
-    from connectors import slack as slack_connector
     import ingest
 
     sources = q(
@@ -331,19 +332,27 @@ def _refresh_slack_aggregate(project_id: int, token: str, channel: str,
     )
     if not sources:
         return
-    item = slack_connector.thread_item(token, channel, thread_ts)
+    document, complete = fetch_slack_thread_by_id(
+        SlackConfig(token), channel, thread_ts, http=component_connectors._http,
+    )
+    if not complete:
+        raise RuntimeError("Slack thread response was incomplete")
+    if document is None:
+        return
     max_tokens, overlap = ingest._chunk_settings()
     for source in sources:
         with ingest._conn() as conn:
-            path = item["path"]
-            content_hash = str(item["hash_hint"])
+            path = document.external_id
+            content_hash = document.revision or ingest._sha(
+                f"{document.title}\n\n{document.body}"
+            )
             doc_id, _inserted = ingest._upsert_document(
-                conn, source["id"], f"slack:{source['id']}:{path}", item["title"],
-                item["body"], f"slack/{path}", "page", content_hash, "Slack",
+                conn, source["id"], f"slack:{source['id']}:{path}", document.title,
+                document.body, f"slack/{path}", "page", content_hash, "Slack",
                 source="slack", initials="SL", acl_visibility="restricted",
                 acl_principals=(f"channel:{channel}",),
             )
-            ingest._sync_chunks(conn, doc_id, item["title"], item["body"],
+            ingest._sync_chunks(conn, doc_id, document.title, document.body,
                                 max_tokens, overlap)
             cfg = source["config"] if isinstance(source["config"], dict) else json.loads(source["config"] or "{}")
             hashes = dict(cfg.get("item_hashes") or {})
