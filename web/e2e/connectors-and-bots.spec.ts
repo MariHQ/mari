@@ -90,8 +90,12 @@ test("Sources exposes connector ingestion without a Bots tab", async ({ page }) 
 });
 
 test("Slack bot setup persists the verified project installation, calls auth.test, and never renders the token", async ({ page }) => {
+  api.setData("botsStatus", {
+    slack: { configured: false, teamName: "", lastEventAt: null, lastError: null },
+    github: { webhookConfigured: true, lastDeliveryAt: null, sources: [{ id: 1, repo: "acme/handbook" }] },
+  });
   await openBotsDestination(page);
-  await page.getByRole("button", { name: "Manage setup" }).first().click();
+  await page.getByRole("button", { name: "Set up Slack bot" }).click();
   const drawer = page.getByRole("dialog", { name: "Set up Slack bot" });
   await expect(drawer.getByText("https://mari.example.test/webhooks/slack", { exact: false })).toBeVisible();
   await expect(drawer).toContainText("channels:history");
@@ -106,6 +110,13 @@ test("Slack bot setup persists the verified project installation, calls auth.tes
   await drawer.getByRole("button", { name: "Next" }).click();
   await drawer.getByRole("button", { name: "Test connection" }).click();
   await expect(drawer.getByText(/Connected in Acme/)).toBeVisible();
+  await drawer.getByRole("button", { name: "Next" }).click();
+  await expect(drawer.getByText("Waiting for first event", { exact: true })).toBeVisible();
+  await drawer.getByRole("button", { name: "Done" }).click();
+  const waiting = page.getByText("Waiting for first event", { exact: true });
+  await expect(waiting).toHaveCount(2);
+  await expect(waiting.first()).toBeVisible();
+  await expect(page.getByText("Acme", { exact: true }).first()).toBeVisible();
   await expect(page.getByText("xoxb-browser-secret", { exact: true })).toHaveCount(0);
   const setup = api.restCalls.find((c) => c.path === "/bots/slack/setup");
   expect(setup?.body).toEqual({ bot_token: "xoxb-browser-secret", signing_secret: "signing-browser-secret" });

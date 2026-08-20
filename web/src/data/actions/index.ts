@@ -15,7 +15,7 @@
  * and returns that page's actions object.
  */
 
-import { gqlResult, clearQueryCache } from "../../lib/api";
+import { gqlResult, invalidateQueries } from "../../lib/api";
 
 import { answersActions } from "./answers";
 import { auditActions } from "./audit";
@@ -48,7 +48,7 @@ import { welcomeActions } from "./welcome";
 export async function mutate(query: string, variables?: Record<string, unknown>): Promise<any> {
   const r = await gqlResult(query, variables);
   if (!r.ok) throw new Error(r.error);
-  clearQueryCache();
+  invalidateQueries();
   return r.data;
 }
 

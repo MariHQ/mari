@@ -115,6 +115,7 @@ export type QueryResult<T> = QueryState<T> & { refetch: () => void };
 // shared request key hands the other adapter the wrong runtime shape.
 const queryCache = new Map<string, unknown>();
 const MAX_QUERY_CACHE = 200;
+const querySubscribers = new Set<() => void>();
 
 function cacheGet(key: string): unknown | undefined {
   if (!queryCache.has(key)) return undefined;
@@ -165,6 +166,12 @@ export function useQuery<T>(
   const [nonce, setNonce] = useState(0);
   const refetch = useCallback(() => setNonce((n) => n + 1), []);
 
+  useEffect(() => {
+    if (!query) return;
+    querySubscribers.add(refetch);
+    return () => { querySubscribers.delete(refetch); };
+  }, [query, refetch]);
+
   // Key changed (new query/variables): swap to that key's cache entry — or a
   // fresh loading state — synchronously during render, before the refetch.
   const [prevKey, setPrevKey] = useState(key);
@@ -202,6 +209,14 @@ export function useQuery<T>(
 /** Drop every cached query result (e.g. after logout). */
 export function clearQueryCache() {
   queryCache.clear();
+}
+
+/** Invalidate mounted reads after a successful write. Clearing the cache alone
+ * only affects a future mount; subscribers make the screen that initiated the
+ * write converge on server truth immediately. */
+export function invalidateQueries() {
+  clearQueryCache();
+  for (const refetch of querySubscribers) refetch();
 }
 
 // (The old /chat page-stream helper lived here; the Mari agent dock's SSE

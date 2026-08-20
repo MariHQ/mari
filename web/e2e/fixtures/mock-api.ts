@@ -319,6 +319,7 @@ settings:
   await page.route("**/bots/slack/setup", async (route) => {
     const body = route.request().postDataJSON();
     restCalls.push({ path: "/bots/slack/setup", body });
+    state.botsStatus.slack = { configured: true, teamName: "Acme", lastEventAt: null, lastError: null };
     await route.fulfill({ json: { ok: true, team: "Acme", teamId: "T-ACME",
       botUser: "mari", installationId: 5 } });
   });

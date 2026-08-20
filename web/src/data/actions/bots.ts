@@ -1,5 +1,5 @@
 import type { SourcesBotsActions } from "@mari-design/components/features/SourcesBots";
-import { authenticatedFetch, gqlResult, projectHeaders } from "../../lib/api";
+import { authenticatedFetch, gqlResult, invalidateQueries, projectHeaders } from "../../lib/api";
 import { mutate } from "./index";
 
 const UPDATE_SETTING = `mutation($key: String!, $value: JSON!) { updateSetting(key: $key, value: $value) }`;
@@ -49,9 +49,11 @@ export function botActions(): SourcesBotsActions {
         bot_token: botToken.trim(),
         signing_secret: signingSecret.trim(),
       });
+      invalidateQueries();
     },
     testSlackConnection: async () => {
       const result = await postBot<{ ok: boolean; team?: string; error?: string }>("/bots/slack/test");
+      if (result.ok) invalidateQueries();
       return { ok: result.ok, teamName: result.team || undefined, error: result.error };
     },
     saveGithubWebhookSecret: async (secret: string) => {
