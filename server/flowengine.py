@@ -184,12 +184,23 @@ def _step_notify(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
 
 
 def _step_summarize(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
+    from mari_components import KnowledgeDocument
+    from mari_components.knowledge import summarize_digest
     with _conn() as conn:
-        rows = conn.execute("SELECT title, snippet FROM documents WHERE id = ANY(%s)",
+        rows = conn.execute("SELECT id, title, body, snippet, updated_src FROM documents WHERE id = ANY(%s)",
                             (ctx.get("doc_ids", []),)).fetchall()
-    text = llm.generate(
-        "Summarize in 2 sentences:\n" + "\n".join(f"- {r['title']}: {r['snippet']}" for r in rows),
-        system="You summarize document sets.") or f"{len(rows)} documents in scope."
+    if not rows:
+        return "skipped", "no documents to summarize", {"summary": ""}
+    result = summarize_digest(
+        [KnowledgeDocument(
+            str(row["id"]), row["title"], row.get("body") or row.get("snippet") or "",
+            revision=str(row.get("updated_src") or ""),
+        ) for row in rows],
+        generate_json=lambda prompt, _version: llm.generate_json(
+            prompt, system="You summarize document sets."),
+        maximum_documents=len(rows),
+    )
+    text = result.summary
     return "passed", text[:160], {"summary": text}
 
 

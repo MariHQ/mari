@@ -5,16 +5,14 @@ POST /onboard/upload            multipart .md/.mdx/.markdown/.txt files → the 
                                 (helpers imported from ingest.py; nothing faked).
 POST /onboard/glossary-harvest  LLM (ollama JSON mode) proposes glossary candidates
                                 grounded in the most-connected page documents;
-                                deterministic capitalized-phrase fallback when ollama
-                                is down. Persists NOTHING — the UI reviews candidates
+                                malformed or unavailable model output returns no
+                                candidates. Persists NOTHING — the UI reviews candidates
                                 and calls the existing upsertGlossary mutation.
 """
 
 from __future__ import annotations
 
 import concurrent.futures as cf
-import json
-import re
 import time
 
 import psycopg
@@ -24,6 +22,8 @@ from pydantic import BaseModel
 
 import llm
 import access
+from mari_components import KnowledgeDocument
+from mari_components.knowledge import harvest_glossary as component_harvest_glossary
 # Reuse the real GitHub ingestion pipeline pieces (chunk + content-hash + embed +
 # mean-pooled doc embedding). ingest._upsert_document is github-specific
 # (hardcodes source='github'), so the document upsert lives here instead.
@@ -222,76 +222,24 @@ def _existing_terms() -> set[str]:
     return seen
 
 
-def _llm_batch(docs: list[dict]) -> list[dict] | None:
-    """One LLM call over a batch of doc excerpts → raw candidate list (or None)."""
-    excerpts = "\n\n".join(
-        f"--- Document: {d['title']}\n{d['body'][:_EXCERPT]}" for d in docs)
-    titles = [d["title"] for d in docs]
-    prompt = (
-        f"Documents:\n\n{excerpts}\n\n"
-        "List up to 6 glossary-worthy domain terms that actually appear in these "
-        "documents. For each, return an object with:\n"
-        '  "term": the term as written in the text,\n'
-        '  "definition": ONE sentence defining it, grounded strictly in the text,\n'
-        f'  "evidence": the exact title of the document it came from (one of {json.dumps(titles)}).\n'
-        "Skip generic words. Return a JSON array."
+def _llm_batch(docs: list[dict]) -> list[dict]:
+    """Run the reusable strict glossary recipe over one bounded batch."""
+    documents = [KnowledgeDocument(
+        str(doc["id"]), doc["title"], doc["body"][:_EXCERPT],
+    ) for doc in docs]
+    by_id = {str(doc["id"]): doc for doc in docs}
+    candidates = component_harvest_glossary(
+        documents,
+        generate_json=lambda prompt, _version: llm.generate_json(
+            prompt, HARVEST_SYSTEM, _HARVEST_CALL_TIMEOUT),
+        maximum_documents=len(documents),
+        maximum_characters=len(documents) * _EXCERPT,
     )
-    out = llm.generate_json(prompt, HARVEST_SYSTEM, _HARVEST_CALL_TIMEOUT)
-    return out if isinstance(out, list) else None
-
-
-def _validate(cand: dict, docs: list[dict]) -> dict | None:
-    """Strict validation: shapes, lengths, term actually appears in a batch doc,
-    evidence is a real doc title (repaired to the doc containing the term)."""
-    if not isinstance(cand, dict):
-        return None
-    term = str(cand.get("term") or "").strip()
-    definition = str(cand.get("definition") or "").strip()
-    evidence = str(cand.get("evidence") or "").strip()
-    if not (2 <= len(term) <= 80) or len(definition) < 15 or len(definition) > 400:
-        return None
-    holder = next((d for d in docs if term.lower() in d["body"].lower()
-                   or term.lower() in d["title"].lower()), None)
-    if holder is None:
-        return None  # not grounded — the model invented it
-    titles = {d["title"] for d in docs}
-    if evidence not in titles:
-        evidence = holder["title"]
-    return {"term": term, "definition": definition.rstrip() if definition.endswith(".")
-            else definition.rstrip() + ".", "evidence": evidence}
-
-
-_PHRASE_RE = re.compile(r"\b([A-Z][A-Za-z0-9]+(?:[ -][A-Z][A-Za-z0-9]+)+)\b")
-_SENT_SPLIT = re.compile(r"(?<=[.!?])\s+")
-_STOP_STARTS = ("The ", "This ", "That ", "These ", "Those ", "A ", "An ", "In ", "If ",
-                "For ", "When ", "How ", "What ", "Why ", "See ", "Note ", "It ")
-
-
-def _fallback(docs: list[dict]) -> list[dict]:
-    """Deterministic harvest when ollama is down: frequent capitalized multiword
-    phrases + the sentence where each first appears."""
-    counts: dict[str, int] = {}
-    first_use: dict[str, tuple[str, str]] = {}  # phrase -> (sentence, doc title)
-    for d in docs:
-        text = re.sub(r"[#*`>\[\]()|]", " ", d["body"])
-        for sent in _SENT_SPLIT.split(text):
-            sent = " ".join(sent.split())
-            for m in _PHRASE_RE.finditer(sent):
-                phrase = m.group(1).strip()
-                if any(phrase.startswith(s) for s in _STOP_STARTS) or len(phrase) > 60:
-                    continue
-                counts[phrase] = counts.get(phrase, 0) + 1
-                if phrase not in first_use and len(sent) >= 25:
-                    first_use[phrase] = (sent[:300], d["title"])
-    out = []
-    for phrase, n in sorted(counts.items(), key=lambda kv: -kv[1]):
-        if n < 2 or phrase not in first_use:
-            continue
-        sent, title = first_use[phrase]
-        out.append({"term": phrase,
-                    "definition": sent if sent.endswith(".") else sent + ".",
-                    "evidence": title})
-    return out
+    return [{
+        "term": candidate.term,
+        "definition": candidate.definition,
+        "evidence": by_id[candidate.evidence[0].document_id]["title"],
+    } for candidate in candidates]
 
 
 @router.post("/glossary-harvest")
@@ -326,22 +274,16 @@ def glossary_harvest(body: HarvestIn):
                 raw = future.result()
             except Exception:  # noqa: BLE001 — one bad batch is not a failed harvest
                 raw = None
-            if raw is None:
-                continue
             llm_ok = True
             for cand in raw[:12]:
-                v = _validate(cand, batch)
-                if v:
-                    keep(v)
+                keep(cand)
             if time.monotonic() >= deadline:
                 for pending in futures:
                     if not pending.done():
                         pending.cancel()
                 break
 
-    if not llm_ok:  # ollama down → deterministic fallback, honestly flagged
-        for c in _fallback(docs):
-            keep(c)
+    if not llm_ok:
         return {"candidates": candidates[:25], "llm": False,
                 "documentsRead": 0, "documentsTotal": len(docs)}
     # documentsRead vs documentsTotal is how the caller can tell a corpus with

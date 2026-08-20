@@ -231,7 +231,7 @@ class SlackSetupToAnswerTests(unittest.TestCase):
              patch.object(queries.llm, "embed", return_value=None), \
              patch.object(bots.llm, "generate_json", side_effect=lambda prompt, **_kwargs: prompts.append(prompt) or {
                  "answer": "Use the runbook [1].", "confidence": 0.9,
-                 "evidence": [{"document_id": "document:1", "quote": "Use the production checklist"}],
+                 "evidence": [{"document_id": "document:1", "quote": "Use the allowed deploy process"}],
              }):
             self.assertEqual(asyncio.run(bots.slack_webhook(self._request(mention))), {"ok": True})
             self.assertEqual(asyncio.run(bots.slack_webhook(self._request(dm))), {"ok": True})
