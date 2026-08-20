@@ -266,10 +266,15 @@ class MutAdmin:
         """Create a real GitHub source and start the initial sync in the background."""
         actor = _require_admin(info)
         project_id = access.require_current_access().project_id
+        repo = repo.strip().strip("/")
+        if repo.count("/") != 1 or any(not part.strip() for part in repo.split("/")):
+            raise ValueError("Repository must be in owner/name form")
         requested_token = (token or "").strip()
         if not requested_token and not github.token():
             raise ValueError("No GitHub token configured (github.token / MARI_GITHUB_TOKEN)")
-        if q1("SELECT id FROM sources WHERE project_id = %s AND kind = 'github' AND config->>'repo' = %s", (project_id, repo)):
+        if q1("""SELECT id FROM sources
+                 WHERE project_id = %s AND kind = 'github'
+                   AND lower(config->>'repo') = lower(%s)""", (project_id, repo)):
             raise ValueError(f"Repository {repo} is already connected")
         token_state = github.push_token(requested_token)
         try:
@@ -308,10 +313,11 @@ class MutAdmin:
         """Backfill link extraction (LINEAGE-ROLLUP-CONTRACT.md §2) for one
         source, or every source when sourceId is null. Returns edges created."""
         _require_manager(info)
+        project_id = access.require_current_access().project_id
         if source_id is None:
-            created = links.extract_all()
+            created = links.extract_all(project_id)
         else:
-            created = sum(links.extract(source_id).values())
+            created = sum(links.extract(source_id, project_id=project_id).values())
         audit("extracted links", f"source {source_id if source_id is not None else 'all'} · {created} edges")
         return created
 

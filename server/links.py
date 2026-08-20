@@ -54,7 +54,8 @@ def _conn():
 _INSERT_BATCH = 500
 
 
-def _insert_edges(conn, triples: list[tuple[int, int, str, dict]]) -> int:
+def _insert_edges(conn, project_id: int,
+                  triples: list[tuple[int, int, str, dict]]) -> int:
     """Insert (from, to, rel, meta) edges; returns how many were actually new.
 
     Batched (SQL-4). This issued one INSERT … RETURNING per edge, so a source
@@ -70,15 +71,15 @@ def _insert_edges(conn, triples: list[tuple[int, int, str, dict]]) -> int:
     for src, dst, rel, meta in triples:
         if src != dst:
             seen.setdefault((src, dst, rel), meta)
-    rows = [(src, dst, rel, psycopg.types.json.Json(meta))
+    rows = [(project_id, src, dst, rel, psycopg.types.json.Json(meta))
             for (src, dst, rel), meta in seen.items()]
     created = 0
     for i in range(0, len(rows), _INSERT_BATCH):
         batch = rows[i:i + _INSERT_BATCH]
-        values = ", ".join(["(%s, %s, %s, 0, 0, %s, CURRENT_DATE)"] * len(batch))
+        values = ", ".join(["(%s, %s, %s, %s, 0, 0, %s, CURRENT_DATE)"] * len(batch))
         args = [field for row in batch for field in row]
         created += len(conn.execute(
-            f"""INSERT INTO edges (from_doc, to_doc, rel, day, curve, meta, created_at)
+            f"""INSERT INTO edges (project_id, from_doc, to_doc, rel, day, curve, meta, created_at)
                 VALUES {values}
                 ON CONFLICT (from_doc, to_doc, rel) DO NOTHING
                 RETURNING id""", args).fetchall())
@@ -88,7 +89,8 @@ def _insert_edges(conn, triples: list[tuple[int, int, str, dict]]) -> int:
 # ————————————————— references (#N) —————————————————
 
 
-def _extract_references(conn, source_id: int, doc_ids: list[int] | None) -> int:
+def _extract_references(conn, source_id: int, project_id: int,
+                        doc_ids: list[int] | None) -> int:
     """pr/issue/commit bodies containing #N → edge to issues/N | pulls/N doc."""
     where, args = "d.source_id = %s AND d.kind IN ('pr','issue','commit')", [source_id]
     if doc_ids is not None:
@@ -116,7 +118,7 @@ def _extract_references(conn, source_id: int, doc_ids: list[int] | None) -> int:
             if target and target != d["id"] and n not in seen:
                 seen.add(n)
                 triples.append((d["id"], target, "references", {"ref": f"#{n}"}))
-    return _insert_edges(conn, triples)
+    return _insert_edges(conn, project_id, triples)
 
 
 # ————————————————— links_to (markdown relative links) —————————————————
@@ -137,7 +139,8 @@ def _resolve(base_path: str, target: str) -> str | None:
     return resolved
 
 
-def _extract_links_to(conn, source_id: int, doc_ids: list[int] | None) -> int:
+def _extract_links_to(conn, source_id: int, project_id: int,
+                      doc_ids: list[int] | None) -> int:
     where, args = "d.source_id = %s AND d.kind = 'page'", [source_id]
     if doc_ids is not None:
         where += " AND d.id = ANY(%s)"
@@ -162,13 +165,14 @@ def _extract_links_to(conn, source_id: int, doc_ids: list[int] | None) -> int:
             if target and target != d["id"] and target not in seen:
                 seen.add(target)
                 triples.append((d["id"], target, "links_to", {"href": m.group(1)}))
-    return _insert_edges(conn, triples)
+    return _insert_edges(conn, project_id, triples)
 
 
 # ————————————————— similar (pgvector cosine) —————————————————
 
 
-def _extract_similar(conn, source_id: int, doc_ids: list[int] | None) -> int:
+def _extract_similar(conn, source_id: int, project_id: int,
+                     doc_ids: list[int] | None) -> int:
     """Top-K cosine neighbors ≥ threshold; page↔page and page↔(pr|issue) only.
     Incremental runs restrict the LEFT side to changed docs but always compare
     against all docs of the source. Deduped both directions; capped per source.
@@ -221,13 +225,14 @@ def _extract_similar(conn, source_id: int, doc_ids: list[int] | None) -> int:
     budget = max(SIM_CAP_PER_SOURCE - existing, 0)
     ranked = sorted(pairs.items(), key=lambda kv: -kv[1])[:budget]
     triples = [(a, b, "similar", {"sim": round(sim, 4)}) for (a, b), sim in ranked]
-    return _insert_edges(conn, triples)
+    return _insert_edges(conn, project_id, triples)
 
 
 # ————————————————— entry points —————————————————
 
 
-def extract(source_id: int, doc_ids: list[int] | None = None) -> dict[str, int]:
+def extract(source_id: int, doc_ids: list[int] | None = None,
+            *, project_id: int | None = None) -> dict[str, int]:
     """Extract link edges for one source. doc_ids=None → full pass over the
     source; a doc-id list → incremental (those docs only; similarity for those
     docs is still computed against the whole source). Returns per-rel counts
@@ -235,18 +240,27 @@ def extract(source_id: int, doc_ids: list[int] | None = None) -> dict[str, int]:
     if doc_ids is not None and not doc_ids:
         return {"references": 0, "links_to": 0, "similar": 0}
     with _conn() as conn:
+        source = conn.execute(
+            "SELECT project_id FROM sources WHERE id = %s", (source_id,)).fetchone()
+        if not source or source.get("project_id") is None:
+            raise ValueError(f"source {source_id} has no project")
+        source_project_id = int(source["project_id"])
+        if project_id is not None and source_project_id != int(project_id):
+            raise PermissionError("source does not belong to the active project")
         counts = {
-            "references": _extract_references(conn, source_id, doc_ids),
-            "links_to": _extract_links_to(conn, source_id, doc_ids),
-            "similar": _extract_similar(conn, source_id, doc_ids),
+            "references": _extract_references(conn, source_id, source_project_id, doc_ids),
+            "links_to": _extract_links_to(conn, source_id, source_project_id, doc_ids),
+            "similar": _extract_similar(conn, source_id, source_project_id, doc_ids),
         }
         conn.commit()
     return counts
 
 
-def extract_all() -> int:
+def extract_all(project_id: int) -> int:
     """Full extraction for every source that has documents. Returns total edges created."""
     with _conn() as conn:
         sids = [r["source_id"] for r in conn.execute(
-            "SELECT DISTINCT source_id FROM documents WHERE source_id IS NOT NULL").fetchall()]
-    return sum(sum(extract(sid).values()) for sid in sids)
+            """SELECT DISTINCT source_id FROM documents
+               WHERE project_id = %s AND source_id IS NOT NULL""",
+            (project_id,)).fetchall()]
+    return sum(sum(extract(sid, project_id=project_id).values()) for sid in sids)

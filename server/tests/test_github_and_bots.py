@@ -35,6 +35,20 @@ class GitHubPollingTests(unittest.TestCase):
         self.assertEqual(execute.call_args.args[1][0], 7)
         self.assertEqual(query.call_args_list[1].args[1], (7, "github:acme/docs"))
 
+    def test_connect_repo_rejects_case_only_duplicate(self) -> None:
+        with patch.object(mutations_admin, "_require_admin", return_value={"name": "Admin"}), \
+             patch.object(mutations_admin.access, "require_current_access",
+                          return_value=SimpleNamespace(project_id=7)), \
+             patch.object(mutations_admin.github, "token", return_value="configured"), \
+             patch.object(mutations_admin, "q1", return_value={"id": 1}) as query, \
+             patch.object(mutations_admin.github, "default_branch") as branch:
+            with self.assertRaisesRegex(ValueError, "already connected"):
+                mutations_admin.MutAdmin().connect_github_repo(object(), "MariHQ/mari/")
+
+        self.assertIn("lower(config->>'repo') = lower(%s)", query.call_args.args[0])
+        self.assertEqual(query.call_args.args[1], (7, "MariHQ/mari"))
+        branch.assert_not_called()
+
     def test_transient_requests_retry_but_auth_does_not(self) -> None:
         sleeps = []
         with patch.object(github, "_request_once",
