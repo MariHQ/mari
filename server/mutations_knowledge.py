@@ -16,7 +16,9 @@ import access
 import flowengine
 import llm
 import links
-import review
+from mari_server.application import review as review_application
+from mari_server.domain.review import ReviewRecord
+from mari_server.infrastructure import review_repository
 from db import actor_name, audit, exec_, jload, q, q1, transaction
 from gqltypes import AnswerCandidate, ImpactDoc, ImpactResult, ReviewPolicyDecision
 from queries import hybrid_search, like_pattern
@@ -317,31 +319,43 @@ def scan_facts_for(doc_ids: list[int] | None = None,
 class MutKnowledge:
     @strawberry.mutation
     def evaluate_review_item(self, review_id: str, dry_run: bool = True) -> ReviewPolicyDecision:
-        item = review.find_item(review_id)
+        item = review_repository.find_item(review_id)
         if not item:
             raise ValueError("Review item not found")
         reviewer = actor_name()
 
-        def permitted(actor: str, candidate: review.ReviewRecord) -> bool:
+        def permitted(actor: str, candidate: ReviewRecord) -> bool:
             member = q1("SELECT role FROM users WHERE name = %s AND status = 'active'", (actor,))
             return bool(member and (member["role"] in ("admin", "manager") or
                                     candidate.assignee.casefold() == actor.casefold()))
 
-        result = review.decide(item, reviewer, dry_run=dry_run, permission=permitted)
-        return ReviewPolicyDecision(**result.__dict__)
+        result = review_application.decide(
+            item, reviewer, review_repository.ports(), dry_run=dry_run, permission=permitted,
+        )
+        return ReviewPolicyDecision(
+            result.review_id, result.outcome, result.explanation, result.policy_version,
+            result.replayed, result.dry_run,
+        )
 
     @strawberry.mutation
     def automate_review(self, first: int = 100, dry_run: bool = True) -> list[ReviewPolicyDecision]:
         """Evaluate a bounded batch; only deterministic `allow` rows mutate."""
         reviewer = actor_name()
-        rows = review.filter_items(review.project_items(), statuses=["pending"])[:min(max(first, 1), 100)]
+        rows = review_application.filter_items(
+            review_repository.project_items(), statuses=["pending"],
+        )[:min(max(first, 1), 100)]
 
-        def permitted(actor: str, candidate: review.ReviewRecord) -> bool:
+        def permitted(actor: str, candidate: ReviewRecord) -> bool:
             member = q1("SELECT role FROM users WHERE name = %s AND status = 'active'", (actor,))
             return bool(member and member["role"] in ("admin", "manager"))
 
-        return [ReviewPolicyDecision(**review.decide(
-            item, reviewer, dry_run=dry_run, permission=permitted).__dict__) for item in rows]
+        results = [review_application.decide(
+            item, reviewer, review_repository.ports(), dry_run=dry_run, permission=permitted,
+        ) for item in rows]
+        return [ReviewPolicyDecision(
+            result.review_id, result.outcome, result.explanation, result.policy_version,
+            result.replayed, result.dry_run,
+        ) for result in results]
 
     @strawberry.mutation
     def set_task_done(self, id: int, done: bool) -> bool:

@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-import connect_sync
+from mari_server.infrastructure import connector_runtime as connect_sync
 import connectors
 from connectors import confluence, dropbox, slack
 from connectors._protocol import (

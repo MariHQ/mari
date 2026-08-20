@@ -46,8 +46,6 @@ not copy reusable logic back into a route or database module.
 - `infrastructure/agent_runtime.py`: concrete Postgres, model, retrieval, usage,
   and trajectory adapters.
 - `api/agent.py`: request/session invocation and SSE serialization.
-- `agentchat.py`: temporary compatibility exports only; new code must not depend
-  on it.
 
 ## Connector ingestion
 
@@ -58,12 +56,22 @@ not copy reusable logic back into a route or database module.
   cursor envelope to `mari-components` connector definitions.
 - `infrastructure/connector_runtime.py`: project-scoped document/chunk writes,
   checkpoints, embeddings, link extraction, and workflow triggers.
-- `component_connectors.py` and `connect_sync.py`: temporary compatibility
-  exports only.
 
 Each page's knowledge mutations, manifest, and provider checkpoint commit in
 one transaction. Full-snapshot absence deletion is planned only by
 `mari-components` after a provider declares the terminal page complete.
+
+## Unified Review
+
+- `domain/review.py`: immutable queue records and policy results.
+- `application/review.py`: filtering, cursors, deterministic policy evaluation,
+  separation-of-duties checks, replay orchestration, and explicit persistence
+  ports.
+- `infrastructure/review_repository.py`: the cross-domain Postgres projection,
+  stored decisions, native-record approval updates, and audit adapter.
+
+GraphQL resolvers translate these values at the boundary. They do not own the
+policy or reach through a flat Review service.
 
 ## Migration rules
 
@@ -72,10 +80,11 @@ one transaction. Full-snapshot absence deletion is planned only by
 3. Preserve behavior at the boundary; then remove the legacy implementation.
 4. Do not create generic repositories, service locators, or an application
    container. Inject the few functions each use case actually needs.
-5. A compatibility module may re-export new symbols but may not contain logic.
+5. Do not add flat compatibility facades for migrated modules. Migrate all
+   internal callers and let stale imports fail immediately.
 6. `test_architecture.py` is a required CI gate. Extend it when a new boundary is
    introduced.
 
-Next verticals are knowledge review and publishing. The
+Next verticals are publishing and automation execution. The
 large GraphQL modules should become transport declarations that call those use
 cases, not be split mechanically by line count.

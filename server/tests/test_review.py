@@ -5,17 +5,33 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import queries
-import review
+from mari_server.application import review
+from mari_server.domain.review import ReviewRecord
+from mari_server.infrastructure import review_repository
 
 
-def item(**overrides) -> review.ReviewRecord:
+def item(**overrides) -> ReviewRecord:
     values = dict(id="fact:1", kind="fact", title="Retention is 30 days",
                   status="pending", source="handbook", assignee="Dana",
                   subject_type="fact", subject_id="1", subject_title="Retention",
                   subject_href="/facts?fact=1", proposer="Alex", confidence=.96,
                   evidence_count=3, trusted_source=True)
     values.update(overrides)
-    return review.ReviewRecord(**values)
+    return ReviewRecord(**values)
+
+
+def ports(*, existing=None, writes=None, auditor=None):
+    writes = writes if writes is not None else []
+    return review.ReviewPorts(
+        existing_decision=lambda *_args: existing,
+        record_decision=lambda candidate, result, reviewer, fingerprint: writes.append(
+            ("record", candidate.id, result.outcome, reviewer, fingerprint),
+        ),
+        apply_approval=lambda candidate: writes.append(("apply", candidate.id)),
+        audit_decision=lambda candidate, result, reviewer: (
+            auditor(candidate, result, reviewer) if auditor else None
+        ),
+    )
 
 
 class ReviewProjectionTests(unittest.TestCase):
@@ -24,9 +40,9 @@ class ReviewProjectionTests(unittest.TestCase):
                  "status": "pending", "subject_id": str(n)}
                 for n, kind in enumerate(
                     ("task", "fact", "decision", "answer", "finding", "change", "workflow"), 1)]
-        with patch.object(review.access, "require_current_access", return_value=SimpleNamespace(project_id=7)), \
-             patch.object(review, "q", return_value=rows) as query:
-            projected = review.project_items()
+        with patch.object(review_repository.access, "require_current_access", return_value=SimpleNamespace(project_id=7)), \
+             patch.object(review_repository, "q", return_value=rows) as query:
+            projected = review_repository.project_items()
         self.assertEqual(query.call_args.args[1], (7,) * 7)
         self.assertEqual({x.kind for x in projected},
                          {"task", "fact", "decision", "answer", "finding", "change", "workflow"})
@@ -38,7 +54,7 @@ class ReviewProjectionTests(unittest.TestCase):
     def test_filters_sort_and_cursor_pagination_are_bounded(self) -> None:
         rows = [item(id=f"fact:{n}", source="trusted" if n % 2 else "other",
                      assignee="Dana" if n % 3 else "Lee") for n in range(140)]
-        with patch.object(review, "project_items", return_value=rows):
+        with patch.object(review_repository, "project_items", return_value=rows):
             page = queries.Query().review_items(first=500, sources=["trusted"], assignees=["Dana"])
         self.assertLessEqual(len(page.items), 100)
         self.assertEqual(page.total_count, len([x for x in rows if x.source == "trusted" and x.assignee == "Dana"]))
@@ -68,27 +84,27 @@ class ApprovalPolicyTests(unittest.TestCase):
 
     def test_separation_of_duties_and_permission_hook_deny(self) -> None:
         self.assertEqual(review.evaluate_policy(item(proposer="Dana"), "dana").outcome, "deny")
-        denied = review.decide(item(), "Dana", permission=lambda _a, _i: False)
+        denied = review.decide(item(), "Dana", ports(), permission=lambda _a, _i: False)
         self.assertEqual(denied.outcome, "deny")
         self.assertIn("permission", denied.explanation)
 
     def test_dry_run_has_no_write_or_audit(self) -> None:
-        with patch.object(review, "exec_") as write:
-            result = review.decide(item(), "Dana", dry_run=True, audit_hook=Mock())
+        writes = []
+        result = review.decide(item(), "Dana", ports(writes=writes), dry_run=True)
         self.assertEqual(result.outcome, "allow")
-        write.assert_not_called()
+        self.assertEqual(writes, [])
 
     def test_real_decision_is_recorded_applied_audited_and_replayed(self) -> None:
-        writes: list[tuple[str, tuple]] = []
+        writes = []
         auditor = Mock()
-        with patch.object(review, "q1", side_effect=[None, {
-                "outcome": "allow", "explanation": "same"}]), \
-             patch.object(review, "exec_", side_effect=lambda sql, args=(): writes.append((sql, args))):
-            first = review.decide(item(), "Dana", dry_run=False, audit_hook=auditor)
-            replay = review.decide(item(), "Dana", dry_run=False, audit_hook=auditor)
+        first = review.decide(item(), "Dana", ports(writes=writes, auditor=auditor), dry_run=False)
+        replay = review.decide(
+            item(), "Dana", ports(existing=("allow", "same"), writes=writes, auditor=auditor),
+            dry_run=False,
+        )
         self.assertEqual(first.outcome, "allow")
-        self.assertTrue(any("INSERT INTO review_decisions" in sql for sql, _ in writes))
-        self.assertTrue(any("UPDATE facts SET status = 'Verified'" in sql for sql, _ in writes))
+        self.assertTrue(any(write[0] == "record" for write in writes))
+        self.assertIn(("apply", "fact:1"), writes)
         self.assertTrue(replay.replayed)
         self.assertEqual(auditor.call_count, 1)
 

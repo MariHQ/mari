@@ -21,7 +21,7 @@ from pydantic import BaseModel
 
 import auth
 import access
-import connect_sync
+from mari_server.infrastructure import connector_runtime as connect_sync
 from mari_server.infrastructure import connector_provider as component_connectors
 import flowengine
 import ingest

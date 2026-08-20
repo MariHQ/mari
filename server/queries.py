@@ -24,7 +24,8 @@ import github
 import ingest
 import llm
 import retrieval
-import review
+from mari_server.application import review as review_application
+from mari_server.infrastructure import review_repository
 from db import actor_name, exec_, jload, q, q1
 from excerpt import excerpt
 from gqltypes import (
@@ -789,7 +790,7 @@ class Query:
         def safe_config(r: dict) -> dict:
             """Never leak connector credentials: secret field values are masked
             and bulky internal hash maps dropped (CONNECTORS-CONTRACT.md)."""
-            import connect_sync
+            from mari_server.infrastructure import connector_runtime as connect_sync
             cfg = jload(r["config"]) or {}
             if r.get("kind") == "connector":
                 return connect_sync.masked_config(r["provider"], cfg)
@@ -1151,8 +1152,8 @@ class Query:
                      assignees: list[str] | None = None, due: str = "") -> ReviewConnection:
         """A bounded, stable projection over every product object requiring review."""
         limit = min(max(first, 1), 100)
-        offset = review.decode_cursor(after)
-        filtered = review.filter_items(review.project_items(), kinds=kinds, statuses=statuses,
+        offset = review_application.decode_cursor(after)
+        filtered = review_application.filter_items(review_repository.project_items(), kinds=kinds, statuses=statuses,
                                        sources=sources, assignees=assignees, due=due)
         page = filtered[offset:offset + limit]
         return ReviewConnection(
@@ -1165,7 +1166,7 @@ class Query:
             ) for x in page],
             total_count=len(filtered),
             page_info=ReviewPageInfo(
-                end_cursor=review.encode_cursor(offset + len(page)),
+                end_cursor=review_application.encode_cursor(offset + len(page)),
                 has_next_page=offset + len(page) < len(filtered)),
         )
 

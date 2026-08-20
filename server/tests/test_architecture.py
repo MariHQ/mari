@@ -60,6 +60,14 @@ class ArchitectureTests(unittest.TestCase):
         ]
         self.assertEqual(offenders, [])
 
+    def test_retired_flat_facades_do_not_return(self) -> None:
+        server = ROOT.parent
+        retired = [
+            name for name in ("agentchat.py", "component_connectors.py", "connect_sync.py", "review.py")
+            if (server / name).exists()
+        ]
+        self.assertEqual(retired, [])
+
 
 if __name__ == "__main__":
     unittest.main()

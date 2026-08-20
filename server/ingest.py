@@ -482,7 +482,7 @@ def _worker_for(source_id: int):
                            (source_id, access.require_current_access().project_id)).fetchone()
     if not row or row.get("kind") != "connector":
         raise RuntimeError("source is not a connector")
-    import connect_sync  # late import — connect_sync imports ingest
+    from mari_server.infrastructure import connector_runtime as connect_sync  # late: runtime imports ingest
     return connect_sync._sync_worker
 
 

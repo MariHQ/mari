@@ -10,7 +10,6 @@ import psycopg
 
 import access
 import llm
-import review
 import trajectory
 from db import DB_URL, exec_, log_usage, q, q1
 from mari_components.connectors import connector_definitions
@@ -23,6 +22,7 @@ from mari_server.application.agent import (
     planner_instructions,
 )
 from mari_server.infrastructure.agent_tools import ToolDependencies, build_tool_bindings
+from mari_server.infrastructure import review_repository
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,7 +67,7 @@ class ProductionAgentRuntime:
             query_one=lambda sql, params: q1(sql, params),
             search=lambda text, limit: hybrid_search(text, limit),
             record_search=lambda text: log_usage("search", text),
-            review_items=review.project_items,
+            review_items=review_repository.project_items,
             connector_definitions=connector_definitions,
         )
         return build_tool_bindings(dependencies)
