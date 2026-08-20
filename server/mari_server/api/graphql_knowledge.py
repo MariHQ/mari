@@ -19,6 +19,7 @@ from mari_server.repositories import lineage_repository as links
 from mari_server.services import review as review_application
 from mari_server.domain.review import ReviewRecord
 from mari_server.repositories import review_repository
+from mari_server.repositories import knowledge as knowledge_store
 from mari_server.repositories.database import actor_name, audit, exec_, jload, q, q1, transaction
 from mari_server.api.graphql_types import AnswerCandidate, ImpactDoc, ImpactResult, ReviewPolicyDecision
 from mari_server.services.search import hybrid_search, like_pattern
@@ -86,19 +87,15 @@ class MutKnowledge:
 
     @strawberry.mutation
     def set_task_done(self, id: int, done: bool) -> bool:
-        project_id = access.require_current_access().project_id
-        task = q1("SELECT title FROM tasks WHERE project_id = %s AND id = %s", (project_id, id))
-        if not task:
+        title = knowledge_store.set_task_done(id, done)
+        if not title:
             return False
-        exec_("UPDATE tasks SET done = %s WHERE project_id = %s AND id = %s", (done, project_id, id))
-        audit("completed" if done else "reopened", task["title"])
+        audit("completed" if done else "reopened", title)
         return True
 
     @strawberry.mutation
     def clear_done_tasks(self) -> int:
-        project_id = access.require_current_access().project_id
-        n = q1("SELECT count(*) AS n FROM tasks WHERE project_id = %s AND done", (project_id,))["n"]
-        exec_("DELETE FROM tasks WHERE project_id = %s AND done", (project_id,))
+        n = knowledge_store.clear_done_tasks()
         if n:
             audit("cleared done tasks", f"{n} tasks")
         return n
@@ -107,13 +104,10 @@ class MutKnowledge:
     def verify_fact(self, id: int) -> bool:
         # verified_at is a DATE; the legacy `verified` text column held a
         # display string the console could neither re-format nor sort on.
-        project_id = access.require_current_access().project_id
-        fact = q1("SELECT claim FROM facts WHERE project_id = %s AND id = %s", (project_id, id))
-        if not fact:
+        claim = knowledge_store.verify_fact(id)
+        if not claim:
             return False
-        exec_("""UPDATE facts SET status = 'Verified', verified_at = current_date
-                 WHERE project_id = %s AND id = %s""", (project_id, id))
-        audit("verified fact", fact["claim"])
+        audit("verified fact", claim)
         return True
 
     @strawberry.mutation
@@ -138,13 +132,10 @@ class MutKnowledge:
         subject = tuple((value or "").strip() for value in
                         (subject_type, subject_id, subject_title, subject_href))
         due_date = _iso_date(due)
-        project_id = access.require_current_access().project_id
-        exec_("""INSERT INTO tasks
-                 (project_id, title, assignee, assignee_initials, assignee_tint, kind, kind_label, due_date,
-                  subject_type, subject_id, subject_title, subject_href)
-                 VALUES (%s, %s, %s, %s, 1, %s, %s, %s, %s, %s, %s, %s)
-                 ON CONFLICT (project_id, title) DO NOTHING""",
-              (project_id, title, assignee, initials, kind, kind_label, due_date, *subject))
+        knowledge_store.create_task(
+            title=title, assignee=assignee, initials=initials, kind=kind,
+            kind_label=kind_label, due_date=due_date, subject=subject,
+        )
         detail = [("Assignee", assignee or "(unassigned)"), ("Kind", kind_label),
                   ("Due", due_date or "(no deadline)")]
         if subject[0]:
@@ -157,11 +148,9 @@ class MutKnowledge:
         """Set or (with null/empty) clear a task's deadline. ISO date in, ISO
         date out — the console formats and sorts on the raw value."""
         value = _iso_date(due)
-        project_id = access.require_current_access().project_id
-        before = q1("SELECT title, due_date FROM tasks WHERE project_id = %s AND id = %s", (project_id, id))
+        before = knowledge_store.set_task_due(id, value)
         if not before:
             return False
-        exec_("UPDATE tasks SET due_date = %s WHERE project_id = %s AND id = %s", (value, project_id, id))
         audit("set task due date" if value else "cleared task due date", before["title"],
               detail=[("Previous due", before["due_date"].isoformat() if before["due_date"] else "(none)"),
                       ("New due", value or "(none)")])
@@ -179,16 +168,11 @@ class MutKnowledge:
         keeps NULL, which is the truth about it: Doc Review lists a document's
         claims by this key, so a guessed id would put someone else's claim
         under this title."""
-        project_id = access.require_current_access().project_id
         doc_id = document_id or None
-        if doc_id and not q1("SELECT 1 FROM documents WHERE project_id = %s AND id = %s", (project_id, doc_id)):
+        if doc_id and not knowledge_store.document_exists(doc_id):
             raise ValueError(f"No document {doc_id} to attribute this claim to")
         owner = owner.strip() or actor_name()
-        exec_("""INSERT INTO facts
-                 (project_id, claim, source, owner_name, owner_tint, status, verified, document_id)
-                 VALUES (%s, %s, %s, %s, 1, 'Needs review', '—', %s)
-                 ON CONFLICT (project_id, claim) DO NOTHING""",
-              (project_id, claim, source, owner, doc_id))
+        knowledge_store.add_fact(claim, source, owner, doc_id)
         audit("added fact", claim, detail=[("Owner", owner), ("Source", source)])
         return True
 
@@ -201,27 +185,21 @@ class MutKnowledge:
         is the truth about it; an existing citation is never overwritten with
         a blank."""
         doc_id = evidence_doc_id or None
-        if doc_id and not q1("SELECT 1 FROM documents WHERE id = %s", (doc_id,)):
+        if doc_id and not knowledge_store.document_exists(doc_id):
             raise ValueError(f"No document {doc_id} to cite as evidence")
+        knowledge_store.upsert_glossary(
+            term_id=id, term=term, definition=definition, owner=actor_name(),
+            evidence=evidence, document_id=doc_id,
+        )
         if id:
-            exec_("""UPDATE glossary SET term = %s, definition = %s, updated = now(),
-                     evidence = CASE WHEN %s <> '' THEN %s ELSE evidence END,
-                     evidence_doc_id = coalesce(%s, evidence_doc_id) WHERE id = %s""",
-                  (term, definition, evidence, evidence, doc_id, id))
             audit("updated glossary term", term)
         else:
-            exec_("""INSERT INTO glossary (term, definition, owner_name, updated, evidence, evidence_doc_id)
-                     VALUES (%s, %s, %s, now(), %s, %s)
-                     ON CONFLICT (term) DO UPDATE SET definition = EXCLUDED.definition, updated = now(),
-                       evidence = CASE WHEN EXCLUDED.evidence <> '' THEN EXCLUDED.evidence ELSE glossary.evidence END,
-                       evidence_doc_id = coalesce(EXCLUDED.evidence_doc_id, glossary.evidence_doc_id)""",
-                  (term, definition, actor_name(), evidence, doc_id))
             audit("added glossary term", term, detail=[("Evidence", evidence or "(none)")])
         return True
 
     @strawberry.mutation
     def delete_glossary(self, id: int) -> bool:
-        exec_("DELETE FROM glossary WHERE id = %s", (id,))
+        knowledge_store.delete_glossary(id)
         audit("deleted glossary term", f"#{id}")
         return True
 

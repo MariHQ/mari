@@ -75,7 +75,7 @@ def fact_claims(*, verified_only: bool = False) -> set[str]:
     return {str(row["claim"]).lower() for row in rows}
 
 
-def add_fact(claim: str, source: str, owner: str, document_id: int) -> bool:
+def add_fact(claim: str, source: str, owner: str, document_id: int | None) -> bool:
     project_id = access.require_current_access().project_id
     with db.connect() as conn, conn.transaction():
         row = conn.execute(
@@ -131,3 +131,107 @@ def replace_digest(topics: list[tuple[str, str, str, str]]) -> None:
                    VALUES (%s, %s, %s, %s, %s)""",
                 (project_id, title, summary, wheres, impact),
             )
+
+
+def set_task_done(task_id: int, done: bool) -> str | None:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn, conn.transaction():
+        row = conn.execute(
+            "SELECT title FROM tasks WHERE project_id = %s AND id = %s",
+            (project_id, task_id),
+        ).fetchone()
+        if row:
+            conn.execute(
+                "UPDATE tasks SET done = %s WHERE project_id = %s AND id = %s",
+                (done, project_id, task_id),
+            )
+    return str(row["title"]) if row else None
+
+
+def clear_done_tasks() -> int:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn, conn.transaction():
+        rows = conn.execute(
+            "DELETE FROM tasks WHERE project_id = %s AND done RETURNING id", (project_id,),
+        ).fetchall()
+    return len(rows)
+
+
+def verify_fact(fact_id: int) -> str | None:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn, conn.transaction():
+        row = conn.execute(
+            """UPDATE facts SET status = 'Verified', verified_at = current_date
+                 WHERE project_id = %s AND id = %s RETURNING claim""",
+            (project_id, fact_id),
+        ).fetchone()
+    return str(row["claim"]) if row else None
+
+
+def create_task(*, title: str, assignee: str, initials: str, kind: str,
+                kind_label: str, due_date: str | None, subject: tuple[str, ...]) -> None:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn, conn.transaction():
+        conn.execute(
+            """INSERT INTO tasks
+               (project_id, title, assignee, assignee_initials, assignee_tint, kind,
+                kind_label, due_date, subject_type, subject_id, subject_title, subject_href)
+               VALUES (%s, %s, %s, %s, 1, %s, %s, %s, %s, %s, %s, %s)
+               ON CONFLICT (project_id, title) DO NOTHING""",
+            (project_id, title, assignee, initials, kind, kind_label, due_date, *subject),
+        )
+
+
+def set_task_due(task_id: int, due_date: str | None) -> dict | None:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn, conn.transaction():
+        row = conn.execute(
+            "SELECT title, due_date FROM tasks WHERE project_id = %s AND id = %s",
+            (project_id, task_id),
+        ).fetchone()
+        if row:
+            conn.execute(
+                "UPDATE tasks SET due_date = %s WHERE project_id = %s AND id = %s",
+                (due_date, project_id, task_id),
+            )
+    return row
+
+
+def document_exists(document_id: int) -> bool:
+    return document(document_id) is not None
+
+
+def upsert_glossary(*, term_id: int | None, term: str, definition: str,
+                    owner: str, evidence: str, document_id: int | None) -> None:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn, conn.transaction():
+        if term_id:
+            conn.execute(
+                """UPDATE glossary SET term = %s, definition = %s, updated = now(),
+                       evidence = CASE WHEN %s <> '' THEN %s ELSE evidence END,
+                       evidence_doc_id = coalesce(%s, evidence_doc_id)
+                     WHERE project_id = %s AND id = %s""",
+                (term, definition, evidence, evidence, document_id, project_id, term_id),
+            )
+        else:
+            conn.execute(
+                """INSERT INTO glossary
+                   (project_id, term, definition, owner_name, updated, evidence, evidence_doc_id)
+                   VALUES (%s, %s, %s, %s, now(), %s, %s)
+                   ON CONFLICT (project_id, term) DO UPDATE SET
+                     definition = EXCLUDED.definition, updated = now(),
+                     evidence = CASE WHEN EXCLUDED.evidence <> ''
+                                     THEN EXCLUDED.evidence ELSE glossary.evidence END,
+                     evidence_doc_id = coalesce(EXCLUDED.evidence_doc_id, glossary.evidence_doc_id)""",
+                (project_id, term, definition, owner, evidence, document_id),
+            )
+
+
+def delete_glossary(term_id: int) -> bool:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn, conn.transaction():
+        row = conn.execute(
+            "DELETE FROM glossary WHERE project_id = %s AND id = %s RETURNING id",
+            (project_id, term_id),
+        ).fetchone()
+    return bool(row)
