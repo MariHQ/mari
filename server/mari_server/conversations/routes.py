@@ -44,7 +44,10 @@ def agent_chat(
             raise HTTPException(404, str(error)) from error
     runtime.append_user_message(session_id, message)
     bindings = runtime.bindings()
-    outputs = stream_agent_turn(session_id, message, bindings, runtime.ports(bindings))
+    outputs = stream_agent_turn(
+        session_id, message, bindings, runtime.ports(bindings),
+        minimum_tool_observations=1,
+    )
 
     def response() -> Iterator[str]:
         yield f"event: meta\ndata: {json.dumps({'session_id': session_id})}\n\n"
