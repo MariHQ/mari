@@ -208,6 +208,18 @@ class GatewayContractTests(unittest.TestCase):
         self.assertNotIn("max_completion_tokens", payload)
         self.assertNotIn("metadata", payload)
 
+    def test_deepseek_json_generation_enables_provider_structured_output(self) -> None:
+        cfg = {**self.CFG, "base_url": "https://api.deepseek.com", "compatibility": "deepseek"}
+        response = {"choices": [{"message": {"content": '{"action":"answer"}'}}]}
+        schema = {"type": "object", "properties": {"action": {"type": "string"}}}
+        with patch.object(llm, "generation_model", return_value=("gateway", "deepseek-v4-flash")), \
+             patch.object(llm, "gateway_config", return_value=cfg), \
+             patch.object(llm, "_post", return_value=response) as post:
+            self.assertEqual(llm.generate_json("choose an action", schema=schema), {"action": "answer"})
+        payload = post.call_args.args[1]
+        self.assertEqual(payload["response_format"], {"type": "json_object"})
+        self.assertNotIn("json_schema", payload["response_format"])
+
 
 @unittest.skipUnless(os.environ.get("MARI_TEST_LIVE_DEEPSEEK") == "1" and
                      os.environ.get("MARI_DEEPSEEK_API_KEY"),

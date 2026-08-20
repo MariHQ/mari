@@ -234,6 +234,27 @@ def _completion_limit(gateway: dict[str, t.Any] | None, tokens: int) -> dict[str
     return {key: tokens}
 
 
+def _response_format(gateway: dict[str, t.Any] | None,
+                     requested: bool | dict[str, t.Any]) -> dict[str, t.Any]:
+    """Provider-native structured output for model decisions.
+
+    DeepSeek implements OpenAI's JSON-object mode but not the stricter JSON
+    Schema envelope. OpenAI and compatible gateways receive the schema when
+    the caller supplied one. The prompt still names JSON because DeepSeek
+    requires that word to appear when JSON mode is enabled.
+    """
+    if not requested:
+        return {}
+    if gateway and gateway.get("compatibility") == "deepseek":
+        return {"response_format": {"type": "json_object"}}
+    if isinstance(requested, dict):
+        return {"response_format": {
+            "type": "json_schema",
+            "json_schema": {"name": "mari_response", "strict": True, "schema": requested},
+        }}
+    return {"response_format": {"type": "json_object"}}
+
+
 def _gateway_config_error(cfg: dict[str, t.Any]) -> str:
     base = str(cfg.get("base_url") or "")
     if not base:
@@ -524,7 +545,12 @@ def generate(prompt: str, system: str = "", timeout: float = 120.0,
         if gateway and (config_error := _gateway_config_error(gateway)):
             _fail(config_error)
             return None
-        payload = {"model": model, "messages": messages, **_completion_limit(gateway, 700)}
+        payload = {
+            "model": model,
+            "messages": messages,
+            **_completion_limit(gateway, 700),
+            **_response_format(gateway, json_format),
+        }
         headers = _gateway_headers(gateway, model) if gateway else {"Authorization": f"Bearer {key}"}
         if gateway:
             payload = _gateway_payload(payload, gateway)
