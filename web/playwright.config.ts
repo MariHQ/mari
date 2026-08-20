@@ -31,7 +31,9 @@ export default defineConfig({
     ...(process.env.MARI_E2E_LIVE === "1"
       ? [{
           name: "live-chromium",
-          use: { ...devices["Desktop Chrome"], trace: "off", video: "off" },
+          // Live forms contain real connector credentials. Never persist a
+          // trace, video, or failure screenshot from this project.
+          use: { ...devices["Desktop Chrome"], trace: "off", video: "off", screenshot: "off" },
           testMatch: /\.live\.spec\.ts/,
           workers: 1,
         }]

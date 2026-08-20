@@ -26,6 +26,19 @@ verify `/metrics` is scraped. Use a rolling deployment with `maxUnavailable: 0`.
 Do not raise API replicas above one until scheduler leadership exists (see the
 SLO document).
 
+### Live connector canaries
+
+The `Live connector canaries` workflow validates Confluence, Slack, Google
+Drive, and GitHub against a dedicated sandbox every Tuesday without storing
+credentials or creating sources. Configure the protected GitHub environment
+`connector-canary` with the `MARI_E2E_*` secrets named in the workflow. The
+job intentionally fails when any priority credential is absent or expired, so
+a green schedule means all four vendor authentication contracts were actually
+exercised. A manual dispatch can opt into mutation-enabled sandbox workflows;
+scheduled runs are read-only validation.
+
+Live Playwright recording is disabled because forms contain real secrets.
+
 For rollback, deploy the previous immutable image digest. Schema changes must
 remain backward-compatible for at least one release. A rollback is complete only
 after readiness is green and connector lag resumes falling.

@@ -41,19 +41,35 @@ const connectors = [
   },
 ] as const;
 
+async function configureConnector(page: Page, connector: typeof connectors[number]) {
+  await signIn(page);
+  await page.getByRole("button", { name: "Add source" }).click();
+  const dialog = page.getByRole("dialog", { name: /Connect/ });
+  await dialog.getByRole("button", { name: new RegExp(connector.name) }).click();
+  await dialog.getByRole("button", { name: "Next" }).click();
+  for (const [label, key] of Object.entries(connector.fields)) {
+    const value = env[key];
+    if (value) await dialog.getByLabel(label).fill(value);
+  }
+  return dialog;
+}
+
+for (const connector of connectors) {
+  test(`LIVE ${connector.name} validates credentials without storing them`, async ({ page }) => {
+    test.skip(connector.required.some((key) => !env[key]), `Missing ${connector.required.join(", ")}`);
+    const dialog = await configureConnector(page, connector);
+    await dialog.getByRole("button", { name: "Test connection" }).click();
+    await expect(dialog.getByText(/Connection OK/)).toBeVisible({ timeout: 30_000 });
+    await dialog.getByRole("button", { name: "Close" }).click();
+    await expect(dialog).toHaveCount(0);
+  });
+}
+
 for (const connector of connectors) {
   test(`LIVE ${connector.name} validates and schedules its initial poll`, async ({ page }) => {
     test.skip(!mutations, "Set MARI_E2E_MUTATIONS=1 to allow sandbox connector creation.");
     test.skip(connector.required.some((key) => !env[key]), `Missing ${connector.required.join(", ")}`);
-    await signIn(page);
-    await page.getByRole("button", { name: "Add source" }).click();
-    const dialog = page.getByRole("dialog", { name: /Connect/ });
-    await dialog.getByRole("button", { name: new RegExp(connector.name) }).click();
-    await dialog.getByRole("button", { name: "Next" }).click();
-    for (const [label, key] of Object.entries(connector.fields)) {
-      const value = env[key];
-      if (value) await dialog.getByLabel(label).fill(value);
-    }
+    const dialog = await configureConnector(page, connector);
     await dialog.getByRole("button", { name: "Test connection" }).click();
     await expect(dialog.getByText(/Connection OK/)).toBeVisible({ timeout: 30_000 });
     await dialog.getByRole("button", { name: "Connect & sync" }).click();
