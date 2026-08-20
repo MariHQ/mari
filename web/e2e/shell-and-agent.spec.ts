@@ -52,6 +52,8 @@ test("agent SSE renders tools and warnings, navigates, and survives route change
   await page.goto("/");
   await page.getByRole("button", { name: "Open the Mari agent" }).click();
   await expect(page.getByText("Mari agent", { exact: true })).toBeVisible();
+  await expect(page.getByText(/Governed changes happen in Review and Automations/)).toHaveCount(2);
+  await expect(page.getByText(/edit and tag docs|run flows/)).toHaveCount(0);
   await page.getByPlaceholder("Ask Mari…").fill("Take me to the repository audit");
   await page.getByRole("button", { name: /Send/ }).click();
   await expect(page).toHaveURL(/\/audit$/);

@@ -250,6 +250,15 @@ export function usePublish(): PageData<PublishData> {
    whenever the subject changes. Mount is not a change: the ref starts on the
    subject the first render already fetched. */
   const { refetch } = q;
+  /* Publish mutations normally clear the shared read cache for the next
+     visit. A knowledge-chat deploy also changes controls on the page that is
+     already open (Draft -> Live, Deploy -> Redeploy, and the launch link), so
+     its action asks this mounted adapter to re-read immediately. */
+  useEffect(() => {
+    const refreshPublish = () => refetch();
+    window.addEventListener("mari:publish-refresh", refreshPublish);
+    return () => window.removeEventListener("mari:publish-refresh", refreshPublish);
+  }, [refetch]);
   const seen = useRef<number | null>(askedId);
   useEffect(() => {
     if (seen.current === askedId) return;

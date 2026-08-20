@@ -219,6 +219,10 @@ CHAT_SYSTEM = (
 
 @app.post("/chat")
 def chat(body: ChatIn, access: t.Any = Depends(auth_module.require_project)):
+    return _chat_for_access(body, access, "web")
+
+
+def _chat_for_access(body: ChatIn, access: access_module.AccessContext, usage_detail: str):
     project_id = access.project_id
     session_id = body.session_id
     if not session_id:
@@ -269,7 +273,7 @@ def chat(body: ChatIn, access: t.Any = Depends(auth_module.require_project)):
             exec_("""INSERT INTO chat_messages (project_id, session_id, role, content, sources)
                      VALUES (%s, %s, 'assistant', %s, %s)""",
                   (project_id, session_id, text, json.dumps(sources)))
-            _log_chat_usage("web")
+            _log_chat_usage(usage_detail)
             yield "event: done\ndata: {}\n\n"
 
         return StreamingResponse(stream_approved(), media_type="text/event-stream")
@@ -308,7 +312,7 @@ def chat(body: ChatIn, access: t.Any = Depends(auth_module.require_project)):
         exec_("""INSERT INTO chat_messages (project_id, session_id, role, content, sources)
                  VALUES (%s, %s, 'assistant', %s, %s)""",
               (project_id, session_id, "".join(answer), json.dumps(sources)))
-        _log_chat_usage("web")
+        _log_chat_usage(usage_detail)
         yield "event: done\ndata: {}\n\n"
 
     return StreamingResponse(stream(), media_type="text/event-stream")
@@ -351,27 +355,39 @@ def metrics() -> str:
 
 
 @app.get("/knowledge-chat-api/{project_slug}/{destination_slug}", response_class=JSONResponse)
-def knowledge_chat_destination(project_slug: str, destination_slug: str, request: Request) -> dict[str, t.Any]:
-    """Configuration for a deployed, project-scoped interactive destination.
-
-    The destination UI intentionally calls the existing authenticated `/chat`
-    endpoint for answers; this endpoint only proves that the named destination
-    is live and that the current member can read its project.
-    """
-    user = auth_module.current_user(request)
-    if not user:
-        raise HTTPException(401, "Authentication required.")
-    project, _ = access_module.resolve_access(user, project_slug, auth_module._conn)
-    if project is None:
-        raise HTTPException(403, "You do not have access to that project.")
-    row = q1("""SELECT name, slug, title, welcome
-                FROM knowledge_chat_destinations
-                WHERE project_id = %s AND slug = %s AND status = 'live'""",
-             (project.project_id, destination_slug))
-    if not row:
-        raise HTTPException(404, "Knowledge chat destination not found.")
+def knowledge_chat_destination(project_slug: str, destination_slug: str) -> dict[str, t.Any]:
+    """Public configuration for a deployed interactive destination."""
+    row = _live_knowledge_chat(project_slug, destination_slug)
     return {"name": row["name"], "slug": row["slug"], "title": row["title"],
             "welcome": row["welcome"], "project": project_slug}
+
+
+def _live_knowledge_chat(project_slug: str, destination_slug: str) -> dict[str, t.Any]:
+    row = q1("""SELECT d.id, d.project_id, d.name, d.slug, d.title, d.welcome,
+                       p.slug AS project_slug, p.name AS project_name
+                  FROM knowledge_chat_destinations d
+                  JOIN projects p ON p.id = d.project_id
+                 WHERE p.slug = %s AND p.status = 'active'
+                   AND d.slug = %s AND d.status = 'live'""",
+             (project_slug, destination_slug))
+    if not row:
+        raise HTTPException(404, "Knowledge chat destination not found.")
+    return row
+
+
+@app.post("/knowledge-chat-api/{project_slug}/{destination_slug}/chat")
+def public_knowledge_chat(project_slug: str, destination_slug: str, body: ChatIn):
+    """Answer through one live destination without opening the Mari console API.
+
+    Resolving the live destination on every turn is the publication/revocation
+    boundary. Retrieval receives only the destination's project and read scope.
+    """
+    row = _live_knowledge_chat(project_slug, destination_slug)
+    access = access_module.external_access(
+        row["project_id"], row["project_slug"], row["project_name"],
+        "knowledge_chat", str(row["id"]), frozenset({"knowledge.read"}),
+    )
+    return _chat_for_access(body, access, f"knowledge_chat:{row['id']}")
 
 
 # In the Lambda container the API also serves the compiled React application.

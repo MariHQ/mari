@@ -5,7 +5,6 @@ import unittest
 from unittest.mock import patch
 
 from fastapi import HTTPException
-from starlette.requests import Request
 
 import app
 import mutations_publish
@@ -47,27 +46,31 @@ class KnowledgeChatDestinationTests(unittest.TestCase):
             self.assertIn("status = 'live'", execute.call_args.args[0])
             self.assertEqual(execute.call_args.args[1], (7, 12))
 
-    def test_live_config_requires_session_membership_and_live_row(self):
-        request = Request({"type": "http", "method": "GET", "path": "/", "headers": []})
-        project = SimpleNamespace(project_id=7)
-        row = {"name": "Company KB", "slug": "company-kb", "title": "Ask Acme", "welcome": "Welcome"}
-        with patch.object(app.auth_module, "current_user", return_value={"id": 3}), \
-             patch.object(app.access_module, "resolve_access", return_value=(project, [])), \
-             patch.object(app, "q1", return_value=row) as q1:
-            self.assertEqual(app.knowledge_chat_destination("acme", "company-kb", request)["title"], "Ask Acme")
-            self.assertEqual(q1.call_args.args[1], (7, "company-kb"))
+    def test_live_config_is_public_but_only_resolves_live_destination(self):
+        row = {"id": 2, "project_id": 7, "project_slug": "acme", "project_name": "Acme",
+               "name": "Company KB", "slug": "company-kb", "title": "Ask Acme", "welcome": "Welcome"}
+        with patch.object(app, "q1", return_value=row) as q1:
+            self.assertEqual(app.knowledge_chat_destination("acme", "company-kb")["title"], "Ask Acme")
+            self.assertEqual(q1.call_args.args[1], ("acme", "company-kb"))
             self.assertIn("status = 'live'", q1.call_args.args[0])
-
-        with patch.object(app.auth_module, "current_user", return_value=None):
+        with patch.object(app, "q1", return_value=None):
             with self.assertRaises(HTTPException) as caught:
-                app.knowledge_chat_destination("acme", "company-kb", request)
-            self.assertEqual(caught.exception.status_code, 401)
-
-        with patch.object(app.auth_module, "current_user", return_value={"id": 3}), \
-             patch.object(app.access_module, "resolve_access", return_value=(project, [])), patch.object(app, "q1", return_value=None):
-            with self.assertRaises(HTTPException) as caught:
-                app.knowledge_chat_destination("acme", "company-kb", request)
+                app.knowledge_chat_destination("acme", "company-kb")
             self.assertEqual(caught.exception.status_code, 404)
+
+    def test_public_chat_uses_destination_scoped_read_access(self):
+        row = {"id": 2, "project_id": 7, "project_slug": "acme", "project_name": "Acme",
+               "name": "Company KB", "slug": "company-kb", "title": "Ask Acme", "welcome": "Welcome"}
+        sentinel = object()
+        with patch.object(app, "q1", return_value=row), \
+             patch.object(app, "_chat_for_access", return_value=sentinel) as answer:
+            result = app.public_knowledge_chat("acme", "company-kb", app.ChatIn(message="policy"))
+        self.assertIs(result, sentinel)
+        access = answer.call_args.args[1]
+        self.assertEqual(access.project_id, 7)
+        self.assertEqual(access.principal_type, "knowledge_chat")
+        self.assertEqual(access.capabilities, frozenset({"knowledge.read"}))
+        self.assertEqual(answer.call_args.args[2], "knowledge_chat:2")
 
 
 if __name__ == "__main__":

@@ -130,7 +130,10 @@ export function publishActions({ navigate }: ActionContext): PublishActions {
       navigate(`/publish?tab=chat&chat=${id}`);
     },
     updateKnowledgeChat: async (id, args) => { await mutate(UPDATE_CHAT, { id, ...args }); },
-    deployKnowledgeChat: async (id) => { await mutate(DEPLOY_CHAT, { id }); },
+    deployKnowledgeChat: async (id) => {
+      await mutate(DEPLOY_CHAT, { id });
+      window.dispatchEvent(new Event("mari:publish-refresh"));
+    },
 
     /* ── MCP servers ──────────────────────────────────────────────────────*/
     createServer: async ({ name, scope, capabilities }) => {

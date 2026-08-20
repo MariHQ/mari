@@ -13,6 +13,35 @@ test("knowledge search is URL-addressable and reaches hybrid retrieval", async (
   await expect.poll(() => api.calls.some((c) => c.query.includes("search") && c.variables.q === "retention policy")).toBeTruthy();
 });
 
+test("knowledge exposes every loaded source without overlapping content tabs", async ({ page }) => {
+  api.setData("search", [
+    { id: 11, source: "confluence", title: "Confluence policy", snippet: "Canonical policy", body: "Canonical policy", kind: "page", author: "Dana", authorInitials: "DR", date: "2026-08-19", tags: ["canonical"] },
+    { id: 12, source: "gdrive", title: "Drive handbook", snippet: "Team handbook", body: "Team handbook", kind: "page", author: "Lee", authorInitials: "LC", date: "2026-08-19", tags: [] },
+    { id: 13, source: "custom_archive", title: "Archive note", snippet: "Legacy record", body: "Legacy record", kind: "page", author: "Sam", authorInitials: "SA", date: "2026-08-19", tags: [] },
+  ]);
+  api.setData("searchTotal", 3);
+  await page.goto("/knowledge");
+
+  await expect(page.getByRole("checkbox", { name: /Confluence/ })).toBeVisible();
+  await expect(page.getByRole("checkbox", { name: /Google Drive/ })).toBeVisible();
+  await expect(page.getByRole("checkbox", { name: /Custom Archive/ })).toBeVisible();
+  await expect(page.getByRole("checkbox", { name: /Dana/ })).toBeVisible();
+  await expect(page.getByRole("checkbox", { name: /Lee/ })).toBeVisible();
+  await expect(page.getByRole("checkbox", { name: /Canonical/ })).toBeVisible();
+  const tabs = page.getByRole("group", { name: "KnowledgeResult type" });
+  await expect(tabs.getByRole("button", { name: /Documents/ })).toBeVisible();
+  await expect(tabs.getByRole("button", { name: /^Pages/ })).toHaveCount(0);
+
+  await page.getByRole("checkbox", { name: /Confluence/ }).locator("xpath=..").click();
+  await expect(page.getByText("Confluence policy", { exact: true }).first()).toBeVisible();
+  await expect(page.getByText("Drive handbook", { exact: true })).toBeHidden();
+  await expect(page.getByText("Archive note", { exact: true })).toBeHidden();
+  await page.getByRole("checkbox", { name: /Confluence/ }).locator("xpath=..").click();
+  await page.getByRole("checkbox", { name: /Canonical/ }).locator("xpath=..").click();
+  await expect(page.getByText("Confluence policy", { exact: true }).first()).toBeVisible();
+  await expect(page.getByText("Drive handbook", { exact: true })).toBeHidden();
+});
+
 test("lineage opens as a rolled-up overview and drills into focused provenance", async ({ page }) => {
   await page.goto("/lineage");
   const question = page.getByLabel("Lineage question");

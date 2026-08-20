@@ -1,6 +1,5 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
-import { authenticatedFetch, projectHeaders } from "../lib/api";
 
 type Config = { name: string; title: string; welcome: string; project: string };
 type Source = { n: number; source: string; title: string; meta: string; href?: string };
@@ -17,7 +16,7 @@ export function KnowledgeChatDestination() {
 
   useEffect(() => {
     const controller = new AbortController();
-    void authenticatedFetch(`/knowledge-chat-api/${encodeURIComponent(project)}/${encodeURIComponent(slug)}`, { signal: controller.signal })
+    void fetch(`/knowledge-chat-api/${encodeURIComponent(project)}/${encodeURIComponent(slug)}`, { signal: controller.signal })
       .then(async (response) => {
         if (!response.ok) throw new Error(response.status === 404 ? "This knowledge chat is not deployed." : "Knowledge chat is unavailable.");
         setConfig(await response.json() as Config);
@@ -33,8 +32,8 @@ export function KnowledgeChatDestination() {
     const turn: Turn = { question: message, answer: "", sources: [] };
     setTurns((rows) => [...rows, turn]);
     try {
-      const response = await authenticatedFetch("/chat", {
-        method: "POST", headers: { "Content-Type": "application/json", ...projectHeaders(), "X-Mari-Project": project },
+      const response = await fetch(`/knowledge-chat-api/${encodeURIComponent(project)}/${encodeURIComponent(slug)}/chat`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ message, session_id: session.current }),
       });
       if (!response.ok || !response.body) throw new Error("The assistant could not answer right now.");

@@ -164,7 +164,7 @@ function Routed() {
     <NavProvider navigate={navigate}>
       <RouteFocus />
       <Routes>
-          <Route path="/knowledge-chat/:project/:slug" element={<Gate><KnowledgeChatDestination /></Gate>} />
+          <Route path="/knowledge-chat/:project/:slug" element={<KnowledgeChatDestination />} />
           {ROUTES.map(({ page, Element }) => (
             <Route
               key={page.id}

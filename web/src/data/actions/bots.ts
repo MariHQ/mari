@@ -37,6 +37,13 @@ async function postBot<T>(path: string, body: Record<string, unknown> = {}): Pro
  * implementation during the route transition and no credential drift. */
 export function botActions(): SourcesBotsActions {
   return {
+    loadSlackManifest: async () => {
+      const response = await authenticatedFetch("/bots/slack/manifest", {
+        headers: projectHeaders(),
+      });
+      if (!response.ok) throw new Error(`The server answered HTTP ${response.status}.`);
+      return response.text();
+    },
     saveSlackCredentials: async ({ botToken, signingSecret }) => {
       await postBot("/bots/slack/setup", {
         bot_token: botToken.trim(),

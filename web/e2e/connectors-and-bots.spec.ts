@@ -66,6 +66,15 @@ test("connected sources can request incremental and full polls", async ({ page }
   await expect.poll(() => api.calls.some((c) => c.query.includes("resyncSource"))).toBeTruthy();
 });
 
+test("pausing a source is labelled as a pause, not a destructive disconnect", async ({ page }) => {
+  await openSources(page);
+  await expect(page.getByRole("button", { name: "Disconnect", exact: true })).toHaveCount(0);
+  const pause = page.getByRole("button", { name: "Pause", exact: true }).first();
+  await pause.click();
+  await page.getByRole("button", { name: "Pause this source?", exact: true }).click();
+  await expect.poll(() => api.calls.some((c) => c.query.includes("disconnectSource"))).toBeTruthy();
+});
+
 test("Sources exposes connector ingestion without a Bots tab", async ({ page }) => {
   await openSources(page);
   await expect(page.getByRole("button", { name: "Add source" })).toBeVisible();
@@ -77,6 +86,11 @@ test("Slack bot setup persists the verified project installation, calls auth.tes
   await openBotsDestination(page);
   await page.getByRole("button", { name: "Manage setup" }).first().click();
   const drawer = page.getByRole("dialog", { name: "Set up Slack bot" });
+  await expect(drawer.getByText("https://mari.example.test/webhooks/slack", { exact: false })).toBeVisible();
+  await expect(drawer).toContainText("channels:history");
+  await expect(drawer).toContainText("im:write");
+  await expect(drawer).toContainText("message.channels");
+  expect(api.restCalls.some((call) => call.path === "/bots/slack/manifest")).toBeTruthy();
   await drawer.getByRole("button", { name: "Next" }).click();
   await drawer.getByRole("textbox", { name: "Bot token" }).fill("xoxb-browser-secret  ");
   await drawer.getByRole("textbox", { name: "Signing secret" }).fill("signing-browser-secret");
@@ -97,6 +111,7 @@ test("GitHub webhook setup persists a generated signing secret and observes deli
   await page.getByRole("button", { name: "Manage setup" }).nth(1).click();
   const drawer = page.getByRole("dialog", { name: "Set up GitHub webhook" });
   await expect(drawer.getByText(/webhooks\/github/)).toBeVisible();
+  await expect(drawer.getByText("Pushes, issues, pull requests, and comments")).toBeVisible();
   await drawer.getByRole("button", { name: "Next" }).click();
   await drawer.getByRole("button", { name: "Generate" }).click();
   await drawer.getByRole("button", { name: "Save secret" }).click();

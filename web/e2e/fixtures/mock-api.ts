@@ -282,7 +282,15 @@ export async function installMockApi(page: Page, options: {
     restCalls.push({ path: new URL(route.request().url()).pathname, body: null });
     await route.fulfill({ json: { name: "Company knowledge", title: "Ask Acme", welcome: "Ask about company policy.", project: "default" } });
   });
+  await page.route("**/knowledge-chat-api/*/*/chat", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    const body = route.request().postDataJSON(); restCalls.push({ path, body });
+    await route.fulfill({ status: 200, contentType: "text/event-stream", body:
+      'event: meta\ndata: {"session_id":41,"sources":[{"n":1,"source":"github","title":"Retention runbook","meta":"Canonical policy","document_id":1,"href":"/knowledge/doc?id=1"}]}\n\n' +
+      'data: {"token":"Retention is 30 days [1]."}\n\nevent: done\ndata: {}\n\n' });
+  });
   await page.route("**/chat", async (route) => {
+    if (new URL(route.request().url()).pathname !== "/chat") return route.fallback();
     const body = route.request().postDataJSON(); restCalls.push({ path: "/chat", body });
     await route.fulfill({ status: 200, contentType: "text/event-stream", body:
       'event: meta\ndata: {"session_id":41,"sources":[{"n":1,"source":"github","title":"Retention runbook","meta":"Canonical policy","document_id":1,"href":"/knowledge/doc?id=1"}]}\n\n' +
@@ -295,6 +303,18 @@ export async function installMockApi(page: Page, options: {
   await page.route("**/bots/slack/test", async (route) => {
     restCalls.push({ path: "/bots/slack/test", body: {} });
     await route.fulfill({ json: { ok: true, team: "Acme", user: "mari" } });
+  });
+  await page.route("**/bots/slack/manifest", async (route) => {
+    restCalls.push({ path: "/bots/slack/manifest", body: null });
+    await route.fulfill({ status: 200, contentType: "text/yaml", body: `display_information:
+  name: Mari
+oauth_config:
+  scopes:
+    bot: [app_mentions:read, channels:history, chat:write, im:history, im:read, im:write]
+settings:
+  event_subscriptions:
+    request_url: https://mari.example.test/webhooks/slack
+    bot_events: [app_mention, message.channels, message.im]` });
   });
   await page.route("**/bots/slack/setup", async (route) => {
     const body = route.request().postDataJSON();
