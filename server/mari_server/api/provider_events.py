@@ -18,7 +18,8 @@ from mari_server.api import auth
 from mari_server.integrations import connector_provider as component_connectors
 from mari_server.services import sync as ingest
 from mari_server.integrations import document_index
-from mari_server.repositories.database import q1
+from mari_server.repositories import provider_events as event_store
+from mari_server.repositories import document_repository
 from mari_server.repositories.event_inbox import DEFAULT_INBOX
 from mari_components.connectors import ConfluenceConfig, fetch_confluence_page
 from mari_components.connectors.events import (
@@ -96,13 +97,7 @@ async def github_webhook(request: Request):
     if not delivery_id or len(delivery_id) > 200 or not event:
         raise HTTPException(400, "GitHub delivery and event headers are required")
     external_id = str(_json(payload.get("installation")).get("id") or "")
-    installation = q1(
-        """SELECT b.*, p.slug AS project_slug, p.name AS project_name
-             FROM bot_installations b JOIN projects p ON p.id=b.project_id
-            WHERE b.provider='github' AND b.external_installation_id=%s
-              AND b.status='connected' AND p.status='active'""",
-        (external_id,),
-    )
+    installation = event_store.github_installation(external_id)
     if not installation:
         raise HTTPException(401, "unknown GitHub installation")
     cfg = _json(installation.get("config"))
@@ -116,13 +111,7 @@ async def github_webhook(request: Request):
         if event == "ping":
             return {"ok": True, "queued": False}
         raise HTTPException(400, "GitHub repository is required")
-    source = q1(
-        """SELECT id FROM sources
-            WHERE project_id=%s AND kind='connector'
-              AND split_part(provider, ':', 1)='github' AND config->>'repo'=%s
-              AND COALESCE(status, 'active') <> 'disconnected'""",
-        (installation["project_id"], repository),
-    )
+    source = event_store.github_source(installation["project_id"], repository)
     if not source:
         raise HTTPException(404, "repository is not connected to this installation")
     envelope = {
@@ -156,13 +145,7 @@ async def confluence_webhook(source_id: int, request: Request):
     delivery_id = request.headers.get("X-Atlassian-Webhook-Identifier", "").strip()
     if not delivery_id or len(delivery_id) > 200:
         raise HTTPException(400, "Atlassian webhook identifier is required")
-    source = q1(
-        """SELECT s.*, p.slug AS project_slug, p.name AS project_name
-             FROM sources s JOIN projects p ON p.id=s.project_id
-            WHERE s.id=%s AND s.kind='connector' AND s.provider='confluence'
-              AND COALESCE(s.status, 'active') <> 'disconnected' AND p.status='active'""",
-        (source_id,),
-    )
+    source = event_store.confluence_source(source_id)
     if not source:
         raise HTTPException(404, "Confluence source not found")
     cfg = _json(source.get("config"))
@@ -194,11 +177,7 @@ def confluence_webhook_setup(
     request: Request,
     current: access.AccessContext = Depends(auth.require_capability("source.manage")),
 ):
-    source = q1(
-        """SELECT id, config FROM sources
-            WHERE id=%s AND project_id=%s AND kind='connector' AND provider='confluence'""",
-        (source_id, current.project_id),
-    )
+    source = event_store.confluence_source(source_id, current.project_id)
     if not source:
         raise HTTPException(404, "Confluence source not found")
     configured = bool(str(_json(source.get("config")).get("webhook_secret") or ""))
@@ -212,15 +191,7 @@ def confluence_webhook_setup(
 
 
 def _source(source_id: int, project_id: int, *, kind: str, provider: str | None = None):
-    sql = """SELECT s.*, p.slug AS project_slug, p.name AS project_name
-               FROM sources s JOIN projects p ON p.id=s.project_id
-              WHERE s.id=%s AND s.project_id=%s AND s.kind=%s
-                AND COALESCE(s.status, 'active') <> 'disconnected' AND p.status='active'"""
-    params: tuple[t.Any, ...] = (source_id, project_id, kind)
-    if provider:
-        sql += " AND split_part(s.provider, ':', 1)=%s"
-        params += (provider,)
-    return q1(sql, params)
+    return event_store.source(source_id, project_id, kind, provider)
 
 
 def _worker_access(source: dict[str, t.Any], provider: str):
@@ -232,12 +203,8 @@ def _worker_access(source: dict[str, t.Any], provider: str):
 
 def process_github_delivery(row: dict[str, t.Any]) -> None:
     envelope = _json(row.get("payload"))
-    installation = q1(
-        """SELECT id FROM bot_installations
-            WHERE id=%s AND project_id=%s AND provider='github' AND status='connected'""",
-        (int(envelope.get("installation_id") or 0), int(row["project_id"])),
-    )
-    if not installation:
+    if not event_store.installation_active(int(envelope.get("installation_id") or 0),
+                                           int(row["project_id"]), "github"):
         raise RuntimeError("GitHub installation is no longer active")
     source = _source(
         int(envelope.get("source_id") or 0), int(row["project_id"]),
@@ -274,11 +241,8 @@ def _sync_confluence_page(source: dict[str, t.Any], page_id: str) -> None:
     hashes = dict(cfg.get("item_hashes") or {})
     with document_index.connection() as conn:
         if document is None:
-            rows = conn.execute(
-                "SELECT id FROM documents WHERE project_id=%s AND source_id=%s AND source_path=%s",
-                (source["project_id"], source["id"], f"confluence/{path}"),
-            ).fetchall()
-            document_index.delete_documents(conn, [int(row["id"]) for row in rows])
+            document_index.delete_documents(conn, document_repository.ids_for_source_path(
+                conn, source["project_id"], source["id"], f"confluence/{path}"))
             hashes.pop(path, None)
         else:
             title = document.title or path
@@ -293,20 +257,10 @@ def _sync_confluence_page(source: dict[str, t.Any], page_id: str) -> None:
             if body.strip():
                 document_index.sync_chunks(conn, doc_id, title, body, max_tokens, overlap)
             else:
-                conn.execute("DELETE FROM chunks WHERE document_id=%s", (doc_id,))
-                conn.execute("UPDATE documents SET embedding=NULL WHERE id=%s", (doc_id,))
+                document_repository.clear_derived_content(conn, doc_id)
             hashes[path] = content_hash
         cfg["item_hashes"] = hashes
-        count = conn.execute(
-            "SELECT count(*) AS n FROM documents WHERE project_id=%s AND source_id=%s",
-            (source["project_id"], source["id"]),
-        ).fetchone()["n"]
-        conn.execute(
-            """UPDATE sources SET config=%s, last_sync_at=now(), docs_count=%s,
-                      stat_num=%s, stat_unit='docs', health='Healthy', status='active'
-                WHERE id=%s AND project_id=%s""",
-            (json.dumps(cfg), count, str(count), source["id"], source["project_id"]),
-        )
+        document_repository.finalize_source(conn, source["project_id"], source["id"], cfg)
         conn.commit()
 
 

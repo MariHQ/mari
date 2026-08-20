@@ -21,7 +21,8 @@ from mari_server import config
 from mari_server.services import sync as ingest
 from mari_server.integrations import connector_provider as component_connectors
 from mari_server.repositories.event_inbox import DEFAULT_INBOX
-from mari_server.repositories.database import exec_, q, q1
+from mari_server.repositories import provider_events as event_store
+from mari_server.repositories import document_repository
 from mari_components import PollRequest
 from mari_components.connectors import (
     GoogleDriveConfig, connector_definition, start_google_drive_watch,
@@ -48,13 +49,7 @@ def _json(value):
 
 
 def _source(source_id: int, project_id: int) -> dict | None:
-    return q1(
-        """SELECT s.*, p.slug AS project_slug, p.name AS project_name
-             FROM sources s JOIN projects p ON p.id=s.project_id
-            WHERE s.id=%s AND s.project_id=%s AND s.kind='connector'
-              AND split_part(s.provider, ':', 1)='gdrive'""",
-        (source_id, project_id),
-    )
+    return event_store.source(source_id, project_id, "connector", "gdrive")
 
 
 @router.post("/connectors/google-drive/watch")
@@ -79,12 +74,7 @@ def create_watch(
     token_hash = hashlib.sha256(channel_token.encode()).hexdigest()
     page_token = cursor[8:]
     expiration = dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=_WATCH_DAYS)
-    exec_(
-        """INSERT INTO gdrive_watch_channels
-               (project_id, source_id, channel_id, token_hash, page_token, expiration)
-             VALUES (%s, %s, %s, %s, %s, %s)""",
-        (project_id, source["id"], channel_id, token_hash, page_token, expiration),
-    )
+    event_store.create_drive_watch(project_id, source["id"], channel_id, token_hash, page_token, expiration)
     try:
         watched = start_google_drive_watch(
             GoogleDriveConfig(
@@ -100,23 +90,12 @@ def create_watch(
         )
     except Exception as exc:
         error = str(exc)
-        exec_("UPDATE gdrive_watch_channels SET status='error', last_error=%s WHERE channel_id=%s",
-              (error[:1000], channel_id))
+        event_store.update_drive_watch(channel_id, status="error", last_error=error[:1000])
         raise HTTPException(502, error) from exc
     resource_id = watched.resource_id
     if watched.expiration_ms is not None:
         expiration = dt.datetime.fromtimestamp(watched.expiration_ms / 1000, tz=dt.timezone.utc)
-    exec_(
-        """UPDATE gdrive_watch_channels
-              SET resource_id=%s, expiration=%s, status='active', updated_at=now()
-            WHERE channel_id=%s""",
-        (resource_id, expiration, channel_id),
-    )
-    exec_(
-        """UPDATE gdrive_watch_channels SET status='retiring', updated_at=now()
-            WHERE source_id=%s AND channel_id<>%s AND status='active'""",
-        (source["id"], channel_id),
-    )
+    event_store.activate_drive_watch(channel_id, source["id"], resource_id, expiration)
     return {"ok": True, "channelId": channel_id, "sourceId": source["id"],
             "expiration": expiration.isoformat()}
 
@@ -140,14 +119,7 @@ async def gdrive_webhook(request: Request):
             raise ValueError
     except Exception:
         return Response(status_code=400, content="invalid Google Drive message number")
-    channel = q1(
-        """SELECT c.*, s.status AS source_status, p.status AS project_status
-             FROM gdrive_watch_channels c
-             JOIN sources s ON s.id=c.source_id
-             JOIN projects p ON p.id=c.project_id
-            WHERE c.channel_id=%s AND c.status IN ('creating','active','retiring')""",
-        (channel_id,),
-    )
+    channel = event_store.drive_channel(channel_id)
     if not channel or channel["source_status"] != "active" or channel["project_status"] != "active":
         return Response(status_code=404, content="unknown Google Drive channel")
     supplied_hash = hashlib.sha256(channel_token.encode()).hexdigest()
@@ -168,13 +140,7 @@ async def gdrive_webhook(request: Request):
         return Response(status_code=503, content="Google Drive delivery could not be persisted")
     # Repair the early-sync race even on replay: Google may notify before the
     # changes.watch response has populated resource_id.
-    exec_(
-        """UPDATE gdrive_watch_channels
-              SET resource_id=CASE WHEN resource_id='' THEN %s ELSE resource_id END,
-                  last_message_number=GREATEST(last_message_number, %s), updated_at=now()
-            WHERE id=%s""",
-        (resource_id, message_number, channel["id"]),
-    )
+    event_store.observe_drive_message(channel_id, resource_id, message_number)
     return Response(status_code=204,
                     headers={"X-Mari-Duplicate": "true"} if not inserted else None)
 
@@ -206,9 +172,7 @@ def _apply_poll(source: dict, source_config: dict, poll) -> None:
             hashes[path] = content_hash
         tombstones = {value.external_id for value in poll.tombstones if value.external_id}
         if tombstones:
-            rows = conn.execute(
-                "SELECT id, source_path FROM documents WHERE source_id=%s", (source_id,),
-            ).fetchall()
+            rows = document_repository.source_document_paths(conn, source_id)
             gone = [row["id"] for row in rows
                     if str(row.get("source_path") or "").removeprefix("gdrive/") in tombstones]
             document_index.delete_documents(conn, gone)
@@ -219,9 +183,7 @@ def _apply_poll(source: dict, source_config: dict, poll) -> None:
 
 
 def _full_reconcile(source: dict, source_config: dict, channel_id: str) -> None:
-    exec_("""UPDATE gdrive_watch_channels
-                SET status='needs_full_resync', last_error='changes token expired (HTTP 410)',
-                    updated_at=now() WHERE channel_id=%s""", (channel_id,))
+    event_store.mark_drive_resync(channel_id)
     result = ingest.run_sync(int(source["id"]), full=True)
     if result is None:
         raise RuntimeError("Google Drive full reconciliation is already running")
@@ -232,22 +194,12 @@ def _full_reconcile(source: dict, source_config: dict, channel_id: str) -> None:
     cursor = str(refreshed_config.get("cursor") or "")
     if not cursor.startswith("changes:") or not cursor[8:]:
         raise RuntimeError("Google Drive full reconciliation produced no Changes cursor")
-    exec_("""UPDATE gdrive_watch_channels
-                SET page_token=%s, status='active', last_error='', updated_at=now()
-              WHERE source_id=%s AND status IN ('active','needs_full_resync','retiring')""",
-          (cursor[8:], source["id"]))
+    event_store.restore_drive_cursor(source["id"], cursor[8:])
 
 
 def process_gdrive_delivery(row: dict) -> None:
     payload = row["payload"] if isinstance(row["payload"], dict) else json.loads(row["payload"])
-    channel = q1(
-        """SELECT c.*, s.config, s.provider, s.display_name, s.status AS source_status,
-                  p.slug AS project_slug, p.name AS project_name, p.status AS project_status
-             FROM gdrive_watch_channels c JOIN sources s ON s.id=c.source_id
-             JOIN projects p ON p.id=c.project_id
-            WHERE c.channel_id=%s AND c.project_id=%s""",
-        (payload["channel_id"], row["project_id"]),
-    )
+    channel = event_store.drive_channel(payload["channel_id"], row["project_id"])
     if not channel or channel["source_status"] != "active" or channel["project_status"] != "active":
         raise RuntimeError("Google Drive source or project is no longer active")
     source_config = _json(channel["config"])
@@ -274,10 +226,7 @@ def process_gdrive_delivery(row: dict) -> None:
                 cursor = str(durable)
                 token = cursor[8:]
                 source_config["cursor"] = cursor
-                exec_("UPDATE sources SET config=%s, last_sync_at=now(), health='Healthy' WHERE id=%s",
-                      (json.dumps(source_config), source["id"]))
-                exec_("UPDATE gdrive_watch_channels SET page_token=%s, last_error='', updated_at=now() WHERE source_id=%s",
-                      (token, source["id"]))
+                event_store.update_drive_cursor(source["id"], source_config, token)
                 if poll.snapshot_complete:
                     break
         except IncompleteSnapshot:
@@ -286,16 +235,7 @@ def process_gdrive_delivery(row: dict) -> None:
 
 def renew_due_watches() -> int:
     """Replace channels before Google's expiration and retire elapsed overlap."""
-    exec_("""DELETE FROM gdrive_watch_channels
-              WHERE status='retiring' AND expiration IS NOT NULL AND expiration < now()""")
-    rows = q(
-        """SELECT c.source_id, c.project_id, p.slug, p.name
-             FROM gdrive_watch_channels c JOIN projects p ON p.id=c.project_id
-            WHERE c.status='active' AND c.expiration IS NOT NULL
-              AND c.expiration <= %s AND p.status='active'
-            ORDER BY c.expiration""",
-        (dt.datetime.now(dt.timezone.utc) + _RENEW_BEFORE,),
-    )
+    rows = event_store.due_drive_watches(dt.datetime.now(dt.timezone.utc) + _RENEW_BEFORE)
     renewed = 0
     for row in rows:
         context = access.external_access(

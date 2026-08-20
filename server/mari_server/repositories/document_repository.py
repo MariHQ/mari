@@ -145,6 +145,30 @@ def history(document_id: int) -> list[dict]:
         ).fetchall()
 
 
+def ids_for_source_path(conn, project_id: int, source_id: int, source_path: str) -> list[int]:
+    return [int(row["id"]) for row in conn.execute(
+        "SELECT id FROM documents WHERE project_id = %s AND source_id = %s AND source_path = %s",
+        (project_id, source_id, source_path)).fetchall()]
+
+
+def clear_derived_content(conn, document_id: int) -> None:
+    conn.execute("DELETE FROM chunks WHERE document_id = %s", (document_id,))
+    conn.execute("UPDATE documents SET embedding = NULL WHERE id = %s", (document_id,))
+
+
+def source_document_paths(conn, source_id: int) -> list[dict]:
+    return conn.execute("SELECT id, source_path FROM documents WHERE source_id = %s", (source_id,)).fetchall()
+
+
+def finalize_source(conn, project_id: int, source_id: int, config: dict) -> int:
+    rows = conn.execute("SELECT count(*) AS n FROM documents WHERE project_id = %s AND source_id = %s",
+                        (project_id, source_id)).fetchone()["n"]
+    conn.execute("""UPDATE sources SET config = %s, last_sync_at = now(), docs_count = %s,
+      stat_num = %s, stat_unit = 'docs', health = 'Healthy', status = 'active'
+      WHERE id = %s AND project_id = %s""", (json.dumps(config), rows, str(rows), source_id, project_id))
+    return int(rows)
+
+
 def canonical_store() -> IcebergDocumentStore:
     global _STORE
     with _STORE_LOCK:
