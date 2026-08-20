@@ -99,21 +99,28 @@ test("provider keys use explicit edits, including legitimate bullet characters",
     call.variables.key === "llm" && (call.variables.value as any).keys?.openai === "sk-live-•-valid")).toBeTruthy();
 });
 
-test("enterprise gateway validates, saves masked credentials, and runs prompt-free health", async ({ page }) => {
+test("generation gateway validates, preserves local embeddings, and runs prompt-free health", async ({ page }) => {
   await page.goto("/settings/models");
-  await expect(page.getByText("Enterprise LLM gateway", { exact: true })).toBeVisible();
-  await expect(page.getByText(/Ollama remains the open-source default/)).toBeVisible();
+  await expect(page.getByText("Generation gateway", { exact: true })).toBeVisible();
+  await expect(page.getByText(/Embeddings remain independently configured/)).toBeVisible();
   await expect(page.getByText(/Claude plugin/i)).toHaveCount(0);
-  await expect(page.getByRole("option", { name: /Enterprise gateway/ })).toHaveCount(2);
+  await expect(page.getByRole("option", { name: /Enterprise gateway/ })).toHaveCount(1);
+  await expect(page.getByRole("option", { name: /Sentence Transformers.*all-mpnet-base-v2/ })).toHaveCount(1);
+  const embedding = page.getByText("Embedding model", { exact: true }).locator("xpath=ancestor::*[contains(@class,'rounded')][1]");
+  await embedding.getByRole("combobox").selectOption("sentence-transformers:sentence-transformers/all-mpnet-base-v2");
+  await page.getByRole("button", { name: "Save", exact: true }).first().click();
+  await embedding.getByRole("button", { name: "Re-index everything?" }).click();
+  await expect.poll(() => api.calls.filter((call) => call.variables.key === "embedding").length).toBe(1);
 
   await page.getByLabel("Generation model").fill("rippling-chat");
-  await page.getByLabel("Embedding model").fill("rippling-embed");
   await page.getByLabel("Routing headers (JSON)").fill("not-json");
   await page.getByRole("button", { name: "Save gateway" }).click();
   await expect(page.getByText("Routing headers must be valid JSON.")).toBeVisible();
-  expect(api.calls.filter((call) => call.query.includes("updateSetting"))).toHaveLength(0);
+  expect(api.calls.filter((call) => call.query.includes("updateSetting"))).toHaveLength(1);
 
   await page.getByLabel("Gateway base URL").fill("https://corp-gateway.example/v1");
+  await page.getByLabel("API compatibility").selectOption("deepseek");
+  await page.getByLabel("Generation model").fill("deepseek-v4-flash");
   await page.getByLabel("Routing headers (JSON)").fill('{"X-Tenant":"rippling"}');
   await page.getByLabel("Request metadata (JSON)").fill('{"application":"mari-browser"}');
   await page.getByLabel("Model routing header").fill("X-Model-ID");
@@ -121,13 +128,14 @@ test("enterprise gateway validates, saves masked credentials, and runs prompt-fr
   await page.getByRole("button", { name: "Save gateway" }).click();
   await expect.poll(() => api.calls.filter((call) => call.query.includes("updateSetting")).length).toBe(2);
   const llmSave = api.calls.find((call) => call.query.includes("updateSetting") && call.variables.key === "llm");
-  const embedSave = api.calls.find((call) => call.query.includes("updateSetting") && call.variables.key === "embedding");
   expect((llmSave?.variables.value as any).provider).toBe("gateway");
-  expect((llmSave?.variables.value as any).model).toBe("rippling-chat");
+  expect((llmSave?.variables.value as any).model).toBe("deepseek-v4-flash");
+  expect((llmSave?.variables.value as any).gateway.compatibility).toBe("deepseek");
   expect((llmSave?.variables.value as any).gateway.token).toBe("••••…oken");
   expect((llmSave?.variables.value as any).gateway.headers).toEqual({ "X-Tenant": "rippling" });
-  expect((embedSave?.variables.value as any).provider).toBe("gateway");
-  expect((embedSave?.variables.value as any).model).toBe("rippling-embed");
+  const embeddingSaves = api.calls.filter((call) => call.variables.key === "embedding");
+  expect(embeddingSaves).toHaveLength(1);
+  expect((embeddingSaves[0].variables.value as any).provider).toBe("sentence-transformers");
 
   await page.getByRole("button", { name: "Test gateway" }).click();
   await expect(page.getByText("Gateway healthy", { exact: true })).toBeVisible();
@@ -137,13 +145,12 @@ test("enterprise gateway validates, saves masked credentials, and runs prompt-fr
   await expect(page.getByRole("textbox", { name: "Gateway token" })).toHaveValue("••••…oken");
 });
 
-test("enterprise gateway form remains usable on mobile", async ({ page }) => {
+test("generation gateway form remains usable on mobile", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/settings/models");
-  await expect(page.getByText("Enterprise LLM gateway", { exact: true })).toBeVisible();
+  await expect(page.getByText("Generation gateway", { exact: true })).toBeVisible();
   await page.getByLabel("Gateway base URL").fill("https://mobile-gateway.example/v1");
   await page.getByLabel("Generation model").fill("mobile-chat");
-  await page.getByLabel("Embedding model").fill("mobile-embed");
   await page.getByRole("button", { name: "Save gateway" }).click();
   await expect.poll(() => api.calls.some((call) => call.variables.key === "llm" && (call.variables.value as any).model === "mobile-chat")).toBeTruthy();
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);

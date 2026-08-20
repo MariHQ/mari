@@ -74,7 +74,6 @@ export function settingsModelsActions(): SettingsModelsActions {
     },
     saveGateway: async (gateway) => {
       const llmRow = await settingRow("llm");
-      const embeddingRow = await settingRow("embedding");
       const headers = jsonObject("Routing headers", gateway.headersJson);
       const metadata = jsonObject("Request metadata", gateway.metadataJson);
       const storedGateway = llmRow.gateway && typeof llmRow.gateway === "object"
@@ -85,14 +84,11 @@ export function settingsModelsActions(): SettingsModelsActions {
           ...llmRow, provider: "gateway", model: gateway.generationModel.trim(),
           gateway: {
             ...storedGateway, base_url: gateway.baseUrl.trim(), token: gateway.token,
+            compatibility: gateway.compatibility,
             headers, metadata, model_header: gateway.modelHeader.trim(), max_retries: gateway.maxRetries,
           },
         },
       });
-      const { dims: _oldDims, ...embeddingRest } = embeddingRow;
-      await mutate(UPDATE_SETTING, { key: "embedding", value: {
-        ...embeddingRest, provider: "gateway", model: gateway.embeddingModel.trim(),
-      } });
     },
     testGateway: async () => {
       const result = await mutate(TEST_GATEWAY);

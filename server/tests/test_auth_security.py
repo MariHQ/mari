@@ -157,6 +157,37 @@ class PasswordAndMagicTests(unittest.TestCase):
 
 
 class LegacyOauthTests(unittest.TestCase):
+    def test_github_start_uses_normalized_public_callback(self):
+        values = {"github_client_id": "client-id", "github_client_secret": "secret",
+                  "oauth_redirect_base": "https://mari.example.test/"}
+        with patch.object(auth.config, "get", side_effect=lambda _section, key, default=None: values.get(key, default)), \
+             patch.object(auth.secrets, "token_urlsafe", return_value="state-token"):
+            response = auth.oauth_start("github", request())
+        self.assertIn("redirect_uri=https%3A%2F%2Fmari.example.test%2Fauth%2Fcallback%2Fgithub",
+                      response.headers["location"])
+        self.assertNotIn("localhost", response.headers["location"])
+
+    def test_github_callback_lands_on_configured_public_app_url(self):
+        class JsonResponse:
+            def __init__(self, value): self.value = value
+            def __enter__(self): return self
+            def __exit__(self, *_): return False
+            def read(self): return json.dumps(self.value).encode()
+
+        values = {"github_client_id": "client-id", "github_client_secret": "secret",
+                  "oauth_redirect_base": "https://api.mari.example.test/",
+                  "app_url": "https://mari.example.test/"}
+        callback_request = request(headers=[(b"cookie", b"mari_oauth_state=state-token")])
+        with patch.object(auth.config, "get", side_effect=lambda _section, key, default=None: values.get(key, default)), \
+             patch.object(auth.urllib.request, "urlopen", side_effect=[
+                 JsonResponse({"access_token": "provider-token"}),
+                 JsonResponse({"id": 42, "login": "person"}),
+             ]), patch.object(auth, "_verified_oauth_email", return_value=("person@example.test", True)), \
+             patch.object(auth, "_link_or_create_oauth_user", return_value=USER), \
+             patch.object(auth, "_create_session"):
+            response = auth.oauth_callback("github", "code", callback_request, "state-token")
+        self.assertEqual(response.headers["location"], "https://mari.example.test/")
+
     def test_first_link_requires_provider_verified_email(self):
         conn = FakeConn(lambda _sql, _args: Result())
         with patch.object(auth, "_conn", return_value=conn), \

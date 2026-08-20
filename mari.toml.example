@@ -16,6 +16,23 @@ host = "http://localhost:11434"
 embed_model = "nomic-embed-text"
 gen_model = "gemma3:4b"
 
+[models]
+# Deployment overrides. Leave blank to use Settings → Models.
+generation_provider = ""
+generation_model = ""
+embedding_provider = "sentence-transformers"
+embedding_model = "sentence-transformers/all-mpnet-base-v2"
+
+[sentence_transformers]
+model = "sentence-transformers/all-mpnet-base-v2"
+cache_dir = ".mari/sentence-transformers"
+
+[llm_gateway]
+base_url = ""
+token = ""
+compatibility = "openai" # use "deepseek" with https://api.deepseek.com
+max_retries = 2
+
 [auth]
 session_days = 14
 # Demo bypass needs both flags and exactly one active project.
@@ -27,6 +44,7 @@ github_client_secret = ""
 google_client_id = ""
 google_client_secret = ""
 oauth_redirect_base = "http://localhost:8000"
+app_url = "http://localhost:5173"
 # Enterprise OIDC discovery + PKCE. Keep secrets outside source control.
 oidc_issuer = ""
 oidc_client_id = ""

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import unittest
 import urllib.error
 from unittest.mock import Mock, patch
@@ -193,6 +194,34 @@ class GatewayContractTests(unittest.TestCase):
         self.assertEqual(health["models"], 2)
         self.assertIsNone(post.call_args.args[1])
         self.assertEqual(post.call_args.kwargs["method"], "GET")
+
+    def test_deepseek_v4_uses_generation_contract_without_metadata(self) -> None:
+        cfg = {**self.CFG, "base_url": "https://api.deepseek.com", "compatibility": "deepseek"}
+        response = {"choices": [{"message": {"content": "ready"}}], "usage": {"total_tokens": 3}}
+        with patch.object(llm, "generation_model", return_value=("gateway", "deepseek-v4-flash")), \
+             patch.object(llm, "gateway_config", return_value=cfg), \
+             patch.object(llm, "_post", return_value=response) as post:
+            self.assertEqual(llm.generate("health prompt"), "ready")
+        payload = post.call_args.args[1]
+        self.assertEqual(payload["max_tokens"], 700)
+        self.assertNotIn("max_completion_tokens", payload)
+        self.assertNotIn("metadata", payload)
+
+
+@unittest.skipUnless(os.environ.get("MARI_TEST_LIVE_DEEPSEEK") == "1" and
+                     os.environ.get("MARI_DEEPSEEK_API_KEY"),
+                     "set MARI_TEST_LIVE_DEEPSEEK=1 and MARI_DEEPSEEK_API_KEY")
+class LiveDeepSeekGatewayTests(unittest.TestCase):
+    def test_v4_flash_nonstreaming_and_streaming_contract(self) -> None:
+        cfg = {"base_url": "https://api.deepseek.com", "token": os.environ["MARI_DEEPSEEK_API_KEY"],
+               "headers": {}, "metadata": {"unsupported": "must-not-be-sent"}, "model_header": "",
+               "max_retries": 2, "compatibility": "deepseek"}
+        with patch.object(llm, "generation_model", return_value=("gateway", "deepseek-v4-flash")), \
+             patch.object(llm, "gateway_config", return_value=cfg):
+            answer = llm.generate("Reply with exactly LIVE_OK.", timeout=45)
+            streamed = "".join(llm.chat_stream([{"role": "user", "content": "Reply with exactly STREAM_OK."}], ""))
+        self.assertIn("LIVE_OK", answer or "")
+        self.assertIn("STREAM_OK", streamed)
 
 
 if __name__ == "__main__":

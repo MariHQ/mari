@@ -27,7 +27,7 @@ type Res = {
 };
 
 type EmbeddingRow = { provider?: string; model?: string; dims?: number; options?: string[] };
-type GatewayRow = { base_url?: string; token?: string; headers?: Record<string, string>; metadata?: Record<string, unknown>; model_header?: string; max_retries?: number };
+type GatewayRow = { base_url?: string; token?: string; compatibility?: "openai" | "deepseek"; headers?: Record<string, string>; metadata?: Record<string, unknown>; model_header?: string; max_retries?: number };
 type LlmRow = { provider?: string; model?: string; options?: string[]; keys?: { openai?: string; anthropic?: string }; gateway?: GatewayRow };
 type ChunkSpec = { strategy?: string; max_tokens?: number; overlap?: number };
 
@@ -59,11 +59,11 @@ export function mapChunking(res: Res): ChunkRow[] {
 }
 
 const NO_KEYS: ProviderKeys = { openai: "", anthropic: "" };
-const gatewayOf = (llm: LlmRow, embedding: EmbeddingRow): GatewaySettings => ({
+const gatewayOf = (llm: LlmRow): GatewaySettings => ({
   baseUrl: llm.gateway?.base_url ?? "",
   token: llm.gateway?.token ?? "",
   generationModel: llm.provider === "gateway" ? (llm.model ?? "") : "",
-  embeddingModel: embedding.provider === "gateway" ? (embedding.model ?? "") : "",
+  compatibility: llm.gateway?.compatibility === "deepseek" ? "deepseek" : "openai",
   headersJson: JSON.stringify(llm.gateway?.headers ?? {}, null, 2),
   metadataJson: JSON.stringify(llm.gateway?.metadata ?? {}, null, 2),
   modelHeader: llm.gateway?.model_header ?? "",
@@ -78,7 +78,7 @@ export const EMPTY: SettingsModelsData = {
   phase: "config",
   embedding: "", llm: "", dims: 0,
   embeddingOptions: [], llmOptions: [], chunking: [], keys: NO_KEYS,
-  gateway: gatewayOf({}, {}),
+  gateway: gatewayOf({}),
   indexSummary: "", testOk: "", testError: "", summary: [],
 };
 
@@ -98,13 +98,16 @@ export function buildSettingsModels(res: Res | null): SettingsModelsData {
     embedding: qualified(embedding),
     llm: qualified(llm),
     dims: embedding.dims ?? 0,
-    embeddingOptions: withGateway(embedding.options ?? [], "gateway:enterprise-embedding"),
+    embeddingOptions: Array.from(new Set([
+      ...(embedding.options ?? []),
+      "sentence-transformers:sentence-transformers/all-mpnet-base-v2",
+    ])),
     llmOptions: withGateway(llm.options ?? [], "gateway:enterprise-chat"),
     chunking: mapChunking(res),
     // Masked by the server (queries.py `_mask_setting`); "" means no key set,
     // which is what the field should read as.
     keys: { openai: llm.keys?.openai ?? "", anthropic: llm.keys?.anthropic ?? "" },
-    gateway: gatewayOf(llm, embedding),
+    gateway: gatewayOf(llm),
     indexSummary,
     // Connection tests run against a provider and produce their result then.
     // Nothing has been tested on a plain page load, so there is no outcome to

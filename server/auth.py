@@ -777,6 +777,11 @@ def _oauth_creds(provider: str) -> tuple[str, str]:
     return cid, secret
 
 
+def _public_url(key: str, fallback: str) -> str:
+    """One normalized public origin for OAuth URLs and post-login landing."""
+    return str(config.get("auth", key, fallback) or fallback).rstrip("/")
+
+
 # Literal column map — never derive SQL identifiers from the URL path.
 OAUTH_ID_COLUMN = {"github": "github_id", "google": "google_id"}
 STATE_COOKIE = "mari_oauth_state"
@@ -881,7 +886,7 @@ def oauth_start(provider: str, request: Request):
     if provider not in OAUTH:
         raise HTTPException(404, "Unknown provider")
     cid, _ = _oauth_creds(provider)
-    redirect = f"{config.get('auth', 'oauth_redirect_base')}/auth/callback/{provider}"
+    redirect = f"{_public_url('oauth_redirect_base', 'http://localhost:8000')}/auth/callback/{provider}"
     state = secrets.token_urlsafe(16)
     params = {"client_id": cid, "redirect_uri": redirect, "scope": OAUTH[provider]["scope"],
               "state": state, "response_type": "code"}
@@ -901,7 +906,7 @@ def oauth_callback(provider: str, code: str, request: Request, state: str = ""):
     if not state or not expected_state or not secrets.compare_digest(state, expected_state):
         raise HTTPException(400, "OAuth state mismatch — restart the sign-in flow.")
     cid, secret = _oauth_creds(provider)
-    redirect = f"{config.get('auth', 'oauth_redirect_base')}/auth/callback/{provider}"
+    redirect = f"{_public_url('oauth_redirect_base', 'http://localhost:8000')}/auth/callback/{provider}"
     body = urllib.parse.urlencode({
         "client_id": cid, "client_secret": secret, "code": code,
         "redirect_uri": redirect, "grant_type": "authorization_code"}).encode()
@@ -931,7 +936,7 @@ def oauth_callback(provider: str, code: str, request: Request, state: str = ""):
     user = _link_or_create_oauth_user(provider, ext_id, name, email, email_verified)
     from fastapi.responses import RedirectResponse
     # Land back on the web app: configurable for deployments, dev default.
-    resp = RedirectResponse(config.get("auth", "app_url", "http://localhost:5173/"))
+    resp = RedirectResponse(_public_url("app_url", "http://localhost:5173") + "/")
     _create_session(user["id"], resp, request)
     resp.delete_cookie(STATE_COOKIE)
     return resp
