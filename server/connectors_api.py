@@ -39,10 +39,10 @@ router = APIRouter(prefix="/connectors")
 _admin = [Depends(auth.require_admin)]
 
 # Main-step order (contract): the rest appear under "Show all".
-TOP8 = ["github", "slack", "upload", "website", "notion", "gdrive", "confluence", "jira"]
+TOP8 = ["github", "slack", "gdrive", "confluence", "notion", "jira"]
 
 # Existing, fully-live connectors that are not provider modules: github has a
-# dedicated repo-picker path (connectGithubRepo), upload posts to /onboard/upload.
+# dedicated repo-picker path (connectGithubRepo).
 BUILTIN = [
     {"key": "github", "name": "GitHub", "builtin": True,
      "blurb": "Markdown docs, issues, PRs and commit messages from your repos.",
@@ -56,9 +56,6 @@ BUILTIN = [
           "required": False,
           "help": "Leave blank to ingest all supported files, or narrow the sync with a glob such as docs/**."},
      ], "docsUrl": "https://github.com/settings/personal-access-tokens/new"},
-    {"key": "upload", "name": "Upload", "builtin": True,
-     "blurb": "Markdown and text files straight from your device.",
-     "fields": [], "docsUrl": ""},
 ]
 
 # Non-secret config fields that identify one instance of a provider — used to
@@ -107,7 +104,7 @@ def catalog() -> list[dict]:
         entries[b["key"]] = dict(b)
     for e in connectors.REGISTRY.values():
         prov = e.get("provider")
-        if not prov or e.get("error"):
+        if not prov or e.get("error") or prov.get("key") == "website":
             continue  # broken module: not real, so not in the catalog
         entries[prov["key"]] = {
             "key": prov["key"], "name": prov.get("name", prov["key"]),

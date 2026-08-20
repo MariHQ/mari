@@ -172,3 +172,20 @@ test("first-run setup is reachable only while the workspace needs setup", async 
   await expect(page).toHaveURL(/\/welcome$/);
   await expectUiContract(page);
 });
+
+test("onboarding contains only the supported knowledge setup steps", async ({ page }) => {
+  await page.goto("/welcome");
+  await expect(page.getByRole("heading", { name: "Build your knowledge workspace" })).toBeVisible();
+  await expect(page.getByText("Choose a style guide", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("Style guide", { exact: true })).toHaveCount(0);
+
+  await page.getByRole("button", { name: "Set up my workspace" }).click();
+  await expect(page.getByRole("button", { name: /GitHub/ })).toBeVisible();
+  await expect(page.getByRole("button", { name: /Confluence/ })).toBeVisible();
+  await expect(page.getByRole("button", { name: /^Upload/ })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /^Website/ })).toHaveCount(0);
+
+  await page.getByRole("button", { name: "Continue" }).click();
+  await expect(page.getByRole("heading", { name: "Seed your glossary" })).toBeVisible();
+  await expectUiContract(page);
+});

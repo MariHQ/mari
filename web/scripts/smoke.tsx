@@ -882,19 +882,8 @@ const WELCOME_RES: any = {
       { name: "pricing.md", detail: "12 chunks · 12 embedded" },
     ],
   },
-  styleGuides: [
-    { key: "plain", name: "Plain language", description: "Short words, active voice.", rules: 12 },
-    { key: "house", name: "Northwind house style", description: "Ours.", rules: 3 },
-  ],
-  defaultStylePack: "plain",
 };
 const welcomeData = buildWelcome(WELCOME_RES);
-check("welcome: the style packs are the stored ones, with real rule counts",
-  welcomeData.packs.length === 2 && welcomeData.packs[0].rules === 12);
-check("welcome: the closing line names the pack that was adopted",
-  welcomeData.doneSummary.guide === "Plain language");
-check("welcome: an adopted key nothing defines any more names no pack",
-  buildWelcome({ ...WELCOME_RES, defaultStylePack: "gone" }).doneSummary.guide === "");
 check("welcome: the upload receipt is the manifest, counted off chunks",
   welcomeData.uploadFiles.length === 2 && welcomeData.uploadFiles[0].detail === "29 chunks · 29 embedded");
 check("welcome: the upload summary is the server's own line",

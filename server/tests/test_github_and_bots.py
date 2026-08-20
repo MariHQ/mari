@@ -6,14 +6,35 @@ import hmac
 import json
 import time
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import bots
 import github
 import access
+import mutations_admin
 
 
 class GitHubPollingTests(unittest.TestCase):
+    def test_connect_repo_uses_the_active_project_for_every_write(self) -> None:
+        with patch.object(mutations_admin, "_require_admin", return_value={"name": "Admin"}), \
+             patch.object(mutations_admin.access, "require_current_access",
+                          return_value=SimpleNamespace(project_id=7)), \
+             patch.object(mutations_admin.github, "token", return_value="configured"), \
+             patch.object(mutations_admin.github, "push_token", return_value=None), \
+             patch.object(mutations_admin.github, "pop_token"), \
+             patch.object(mutations_admin.github, "default_branch", return_value="main"), \
+             patch.object(mutations_admin, "q1", side_effect=[None, {"id": 12}]) as query, \
+             patch.object(mutations_admin, "exec_") as execute, \
+             patch.object(mutations_admin, "audit"), \
+             patch.object(mutations_admin.flowengine, "ensure_sync_flow"), \
+             patch.object(mutations_admin.ingest, "start_sync"):
+            source_id = mutations_admin.MutAdmin().connect_github_repo(object(), "acme/docs")
+        self.assertEqual(source_id, 12)
+        self.assertEqual(query.call_args_list[0].args[1], (7, "acme/docs"))
+        self.assertEqual(execute.call_args.args[1][0], 7)
+        self.assertEqual(query.call_args_list[1].args[1], (7, "github:acme/docs"))
+
     def test_transient_requests_retry_but_auth_does_not(self) -> None:
         sleeps = []
         with patch.object(github, "_request_once",

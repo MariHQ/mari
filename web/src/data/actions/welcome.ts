@@ -78,9 +78,6 @@ export function welcomeActions({ navigate }: { navigate: (href: string) => void 
 
     uploadFiles: uploadDocuments,
 
-    chooseGuide: (id) =>
-      mutate(`mutation($key: String!) { setDefaultStylePack(key: $key) }`, { key: id }),
-
     harvestGlossary: async () => {
       await mutate(`mutation { harvestGlossary }`);
       return readCandidates();

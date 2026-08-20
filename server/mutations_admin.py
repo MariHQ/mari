@@ -265,6 +265,7 @@ class MutAdmin:
     ) -> int:
         """Create a real GitHub source and start the initial sync in the background."""
         actor = _require_admin(info)
+        project_id = access.require_current_access().project_id
         requested_token = (token or "").strip()
         if not requested_token and not github.token():
             raise ValueError("No GitHub token configured (github.token / MARI_GITHUB_TOKEN)")
