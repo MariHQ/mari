@@ -73,8 +73,8 @@ class IcebergWarehouse:
             self.catalog = catalog
         elif os.environ.get("MARI_ICEBERG_CATALOG"):
             # REST/Glue/Hive catalogs use the ordinary PyIceberg environment
-            # configuration. The named catalog can point at S3 without a local
-            # SQLite catalog and is the production multi-writer path.
+            # configuration. The named catalog can point at S3 and is the
+            # production multi-writer path.
             self.catalog = load_catalog(os.environ["MARI_ICEBERG_CATALOG"])
         else:
             root = pathlib.Path(configured or _default_root()).expanduser().resolve()
@@ -85,8 +85,11 @@ class IcebergWarehouse:
                 pathlib.Path(warehouse_uri).mkdir(parents=True, exist_ok=True)
                 warehouse_uri = pathlib.Path(warehouse_uri).resolve().as_uri()
             self.warehouse = warehouse_uri
-            self.catalog = SqlCatalog(
-                "mari", uri=f"sqlite:///{root / 'catalog.db'}", warehouse=warehouse_uri)
+            catalog_uri = os.environ.get("MARI_ICEBERG_CATALOG_URI", "").strip()
+            if not catalog_uri:
+                database_uri = os.environ.get("MARI_DB", "postgresql://localhost/mari_cloud")
+                catalog_uri = database_uri.replace("postgresql://", "postgresql+psycopg://", 1)
+            self.catalog = SqlCatalog("mari", uri=catalog_uri, warehouse=warehouse_uri)
         self.catalog.create_namespace_if_not_exists(NAMESPACE)
         self._ensure_journal()
 
@@ -164,4 +167,3 @@ def warehouse() -> IcebergWarehouse:
         if _WAREHOUSE is None:
             _WAREHOUSE = IcebergWarehouse()
         return _WAREHOUSE
-

@@ -1,4 +1,4 @@
-.PHONY: test test-server test-web test-browser test-live-ollama test-integration
+.PHONY: test test-server test-web test-browser test-live-ollama test-integration test-reliability test-restore
 
 test: test-server test-web test-browser
 
@@ -19,3 +19,6 @@ test-integration:
 
 test-reliability:
 	./deploy/integration/resilience.sh
+
+test-restore:
+	./deploy/integration/restore-drill.sh

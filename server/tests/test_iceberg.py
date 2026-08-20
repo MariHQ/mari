@@ -6,13 +6,14 @@ import unittest
 
 import pyarrow as pa
 
-from iceberg import IcebergWarehouse, restore_args
+from iceberg import restore_args
+from tests.iceberg_fixture import temporary_warehouse
 
 
 class IcebergWarehouseTests(unittest.TestCase):
     def test_journal_round_trips_order_types_and_transaction_snapshot(self):
         with tempfile.TemporaryDirectory() as directory:
-            store = IcebergWarehouse(directory)
+            store = temporary_warehouse(directory)
             store.append_transaction("tx-2", [
                 ("UPDATE tasks SET done = ? WHERE id = ?", (True, 7)),
                 ("INSERT INTO events VALUES (?, ?)", (dt.date(2026, 8, 19), b"ok")),
@@ -26,7 +27,7 @@ class IcebergWarehouseTests(unittest.TestCase):
 
     def test_typed_snapshot_overwrites_and_preserves_time_travel_history(self):
         with tempfile.TemporaryDirectory() as directory:
-            store = IcebergWarehouse(directory)
+            store = temporary_warehouse(directory)
             schema = pa.schema([pa.field("id", pa.int64(), nullable=False), pa.field("title", pa.string())])
             store.snapshot("documents", pa.Table.from_pylist([{"id": 1, "title": "Old"}], schema=schema),
                            transaction_id="tx-1")

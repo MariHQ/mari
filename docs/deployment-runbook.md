@@ -8,7 +8,7 @@ system; never commit a populated Secret.
 
 1. Provide a managed PostgreSQL/pgvector URL in `mari-secrets`. Verify backups,
    point-in-time recovery, TLS, connection limits, and a restore rehearsal.
-2. Configure the Iceberg catalog/warehouse and S3 credentials through workload
+2. Configure the PostgreSQL-backed Iceberg catalog/warehouse and S3 credentials through workload
    identity. Derived vector snapshots use `MARI_VECTOR_URI`; they can be rebuilt.
 3. Confirm the required LLM gateway or Ollama endpoint and its network policy.
    Enterprise gateways use `MARI_LLM_GATEWAY_URL` and the Secret-backed
@@ -55,6 +55,12 @@ after readiness is green and connector lag resumes falling.
 Quarterly, restore into an isolated namespace, run schema initialization, compare
 document/source/workflow/audit counts, rebuild retrieval snapshots, and execute
 the browser smoke suite. Record recovery point and recovery time.
+
+Every pull request performs the same core recovery proof in the production-like
+Compose stack: `make test-restore` restores a `pg_dump` into an isolated database,
+compares representative tenant and control-state counts, reruns the migration ledger,
+and mirrors the versioned object artifacts into a clean bucket. This is a release gate, not a substitute
+for the managed provider's point-in-time recovery exercise.
 
 ## Incident triage
 

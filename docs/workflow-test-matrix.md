@@ -8,7 +8,7 @@ suites with `make test`; run the real local-model probe with
 
 The production-like gate is `make test-integration`. Unlike the normal browser
 suite, it uses no mocked GraphQL or REST handlers: nginx, FastAPI, Postgres,
-Iceberg, MinIO, SQLite control state, and Ollama all run as real services. Its
+Iceberg with a PostgreSQL catalog, MinIO, and Ollama all run as real services. Its
 GitHub Actions workflow is `.github/workflows/integration-stack.yml`.
 
 | Burndown area | Browser + server assurance | Status / remaining production check |
@@ -63,10 +63,9 @@ The live spec reads these only from the environment:
   (transactional enqueue, `FOR UPDATE SKIP LOCKED`, leases, attempts, idempotency
   keys), then allow a managed queue adapter if Rippling's deployment platform
   already standardizes on one.
-- Iceberg storage primitives now provide a typed mutation journal and snapshot
-  time travel. The remaining migration step is to materialize request-time SQL
-  in embedded DuckDB, import the current Postgres corpus, and then remove the
-  Postgres runtime and deployment dependency.
+- Iceberg storage primitives provide a typed mutation journal and snapshot time
+  travel, with catalog and application transactions sharing the managed
+  PostgreSQL recovery boundary. Derived vector artifacts remain rebuildable.
 - Derived MUVERA/PolarQuant embeddings are deliberately outside the canonical
   store and flush atomically to filesystem or S3. Continue measuring recall@k,
   nDCG, latency, storage amplification, and rerank cost against fixed corpora;

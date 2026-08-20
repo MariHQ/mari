@@ -4,14 +4,14 @@ import datetime as dt
 import tempfile
 import unittest
 
-from iceberg import IcebergWarehouse
+from tests.iceberg_fixture import temporary_warehouse
 from knowledge_store import KnowledgeStore, KnowledgeVersion
 
 
 class KnowledgeLifecycleTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.store = KnowledgeStore(IcebergWarehouse(self.tmp.name))
+        self.store = KnowledgeStore(temporary_warehouse(self.tmp.name))
         self.when = dt.datetime(2026, 8, 19, tzinfo=dt.timezone.utc)
 
     def tearDown(self):

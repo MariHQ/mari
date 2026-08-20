@@ -19,22 +19,28 @@ import numpy as np
 import access
 import bots
 import trajectory
-from event_dedupe import EventLedger
 from retrieval import DerivedVectorIndex, FDEConfig
 
 
-class EventLedgerTests(unittest.TestCase):
-    def test_claim_is_durable_and_release_only_reopens_unfinished_work(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = str(pathlib.Path(directory) / "events.sqlite3")
-            first, restarted = EventLedger(path), EventLedger(path)
-            self.assertTrue(first.claim("slack", "Ev1"))
-            self.assertFalse(restarted.claim("slack", "Ev1"))
-            restarted.release("slack", "Ev1")
-            self.assertTrue(first.claim("slack", "Ev1"))
-            first.complete("slack", "Ev1")
-            restarted.release("slack", "Ev1")
-            self.assertFalse(restarted.claim("slack", "Ev1"))
+class _MemoryLedger:
+    """Bot orchestration seam; PostgreSQL durability is integration-tested."""
+    def __init__(self):
+        self.events: dict[tuple[str, str], bool] = {}
+
+    def claim(self, provider, event_id):
+        key = (provider, event_id)
+        if key in self.events:
+            return False
+        self.events[key] = False
+        return True
+
+    def complete(self, provider, event_id):
+        self.events[(provider, event_id)] = True
+
+    def release(self, provider, event_id):
+        key = (provider, event_id)
+        if self.events.get(key) is False:
+            del self.events[key]
 
 
 class SlackExecutionTests(unittest.TestCase):
@@ -66,12 +72,11 @@ class SlackExecutionTests(unittest.TestCase):
             def submit(self, *args):
                 self.calls.append(args)
                 return True
-        with tempfile.TemporaryDirectory() as directory:
-            ledger, executor = EventLedger(str(pathlib.Path(directory) / "events.db")), Capture()
-            with patch.object(bots, "q1", return_value=self._installation()), \
-                 patch.object(bots, "_SLACK_EVENTS", ledger), patch.object(bots, "_SLACK_EXECUTOR", executor):
-                first = asyncio.run(bots.slack_webhook(self._request(payload)))
-                duplicate = asyncio.run(bots.slack_webhook(self._request(payload)))
+        ledger, executor = _MemoryLedger(), Capture()
+        with patch.object(bots, "q1", return_value=self._installation()), \
+             patch.object(bots, "_SLACK_EVENTS", ledger), patch.object(bots, "_SLACK_EXECUTOR", executor):
+            first = asyncio.run(bots.slack_webhook(self._request(payload)))
+            duplicate = asyncio.run(bots.slack_webhook(self._request(payload)))
         self.assertEqual(first, {"ok": True})
         self.assertEqual(duplicate, {"ok": True, "duplicate": True})
         self.assertEqual(len(executor.calls), 1)
@@ -82,13 +87,12 @@ class SlackExecutionTests(unittest.TestCase):
                    "event": {"type": "app_mention", "text": "hello", "channel": "C1", "ts": "1"}}
         class Full:
             def submit(self, *_args): return False
-        with tempfile.TemporaryDirectory() as directory:
-            ledger = EventLedger(str(pathlib.Path(directory) / "events.db"))
-            with patch.object(bots, "q1", return_value=self._installation()), \
-                 patch.object(bots, "_SLACK_EVENTS", ledger), patch.object(bots, "_SLACK_EXECUTOR", Full()):
-                response = asyncio.run(bots.slack_webhook(self._request(payload)))
-            self.assertEqual(response.status_code, 503)
-            self.assertTrue(ledger.claim("slack", "Ev-full"))
+        ledger = _MemoryLedger()
+        with patch.object(bots, "q1", return_value=self._installation()), \
+             patch.object(bots, "_SLACK_EVENTS", ledger), patch.object(bots, "_SLACK_EXECUTOR", Full()):
+            response = asyncio.run(bots.slack_webhook(self._request(payload)))
+        self.assertEqual(response.status_code, 503)
+        self.assertTrue(ledger.claim("slack", "Ev-full"))
 
 
 class TrajectoryOperationsTests(unittest.TestCase):

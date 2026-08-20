@@ -25,8 +25,8 @@ $compose exec -T \
   -e MARI_LOAD_CONCURRENCY="${MARI_LOAD_CONCURRENCY:-8}" \
   api python -m tests.integration_load
 
-# Process restart: transactional state remains in Postgres, sessions remain in
-# the mounted SQLite control store, and the public endpoint recovers.
+# Process restart: knowledge, sessions, and webhook control state remain in
+# Postgres, and the public endpoint recovers.
 $compose restart api
 $compose up -d --wait --wait-timeout 180 api web
 wait_status 200 30

@@ -4,13 +4,13 @@ import tempfile
 import unittest
 
 from audit_log import AuditEvent, IcebergAuditTrail
-from iceberg import IcebergWarehouse
+from tests.iceberg_fixture import temporary_warehouse
 
 
 class AuditTrailTests(unittest.TestCase):
     def test_chain_is_append_only_project_filterable_and_redacted(self):
         with tempfile.TemporaryDirectory() as directory:
-            trail = IcebergAuditTrail(IcebergWarehouse(directory))
+            trail = IcebergAuditTrail(temporary_warehouse(directory))
             trail.append(AuditEvent(
                 project_id=7, actor_type="user", actor_id="2", actor_name="Dana",
                 action="fact.approve", resource_type="fact", resource_id="8",

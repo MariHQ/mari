@@ -336,7 +336,7 @@ def _create_session(user_id: int, response: Response, request: Request | None = 
                     ttl_seconds: int | None = None, verb: str = "signed in") -> str:
     """Mint one session. EVERY authenticated path goes through here — the
     server accepts no token it did not generate and store. Sessions are
-    revocable SQLite control state, separate from durable knowledge data."""
+    revocable PostgreSQL control state."""
     ttl = ttl_seconds if ttl_seconds is not None else int(config.get("auth", "session_days", 14)) * 86400
     token = secrets.token_urlsafe(32)
     control_store.put_session(

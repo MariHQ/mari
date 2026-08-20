@@ -58,6 +58,25 @@ class IntegrationStackTests(unittest.TestCase):
         ]
         self.assertTrue(any(key.endswith("current.json") for key in keys), keys)
 
+    def test_postgres_sessions_and_webhook_deduplication_survive_reconnect(self):
+        import control_store
+        from event_dedupe import EventLedger
+
+        control_store.put_session("integration-session", 1, 60)
+        self.assertEqual(control_store.session("integration-session")["user_id"], 1)
+        self.assertEqual(control_store.health()["backend"], "postgresql")
+
+        first, restarted = EventLedger(), EventLedger()
+        self.assertTrue(first.claim("slack", "integration-event"))
+        self.assertFalse(restarted.claim("slack", "integration-event"))
+        restarted.release("slack", "integration-event")
+        self.assertTrue(first.claim("slack", "integration-event"))
+        first.complete("slack", "integration-event")
+        restarted.release("slack", "integration-event")
+        self.assertFalse(restarted.claim("slack", "integration-event"))
+
+        control_store.revoke_session("integration-session")
+
 
 if __name__ == "__main__":
     unittest.main()
