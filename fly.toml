@@ -1,0 +1,42 @@
+app = "mari-dogfood"
+primary_region = "sjc"
+
+[build]
+  dockerfile = "deploy/fly/Dockerfile"
+
+[env]
+  MARI_APP_URL = "https://mari-dogfood.fly.dev"
+  MARI_OAUTH_REDIRECT_BASE = "https://mari-dogfood.fly.dev"
+  MARI_LLM_PROVIDER = "gateway"
+  MARI_LLM_MODEL = "deepseek-v4-flash"
+  MARI_EMBEDDING_PROVIDER = "sentence-transformers"
+  MARI_EMBEDDING_MODEL = "sentence-transformers/all-mpnet-base-v2"
+  MARI_LLM_GATEWAY_URL = "https://api.deepseek.com"
+  MARI_LLM_GATEWAY_COMPATIBILITY = "deepseek"
+  MARI_AUTH_BYPASS = "false"
+  MARI_AUTH_BYPASS_DEV_MODE = "false"
+
+[[mounts]]
+  source = "mari_data"
+  destination = "/data"
+  initial_size = "20gb"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ["app"]
+
+  [[http_service.checks]]
+    grace_period = "60s"
+    interval = "15s"
+    method = "GET"
+    path = "/readyz"
+    timeout = "5s"
+
+[[vm]]
+  memory = "2gb"
+  cpu_kind = "shared"
+  cpus = 2

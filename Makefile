@@ -1,4 +1,4 @@
-.PHONY: test test-server test-web test-browser test-contracts test-agent-evals test-live-ollama test-live-deepseek test-live-connectors test-integration test-reliability test-restore
+.PHONY: test test-server test-web test-browser test-contracts test-agent-evals test-live-ollama test-live-deepseek test-live-connectors test-integration test-reliability test-restore test-fly-image
 
 test: test-server test-web test-browser
 
@@ -34,3 +34,6 @@ test-reliability:
 
 test-restore:
 	./deploy/integration/restore-drill.sh
+
+test-fly-image:
+	./deploy/fly/smoke.sh
