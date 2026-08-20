@@ -80,6 +80,15 @@ class ProductionAgentRuntime:
 
     def ports(self, bindings: dict[str, ToolBinding]) -> AgentPorts:
         system = planner_instructions(bindings)
+        decision_schema = {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["tool", "answer"]},
+                "tool": {"type": "string", "enum": sorted(bindings)},
+                "arguments": {"type": "object"},
+            },
+            "required": ["action"],
+        }
 
         def history(session_id: int):
             rows = chat_store.messages(self.project_id, session_id, 12)
@@ -96,7 +105,7 @@ class ProductionAgentRuntime:
         return AgentPorts(
             history=history,
             plan=lambda prompt, _version: llm.generate_json(
-                prompt, system=system, timeout=90.0,
+                prompt, system=system, timeout=90.0, schema=decision_schema,
             ),
             answer=lambda transcript: llm.chat_stream(
                 [dict(row) for row in transcript], system=ANSWER_INSTRUCTIONS,

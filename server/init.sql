@@ -1102,6 +1102,11 @@ ALTER TABLE facts ADD COLUMN IF NOT EXISTS project_id int REFERENCES projects(id
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS project_id int REFERENCES projects(id);
 ALTER TABLE approved_answers ADD COLUMN IF NOT EXISTS project_id int REFERENCES projects(id);
 ALTER TABLE decisions ADD COLUMN IF NOT EXISTS project_id int REFERENCES projects(id);
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS project_id int REFERENCES projects(id);
+ALTER TABLE changes ADD COLUMN IF NOT EXISTS project_id int REFERENCES projects(id);
+ALTER TABLE notifications ADD COLUMN IF NOT EXISTS project_id int REFERENCES projects(id);
+ALTER TABLE watches ADD COLUMN IF NOT EXISTS project_id int REFERENCES projects(id);
+ALTER TABLE usage_log ADD COLUMN IF NOT EXISTS project_id int REFERENCES projects(id);
 ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS project_id int REFERENCES projects(id);
 ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS owner_user_id int REFERENCES users(id) ON DELETE SET NULL;
 ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS project_id int REFERENCES projects(id);
@@ -1152,6 +1157,14 @@ BEGIN
     UPDATE tasks SET project_id = only_project WHERE project_id IS NULL;
     UPDATE approved_answers SET project_id = only_project WHERE project_id IS NULL;
     UPDATE decisions SET project_id = only_project WHERE project_id IS NULL;
+    UPDATE findings f SET project_id = COALESCE(d.project_id, only_project)
+      FROM documents d WHERE f.document_id = d.id AND f.project_id IS NULL;
+    UPDATE changes c SET project_id = COALESCE(d.project_id, only_project)
+      FROM documents d WHERE c.document_id = d.id AND c.project_id IS NULL;
+    UPDATE notifications SET project_id = only_project WHERE project_id IS NULL;
+    UPDATE watches w SET project_id = COALESCE(d.project_id, only_project)
+      FROM documents d WHERE w.document_id = d.id AND w.project_id IS NULL;
+    UPDATE usage_log SET project_id = only_project WHERE project_id IS NULL;
     UPDATE chat_sessions SET project_id = only_project WHERE project_id IS NULL;
     UPDATE chat_messages m SET project_id = COALESCE(s.project_id, only_project)
       FROM chat_sessions s WHERE m.session_id = s.id AND m.project_id IS NULL;
@@ -1203,6 +1216,11 @@ CREATE INDEX IF NOT EXISTS edges_project_from_idx ON edges(project_id, from_doc)
 CREATE INDEX IF NOT EXISTS edges_project_to_idx ON edges(project_id, to_doc);
 CREATE INDEX IF NOT EXISTS facts_project_status_idx ON facts(project_id, status);
 CREATE INDEX IF NOT EXISTS tasks_project_done_idx ON tasks(project_id, done, id);
+CREATE INDEX IF NOT EXISTS findings_project_document_idx ON findings(project_id, document_id);
+CREATE INDEX IF NOT EXISTS changes_project_document_idx ON changes(project_id, document_id);
+CREATE INDEX IF NOT EXISTS notifications_project_user_idx ON notifications(project_id, user_name, id);
+CREATE INDEX IF NOT EXISTS watches_project_user_idx ON watches(project_id, user_name, document_id);
+CREATE INDEX IF NOT EXISTS usage_log_project_kind_idx ON usage_log(project_id, kind, at DESC);
 CREATE INDEX IF NOT EXISTS chat_sessions_project_owner_idx ON chat_sessions(project_id, owner_user_id, id);
 CREATE INDEX IF NOT EXISTS chat_messages_project_session_idx ON chat_messages(project_id, session_id, id);
 CREATE INDEX IF NOT EXISTS trajectories_project_started_idx ON trajectories(project_id, started_at DESC);

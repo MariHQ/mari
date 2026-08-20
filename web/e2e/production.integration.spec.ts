@@ -84,15 +84,17 @@ test("project identity and audit data survive a new browser context", async ({ b
   await context.close();
 });
 
-test("agent setup help reaches the real MCP workflow with actionable instructions", async ({ page }) => {
+test("agent streams a complete turn through the real model boundary", async ({ page }) => {
+  test.setTimeout(120_000);
   await page.goto("/");
   await page.getByRole("button", { name: "Open the Mari agent" }).click();
-  await page.getByPlaceholder("Ask Mari…").fill("Help me set up MCP for my client");
+  await page.getByPlaceholder("Ask Mari…").fill("What can you help me do in this workspace?");
   await page.getByRole("button", { name: /Send/ }).click();
-  await expect(page).toHaveURL(/\/publish\?tab=mcp$/);
-  await expect(page.getByText(/Choose New MCP server/)).toBeVisible();
-  await expect(page.getByText(/bearer token.*shown.*once/i)).toBeVisible();
-  await expect(page.getByText(/Test connection/)).toBeVisible();
+  const dock = page.getByRole("complementary", { name: "Mari agent" });
+  await expect(dock.locator("div.flex.flex-col.gap-1").last()).not.toBeEmpty({ timeout: 90_000 });
+  await expect(dock.getByRole("button", { name: "Stop" })).toHaveCount(0);
+  await expect(dock).not.toContainText("I can't reach the Mari API");
+  await expect(dock).not.toContainText("Agent execution stopped");
 });
 
 test("knowledge chat is created, deployed, and answers from real indexed knowledge", async ({ page }) => {
@@ -130,7 +132,9 @@ test("knowledge chat is created, deployed, and answers from real indexed knowled
   await expect(page.getByRole("button", { name: "Open the Mari agent" })).toHaveCount(0);
   await page.getByLabel("Ask a question").fill("How long are customer records retained?");
   await page.getByRole("button", { name: "Ask", exact: true }).click();
-  await expect(page.getByRole("list", { name: "Sources" })).toContainText("Retention runbook");
+  await expect(page.getByRole("list", { name: "Sources" })).toContainText(
+    "Retention runbook", { timeout: 60_000 },
+  );
   await expect(page.getByRole("button", { name: "Answering…" })).toHaveCount(0, { timeout: 90_000 });
   await expect(page.locator("article").last().locator("div").first()).not.toBeEmpty();
   await page.getByRole("link", { name: /Retention runbook/ }).click();

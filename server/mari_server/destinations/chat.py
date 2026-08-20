@@ -30,9 +30,14 @@ def _sse(project_access: access.AccessContext, body: ChatIn, usage: str):
         raise HTTPException(404, str(error)) from error
 
     def response():
-        with access.use_access(project_access):
-            for event in events:
-                yield f"event: {event.kind}\ndata: {json.dumps(dict(event.payload))}\n\n"
+        iterator = iter(events)
+        while True:
+            with access.use_access(project_access):
+                try:
+                    event = next(iterator)
+                except StopIteration:
+                    return
+            yield f"event: {event.kind}\ndata: {json.dumps(dict(event.payload))}\n\n"
     return StreamingResponse(response(), media_type="text/event-stream")
 
 

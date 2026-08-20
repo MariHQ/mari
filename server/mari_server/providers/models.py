@@ -492,7 +492,8 @@ def embed(text: str) -> list[float] | None:
 # ————————————————— generation —————————————————
 
 
-def generate(prompt: str, system: str = "", timeout: float = 120.0) -> str | None:
+def generate(prompt: str, system: str = "", timeout: float = 120.0,
+             *, json_format: bool | dict[str, t.Any] = False) -> str | None:
     """One completion, or None with `last_error()` explaining why."""
     provider, model = generation_model()
 
@@ -501,9 +502,13 @@ def generate(prompt: str, system: str = "", timeout: float = 120.0) -> str | Non
         return None
 
     if provider == "ollama":
-        out = _post(f"{ollama_host()}/api/generate",
-                    {"model": model, "prompt": prompt, "system": system, "stream": False,
-                     "options": {"temperature": 0.3, "num_predict": 700}},
+        payload: dict[str, t.Any] = {
+            "model": model, "prompt": prompt, "system": system, "stream": False,
+            "options": {"temperature": 0.3, "num_predict": 700},
+        }
+        if json_format:
+            payload["format"] = json_format if isinstance(json_format, dict) else "json"
+        out = _post(f"{ollama_host()}/api/generate", payload,
                     timeout=timeout)
         return out.get("response", "").strip() if out else None
 
@@ -557,13 +562,15 @@ def generate(prompt: str, system: str = "", timeout: float = 120.0) -> str | Non
     return None
 
 
-def generate_json(prompt: str, system: str = "", timeout: float = 120.0) -> t.Any | None:
+def generate_json(prompt: str, system: str = "", timeout: float = 120.0,
+                  *, schema: dict[str, t.Any] | None = None) -> t.Any | None:
     """Ask for JSON and parse leniently (strip code fences, find first bracket).
 
     `timeout` is exposed because callers that make many of these in a row need
     to bound the total, and a 120-second default multiplied by eight documents
     is sixteen minutes."""
-    raw = generate(prompt + "\n\nRespond with ONLY valid JSON, no prose.", system, timeout)
+    raw = generate(prompt + "\n\nRespond with ONLY valid JSON, no prose.", system, timeout,
+                   json_format=schema or True)
     if not raw:
         return None
     raw = raw.strip()

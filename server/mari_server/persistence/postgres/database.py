@@ -142,7 +142,9 @@ def log_usage(kind: str, detail: str = "") -> None:
     'chat_answer', 'site_view'. Shared by the search resolver and the bot/chat
     paths. Telemetry must never break the request it rides on."""
     try:
-        exec_("INSERT INTO usage_log (kind, detail) VALUES (%s, %s)", (kind, (detail or "")[:120]))
+        project_id = access_module.require_current_access().project_id
+        exec_("INSERT INTO usage_log (project_id, kind, detail) VALUES (%s, %s, %s)",
+              (project_id, kind, (detail or "")[:120]))
     except Exception:  # noqa: BLE001
         pass
 

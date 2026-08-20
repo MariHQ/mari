@@ -13,5 +13,5 @@ deployment.
 Run locally with:
 
 ```sh
-MARI_DB=postgresql://… python -m schema_migrations
+MARI_DB=postgresql://… python -m mari_server.persistence.postgres.schema
 ```

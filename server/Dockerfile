@@ -14,7 +14,7 @@ WORKDIR /app/server
 # the application dependencies so local, CI, and container builds use the same
 # source tree.
 COPY mari-components/ /app/mari-components/
-RUN pip install --no-cache-dir /app/mari-components
+RUN pip install --no-cache-dir /app/mari-components/packages/*
 
 # Dependencies first for layer caching. Every runtime dependency is declared
 # in requirements.txt so local and container installs resolve the same set.

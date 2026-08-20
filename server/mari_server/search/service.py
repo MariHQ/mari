@@ -148,7 +148,11 @@ def _document_visible(row: dict, ctx: access.AccessContext) -> bool:
         visibility,
         [str(value) for value in principals],
         ctx.principals,
-        project_member=bool(ctx.user_id),
+        # A public knowledge-chat destination is not a human member, but it is
+        # an authenticated, project-bound principal granted knowledge.read.
+        # Use the capability boundary rather than the implementation detail
+        # that interactive users happen to have non-zero user ids.
+        project_member=ctx.allows("knowledge.read"),
     )
 
 

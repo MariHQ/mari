@@ -53,7 +53,7 @@ fi
 # missing/corrupt migration ledgers and makes rollback rehearsals realistic.
 $compose exec -T \
   -e MARI_DB="postgresql://mari:mari@db:5432/$restore_db" \
-  api python -c 'import schema_migrations; assert schema_migrations.migrate() == []'
+  api python -c 'from mari_server.persistence.postgres import schema; assert schema.migrate() == []'
 
 # The integration object store has versioning enabled. Mirror all generated
 # vector generations into a separate restore bucket and compare object counts;

@@ -47,8 +47,17 @@ def agent_chat(
     outputs = stream_agent_turn(session_id, message, bindings, runtime.ports(bindings))
 
     def response() -> Iterator[str]:
-        with access.use_access(project_access):
-            yield f"event: meta\ndata: {json.dumps({'session_id': session_id})}\n\n"
-            yield from serialize_sse(outputs)
+        yield f"event: meta\ndata: {json.dumps({'session_id': session_id})}\n\n"
+        iterator = iter(outputs)
+        while True:
+            # StreamingResponse may resume a synchronous generator in a
+            # different worker context after every yield. Set and reset the
+            # ContextVar around next(), never across the yield boundary.
+            with access.use_access(project_access):
+                try:
+                    output = next(iterator)
+                except StopIteration:
+                    return
+            yield f"event: {output.kind}\ndata: {json.dumps(dict(output.payload))}\n\n"
 
     return StreamingResponse(response(), media_type="text/event-stream")

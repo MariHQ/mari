@@ -24,7 +24,7 @@ def create_session(project_id: int, owner_user_id: int | None, title: str) -> in
                  VALUES (%s, %s, %s) RETURNING id""",
             (project_id, owner_user_id, title[:60]),
         ).fetchone()
-        return int(row[0])
+        return int(row["id"])
 
 
 def session_exists(project_id: int, owner_user_id: int, session_id: int) -> bool:
@@ -41,7 +41,7 @@ def add_message(project_id: int, session_id: int, role: str, content: str, sourc
         conn.execute(
             """INSERT INTO chat_messages (project_id, session_id, role, content, sources)
                  VALUES (%s, %s, %s, %s, %s)""",
-            (project_id, session_id, role, content, sources),
+            (project_id, session_id, role, content, sources if sources is not None else "[]"),
         )
 
 

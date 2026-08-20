@@ -33,7 +33,7 @@ spec:
         - name: schema-migrations
           image: ghcr.io/marihq/mari-api:replace-with-digest
           imagePullPolicy: IfNotPresent
-          command: ["python", "-m", "schema_migrations"]
+          command: ["python", "-m", "mari_server.persistence.postgres.schema"]
           envFrom:
             - configMapRef:
                 name: mari-config

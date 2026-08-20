@@ -36,7 +36,7 @@ services:
         condition: service_healthy
     environment:
       MARI_DB: postgresql://mari:mari@db:5432/mari_cloud
-    command: ["python", "-m", "schema_migrations"]
+    command: ["python", "-m", "mari_server.persistence.postgres.schema"]
     restart: "no"
 
   api:

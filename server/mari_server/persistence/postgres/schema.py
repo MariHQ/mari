@@ -34,7 +34,7 @@ def _migration(version: str, path: Path) -> Migration:
 
 
 def discover(root: Path | None = None) -> list[Migration]:
-    root = root or Path(__file__).resolve().parents[2]
+    root = root or Path(__file__).resolve().parents[3]
     migrations = [_migration("0001_baseline", root / "init.sql")]
     directory = root / "migrations"
     for path in sorted(directory.glob("*.sql")):
