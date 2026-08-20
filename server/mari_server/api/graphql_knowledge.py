@@ -215,11 +215,7 @@ class MutKnowledge:
             raise ValueError("A style guide needs a key and a name")
         if tone not in _TONES:
             raise ValueError(f"tone must be one of {', '.join(sorted(_TONES))}")
-        exec_("""INSERT INTO style_guides (key, name, description, tone, builtin, sort)
-                 VALUES (%s, %s, %s, %s, false, 200)
-                 ON CONFLICT (key) DO UPDATE SET name = EXCLUDED.name,
-                   description = EXCLUDED.description, tone = EXCLUDED.tone""",
-              (slug, name.strip(), description.strip(), tone))
+        knowledge_store.save_style_guide(slug, name.strip(), description.strip(), tone)
         audit("saved style guide", name.strip(), detail=[("Key", slug), ("Tone", tone)])
         return True
 
@@ -227,14 +223,11 @@ class MutKnowledge:
     def delete_style_guide(self, key: str) -> bool:
         """Delete a pack and its rules. Clears the workspace default if it was
         the one adopted, so nothing points at a pack that no longer exists."""
-        guide = q1("SELECT name FROM style_guides WHERE key = %s", (key,))
-        if not guide:
+        removed = knowledge_store.remove_style_guide(key)
+        if not removed:
             return False
-        n = int((q1("SELECT count(*) AS n FROM style_rules WHERE guide_key = %s", (key,)) or {"n": 0})["n"])
-        exec_("DELETE FROM style_guides WHERE key = %s", (key,))  # rules cascade
-        exec_("""UPDATE settings SET value = value || '{"default_pack":""}'
-                 WHERE key = 'style_guide' AND value->>'default_pack' = %s""", (key,))
-        audit("deleted style guide", guide["name"], detail=[("Key", key), ("Rules removed", n)])
+        name, count = removed
+        audit("deleted style guide", name, detail=[("Key", key), ("Rules removed", count)])
         return True
 
     @strawberry.mutation
@@ -244,28 +237,20 @@ class MutKnowledge:
         """Add or edit one rule in the registry. The rule must belong to a pack
         that exists — the count on the Library's tab strip is this table's row
         count, and an orphan rule would inflate it."""
-        if not q1("SELECT 1 FROM style_guides WHERE key = %s", (guide_key,)):
-            raise ValueError(f"No style guide '{guide_key}' to add this rule to")
         if severity not in _SEVERITIES:
             raise ValueError(f"severity must be one of {', '.join(sorted(_SEVERITIES))}")
         if not id.strip() or not description.strip():
             raise ValueError("A rule needs an id and a description")
-        exec_("""INSERT INTO style_rules (id, guide_key, family, severity, description, pack, suggestion, sort)
-                 VALUES (%s, %s, %s, %s, %s, %s, %s, 200)
-                 ON CONFLICT (id) DO UPDATE SET guide_key = EXCLUDED.guide_key,
-                   family = EXCLUDED.family, severity = EXCLUDED.severity,
-                   description = EXCLUDED.description, pack = EXCLUDED.pack,
-                   suggestion = EXCLUDED.suggestion""",
-              (id.strip(), guide_key, family.strip(), severity, description.strip(),
-               pack.strip(), suggestion.strip()))
+        if not knowledge_store.save_style_rule(id.strip(), guide_key, family.strip(), severity,
+                                               description.strip(), pack.strip(), suggestion.strip()):
+            raise ValueError(f"No style guide '{guide_key}' to add this rule to")
         audit("saved style rule", id.strip(), detail=[("Guide", guide_key), ("Severity", severity)])
         return True
 
     @strawberry.mutation
     def delete_style_rule(self, id: str) -> bool:
-        if not q1("SELECT 1 FROM style_rules WHERE id = %s", (id,)):
+        if not knowledge_store.remove_style_rule(id):
             return False
-        exec_("DELETE FROM style_rules WHERE id = %s", (id,))
         audit("deleted style rule", id)
         return True
 
@@ -274,14 +259,9 @@ class MutKnowledge:
         """Adopt a pack as the project default, or clear the choice with ''.
         A key with no pack behind it is rejected rather than stored."""
         pack = key.strip()
-        if pack and not q1("SELECT 1 FROM style_guides WHERE key = %s", (pack,)):
-            raise ValueError(f"No style guide '{pack}' to adopt")
-        before = q1("SELECT value->>'default_pack' AS pack FROM settings WHERE key = 'style_guide'")
-        exec_("""INSERT INTO settings (key, value) VALUES ('style_guide', %s)
-                 ON CONFLICT (key) DO UPDATE SET value = settings.value || EXCLUDED.value""",
-              (json.dumps({"default_pack": pack}),))
+        before = knowledge_store.set_default_style_pack(pack)
         audit("adopted style pack" if pack else "cleared style pack", pack or "(none)",
-              detail=[("Previous", (before or {}).get("pack") or "(none)"), ("New", pack or "(none)")])
+              detail=[("Previous", before or "(none)"), ("New", pack or "(none)")])
         return True
 
     @strawberry.mutation
@@ -294,8 +274,7 @@ class MutKnowledge:
         layer = {"voice": voice.strip(), "terms": terms.strip(), "banned": banned.strip(),
                  "inclusive": bool(inclusive), "jargon": bool(jargon),
                  "sentence_case": bool(sentence_case)}
-        exec_("""INSERT INTO settings (key, value) VALUES ('voice', %s)
-                 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value""", (json.dumps(layer),))
+        knowledge_store.set_voice(layer)
         audit("saved voice layer", "Style guides",
               detail=[("Enforcement", ", ".join(k for k in ("inclusive", "jargon", "sentence_case")
                                                 if layer[k]) or "(none)")])
@@ -314,21 +293,16 @@ class MutKnowledge:
         if icon not in _TEMPLATE_ICONS:
             raise ValueError(f"icon must be one of {', '.join(sorted(_TEMPLATE_ICONS))}")
         rows = [s.strip() for s in (sections or []) if s.strip()]
-        exec_("""INSERT INTO document_templates (key, name, category, description, sections, icon, standard, sort)
-                 VALUES (%s, %s, %s, %s, %s, %s, false, 200)
-                 ON CONFLICT (key) DO UPDATE SET name = EXCLUDED.name, category = EXCLUDED.category,
-                   description = EXCLUDED.description, sections = EXCLUDED.sections, icon = EXCLUDED.icon""",
-              (slug, name.strip(), category.strip(), description.strip(), json.dumps(rows), icon))
+        knowledge_store.save_template(slug, name.strip(), category.strip(), description.strip(), rows, icon)
         audit("saved document template", name.strip(),
               detail=[("Key", slug), ("Category", category.strip() or "(none)"), ("Sections", len(rows))])
         return True
 
     @strawberry.mutation
     def delete_document_template(self, key: str) -> bool:
-        row = q1("SELECT name, standard FROM document_templates WHERE key = %s", (key,))
+        row = knowledge_store.remove_template(key)
         if not row:
             return False
-        exec_("DELETE FROM document_templates WHERE key = %s", (key,))
         audit("deleted document template", row["name"],
               detail=[("Key", key), ("Shipped with the product", "yes" if row["standard"] else "no")])
         return True
@@ -336,24 +310,20 @@ class MutKnowledge:
     # ——— tags ———
     @strawberry.mutation
     def set_tag_weight(self, tag: str, weight: float) -> bool:
-        exec_("UPDATE tag_definitions SET search_weight = %s WHERE tag = %s", (weight, tag))
+        knowledge_store.set_tag_weight(tag, weight)
         audit("set tag weight", f"{tag} → {weight}")
         return True
 
     @strawberry.mutation
     def upsert_tag_def(self, tag: str, label: str, kind: str = "neutral",
                        search_weight: float = 1.0, behaviors: str = "") -> bool:
-        exec_("""INSERT INTO tag_definitions (tag, label, kind, search_weight, is_default, behaviors)
-                 VALUES (%s, %s, %s, %s, false, %s)
-                 ON CONFLICT (tag) DO UPDATE SET label = EXCLUDED.label, kind = EXCLUDED.kind,
-                   search_weight = EXCLUDED.search_weight, behaviors = EXCLUDED.behaviors""",
-              (tag, label, kind, search_weight, behaviors))
+        knowledge_store.set_tag_definition(tag, label, kind, search_weight, behaviors)
         audit("saved tag definition", tag)
         return True
 
     @strawberry.mutation
     def delete_tag_def(self, tag: str) -> bool:
-        exec_("DELETE FROM tag_definitions WHERE tag = %s AND NOT is_default", (tag,))
+        knowledge_store.remove_tag_definition(tag)
         audit("deleted tag definition", tag)
         return True
 
@@ -368,18 +338,15 @@ class MutKnowledge:
         clean = re.sub(r"[^a-z0-9\-]", "", tag.lower().strip())
         if not clean:
             raise ValueError("Not a valid tag.")
-        exec_("INSERT INTO tags (document_id, tag) VALUES (%s, %s) ON CONFLICT DO NOTHING",
-              (document_id, clean))
-        row = q1("SELECT title FROM documents WHERE id = %s", (document_id,))
-        audit(f"tagged {clean}", row["title"] if row else f"document {document_id}")
-        return [r["tag"] for r in q("SELECT tag FROM tags WHERE document_id = %s ORDER BY tag", (document_id,))]
+        title, tags = knowledge_store.set_document_tag(document_id, clean, True)
+        audit(f"tagged {clean}", title or f"document {document_id}")
+        return tags
 
     @strawberry.mutation
     def untag_document(self, document_id: int, tag: str) -> list[str]:
-        exec_("DELETE FROM tags WHERE document_id = %s AND tag = %s", (document_id, tag.lower().strip()))
-        row = q1("SELECT title FROM documents WHERE id = %s", (document_id,))
-        audit(f"untagged {tag}", row["title"] if row else f"document {document_id}")
-        return [r["tag"] for r in q("SELECT tag FROM tags WHERE document_id = %s ORDER BY tag", (document_id,))]
+        title, tags = knowledge_store.set_document_tag(document_id, tag.lower().strip(), False)
+        audit(f"untagged {tag}", title or f"document {document_id}")
+        return tags
 
     @strawberry.mutation
     def fact_check(self, document_id: int) -> int:
@@ -392,25 +359,18 @@ class MutKnowledge:
 
     @strawberry.mutation
     def pin_node(self, document_id: int, x: float, y: float) -> bool:
-        project_id = access.require_current_access().project_id
-        doc = q1("SELECT title FROM documents WHERE project_id = %s AND id = %s",
-                 (project_id, document_id))
-        if not doc:
+        title = knowledge_store.set_node_position(document_id, (x, y))
+        if not title:
             return False
-        exec_("""UPDATE documents SET graph_x = %s, graph_y = %s
-                 WHERE project_id = %s AND id = %s""", (x, y, project_id, document_id))
-        audit("pinned graph node", doc["title"])
+        audit("pinned graph node", title)
         return True
 
     @strawberry.mutation
     def unpin_node(self, document_id: int) -> bool:
-        project_id = access.require_current_access().project_id
-        row = q1("SELECT title FROM documents WHERE project_id = %s AND id = %s", (project_id, document_id))
-        if not row:
+        title = knowledge_store.set_node_position(document_id, None)
+        if not title:
             return False
-        exec_("UPDATE documents SET graph_x = NULL, graph_y = NULL WHERE project_id = %s AND id = %s",
-              (project_id, document_id))
-        audit("unpinned graph node", row["title"])
+        audit("unpinned graph node", title)
         return True
 
     @strawberry.mutation
@@ -423,19 +383,13 @@ class MutKnowledge:
             raise ValueError("Graph view state must be valid JSON.") from None
         if not isinstance(parsed, dict):
             raise ValueError("Graph view state must be a JSON object.")
-        project_id = access.require_current_access().project_id
-        exec_("""INSERT INTO graph_views (project_id, name, state, created_by)
-                 VALUES (%s, %s, %s::jsonb, %s)
-                 ON CONFLICT (project_id, name) DO UPDATE SET state = EXCLUDED.state""",
-              (project_id, name, json.dumps(parsed), actor_name()))
+        view_id = knowledge_store.save_graph_view(name, parsed, actor_name())
         audit("saved graph view", name)
-        return (q1("SELECT id FROM graph_views WHERE project_id = %s AND name = %s",
-                   (project_id, name)) or {"id": 0})["id"]
+        return view_id
 
     @strawberry.mutation
     def delete_graph_view(self, id: int) -> bool:
-        project_id = access.require_current_access().project_id
-        exec_("DELETE FROM graph_views WHERE project_id = %s AND id = %s", (project_id, id))
+        knowledge_store.remove_graph_view(id)
         return True
 
     # ——— digest ———
@@ -471,98 +425,60 @@ class MutKnowledge:
     # ——— approved answers ———
     @strawberry.mutation
     def upsert_answer(self, question: str, answer: str, id: int | None = None) -> bool:
-        project_id = access.require_current_access().project_id
-        if id:
-            exec_("""UPDATE approved_answers SET question = %s, answer = %s, updated = now()
-                     WHERE project_id = %s AND id = %s""", (question, answer, project_id, id))
-        else:
-            exec_("""INSERT INTO approved_answers
-                     (project_id, question, answer, status, owner_name, updated)
-                     VALUES (%s, %s, %s, 'draft', %s, now())
-                     ON CONFLICT (project_id, question) DO UPDATE
-                       SET answer = EXCLUDED.answer, updated = now()""",
-                  (project_id, question, answer, actor_name()))
+        knowledge_store.save_answer(question, answer, actor_name(), id)
         audit("drafted answer", question)
         return True
 
     @strawberry.mutation
     def set_answer_status(self, id: int, status: str) -> bool:
-        project_id = access.require_current_access().project_id
-        row = q1("""SELECT question, answer FROM approved_answers
-                    WHERE project_id = %s AND id = %s""", (project_id, id))
+        row = knowledge_store.answer_for_status(id)
         if not row:
             return False
-        exec_("""UPDATE approved_answers SET status = %s, updated = now()
-                 WHERE project_id = %s AND id = %s""", (status, project_id, id))
+        vec = None
         if status == "approved":
-            vec = None
-            if row:
-                vec = llm.embed(row["question"] + " " + row["answer"])
-            if vec:
-                exec_("""UPDATE approved_answers SET embedding = %s::vector
-                         WHERE project_id = %s AND id = %s""", (str(vec), project_id, id))
+            vec = llm.embed(row["question"] + " " + row["answer"])
+        knowledge_store.set_answer_status(id, status, vec)
         audit(f"{status} answer", row["question"])
         return True
 
     @strawberry.mutation
     def set_answer_channels(self, id: int, channels: list[str]) -> bool:
-        project_id = access.require_current_access().project_id
-        row = q1("SELECT question FROM approved_answers WHERE project_id = %s AND id = %s", (project_id, id))
-        if not row:
+        question = knowledge_store.set_answer_channels(id, channels)
+        if not question:
             return False
-        exec_("UPDATE approved_answers SET channels = %s WHERE project_id = %s AND id = %s",
-              (channels, project_id, id))
-        audit("updated answer channels", row["question"], detail=[("Channels", ", ".join(channels) or "(none)")])
+        audit("updated answer channels", question, detail=[("Channels", ", ".join(channels) or "(none)")])
         return True
 
     # ——— decisions ———
     @strawberry.mutation
     def add_decision(self, statement: str, context: str = "", source_label: str = "") -> bool:
-        project_id = access.require_current_access().project_id
-        exec_("""INSERT INTO decisions (project_id, statement, context, status, source_label, owners)
-                 VALUES (%s, %s, %s, 'proposed', %s, %s)
-                 ON CONFLICT (project_id, statement) DO NOTHING""",
-              (project_id, statement, context, source_label or "Captured in Mari", [actor_name()]))
+        knowledge_store.capture_decision(statement, context, source_label or "Captured in Mari", actor_name())
         audit("captured decision", statement)
         return True
 
     @strawberry.mutation
     def ratify_decision(self, id: int) -> bool:
-        project_id = access.require_current_access().project_id
-        decision = q1("SELECT statement FROM decisions WHERE project_id = %s AND id = %s",
-                      (project_id, id))
-        if not decision:
+        statement = knowledge_store.ratify_decision(id)
+        if not statement:
             return False
-        exec_("""UPDATE decisions SET status = 'ratified', decided_on = now()
-                 WHERE project_id = %s AND id = %s""", (project_id, id))
-        audit("ratified decision", decision["statement"])
+        audit("ratified decision", statement)
         return True
 
     @strawberry.mutation
     def supersede_decision(self, id: int, by_statement: str) -> bool:
-        project_id = access.require_current_access().project_id
-        old = q1("SELECT statement FROM decisions WHERE project_id = %s AND id = %s", (project_id, id))
+        old = knowledge_store.supersede_decision(id, by_statement, actor_name())
         if not old:
             return False
-        exec_("""INSERT INTO decisions (project_id, statement, status, source_label, owners, decided_on)
-                 VALUES (%s, %s, 'ratified', 'Supersedes an earlier decision', %s, now())
-                 ON CONFLICT (project_id, statement) DO NOTHING""", (project_id, by_statement, [actor_name()]))
-        exec_("""UPDATE decisions SET status = 'superseded',
-                   superseded_by = (SELECT id FROM decisions WHERE project_id = %s AND statement = %s)
-                 WHERE project_id = %s AND id = %s""", (project_id, by_statement, project_id, id))
-        audit("superseded decision", old["statement"], detail=[("Replacement", by_statement)])
+        audit("superseded decision", old, detail=[("Replacement", by_statement)])
         return True
 
     @strawberry.mutation
     def decision_impact(self, id: int) -> ImpactResult:
-        project_id = access.require_current_access().project_id
-        d = q1("SELECT * FROM decisions WHERE project_id = %s AND id = %s", (project_id, id))
+        d = knowledge_store.get_decision(id)
         if not d:
             return ImpactResult(claim="", summary="Decision not found.", docs=[])
         result = MutKnowledge.impact_analysis(self, d["statement"])
-        exec_("""UPDATE decisions SET impact_summary = %s, impact_count = %s
-                 WHERE project_id = %s AND id = %s""",
-              (result.summary[:300], len(result.docs), project_id, id))
+        knowledge_store.save_decision_impact(id, result.summary, len(result.docs))
         return result
 
     # ——— insights ———

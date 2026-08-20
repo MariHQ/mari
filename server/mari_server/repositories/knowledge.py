@@ -441,3 +441,256 @@ def glossary_candidates() -> list[dict]:
     with db.connect() as conn:
         return conn.execute("SELECT * FROM glossary WHERE project_id = %s AND candidate ORDER BY id",
                             (project_id,)).fetchall()
+
+
+def save_style_guide(key: str, name: str, description: str, tone: str) -> None:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn, conn.transaction():
+        conn.execute("""INSERT INTO style_guides (project_id, key, name, description, tone, builtin, sort)
+          VALUES (%s, %s, %s, %s, %s, false, 200) ON CONFLICT (project_id, key) DO UPDATE SET
+          name = EXCLUDED.name, description = EXCLUDED.description, tone = EXCLUDED.tone""",
+          (project_id, key, name, description, tone))
+
+
+def remove_style_guide(key: str) -> tuple[str, int] | None:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn, conn.transaction():
+        guide = conn.execute("SELECT name FROM style_guides WHERE project_id = %s AND key = %s",
+                             (project_id, key)).fetchone()
+        if not guide:
+            return None
+        count = conn.execute("SELECT count(*) AS n FROM style_rules WHERE project_id = %s AND guide_key = %s",
+                             (project_id, key)).fetchone()["n"]
+        conn.execute("DELETE FROM style_guides WHERE project_id = %s AND key = %s", (project_id, key))
+        conn.execute("""UPDATE settings SET value = value || '{"default_pack":""}'
+          WHERE project_id = %s AND key = 'style_guide' AND value->>'default_pack' = %s""", (project_id, key))
+    return str(guide["name"]), int(count)
+
+
+def save_style_rule(rule_id: str, guide_key: str, family: str, severity: str,
+                    description: str, pack: str, suggestion: str) -> bool:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn, conn.transaction():
+        if not conn.execute("SELECT 1 FROM style_guides WHERE project_id = %s AND key = %s",
+                            (project_id, guide_key)).fetchone():
+            return False
+        conn.execute("""INSERT INTO style_rules
+          (project_id, id, guide_key, family, severity, description, pack, suggestion, sort)
+          VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 200)
+          ON CONFLICT (project_id, id) DO UPDATE SET guide_key = EXCLUDED.guide_key,
+          family = EXCLUDED.family, severity = EXCLUDED.severity, description = EXCLUDED.description,
+          pack = EXCLUDED.pack, suggestion = EXCLUDED.suggestion""",
+          (project_id, rule_id, guide_key, family, severity, description, pack, suggestion))
+    return True
+
+
+def remove_style_rule(rule_id: str) -> bool:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn, conn.transaction():
+        return bool(conn.execute("DELETE FROM style_rules WHERE project_id = %s AND id = %s RETURNING id",
+                                 (project_id, rule_id)).fetchone())
+
+
+def set_default_style_pack(pack: str) -> str:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn, conn.transaction():
+        if pack and not conn.execute("SELECT 1 FROM style_guides WHERE project_id = %s AND key = %s",
+                                     (project_id, pack)).fetchone():
+            raise ValueError(f"No style guide '{pack}' to adopt")
+        previous = conn.execute("""SELECT value->>'default_pack' AS pack FROM settings
+          WHERE project_id = %s AND key = 'style_guide'""", (project_id,)).fetchone()
+        conn.execute("""INSERT INTO settings (project_id, key, value) VALUES (%s, 'style_guide', %s)
+          ON CONFLICT (project_id, key) DO UPDATE SET value = settings.value || EXCLUDED.value""",
+          (project_id, json.dumps({"default_pack": pack})))
+    return str((previous or {}).get("pack") or "")
+
+
+def set_voice(layer: dict) -> None:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn, conn.transaction():
+        conn.execute("""INSERT INTO settings (project_id, key, value) VALUES (%s, 'voice', %s)
+          ON CONFLICT (project_id, key) DO UPDATE SET value = EXCLUDED.value""",
+          (project_id, json.dumps(layer)))
+
+
+def save_template(key: str, name: str, category: str, description: str,
+                  sections: list[str], icon: str) -> None:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn, conn.transaction():
+        conn.execute("""INSERT INTO document_templates
+          (project_id, key, name, category, description, sections, icon, standard, sort)
+          VALUES (%s, %s, %s, %s, %s, %s, %s, false, 200)
+          ON CONFLICT (project_id, key) DO UPDATE SET name = EXCLUDED.name,
+          category = EXCLUDED.category, description = EXCLUDED.description,
+          sections = EXCLUDED.sections, icon = EXCLUDED.icon""",
+          (project_id, key, name, category, description, json.dumps(sections), icon))
+
+
+def remove_template(key: str) -> dict | None:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn, conn.transaction():
+        return conn.execute("DELETE FROM document_templates WHERE project_id = %s AND key = %s RETURNING name, standard",
+                            (project_id, key)).fetchone()
+
+
+def set_tag_definition(tag: str, label: str, kind: str, weight: float, behaviors: str) -> None:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn, conn.transaction():
+        conn.execute("""INSERT INTO tag_definitions
+          (project_id, tag, label, kind, search_weight, is_default, behaviors)
+          VALUES (%s, %s, %s, %s, %s, false, %s) ON CONFLICT (project_id, tag) DO UPDATE SET
+          label = EXCLUDED.label, kind = EXCLUDED.kind, search_weight = EXCLUDED.search_weight,
+          behaviors = EXCLUDED.behaviors""", (project_id, tag, label, kind, weight, behaviors))
+
+
+def set_tag_weight(tag: str, weight: float) -> None:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn, conn.transaction():
+        conn.execute("UPDATE tag_definitions SET search_weight = %s WHERE project_id = %s AND tag = %s",
+                     (weight, project_id, tag))
+
+
+def remove_tag_definition(tag: str) -> None:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn, conn.transaction():
+        conn.execute("DELETE FROM tag_definitions WHERE project_id = %s AND tag = %s AND NOT is_default",
+                     (project_id, tag))
+
+
+def set_document_tag(document_id: int, tag: str, present: bool) -> tuple[str | None, list[str]]:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn, conn.transaction():
+        if present:
+            conn.execute("""INSERT INTO tags (project_id, document_id, tag) VALUES (%s, %s, %s)
+              ON CONFLICT DO NOTHING""", (project_id, document_id, tag))
+        else:
+            conn.execute("DELETE FROM tags WHERE project_id = %s AND document_id = %s AND tag = %s",
+                         (project_id, document_id, tag))
+        row = conn.execute("SELECT title FROM documents WHERE project_id = %s AND id = %s",
+                           (project_id, document_id)).fetchone()
+        tags = conn.execute("SELECT tag FROM tags WHERE project_id = %s AND document_id = %s ORDER BY tag",
+                            (project_id, document_id)).fetchall()
+    return (str(row["title"]) if row else None), [str(item["tag"]) for item in tags]
+
+
+def set_node_position(document_id: int, position: tuple[float, float] | None) -> str | None:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn, conn.transaction():
+        row = conn.execute("SELECT title FROM documents WHERE project_id = %s AND id = %s",
+                           (project_id, document_id)).fetchone()
+        if not row:
+            return None
+        if position:
+            conn.execute("UPDATE documents SET graph_x = %s, graph_y = %s WHERE project_id = %s AND id = %s",
+                         (position[0], position[1], project_id, document_id))
+        else:
+            conn.execute("UPDATE documents SET graph_x = NULL, graph_y = NULL WHERE project_id = %s AND id = %s",
+                         (project_id, document_id))
+    return str(row["title"])
+
+
+def save_graph_view(name: str, state: dict, creator: str) -> int:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn, conn.transaction():
+        row = conn.execute("""INSERT INTO graph_views (project_id, name, state, created_by)
+          VALUES (%s, %s, %s::jsonb, %s) ON CONFLICT (project_id, name) DO UPDATE
+          SET state = EXCLUDED.state RETURNING id""", (project_id, name, json.dumps(state), creator)).fetchone()
+    return int(row["id"])
+
+
+def remove_graph_view(view_id: int) -> None:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn, conn.transaction():
+        conn.execute("DELETE FROM graph_views WHERE project_id = %s AND id = %s", (project_id, view_id))
+
+
+def save_answer(question: str, answer: str, owner: str, answer_id: int | None = None) -> None:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn, conn.transaction():
+        if answer_id:
+            conn.execute("""UPDATE approved_answers SET question = %s, answer = %s, updated = now()
+              WHERE project_id = %s AND id = %s""", (question, answer, project_id, answer_id))
+        else:
+            conn.execute("""INSERT INTO approved_answers
+              (project_id, question, answer, status, owner_name, updated)
+              VALUES (%s, %s, %s, 'draft', %s, now()) ON CONFLICT (project_id, question)
+              DO UPDATE SET answer = EXCLUDED.answer, updated = now()""",
+              (project_id, question, answer, owner))
+
+
+def answer_for_status(answer_id: int) -> dict | None:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn:
+        return conn.execute("SELECT question, answer FROM approved_answers WHERE project_id = %s AND id = %s",
+                            (project_id, answer_id)).fetchone()
+
+
+def set_answer_status(answer_id: int, status: str, embedding: list[float] | None = None) -> None:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn, conn.transaction():
+        conn.execute("UPDATE approved_answers SET status = %s, updated = now() WHERE project_id = %s AND id = %s",
+                     (status, project_id, answer_id))
+        if embedding:
+            conn.execute("UPDATE approved_answers SET embedding = %s::vector WHERE project_id = %s AND id = %s",
+                         (str(embedding), project_id, answer_id))
+
+
+def set_answer_channels(answer_id: int, channels: list[str]) -> str | None:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn, conn.transaction():
+        row = conn.execute("SELECT question FROM approved_answers WHERE project_id = %s AND id = %s",
+                           (project_id, answer_id)).fetchone()
+        if row:
+            conn.execute("UPDATE approved_answers SET channels = %s WHERE project_id = %s AND id = %s",
+                         (channels, project_id, answer_id))
+    return str(row["question"]) if row else None
+
+
+def capture_decision(statement: str, context: str, source: str, owner: str) -> None:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn, conn.transaction():
+        conn.execute("""INSERT INTO decisions (project_id, statement, context, status, source_label, owners)
+          VALUES (%s, %s, %s, 'proposed', %s, %s) ON CONFLICT (project_id, statement) DO NOTHING""",
+          (project_id, statement, context, source, [owner]))
+
+
+def ratify_decision(decision_id: int) -> str | None:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn, conn.transaction():
+        row = conn.execute("SELECT statement FROM decisions WHERE project_id = %s AND id = %s",
+                           (project_id, decision_id)).fetchone()
+        if row:
+            conn.execute("UPDATE decisions SET status = 'ratified', decided_on = now() WHERE project_id = %s AND id = %s",
+                         (project_id, decision_id))
+    return str(row["statement"]) if row else None
+
+
+def supersede_decision(decision_id: int, replacement: str, owner: str) -> str | None:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn, conn.transaction():
+        old = conn.execute("SELECT statement FROM decisions WHERE project_id = %s AND id = %s",
+                           (project_id, decision_id)).fetchone()
+        if not old:
+            return None
+        conn.execute("""INSERT INTO decisions
+          (project_id, statement, status, source_label, owners, decided_on)
+          VALUES (%s, %s, 'ratified', 'Supersedes an earlier decision', %s, now())
+          ON CONFLICT (project_id, statement) DO NOTHING""", (project_id, replacement, [owner]))
+        conn.execute("""UPDATE decisions SET status = 'superseded', superseded_by =
+          (SELECT id FROM decisions WHERE project_id = %s AND statement = %s)
+          WHERE project_id = %s AND id = %s""", (project_id, replacement, project_id, decision_id))
+    return str(old["statement"])
+
+
+def get_decision(decision_id: int) -> dict | None:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn:
+        return conn.execute("SELECT * FROM decisions WHERE project_id = %s AND id = %s",
+                            (project_id, decision_id)).fetchone()
+
+
+def save_decision_impact(decision_id: int, summary: str, count: int) -> None:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn, conn.transaction():
+        conn.execute("UPDATE decisions SET impact_summary = %s, impact_count = %s WHERE project_id = %s AND id = %s",
+                     (summary[:300], count, project_id, decision_id))
