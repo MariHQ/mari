@@ -1,9 +1,7 @@
 """Mari — authentication (DESIGN.md §3).
 
 Email/password (scrypt, stdlib), GitHub/Google OAuth (when configured in
-mari.toml), cookie sessions, and first-run setup: when no account can log in,
-a one-time admin setup token is printed to the server logs; POST /auth/setup
-redeems it to create the admin.
+mari.toml), cookie sessions, and browser-based first-owner setup.
 """
 
 from __future__ import annotations
