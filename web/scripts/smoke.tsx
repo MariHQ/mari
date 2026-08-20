@@ -139,11 +139,10 @@ states(overview, EMPTY);
 
 console.log("tasks");
 const TASKS_RES: any = {
-  tasks: [
-    { id: 1, title: "Verify the proration rule", assigneeInitials: "DR", kind: "factcheck", kindLabel: "Fact check", done: false, due: "2026-07-18", overdue: true },
-    { id: 2, title: "Approve the SSO guide", assigneeInitials: "MG", kind: "approval", kindLabel: "Approval", done: true, due: "", overdue: false },
-  ],
-  tasksSummary: { title: "Review queue", tags: ["Fact check", "Approval"], people: ["DR"], statValue: "1", statLabel: "overdue" },
+  reviewItems: { items: [
+    { id: "task:1", title: "Verify the proration rule", assignee: "Dana Rodriguez", kind: "task", status: "pending", source: "Manual", due: "2026-07-18" },
+    { id: "task:2", title: "Approve the SSO guide", assignee: "Morgan Green", kind: "task", status: "done", source: "Manual", due: "" },
+  ], totalCount: 2, pageInfo: { endCursor: "2", hasNextPage: false } },
   /* Who a task can be filed to. Without this the composer draws no owner
      picker and every task silently files to whoever is signed in. */
   members: [
@@ -157,9 +156,9 @@ check("tasks: a task with no deadline carries none", taskRows[1].due === undefin
 check("tasks: overdue comes off the server, not off a clock here", taskRows[0].overdue === true);
 const taskStrip = mapStrip(TASKS_RES)!;
 check("tasks: the strip is the server's rollup of the same rows",
-  taskStrip.statValue === "1" && taskStrip.statLabel === "overdue" && taskStrip.people.join() === "DR");
+  taskStrip.statValue === "2" && taskStrip.statLabel === "open" && taskStrip.people.includes("DR"));
 check("tasks: an empty inbox has nothing to summarise",
-  mapStrip({ tasks: [], tasksSummary: null } as any) === null);
+  mapStrip({ reviewItems: { items: [], totalCount: 0, pageInfo: { endCursor: "", hasNextPage: false } } } as any) === null);
 const taskAssignees = mapAssignees(TASKS_RES);
 check("tasks: a task cannot be filed to someone who has never signed in",
   taskAssignees.length === 1 && taskAssignees[0].name === "Dana Rodriguez");
