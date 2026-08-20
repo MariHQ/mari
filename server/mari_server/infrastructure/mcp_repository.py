@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import secrets
 
-from db import audit, exec_, jload, q1
+from mari_server.infrastructure.database import audit, exec_, jload, q1
 from mari_server.application.mcp import McpPorts
 from mari_server.domain.mcp import McpServerSpec
 

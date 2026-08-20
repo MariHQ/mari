@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import json
 
-import access
-import llm
-from db import exec_, log_usage, q, q1
-from queries import hybrid_search, like_pattern
+from mari_server.domain import access
+from mari_server.infrastructure import models as llm
+from mari_server.infrastructure.database import exec_, log_usage, q, q1
+from mari_server.infrastructure.search import hybrid_search, like_pattern
 from mari_server.application.chat import ChatContext, ChatPorts
 from mari_server.infrastructure import postgres
 

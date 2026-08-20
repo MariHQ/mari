@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import access
-from db import audit, exec_, q, q1
+from mari_server.domain import access
+from mari_server.infrastructure.database import audit, exec_, q, q1
 
 from mari_server.application.review import ReviewPorts
 from mari_server.domain.review import POLICY_VERSION, PolicyResult, ReviewRecord

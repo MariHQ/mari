@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import threading
 
-from excerpt import excerpt
+from mari_server.application.excerpt import excerpt
 from mari_server.application.documents import DocumentPorts, ProjectionFields
 from mari_server.domain.documents import DocumentVersion
 from mari_server.infrastructure.document_store import IcebergDocumentStore

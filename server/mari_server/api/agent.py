@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-import access
+from mari_server.api import access
 from mari_server.application.agent import AgentOutput, stream_agent_turn
 from mari_server.infrastructure.agent_runtime import production_runtime
 

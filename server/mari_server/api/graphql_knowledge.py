@@ -12,16 +12,16 @@ import typing as t
 
 import strawberry
 
-import access
-import flowengine
-import llm
-import links
+from mari_server.api import access
+from mari_server.infrastructure import workflow_runtime as flowengine
+from mari_server.infrastructure import models as llm
+from mari_server.infrastructure import lineage_repository as links
 from mari_server.application import review as review_application
 from mari_server.domain.review import ReviewRecord
 from mari_server.infrastructure import review_repository
-from db import actor_name, audit, exec_, jload, q, q1, transaction
-from gqltypes import AnswerCandidate, ImpactDoc, ImpactResult, ReviewPolicyDecision
-from queries import hybrid_search, like_pattern
+from mari_server.infrastructure.database import actor_name, audit, exec_, jload, q, q1, transaction
+from mari_server.api.graphql_types import AnswerCandidate, ImpactDoc, ImpactResult, ReviewPolicyDecision
+from mari_server.api.graphql_queries import hybrid_search, like_pattern
 from mari_components import KnowledgeDocument
 from mari_components.knowledge import (
     assess_impact as component_assess_impact,

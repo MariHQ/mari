@@ -27,11 +27,11 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 
-import auth
-import access
-import config
+from mari_server.api import auth
+from mari_server.api import access
+from mari_server.infrastructure import config
 from mari_server.infrastructure import connector_provider as component_connectors
-import llm
+from mari_server.infrastructure import models as llm
 from mari_components.connectors import SlackConfig, fetch_slack_thread_by_id
 from mari_components.connectors.events import (
     verify_hmac_sha256 as component_verify_hmac_sha256,
@@ -39,9 +39,9 @@ from mari_components.connectors.events import (
 )
 from mari_components import KnowledgeDocument
 from mari_components.knowledge import answer_question as component_answer_question
-from event_inbox import DEFAULT_INBOX, EventDispatcher
-from db import exec_, pq, pq1, q, q1
-from queries import hybrid_search
+from mari_server.infrastructure.event_inbox import DEFAULT_INBOX, EventDispatcher
+from mari_server.infrastructure.database import exec_, pq, pq1, q, q1
+from mari_server.api.graphql_queries import hybrid_search
 
 router = APIRouter()
 
@@ -88,7 +88,7 @@ def _now_iso() -> str:
 def _log_usage(kind: str, detail: str = "") -> None:
     """Honest-telemetry hook (contract §A). Tolerates db.log_usage not existing yet."""
     try:
-        import db as _db
+        from mari_server.infrastructure import database as _db
 
         if hasattr(_db, "log_usage"):
             _db.log_usage(kind, detail)
@@ -322,7 +322,7 @@ def _conversation_context(turns: list[dict[str, str]]) -> str:
 def _refresh_slack_aggregate(project_id: int, token: str, channel: str,
                              thread_ts: str) -> None:
     """Refetch the canonical thread and update every matching Slack source."""
-    import ingest
+    from mari_server.infrastructure import ingestion as ingest
 
     sources = q(
         """SELECT id, config FROM sources
@@ -333,7 +333,7 @@ def _refresh_slack_aggregate(project_id: int, token: str, channel: str,
     if not sources:
         return
     document, complete = fetch_slack_thread_by_id(
-        SlackConfig(token), channel, thread_ts, http=component_connectors._http,
+        SlackConfig(token), channel, thread_ts, http=component_connectors.http_transport,
     )
     if not complete:
         raise RuntimeError("Slack thread response was incomplete")
@@ -450,8 +450,8 @@ def _process_slack_delivery(row: dict) -> None:
 def start_event_dispatcher() -> None:
     global _EVENT_DISPATCHER
     if _EVENT_DISPATCHER is None:
-        from gdrive_events import process_gdrive_delivery
-        import provider_events
+        from mari_server.api.gdrive_events import process_gdrive_delivery
+        from mari_server.api import provider_events
         _EVENT_DISPATCHER = EventDispatcher(
             _EVENT_INBOX,
             {"slack": _process_slack_delivery, "gdrive": process_gdrive_delivery,

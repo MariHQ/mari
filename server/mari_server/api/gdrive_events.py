@@ -14,13 +14,13 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel
 
-import access
-import auth
-import config
-import ingest
+from mari_server.api import access
+from mari_server.api import auth
+from mari_server.infrastructure import config
+from mari_server.infrastructure import ingestion as ingest
 from mari_server.infrastructure import connector_provider as component_connectors
-from event_inbox import DEFAULT_INBOX
-from db import exec_, q, q1
+from mari_server.infrastructure.event_inbox import DEFAULT_INBOX
+from mari_server.infrastructure.database import exec_, q, q1
 from mari_components import PollRequest
 from mari_components.connectors import (
     GoogleDriveConfig, connector_definition, start_google_drive_watch,
@@ -95,7 +95,7 @@ def create_watch(
             channel_id,
             channel_token,
             expiration_ms=round(expiration.timestamp() * 1000),
-            http=component_connectors._http,
+            http=component_connectors.http_transport,
         )
     except Exception as exc:
         error = str(exc)
@@ -263,7 +263,7 @@ def process_gdrive_delivery(row: dict) -> None:
             while True:
                 request = PollRequest(cursor=cursor, page_limit=1)
                 pages = connector_definition("gdrive").poll(
-                    source_config, request, http=component_connectors._http,
+                    source_config, request, http=component_connectors.http_transport,
                 )
                 poll = next(pages)
                 _apply_poll(source, source_config, poll)

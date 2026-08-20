@@ -21,9 +21,9 @@ from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import RedirectResponse, Response
 from psycopg.rows import dict_row
 
-import auth
-import config
-import control_store
+from mari_server.api import auth
+from mari_server.infrastructure import config
+from mari_server.infrastructure import control_store
 
 router = APIRouter()
 OIDC_STATE = "mari_oidc_state"

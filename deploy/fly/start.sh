@@ -62,6 +62,6 @@ backup_loop() {
 backup_loop &
 backup_pid=$!
 
-gosu mari uvicorn app:app --host 0.0.0.0 --port 8080 &
+gosu mari uvicorn mari_server.api.app:app --host 0.0.0.0 --port 8080 &
 api_pid=$!
 wait "$api_pid"

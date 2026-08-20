@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from db import audit, transaction
+from mari_server.infrastructure.database import audit, transaction
 from mari_server.application.knowledge_chat import KnowledgeChatPorts
 
 

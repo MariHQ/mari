@@ -5,13 +5,13 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Iterator
 
-import nethttp
+from mari_server.infrastructure import http as nethttp
 from mari_components import PollRequest, SyncMode
 from mari_components.connectors import connector_definition
 from mari_components.http import HttpRequest, HttpResponse
 
 
-def _http(request: HttpRequest) -> HttpResponse:
+def http_transport(request: HttpRequest) -> HttpResponse:
     response = nethttp.fetch(
         request.url,
         method=request.method,
@@ -37,7 +37,7 @@ def poll_pages(key: str, cfg: dict, cursor: str | None, checkpoint: str | None =
     """Yield the shared connector's native pages without a legacy translation."""
     definition = connector_definition(key)
     poll_request = request(cursor, checkpoint, cfg, full=full)
-    for page in definition.poll(cfg, poll_request, http=_http):
+    for page in definition.poll(cfg, poll_request, http=http_transport):
         if not page.snapshot_complete:
             page = replace(
                 page,
@@ -49,5 +49,5 @@ def poll_pages(key: str, cfg: dict, cursor: str | None, checkpoint: str | None =
 def validate_config(key: str, values: dict) -> str | None:
     """Validate raw connector values through the shared declarative catalog."""
     definition = connector_definition(key)
-    result = definition.validate(values, http=_http)
+    result = definition.validate(values, http=http_transport)
     return None if result.ok else result.message

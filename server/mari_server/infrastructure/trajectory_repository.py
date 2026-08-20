@@ -15,9 +15,9 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-import llm
-import access
-from db import exec_, q, q1
+from mari_server.infrastructure import models as llm
+from mari_server.domain import access
+from mari_server.infrastructure.database import exec_, q, q1
 from mari_components.trajectories import (
     TrajectoryStep as ComponentTrajectoryStep,
     analyze_trajectory as component_analyze_trajectory,

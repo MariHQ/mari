@@ -19,13 +19,13 @@ import re
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
-import auth
-import access
+from mari_server.api import auth
+from mari_server.api import access
 from mari_server.infrastructure import connector_runtime as connect_sync
 from mari_server.infrastructure import connector_provider as component_connectors
-import flowengine
-import ingest
-from db import audit, exec_, q, q1
+from mari_server.infrastructure import workflow_runtime as flowengine
+from mari_server.infrastructure import ingestion as ingest
+from mari_server.infrastructure.database import audit, exec_, q, q1
 from mari_components.connectors import connector_definition, connector_definitions
 
 router = APIRouter(prefix="/connectors")

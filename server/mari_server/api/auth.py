@@ -22,9 +22,9 @@ import urllib.request
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel
 
-import config
-import access as access_module
-import control_store
+from mari_server.infrastructure import config
+from mari_server.api import access as access_module
+from mari_server.infrastructure import control_store
 from mari_server.infrastructure import postgres
 
 log = logging.getLogger("mari.auth")
@@ -51,25 +51,7 @@ BYPASS_SESSION_HOURS = 12
 # reads it back. Background threads (ingest, flowengine, the poller) never go
 # through `current_user`, so they keep the default: SERVICE_ACTOR, which says
 # "no human asked for this" instead of naming one.
-SERVICE_ACTOR = "Mari"
-
-CALLER: contextvars.ContextVar[dict | None] = contextvars.ContextVar("mari_caller", default=None)
-
-
-def set_caller(user: dict | None) -> None:
-    CALLER.set(user)
-
-
-def caller() -> dict | None:
-    return CALLER.get()
-
-
-def actor_name() -> str:
-    """The name to record as the actor of a write. SERVICE_ACTOR when the write
-    has no human behind it — never a hardcoded person."""
-    user = CALLER.get()
-    name = (user or {}).get("name") if isinstance(user, dict) else None
-    return str(name) if name else SERVICE_ACTOR
+from mari_server.domain.identity import SERVICE_ACTOR, actor_name, caller, set_caller
 
 
 def _conn():

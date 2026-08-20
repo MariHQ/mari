@@ -15,7 +15,7 @@ import pathlib
 import re
 import subprocess
 
-import config
+from mari_server.infrastructure import config
 from mari_server.infrastructure import postgres
 
 

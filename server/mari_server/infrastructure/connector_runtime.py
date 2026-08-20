@@ -19,10 +19,10 @@ import datetime as dt
 import json
 import time
 
-import flowengine
-import ingest
-import access
-import links
+from mari_server.infrastructure import workflow_runtime as flowengine
+from mari_server.infrastructure import ingestion as ingest
+from mari_server.domain import access
+from mari_server.infrastructure import lineage_repository as links
 from mari_components import IncompleteSnapshot, SyncMode
 from mari_components.sync import ManifestEntry, SyncState
 from mari_components.connectors import CONNECTOR_CATALOG, call_with_retry, connector_definition
@@ -149,7 +149,7 @@ def _sync_worker(source_id: int, full: bool) -> dict:
         # —— validate (cheap, honest) ——
         ingest._set(source_id, state="running", phase="listing", done=0, total=0, error="")
         def validate_once() -> None:
-            result = definition.validate(cfg, http=connector_provider._http)
+            result = definition.validate(cfg, http=connector_provider.http_transport)
             if not result.ok:
                 raise ValueError(result.message)
         call_with_retry(validate_once, sleep=time.sleep)

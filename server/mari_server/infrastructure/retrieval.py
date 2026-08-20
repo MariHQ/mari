@@ -30,7 +30,7 @@ from collections import defaultdict
 
 import numpy as np
 
-import config
+from mari_server.infrastructure import config
 from mari_components.retrieval import (
     FDEConfig,
     PolarCodec,
@@ -352,8 +352,8 @@ def _parse_vector(value: t.Any) -> np.ndarray | None:
 
 def rebuild_from_database() -> dict | None:
     """Snapshot canonical chunk vectors. Imported lazily to avoid db cycles."""
-    import access
-    from db import pq
+    from mari_server.domain import access
+    from mari_server.infrastructure.database import pq
     context = access.require_current_access()
     rows = pq("""SELECT document_id, content_hash, embedding::text AS embedding
                  FROM chunks WHERE project_id = %s AND embedding IS NOT NULL
@@ -373,7 +373,7 @@ def rebuild_from_database() -> dict | None:
 
 
 def ensure_index() -> bool:
-    import access
+    from mari_server.domain import access
     index = index_for(access.require_current_access().project_id)
     if index.available:
         return True
@@ -385,7 +385,7 @@ def ensure_index() -> bool:
 
 def schedule_rebuild(delay: float | None = None) -> None:
     """Debounce ingestion bursts into one periodic atomic vector flush."""
-    import access
+    from mari_server.domain import access
     context = access.require_current_access()
     project_id = context.project_id
     seconds = float(delay if delay is not None else os.environ.get("MARI_VECTOR_FLUSH_SECONDS", "30"))

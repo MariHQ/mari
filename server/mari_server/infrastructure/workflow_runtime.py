@@ -16,8 +16,8 @@ import threading
 import time
 import typing as t
 
-import llm
-import config
+from mari_server.infrastructure import models as llm
+from mari_server.infrastructure import config
 from mari_server.infrastructure import postgres
 
 
@@ -78,8 +78,8 @@ def _step_fetch(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
 
 def _step_refine(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
     # late imports — flowengine must stay importable before app/db load
-    from db import exec_, q1
-    from mutations_knowledge import llm_refine
+    from mari_server.infrastructure.database import exec_, q1
+    from mari_server.api.graphql_knowledge import llm_refine
     skill = cfg.get("skill", "tighten")
     total = 0
     for doc_id in ctx.get("doc_ids", [])[:2]:  # cap LLM work per run
@@ -95,7 +95,7 @@ def _step_refine(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
 
 
 def _step_fact_check(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
-    from app import Mutation
+    from mari_server.api.app import Mutation
     contradictions = 0
     checked = 0
     for doc_id in ctx.get("doc_ids", [])[:2]:
@@ -132,7 +132,7 @@ def _step_tag(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
 
 
 def _step_derive_links(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
-    from app import Mutation
+    from mari_server.api.app import Mutation
     added = Mutation.derive_links(None)  # type: ignore[arg-type]
     return "passed", f"{added} new semantic links", {"links": added}
 
@@ -207,7 +207,7 @@ def _step_trigger(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
 def _step_sync_source(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
     """Run the real diff-based ingest sync for one source, synchronously, and
     report honest per-step stats from the sync result."""
-    import ingest  # late import — ingest imports flowengine at module load
+    from mari_server.infrastructure import ingestion as ingest  # late import — ingest imports flowengine at module load
     source_id = int(cfg.get("source_id") or 0)
     with _conn() as conn:
         src = conn.execute("SELECT display_name FROM sources WHERE id = %s", (source_id,)).fetchone()
@@ -244,7 +244,7 @@ def _step_scan_facts(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
     picks its own batch, as it does from the Facts page."""
     if ctx.get("dry_run"):
         return "passed", "would mine recent documents for claims (dry run)", {}
-    from mutations_knowledge import scan_facts_for  # late import — app/db load after this module
+    from mari_server.api.graphql_knowledge import scan_facts_for  # late import — app/db load after this module
     doc_ids = ctx.get("doc_ids") or None
     added, scanned, note = scan_facts_for(doc_ids)
     return "passed", _scan_detail(added, scanned, note, "claim"), {"facts": added}
@@ -255,7 +255,7 @@ def _step_scan_decisions(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
     shape as the fact scan, including reading ctx["doc_ids"] (FACT-4)."""
     if ctx.get("dry_run"):
         return "passed", "would mine recent documents for decisions (dry run)", {}
-    from mutations_knowledge import scan_decisions_for
+    from mari_server.api.graphql_knowledge import scan_decisions_for
     doc_ids = ctx.get("doc_ids") or None
     added, scanned, note = scan_decisions_for(doc_ids)
     return "passed", _scan_detail(added, scanned, note, "decision"), {"decisions": added}
@@ -265,7 +265,7 @@ def _step_refresh_digest(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
     """Regenerate the weekly digest — same logic as the regenerateDigest mutation."""
     if ctx.get("dry_run"):
         return "passed", "would regenerate the weekly digest (dry run)", {}
-    from app import Mutation  # late import to reuse app helpers
+    from mari_server.api.app import Mutation  # late import to reuse app helpers
     ok = Mutation.regenerate_digest(None)  # type: ignore[arg-type]
     with _conn() as conn:
         n = conn.execute("SELECT count(*) AS n FROM digest_topics").fetchone()["n"]

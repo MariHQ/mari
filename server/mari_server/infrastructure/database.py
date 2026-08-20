@@ -9,9 +9,9 @@ from __future__ import annotations
 import json
 import typing as t
 
-import auth as auth_module
-import access as access_module
-import observability
+from mari_server.domain import access as access_module
+from mari_server.domain.identity import SERVICE_ACTOR, actor_name, caller
+from mari_server.infrastructure import observability
 from mari_server.domain.audit import AuditEvent, chained_row
 from mari_server.infrastructure import postgres
 
@@ -23,9 +23,6 @@ from mari_server.infrastructure import postgres
 # `actor_name()` returns the person actually signed in. Work with no human
 # behind it — the ingest poller, a scheduled flow, a webhook — records
 # SERVICE_ACTOR ("Mari"), which is a true statement about who did it.
-SERVICE_ACTOR = auth_module.SERVICE_ACTOR
-actor_name = auth_module.actor_name
-caller = auth_module.caller
 
 # Shared pool for the request path (q/q1/exec_). Long-lived background workers
 # (ingest/connect_sync/flowengine) keep their own dedicated connections — they
@@ -97,7 +94,7 @@ def audit(verb: str, target: str, actor: str | None = None,
             for lbl, val in (detail or []) if str(lbl)]
     scope = access_module.current_access()
     request_id, correlation_id = observability.request_context()
-    current_user = auth_module.caller() or {}
+    current_user = caller() or {}
     project = scope.project_id if scope else 0
     event = AuditEvent(
         project_id=project,
@@ -159,5 +156,5 @@ def jload(v: t.Any) -> t.Any:
 
 def ensure_schema() -> None:
     """Apply serialized, checksum-verified migrations before serving traffic."""
-    from schema_migrations import migrate
+    from mari_server.infrastructure.schema_migrations import migrate
     migrate(postgres.database_url())

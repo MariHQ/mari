@@ -8,13 +8,13 @@ from typing import Any
 
 import psycopg
 
-import access
-import llm
-import trajectory
-from db import exec_, log_usage, q, q1
+from mari_server.domain import access
+from mari_server.infrastructure import models as llm
+from mari_server.infrastructure import trajectory_repository as trajectory
+from mari_server.infrastructure.database import exec_, log_usage, q, q1
 from mari_server.infrastructure import postgres
 from mari_components.connectors import connector_definitions
-from queries import hybrid_search
+from mari_server.infrastructure.search import hybrid_search
 
 from mari_server.application.agent import (
     ANSWER_INSTRUCTIONS,

@@ -20,17 +20,17 @@ from fastapi import APIRouter, File, HTTPException, UploadFile
 from psycopg.rows import dict_row
 from pydantic import BaseModel
 
-import llm
-import access
+from mari_server.infrastructure import models as llm
+from mari_server.api import access
 from mari_components import KnowledgeDocument
 from mari_components.knowledge import harvest_glossary as component_harvest_glossary
 # Reuse the real GitHub ingestion pipeline pieces (chunk + content-hash + embed +
 # mean-pooled doc embedding). ingest._upsert_document is github-specific
 # (hardcodes source='github'), so the document upsert lives here instead.
-from ingest import _chunk_settings, _sha, _sync_chunks, _title_of
+from mari_server.infrastructure.ingestion import _chunk_settings, _sha, _sync_chunks, _title_of
 
 from mari_server.infrastructure import postgres
-from excerpt import excerpt
+from mari_server.application.excerpt import excerpt
 
 router = APIRouter(prefix="/onboard")
 

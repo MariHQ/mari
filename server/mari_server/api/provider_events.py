@@ -13,12 +13,12 @@ import typing as t
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
-import access
-import auth
+from mari_server.api import access
+from mari_server.api import auth
 from mari_server.infrastructure import connector_provider as component_connectors
-import ingest
-from db import q1
-from event_inbox import DEFAULT_INBOX
+from mari_server.infrastructure import ingestion as ingest
+from mari_server.infrastructure.database import q1
+from mari_server.infrastructure.event_inbox import DEFAULT_INBOX
 from mari_components.connectors import ConfluenceConfig, fetch_confluence_page
 from mari_components.connectors.events import (
     MAX_DIRTY_PATHS, confluence_change_hint, github_change_hint,
@@ -263,7 +263,7 @@ def _sync_confluence_page(source: dict[str, t.Any], page_id: str) -> None:
             str(cfg.get("api_token") or ""), str(cfg.get("space_key") or ""),
         ),
         page_id,
-        http=component_connectors._http,
+        http=component_connectors.http_transport,
     )
     configured_space = str(cfg.get("space_key") or "").strip()
     if (document is not None and configured_space

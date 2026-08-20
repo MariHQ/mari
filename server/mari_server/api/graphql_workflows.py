@@ -5,7 +5,7 @@ from __future__ import annotations
 import strawberry
 from strawberry.scalars import JSON
 
-import access
+from mari_server.api import access
 from mari_server.application import workflows
 from mari_server.infrastructure import workflow_repository
 

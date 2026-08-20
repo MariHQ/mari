@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
-import access
+from mari_server.api import access
 from mari_server.application.chat import stream_answer
 from mari_server.infrastructure.chat_runtime import live_destination, ports
 

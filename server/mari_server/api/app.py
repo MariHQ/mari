@@ -29,29 +29,29 @@ from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
 from strawberry.fastapi import GraphQLRouter
 
-import config
-import ingest
-import llm
+from mari_server.infrastructure import config
+from mari_server.infrastructure import ingestion as ingest
+from mari_server.infrastructure import models as llm
 from mari_server.api import agent as agent_api
 from mari_server.api import chat as chat_api
 from mari_server.api.graphql_destinations import DestinationMutations
 from mari_server.api.graphql_workflows import WorkflowMutations
-import access as access_module
-import auth as auth_module
-import bots
-import mcp
-import connectors_api
-import onboard
-import repoaudit
-import provider_events
-import observability
-import enterprise_identity
-import gdrive_events
+from mari_server.api import access as access_module
+from mari_server.api import auth as auth_module
+from mari_server.api import bots
+from mari_server.api import mcp
+from mari_server.api import connectors as connectors_api
+from mari_server.api import onboarding as onboard
+from mari_server.infrastructure import repository_audit as repoaudit
+from mari_server.api import provider_events
+from mari_server.infrastructure import observability
+from mari_server.api import enterprise_identity
+from mari_server.api import gdrive_events
 
-from db import close_pool, ensure_schema, exec_, open_pool, q, q1
-from queries import Query
-from mutations_knowledge import MutKnowledge
-from mutations_admin import MutAdmin
+from mari_server.infrastructure.database import close_pool, ensure_schema, exec_, open_pool, q, q1
+from mari_server.api.graphql_queries import Query
+from mari_server.api.graphql_knowledge import MutKnowledge
+from mari_server.api.graphql_admin import MutAdmin
 
 
 @strawberry.type

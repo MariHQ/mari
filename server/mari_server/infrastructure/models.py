@@ -47,8 +47,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-import config
-import observability
+from mari_server.infrastructure import config
+from mari_server.infrastructure import observability
 
 # Connection defaults are not provider/model fallbacks. Fresh databases seed
 # their explicit model selections in init.sql.
@@ -108,7 +108,7 @@ def _settings() -> tuple[dict, dict]:
     llm_cfg: dict = {}
     embed_cfg: dict = {}
     try:
-        from db import jload, q  # late: db imports flowengine imports this module
+        from mari_server.infrastructure.database import jload, q  # late: db imports flowengine imports this module
         for row in q("SELECT key, value FROM settings WHERE key IN ('llm', 'embedding')"):
             value = jload(row["value"])
             if isinstance(value, dict):

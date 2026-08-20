@@ -16,7 +16,7 @@ SCHEMA_PATH = Path(__file__).with_name("graphql-schema.graphql")
 
 
 def rendered_schema() -> str:
-    from app import schema
+    from mari_server.api.app import schema
     return str(schema).rstrip() + "\n"
 
 
