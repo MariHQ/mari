@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import threading
 
+from mari_server import db
+from mari_server.domain import access
 from mari_server.services.excerpt import excerpt
 from mari_server.services.documents import DocumentPorts, ProjectionFields
 from mari_server.domain.documents import DocumentVersion
@@ -13,6 +15,134 @@ from mari_server.repositories.document_store import IcebergDocumentStore
 
 _STORE: IcebergDocumentStore | None = None
 _STORE_LOCK = threading.Lock()
+
+
+_DOCUMENT_SELECT = """SELECT d.id, d.source, d.external_id, d.title, d.snippet,
+       d.body, d.author, d.author_initials, d.updated_src, d.kind,
+       array_remove(array_agg(t.tag), NULL) AS tags
+  FROM documents d LEFT JOIN tags t ON t.document_id = d.id AND t.project_id = d.project_id"""
+
+
+def recent(limit: int, offset: int) -> list[dict]:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn:
+        return conn.execute(
+            _DOCUMENT_SELECT + """ WHERE d.project_id = %s GROUP BY d.id
+              ORDER BY d.updated_src DESC NULLS LAST, d.id DESC LIMIT %s OFFSET %s""",
+            (project_id, limit, offset),
+        ).fetchall()
+
+
+def count() -> int:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT count(*) AS n FROM documents WHERE project_id = %s", (project_id,),
+        ).fetchone()
+    return int(row["n"])
+
+
+def recent_searches(limit: int) -> list[str]:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn:
+        rows = conn.execute(
+            """SELECT detail, max(at) AS last FROM usage_log
+                 WHERE project_id = %s AND kind = 'search' AND detail <> ''
+                 GROUP BY detail ORDER BY last DESC LIMIT %s""", (project_id, limit),
+        ).fetchall()
+    return [str(row["detail"]) for row in rows]
+
+
+def record_search(query: str, *, window: str = "5 minutes") -> None:
+    project_id = access.require_current_access().project_id
+    detail = query[:120]
+    with db.connect() as conn:
+        conn.execute(f"""INSERT INTO usage_log (project_id, kind, detail)
+          SELECT %s, 'search', %s
+           WHERE NOT EXISTS (SELECT 1 FROM usage_log
+                              WHERE project_id = %s AND kind = 'search' AND detail = %s
+                                AND at > now() - interval '{window}')""",
+                     (project_id, detail, project_id, detail))
+
+
+def related(document_id: int) -> list[dict]:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn:
+        return conn.execute(
+            """SELECT d.id, d.source, d.title, e.rel, 'out' AS direction
+                 FROM edges e JOIN documents d ON d.id = e.to_doc
+                WHERE e.project_id = %s AND d.project_id = %s AND e.from_doc = %s
+               UNION ALL
+               SELECT d.id, d.source, d.title, e.rel, 'in' AS direction
+                 FROM edges e JOIN documents d ON d.id = e.from_doc
+                WHERE e.project_id = %s AND d.project_id = %s AND e.to_doc = %s
+               ORDER BY title, id, rel""",
+            (project_id, project_id, document_id, project_id, project_id, document_id),
+        ).fetchall()
+
+
+def get(document_id: int) -> dict | None:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn:
+        rows = conn.execute(
+            _DOCUMENT_SELECT + " WHERE d.project_id = %s AND d.id = %s GROUP BY d.id",
+            (project_id, document_id),
+        ).fetchall()
+    return rows[0] if rows else None
+
+
+def is_watched(document_id: int, user_name: str) -> bool:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn:
+        return bool(conn.execute(
+            """SELECT 1 FROM watches
+                 WHERE project_id = %s AND user_name = %s AND document_id = %s""",
+            (project_id, user_name, document_id),
+        ).fetchone())
+
+
+def revisions(document_id: int) -> list[dict]:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn:
+        return conn.execute(
+            """SELECT e.* FROM events e JOIN documents d ON e.target = d.title
+                 WHERE d.project_id = %s AND e.project_id = %s AND d.id = %s
+                 ORDER BY e.occurred_at DESC LIMIT 20""",
+            (project_id, project_id, document_id),
+        ).fetchall()
+
+
+def findings(document_id: int) -> list[dict]:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn:
+        return conn.execute(
+            """SELECT f.* FROM findings f JOIN documents d ON d.id = f.document_id
+                 WHERE f.project_id = %s AND d.project_id = %s AND f.document_id = %s
+                 ORDER BY f.id""", (project_id, project_id, document_id),
+        ).fetchall()
+
+
+def changes(document_id: int) -> list[dict]:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn:
+        return conn.execute(
+            """SELECT c.* FROM changes c JOIN documents d ON d.id = c.document_id
+                 WHERE c.project_id = %s AND d.project_id = %s AND c.document_id = %s
+                 ORDER BY c.id""", (project_id, project_id, document_id),
+        ).fetchall()
+
+
+def history(document_id: int) -> list[dict]:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn:
+        return conn.execute(
+            """SELECT e.actor, e.verb, e.target,
+                      to_char(e.occurred_at, 'YYYY-MM-DD"T"HH24:MI:SS') AS at
+                 FROM events e JOIN documents d ON e.target = d.title
+                WHERE e.project_id = %s AND d.project_id = %s AND d.id = %s
+                ORDER BY e.occurred_at DESC LIMIT 30""",
+            (project_id, project_id, document_id),
+        ).fetchall()
 
 
 def canonical_store() -> IcebergDocumentStore:

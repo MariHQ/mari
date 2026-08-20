@@ -26,7 +26,9 @@ from mari_server.integrations import llm
 from mari_server.integrations import vector_index as retrieval
 from mari_server.services import review as review_application
 from mari_server.repositories import review_repository
-from mari_server.repositories.database import actor_name, exec_, jload, q, q1
+from mari_server.repositories import knowledge as knowledge_store
+from mari_server.repositories import document_repository, lineage_repository as lineage_store
+from mari_server.repositories.database import actor_name, jload, q, q1
 from mari_server.services.excerpt import excerpt
 from mari_server.api.graphql_types import (
     ActivityBucket, ActivityItem, ApiKey, ApprovedAnswer,
@@ -141,19 +143,6 @@ def _doc(row: dict, watched: bool = False) -> Document:
     )
 
 
-# A page of documents ordered by recency. `d.id DESC` is not decoration:
-# updated_src is a DATE, so a corpus ingested in one sync shares one value
-# across thousands of rows and the sort between them is whatever the plan
-# happens to produce. Paging an unstable sort duplicates some rows and skips
-# others (SRCH-2), and the reader has no way to tell.
-DOC_SQL = """
-  SELECT d.id, d.source, d.external_id, d.title, d.snippet, d.body, d.author,
-         d.author_initials, d.updated_src, d.kind, array_remove(array_agg(t.tag), NULL) AS tags
-  FROM documents d LEFT JOIN tags t ON t.document_id = d.id
-  {where}
-  GROUP BY d.id ORDER BY d.updated_src DESC NULLS LAST, d.id DESC
-"""
-
 # Search implementation lives behind the infrastructure boundary.
 from mari_server.services.search import MAX_K, hybrid_count, hybrid_search, invalidate_search, like_pattern
 
@@ -175,13 +164,7 @@ def log_search_once(query: str) -> None:
     page of that search and there is nothing new to record."""
     detail = query[:120]
     try:
-        exec_(f"""
-          INSERT INTO usage_log (kind, detail)
-          SELECT 'search', %s
-           WHERE NOT EXISTS (SELECT 1 FROM usage_log
-                              WHERE kind = 'search' AND detail = %s
-                                AND at > now() - interval '{SEARCH_LOG_WINDOW}')""",
-              (detail, detail))
+        document_repository.record_search(detail, window=SEARCH_LOG_WINDOW)
     except Exception:  # noqa: BLE001 — telemetry never breaks the search it rides on
         pass
 
@@ -531,9 +514,7 @@ class Query:
             log_search_once(query.strip())
             rows = hybrid_search(query, k, offset)
         else:
-            # No query: most-recently-updated, paged the same way.
-            rows = q(DOC_SQL.format(where="WHERE d.project_id = %s") + " LIMIT %s OFFSET %s",
-                     (access.require_current_access().project_id, k, offset))
+            rows = document_repository.recent(k, offset)
         return [_doc(r) for r in rows]
 
     @strawberry.field
@@ -542,18 +523,14 @@ class Query:
         limit. The count the results feed puts above the list."""
         if query.strip():
             return hybrid_count(query)
-        return int(q1("SELECT count(*) AS n FROM documents WHERE project_id = %s",
-                      (access.require_current_access().project_id,))["n"])
+        return document_repository.count()
 
     @strawberry.field
     def recent_searches(self, limit: int = 6) -> list[str]:
         """The queries this workspace has actually run, newest distinct first.
         Read from usage_log, which the search resolver already writes — nothing
         is recorded here that a person did not type."""
-        return [r["detail"] for r in q(
-            """SELECT detail, max(at) AS last FROM usage_log
-               WHERE kind = 'search' AND detail <> ''
-               GROUP BY detail ORDER BY last DESC LIMIT %s""", (max(1, limit),))]
+        return document_repository.recent_searches(max(1, limit))
 
     @strawberry.field
     def related_documents(self, document_id: int) -> list[RelatedDoc]:
@@ -565,58 +542,35 @@ class Query:
         # this read the whole edge table to answer "what links here". Ordering
         # ends in id so two documents with the same title do not swap places
         # between reads.
-        project_id = access.require_current_access().project_id
-        rows = q("""
-          SELECT d.id, d.source, d.title, e.rel, 'out' AS direction
-          FROM edges e JOIN documents d ON d.id = e.to_doc
-          WHERE e.project_id = %s AND d.project_id = %s AND e.from_doc = %s
-          UNION ALL
-          SELECT d.id, d.source, d.title, e.rel, 'in' AS direction
-          FROM edges e JOIN documents d ON d.id = e.from_doc
-          WHERE e.project_id = %s AND d.project_id = %s AND e.to_doc = %s
-          ORDER BY title, id, rel""", (project_id, project_id, document_id,
-                                        project_id, project_id, document_id))
+        rows = document_repository.related(document_id)
         return [RelatedDoc(id=r["id"], source=r["source"], title=r["title"],
                            rel=r["rel"], direction=r["direction"]) for r in rows]
 
     @strawberry.field
     def document(self, id: int) -> Document | None:
-        project_id = access.require_current_access().project_id
-        rows = q(DOC_SQL.format(where="WHERE d.project_id = %s AND d.id = %s"), (project_id, id))
-        if not rows:
+        row = document_repository.get(id)
+        if not row:
             return None
         # Per-user, and it must be the same name toggleWatch writes, or the
         # star never comes back lit for the person who set it.
-        watched = q1("SELECT 1 AS x FROM watches WHERE user_name = %s AND document_id = %s",
-                     (actor_name(), id)) is not None
-        return _doc(rows[0], watched)
+        return _doc(row, document_repository.is_watched(id, actor_name()))
 
     @strawberry.field
     def revisions(self, document_id: int) -> list[AuditEvent]:
-        project_id = access.require_current_access().project_id
         return [AuditEvent(id=r["id"], actor=r["actor"], verb=r["verb"], target=r["target"],
                            at=r["occurred_at"].isoformat(), detail=_details(r))
-                for r in q("""SELECT e.* FROM events e JOIN documents d ON e.target = d.title
-                              WHERE d.project_id = %s AND e.project_id = %s AND d.id = %s
-                              ORDER BY e.occurred_at DESC LIMIT 20""",
-                            (project_id, project_id, document_id))]
+                for r in document_repository.revisions(document_id)]
 
     @strawberry.field
     def findings(self, document_id: int) -> list[Finding]:
-        project_id = access.require_current_access().project_id
         return [Finding(id=r["id"], kind=r["kind"], severity=r["severity"], text=r["text"], note=r["note"])
-                for r in q("""SELECT f.* FROM findings f JOIN documents d ON d.id = f.document_id
-                              WHERE d.project_id = %s AND f.document_id = %s ORDER BY f.id""",
-                           (project_id, document_id))]
+                for r in document_repository.findings(document_id)]
 
     @strawberry.field
     def changes(self, document_id: int) -> list[Change]:
-        project_id = access.require_current_access().project_id
         return [Change(id=r["id"], original=r["original"], replacement=r["replacement"],
                        reason=r["reason"], status=r["status"])
-                for r in q("""SELECT c.* FROM changes c JOIN documents d ON d.id = c.document_id
-                              WHERE d.project_id = %s AND c.document_id = %s ORDER BY c.id""",
-                           (project_id, document_id))]
+                for r in document_repository.changes(document_id)]
 
     @strawberry.field
     def lineage(self) -> list[LineageNode]:
@@ -628,28 +582,7 @@ class Query:
         # pass over both endpoints, and the result is joined in. Documents with
         # no edges are absent from `degree` and coalesce to 0, which is the same
         # answer count(*) gave them.
-        rows = q("""
-          WITH degree AS (
-            SELECT doc, sum(inb) AS inbound, sum(outb) AS outbound FROM (
-              SELECT to_doc   AS doc, 1 AS inb, 0 AS outb FROM edges WHERE project_id = %s
-              UNION ALL
-              SELECT from_doc AS doc, 0 AS inb, 1 AS outb FROM edges WHERE project_id = %s
-            ) x GROUP BY doc
-          )
-          SELECT d.id, d.source, d.external_id, d.title, d.author, d.updated_src, d.created_src,
-                 d.graph_x, d.graph_y, d.graph_icon, d.graph_meta,
-                 d.kind, d.source_path, d.source_id, s.kind AS src_kind,
-                 s.config->>'repo' AS repo,
-                 array_remove(array_agg(DISTINCT t.tag), NULL) AS tags,
-                 coalesce(max(g.inbound), 0)::int AS inbound,
-                 coalesce(max(g.outbound), 0)::int AS outbound
-          FROM documents d
-          LEFT JOIN tags t ON t.project_id = d.project_id AND t.document_id = d.id
-          LEFT JOIN sources s ON s.project_id = d.project_id AND s.id = d.source_id
-          LEFT JOIN degree g ON g.doc = d.id
-          WHERE d.project_id = %s
-          GROUP BY d.id, s.kind, s.config ORDER BY d.id""",
-                 (project_id, project_id, project_id))
+        rows = lineage_store.graph(project_id)
         pos = layout_nodes(rows)
         today = dt.date.today()
         out = []
@@ -676,12 +609,7 @@ class Query:
     @strawberry.field
     def lineage_edges(self) -> list[LineageEdge]:
         project_id = access.require_current_access().project_id
-        rows = q("""
-          SELECT e.id, f.external_id AS from_id, t.external_id AS to_id, e.rel, e.created_at,
-                 e.curve, e.meta
-          FROM edges e JOIN documents f ON f.id = e.from_doc JOIN documents t ON t.id = e.to_doc
-          WHERE e.project_id = %s AND f.project_id = %s AND t.project_id = %s
-          ORDER BY e.id""", (project_id, project_id, project_id))
+        rows = lineage_store.graph_edges(project_id)
         return [LineageEdge(id=r["id"], from_id=r["from_id"], to_id=r["to_id"], kind=r["rel"],
                             date=r["created_at"].isoformat() if r["created_at"] else "",
                             curve=r["curve"], meta=jload(r["meta"])) for r in rows]
@@ -689,30 +617,7 @@ class Query:
     @strawberry.field
     def graph_stats(self) -> GraphStats:
         project_id = access.require_current_access().project_id
-        # "stale" is relative to the newest doc so seeded 2024 data reads sensibly.
-        s = q1("""
-          SELECT count(*) AS docs,
-                 count(*) FILTER (WHERE d.updated_src < (SELECT max(updated_src) FROM documents) - 45
-                                  OR EXISTS (SELECT 1 FROM tags t WHERE t.document_id = d.id
-                                             AND t.tag IN ('stale','needs-review'))) AS stale,
-                 count(*) FILTER (WHERE NOT EXISTS (
-                   SELECT 1 FROM edges e WHERE e.from_doc = d.id OR e.to_doc = d.id)) AS orphans,
-                 count(*) FILTER (WHERE EXISTS (SELECT 1 FROM tags t WHERE t.document_id = d.id
-                                                AND t.tag = 'customer-facing')
-                                  AND NOT EXISTS (SELECT 1 FROM edges e WHERE e.rel = 'translates'
-                                                  AND (e.from_doc = d.id OR e.to_doc = d.id))) AS untranslated,
-                 count(*) FILTER (WHERE d.author = '' OR d.author = 'CI') AS unowned
-          FROM documents d WHERE d.project_id = %s""", (project_id,))
-        contradictions = q1("""SELECT count(*) AS n FROM edges
-                                WHERE project_id = %s AND rel = 'contradicts'""", (project_id,))["n"]
-        cited = q("""SELECT d.title, d.id, count(*) AS inbound FROM edges e
-                     JOIN documents d ON d.id = e.to_doc
-                     WHERE e.project_id = %s AND d.project_id = %s
-                     GROUP BY d.id ORDER BY inbound DESC, d.id LIMIT 3""", (project_id, project_id))
-        activity = q("""SELECT * FROM (
-                          SELECT occurred_at::date AS day, count(*) AS n FROM events
-                          WHERE project_id = %s
-                          GROUP BY 1 ORDER BY 1 DESC LIMIT 60) x ORDER BY day""", (project_id,))
+        s, contradictions, cited, activity = lineage_store.graph_stats(project_id)
         return GraphStats(
             docs=s["docs"], stale=s["stale"], orphans=s["orphans"],
             untranslated=s["untranslated"], unowned=s["unowned"], contradictions=int(contradictions),
@@ -722,17 +627,13 @@ class Query:
     @strawberry.field
     def doc_history(self, document_id: int) -> list[DocHistory]:
         return [DocHistory(at=r["at"], actor=r["actor"], verb=r["verb"], detail=r["target"])
-                for r in q("""SELECT e.actor, e.verb, e.target,
-                                     to_char(e.occurred_at, 'YYYY-MM-DD"T"HH24:MI:SS') AS at
-                              FROM events e JOIN documents d ON e.target = d.title
-                              WHERE d.id = %s ORDER BY e.occurred_at DESC LIMIT 30""", (document_id,))]
+                for r in document_repository.history(document_id)]
 
     @strawberry.field
     def graph_views(self) -> list[GraphView]:
         project_id = access.require_current_access().project_id
         return [GraphView(id=r["id"], name=r["name"], state=json.dumps(jload(r["state"])))
-                for r in q("""SELECT id, name, state FROM graph_views
-                            WHERE project_id = %s ORDER BY id""", (project_id,))]
+                for r in knowledge_store.graph_views()]
 
     @strawberry.field
     def facts(self) -> list[Fact]:
@@ -742,8 +643,7 @@ class Query:
         return [Fact(id=r["id"], claim=r["claim"], source=r["source"], owner=r["owner_name"],
                      owner_tint=r["owner_tint"], status=r["status"],
                      verified=r["verified_at"].isoformat() if r["verified_at"] else "")
-                for r in q("SELECT * FROM facts WHERE project_id = %s ORDER BY id",
-                           (access.require_current_access().project_id,))]
+                for r in knowledge_store.facts()]
 
     @strawberry.field
     def claims(self, document_id: int) -> list[Fact]:
@@ -756,16 +656,14 @@ class Query:
         return [Fact(id=r["id"], claim=r["claim"], source=r["source"], owner=r["owner_name"],
                      owner_tint=r["owner_tint"], status=r["status"],
                      verified=r["verified_at"].isoformat() if r["verified_at"] else "")
-                for r in q("SELECT * FROM facts WHERE project_id = %s AND document_id = %s ORDER BY id",
-                           (access.require_current_access().project_id, document_id))]
+                for r in knowledge_store.facts(document_id)]
 
     @strawberry.field
     def fact_contradictions(self) -> list[FactContradiction]:
         """Claims in the ledger that disagree with each other. Deterministic
         (see detect_contradictions) — no model call, and [] on a ledger whose
         claims are consistent, which is the common case."""
-        rows = q("SELECT id, claim, status FROM facts WHERE project_id = %s ORDER BY id",
-                 (access.require_current_access().project_id,))
+        rows = knowledge_store.facts()
         return [FactContradiction(
             fact_id=a["id"], claim=a["claim"], status=a["status"],
             other_fact_id=b["id"], other_claim=b["claim"], other_status=b["status"],
@@ -776,9 +674,7 @@ class Query:
     def tasks(self) -> list[Task]:
         # overdue is derived in SQL against the database's own current_date, so
         # it cannot drift from the due date the same row reports.
-        rows = q("""SELECT *, (due_date IS NOT NULL AND NOT done AND due_date < current_date) AS overdue
-                    FROM tasks WHERE project_id = %s ORDER BY id""",
-                 (access.require_current_access().project_id,))
+        rows = knowledge_store.tasks()
         return [Task(id=r["id"], title=r["title"], assignee_initials=r["assignee_initials"],
                      assignee_tint=r["assignee_tint"], kind=r["kind"], kind_label=r["kind_label"],
                      done=r["done"], due=r["due_date"].isoformat() if r["due_date"] else "",
@@ -816,23 +712,9 @@ class Query:
         """The strip above the board: counts and rosters rolled up off the same
         rows `tasks` returns. None on an empty inbox — there is nothing to
         summarise, and the board renders without a headline."""
-        project_id = access.require_current_access().project_id
-        s = q1("""SELECT count(*) AS total,
-                         count(*) FILTER (WHERE NOT done) AS open,
-                         count(*) FILTER (WHERE done) AS done,
-                         count(*) FILTER (WHERE NOT done AND due_date < current_date) AS overdue,
-                         count(*) FILTER (WHERE NOT done AND due_date >= current_date
-                                          AND due_date <= current_date + 7) AS due_soon
-                  FROM tasks WHERE project_id = %s""", (project_id,))
+        s, tags, people = knowledge_store.task_summary()
         if not s or not s["total"]:
             return None
-        tags = [r["kind_label"] for r in q(
-            """SELECT DISTINCT kind_label FROM tasks
-               WHERE project_id = %s AND kind_label <> '' ORDER BY kind_label""", (project_id,))]
-        people = [r["assignee_initials"] for r in q(
-            """SELECT DISTINCT assignee_initials FROM tasks
-               WHERE project_id = %s AND NOT done AND assignee_initials <> ''
-               ORDER BY assignee_initials""", (project_id,))]
         # The headline is whichever number needs acting on: a missed deadline
         # outranks the open count, and "all caught up" is itself the news.
         if s["overdue"]:
@@ -862,22 +744,20 @@ class Query:
         return [DigestTopic(title=r["title"], summary=r["summary"],
                             where=[DigestWhere(**w) for w in jload(r["wheres"])],
                             impact=[DigestImpact(**i) for i in jload(r["impact"])])
-                for r in q("SELECT * FROM digest_topics WHERE project_id = %s ORDER BY id",
-                           (project_id,))]
+                for r in knowledge_store.digest_topics()]
 
     @strawberry.field
     def members(self) -> list[Member]:
         return [Member(id=r["id"], name=r["name"], initials=r["initials"], tint=r["tint"],
                        email=r["email"], role=r["role"], provider=r["provider"], status=r["status"],
                        joined=r["joined"].isoformat())
-                for r in q("SELECT * FROM users ORDER BY id")]
+                for r in knowledge_store.members()]
 
     @strawberry.field
     def glossary(self) -> list[GlossaryTerm]:
         return [GlossaryTerm(id=r["id"], term=r["term"], definition=r["definition"],
                              owner=r["owner_name"], updated=r["updated"].isoformat())
-                for r in q("SELECT * FROM glossary WHERE project_id = %s ORDER BY term",
-                           (access.require_current_access().project_id,))]
+                for r in knowledge_store.glossary_terms()]
 
     @strawberry.field
     def tag_defs(self) -> list[TagDef]:
@@ -886,8 +766,7 @@ class Query:
         # must come back as 0 rather than as a blank the UI can round up.
         return [TagDef(tag=r["tag"], label=r["label"], kind=r["kind"], search_weight=r["search_weight"],
                        is_default=r["is_default"], behaviors=r["behaviors"], usage=int(r["usage"]))
-                for r in q("""SELECT d.*, (SELECT count(*) FROM tags t WHERE t.tag = d.tag) AS usage
-                              FROM tag_definitions d ORDER BY d.search_weight DESC""")]
+                for r in knowledge_store.tag_definitions()]
 
     # ——— editorial system: style guides, rule registry, templates, voice ———
 
@@ -898,31 +777,29 @@ class Query:
         is literally the rules it has. A workspace that deleted every shipped
         pack gets [] and the guides tab renders its own empty state."""
         rules: dict[str, list[str]] = {}
-        for r in q("SELECT guide_key, description FROM style_rules ORDER BY guide_key, sort, id"):
+        guides, style_rules = knowledge_store.style_guides()
+        for r in style_rules:
             rules.setdefault(r["guide_key"], []).append(r["description"])
         return [StyleGuide(key=g["key"], name=g["name"], description=g["description"],
                            tone=g["tone"], builtin=g["builtin"],
                            rules=len(rules.get(g["key"], [])), preview=rules.get(g["key"], []))
-                for g in q("SELECT * FROM style_guides ORDER BY sort, key")]
+                for g in guides]
 
     @strawberry.field
     def style_rules(self, guide_key: str | None = None) -> list[StyleRule]:
         """The deterministic rule registry, optionally one pack's. The Library's
         rules tab counts this list, so the number on the tab strip is the number
         of rules a document is actually checked against."""
-        where = "WHERE guide_key = %s" if guide_key else ""
         return [StyleRule(id=r["id"], guide_key=r["guide_key"], family=r["family"],
                           severity=r["severity"], description=r["description"],
                           pack=r["pack"], suggestion=r["suggestion"])
-                for r in q(f"SELECT * FROM style_rules {where} ORDER BY guide_key, sort, id",
-                           (guide_key,) if guide_key else ())]
+                for r in knowledge_store.style_rules(guide_key)]
 
     @strawberry.field
     def default_style_pack(self) -> str:
         """The pack this workspace adopted (`style_guide.default_pack`), or ''
         when nobody has chosen one — a real state on a fresh install."""
-        row = q1("SELECT value FROM settings WHERE key = 'style_guide'")
-        v = jload(row["value"]) if row else {}
+        v = jload(knowledge_store.setting_value("style_guide")) or {}
         return str(v.get("default_pack") or "") if isinstance(v, dict) else ""
 
     @strawberry.field
@@ -930,8 +807,7 @@ class Query:
         """The workspace's voice layer (`settings.voice`). Blank and all-off on
         a workspace that has not written one down, which the panel renders as
         empty fields rather than as someone else's voice."""
-        row = q1("SELECT value FROM settings WHERE key = 'voice'")
-        v = jload(row["value"]) if row else {}
+        v = jload(knowledge_store.setting_value("voice")) or {}
         if not isinstance(v, dict):
             v = {}
         return VoiceLayer(voice=str(v.get("voice") or ""), terms=str(v.get("terms") or ""),
@@ -946,7 +822,7 @@ class Query:
                                  description=r["description"],
                                  sections=[str(s) for s in (jload(r["sections"]) or [])],
                                  icon=r["icon"], standard=r["standard"])
-                for r in q("SELECT * FROM document_templates ORDER BY sort, key")]
+                for r in knowledge_store.document_templates()]
 
     @strawberry.field
     def upload_manifest(self) -> UploadManifest:
@@ -954,16 +830,7 @@ class Query:
         many carry a vector. Counted off `chunks` at read time. A workspace that
         has uploaded nothing gets an empty manifest and a '' summary — never a
         sample receipt."""
-        project_id = access.require_current_access().project_id
-        rows = q("""SELECT d.id, d.source_path, d.external_id, d.updated_src,
-                           count(c.id) AS chunks,
-                           count(c.embedding) AS embedded
-                    FROM documents d
-                    JOIN sources s ON s.project_id = d.project_id AND s.id = d.source_id
-                                      AND s.provider = 'upload'
-                    LEFT JOIN chunks c ON c.project_id = d.project_id AND c.document_id = d.id
-                    WHERE d.project_id = %s
-                    GROUP BY d.id ORDER BY d.id""", (project_id,))
+        rows = knowledge_store.upload_manifest()
         files = []
         for r in rows:
             # source_path is 'upload/<file>' and external_id 'upload:<file>';
@@ -986,7 +853,7 @@ class Query:
         project_id = access.require_current_access().project_id
         return [ApiKey(id=r["id"], name=r["name"], prefix=r["prefix"], scopes=r["scopes"],
                        created=r["created_at"].isoformat(), last_used=r["last_used"], revoked=r["revoked"])
-                for r in q("SELECT * FROM api_keys WHERE project_id = %s ORDER BY id", (project_id,))]
+                for r in knowledge_store.api_keys()]
 
     @strawberry.field
     def mcp_servers(self) -> list[McpServer]:

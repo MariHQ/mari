@@ -235,3 +235,146 @@ def delete_glossary(term_id: int) -> bool:
             (project_id, term_id),
         ).fetchone()
     return bool(row)
+
+
+def graph_views() -> list[dict]:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn:
+        return conn.execute(
+            "SELECT id, name, state FROM graph_views WHERE project_id = %s ORDER BY id",
+            (project_id,),
+        ).fetchall()
+
+
+def facts(document_id: int | None = None) -> list[dict]:
+    project_id = access.require_current_access().project_id
+    clause = " AND document_id = %s" if document_id is not None else ""
+    args = (project_id, document_id) if document_id is not None else (project_id,)
+    with db.connect() as conn:
+        return conn.execute(
+            f"SELECT * FROM facts WHERE project_id = %s{clause} ORDER BY id", args,
+        ).fetchall()
+
+
+def tasks() -> list[dict]:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn:
+        return conn.execute(
+            """SELECT *, (due_date IS NOT NULL AND NOT done AND due_date < current_date) AS overdue
+                 FROM tasks WHERE project_id = %s ORDER BY id""", (project_id,),
+        ).fetchall()
+
+
+def task_summary() -> tuple[dict | None, list[str], list[str]]:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn:
+        summary = conn.execute(
+            """SELECT count(*) AS total, count(*) FILTER (WHERE NOT done) AS open,
+                      count(*) FILTER (WHERE done) AS done,
+                      count(*) FILTER (WHERE NOT done AND due_date < current_date) AS overdue,
+                      count(*) FILTER (WHERE NOT done AND due_date >= current_date
+                                       AND due_date <= current_date + 7) AS due_soon
+                 FROM tasks WHERE project_id = %s""", (project_id,),
+        ).fetchone()
+        kinds = [row["kind_label"] for row in conn.execute(
+            """SELECT DISTINCT kind_label FROM tasks
+                 WHERE project_id = %s AND kind_label <> '' ORDER BY kind_label""",
+            (project_id,),
+        ).fetchall()]
+        people = [row["assignee_initials"] for row in conn.execute(
+            """SELECT DISTINCT assignee_initials FROM tasks
+                 WHERE project_id = %s AND NOT done AND assignee_initials <> ''
+                 ORDER BY assignee_initials""", (project_id,),
+        ).fetchall()]
+    return summary, kinds, people
+
+
+def digest_topics() -> list[dict]:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn:
+        return conn.execute(
+            "SELECT * FROM digest_topics WHERE project_id = %s ORDER BY id", (project_id,),
+        ).fetchall()
+
+
+def members() -> list[dict]:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn:
+        return conn.execute(
+            """SELECT u.id, u.name, u.initials, u.tint, u.email, pm.role,
+                      u.provider, pm.status, u.joined
+                 FROM project_members pm JOIN users u ON u.id = pm.user_id
+                WHERE pm.project_id = %s ORDER BY u.id""", (project_id,),
+        ).fetchall()
+
+
+def glossary_terms() -> list[dict]:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn:
+        return conn.execute(
+            "SELECT * FROM glossary WHERE project_id = %s ORDER BY term", (project_id,),
+        ).fetchall()
+
+
+def tag_definitions() -> list[dict]:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn:
+        return conn.execute(
+            """SELECT d.*, (SELECT count(*) FROM tags t
+                              WHERE t.project_id = %s AND t.tag = d.tag) AS usage
+                 FROM tag_definitions d ORDER BY d.search_weight DESC""", (project_id,),
+        ).fetchall()
+
+
+def style_guides() -> tuple[list[dict], list[dict]]:
+    with db.connect() as conn:
+        guides = conn.execute("SELECT * FROM style_guides ORDER BY sort, key").fetchall()
+        rules = conn.execute(
+            "SELECT guide_key, description FROM style_rules ORDER BY guide_key, sort, id",
+        ).fetchall()
+    return guides, rules
+
+
+def style_rules(guide_key: str | None = None) -> list[dict]:
+    with db.connect() as conn:
+        if guide_key:
+            return conn.execute(
+                "SELECT * FROM style_rules WHERE guide_key = %s ORDER BY guide_key, sort, id",
+                (guide_key,),
+            ).fetchall()
+        return conn.execute(
+            "SELECT * FROM style_rules ORDER BY guide_key, sort, id",
+        ).fetchall()
+
+
+def setting_value(key: str):
+    with db.connect() as conn:
+        row = conn.execute("SELECT value FROM settings WHERE key = %s", (key,)).fetchone()
+    return row["value"] if row else None
+
+
+def document_templates() -> list[dict]:
+    with db.connect() as conn:
+        return conn.execute("SELECT * FROM document_templates ORDER BY sort, key").fetchall()
+
+
+def upload_manifest() -> list[dict]:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn:
+        return conn.execute(
+            """SELECT d.id, d.source_path, d.external_id, d.updated_src,
+                      count(c.id) AS chunks, count(c.embedding) AS embedded
+                 FROM documents d
+                 JOIN sources s ON s.project_id = d.project_id AND s.id = d.source_id
+                               AND s.provider = 'upload'
+                 LEFT JOIN chunks c ON c.project_id = d.project_id AND c.document_id = d.id
+                WHERE d.project_id = %s GROUP BY d.id ORDER BY d.id""", (project_id,),
+        ).fetchall()
+
+
+def api_keys() -> list[dict]:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn:
+        return conn.execute(
+            "SELECT * FROM api_keys WHERE project_id = %s ORDER BY id", (project_id,),
+        ).fetchall()

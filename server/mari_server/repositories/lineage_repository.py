@@ -40,6 +40,85 @@ def _conn():
     return postgres.connect()
 
 
+def graph(project_id: int) -> list[dict]:
+    with _conn() as conn:
+        return conn.execute("""
+          WITH degree AS (
+            SELECT doc, sum(inb) AS inbound, sum(outb) AS outbound FROM (
+              SELECT to_doc AS doc, 1 AS inb, 0 AS outb FROM edges WHERE project_id = %s
+              UNION ALL
+              SELECT from_doc AS doc, 0 AS inb, 1 AS outb FROM edges WHERE project_id = %s
+            ) x GROUP BY doc
+          )
+          SELECT d.id, d.source, d.external_id, d.title, d.author, d.updated_src,
+                 d.created_src, d.graph_x, d.graph_y, d.graph_icon, d.graph_meta,
+                 d.kind, d.source_path, d.source_id, s.kind AS src_kind,
+                 s.config->>'repo' AS repo,
+                 array_remove(array_agg(DISTINCT t.tag), NULL) AS tags,
+                 coalesce(max(g.inbound), 0)::int AS inbound,
+                 coalesce(max(g.outbound), 0)::int AS outbound
+            FROM documents d
+            LEFT JOIN tags t ON t.project_id = d.project_id AND t.document_id = d.id
+            LEFT JOIN sources s ON s.project_id = d.project_id AND s.id = d.source_id
+            LEFT JOIN degree g ON g.doc = d.id
+           WHERE d.project_id = %s
+           GROUP BY d.id, s.kind, s.config ORDER BY d.id""",
+            (project_id, project_id, project_id),
+        ).fetchall()
+
+
+def graph_edges(project_id: int) -> list[dict]:
+    with _conn() as conn:
+        return conn.execute("""
+          SELECT e.id, f.external_id AS from_id, t.external_id AS to_id,
+                 e.rel, e.created_at, e.curve, e.meta
+            FROM edges e JOIN documents f ON f.id = e.from_doc
+            JOIN documents t ON t.id = e.to_doc
+           WHERE e.project_id = %s AND f.project_id = %s AND t.project_id = %s
+           ORDER BY e.id""", (project_id, project_id, project_id),
+        ).fetchall()
+
+
+def graph_stats(project_id: int) -> tuple[dict, int, list[dict], list[dict]]:
+    with _conn() as conn:
+        summary = conn.execute("""
+          SELECT count(*) AS docs,
+                 count(*) FILTER (WHERE d.updated_src <
+                   (SELECT max(updated_src) FROM documents WHERE project_id = %s) - 45
+                   OR EXISTS (SELECT 1 FROM tags t WHERE t.project_id = %s
+                              AND t.document_id = d.id
+                              AND t.tag IN ('stale','needs-review'))) AS stale,
+                 count(*) FILTER (WHERE NOT EXISTS (
+                   SELECT 1 FROM edges e WHERE e.project_id = %s
+                     AND (e.from_doc = d.id OR e.to_doc = d.id))) AS orphans,
+                 count(*) FILTER (WHERE EXISTS (SELECT 1 FROM tags t
+                   WHERE t.project_id = %s AND t.document_id = d.id
+                     AND t.tag = 'customer-facing') AND NOT EXISTS (
+                   SELECT 1 FROM edges e WHERE e.project_id = %s AND e.rel = 'translates'
+                     AND (e.from_doc = d.id OR e.to_doc = d.id))) AS untranslated,
+                 count(*) FILTER (WHERE d.author = '' OR d.author = 'CI') AS unowned
+            FROM documents d WHERE d.project_id = %s""",
+            (project_id, project_id, project_id, project_id, project_id, project_id),
+        ).fetchone()
+        contradictions = conn.execute(
+            "SELECT count(*) AS n FROM edges WHERE project_id = %s AND rel = 'contradicts'",
+            (project_id,),
+        ).fetchone()["n"]
+        cited = conn.execute("""
+          SELECT d.title, d.id, count(*) AS inbound FROM edges e
+          JOIN documents d ON d.id = e.to_doc
+          WHERE e.project_id = %s AND d.project_id = %s
+          GROUP BY d.id ORDER BY inbound DESC, d.id LIMIT 3""",
+            (project_id, project_id),
+        ).fetchall()
+        activity = conn.execute("""
+          SELECT * FROM (SELECT occurred_at::date AS day, count(*) AS n FROM events
+          WHERE project_id = %s GROUP BY 1 ORDER BY 1 DESC LIMIT 60) x ORDER BY day""",
+            (project_id,),
+        ).fetchall()
+    return summary, int(contradictions), cited, activity
+
+
 # How many edges go in one INSERT. Large enough that a full extraction is a
 # handful of statements, small enough that one statement's parameter list stays
 # a reasonable size (4 parameters per row).
