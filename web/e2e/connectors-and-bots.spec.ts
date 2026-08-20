@@ -101,6 +101,8 @@ test("Slack bot setup persists the verified project installation, calls auth.tes
   await expect(drawer).toContainText("channels:history");
   await expect(drawer).toContainText("im:write");
   await expect(drawer).toContainText("message.channels");
+  await expect(drawer).toContainText("messages_tab_enabled: true");
+  await expect(drawer).toContainText("messages_tab_read_only_enabled: false");
   expect(api.restCalls.some((call) => call.path === "/bots/slack/manifest")).toBeTruthy();
   await drawer.getByRole("button", { name: "Next" }).click();
   await drawer.getByRole("textbox", { name: "Bot token" }).fill("xoxb-browser-secret  ");
@@ -112,6 +114,7 @@ test("Slack bot setup persists the verified project installation, calls auth.tes
   await expect(drawer.getByText(/Connected in Acme/)).toBeVisible();
   await drawer.getByRole("button", { name: "Next" }).click();
   await expect(drawer.getByText("Waiting for first event", { exact: true })).toBeVisible();
+  await expect(drawer).toContainText("App Home → Messages Tab");
   await drawer.getByRole("button", { name: "Done" }).click();
   const waiting = page.getByText("Waiting for first event", { exact: true });
   await expect(waiting).toHaveCount(2);

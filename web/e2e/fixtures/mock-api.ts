@@ -308,6 +308,11 @@ export async function installMockApi(page: Page, options: {
     restCalls.push({ path: "/bots/slack/manifest", body: null });
     await route.fulfill({ status: 200, contentType: "text/yaml", body: `display_information:
   name: Mari
+features:
+  app_home:
+    home_tab_enabled: false
+    messages_tab_enabled: true
+    messages_tab_read_only_enabled: false
 oauth_config:
   scopes:
     bot: [app_mentions:read, channels:history, chat:write, im:history, im:read, im:write]

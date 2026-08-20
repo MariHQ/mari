@@ -108,6 +108,12 @@ class GitHubPollingTests(unittest.TestCase):
 
 
 class SlackBotTests(unittest.TestCase):
+    def test_manifest_enables_two_way_app_home_messages(self) -> None:
+        manifest = bots.slack_manifest()
+        self.assertIn("messages_tab_enabled: true", manifest)
+        self.assertIn("messages_tab_read_only_enabled: false", manifest)
+        self.assertIn("message.im", manifest)
+
     def test_signature_accepts_current_exact_body_and_rejects_tampering(self) -> None:
         raw = b'{"type":"event_callback"}'
         ts = str(int(time.time()))
