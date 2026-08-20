@@ -5,7 +5,8 @@ import tempfile
 import unittest
 
 from tests.iceberg_fixture import temporary_warehouse
-from mari_server.infrastructure.document_store import IcebergDocumentStore, KnowledgeVersion
+from mari_server.domain.documents import DocumentVersion
+from mari_server.infrastructure.document_store import IcebergDocumentStore
 
 
 class KnowledgeLifecycleTests(unittest.TestCase):
@@ -22,7 +23,7 @@ class KnowledgeLifecycleTests(unittest.TestCase):
                       revision="1", title="Retention", body="Thirty days",
                       source_url="https://wiki/page-9", recorded_at=self.when)
         values.update(changes)
-        return KnowledgeVersion(**values)
+        return DocumentVersion(**values)
 
     def test_versions_are_idempotent_and_acl_changes_are_versions(self):
         first = self.store.append(self.version())

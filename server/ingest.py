@@ -29,6 +29,8 @@ import links
 import llm
 import retrieval
 import access
+from mari_server.application import documents as document_application
+from mari_server.domain.documents import DocumentVersion
 from mari_server.infrastructure import document_repository
 
 DB_URL_REF: dict = {"url": "postgresql://localhost/mari_cloud"}
@@ -124,11 +126,18 @@ def _upsert_document(conn, source_id: int, external_id: str, title: str, body: s
     brand-new row, False for an update (xmax = 0 only on fresh inserts).
     `source`/`initials` default to github; connect_sync passes the provider key."""
     project_id = access.require_current_access().project_id
-    doc_id, inserted = document_repository.upsert(
-        conn, source_id=source_id, external_id=external_id, title=title, body=body,
-        source_path=source_path, kind=kind, revision=content_hash, author=author,
-        source=source, initials=initials, acl_visibility=acl_visibility,
-        acl_principals=acl_principals,
+    version = DocumentVersion(
+        project_id=project_id, source_id=str(source_id), external_id=external_id,
+        revision=content_hash, title=title, body=body, source_url=source_path,
+        acl={"visibility": acl_visibility, "principals": list(acl_principals)},
+        reason="connector ingestion", actor=author or "connector",
+    )
+    doc_id, inserted = document_application.upsert(
+        version,
+        document_application.ProjectionFields(
+            source=source, kind=kind, author=author, author_initials=initials,
+        ),
+        ports=document_repository.ports(conn),
     )
     conn.commit()
     # Import lazily: queries imports ingest for status resolvers.
@@ -184,7 +193,11 @@ def _sync_chunks(conn, doc_id: int, title: str, body: str,
 def _delete_documents(conn, doc_ids: list[int]) -> None:
     if not doc_ids:
         return
-    document_repository.delete(conn, doc_ids)
+    document_application.delete(
+        access.require_current_access().project_id, doc_ids,
+        reason="provider tombstone", actor="connector",
+        ports=document_repository.ports(conn),
+    )
     conn.commit()
     from queries import invalidate_search
     invalidate_search(access.require_current_access().project_id)

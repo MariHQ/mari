@@ -3,7 +3,8 @@ from __future__ import annotations
 import tempfile
 import unittest
 
-from mari_server.infrastructure.document_store import IcebergDocumentStore, KnowledgeVersion
+from mari_server.domain.documents import DocumentVersion
+from mari_server.infrastructure.document_store import IcebergDocumentStore
 from tests.iceberg_fixture import temporary_warehouse
 
 
@@ -12,7 +13,7 @@ class IcebergWarehouseTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             warehouse = temporary_warehouse(directory)
             store = IcebergDocumentStore(warehouse)
-            store.append(KnowledgeVersion(
+            store.append(DocumentVersion(
                 project_id=1,
                 source_id="github:1",
                 external_id="README.md",

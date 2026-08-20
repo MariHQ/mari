@@ -8,17 +8,15 @@ intentionally absent: retrieval.py can rebuild and flush those derived files.
 from __future__ import annotations
 
 import datetime as dt
-import hashlib
 import json
 import threading
 import typing as t
-import uuid
-from dataclasses import dataclass, field
 
 import pyarrow as pa
 from pyiceberg.expressions import EqualTo
 
 from mari_server.infrastructure.iceberg_warehouse import IcebergWarehouse, warehouse
+from mari_server.domain.documents import DocumentVersion, document_key
 
 
 TABLE = "mari.knowledge_versions"
@@ -39,36 +37,6 @@ SCHEMA = pa.schema([
     pa.field("actor", pa.string(), nullable=False),
     pa.field("recorded_at", pa.timestamp("us", tz="UTC"), nullable=False),
 ])
-
-
-def document_key(project_id: int, source_id: str, external_id: str) -> str:
-    raw = f"{project_id}\0{source_id}\0{external_id}".encode()
-    return hashlib.sha256(raw).hexdigest()
-
-
-@dataclass(frozen=True, slots=True)
-class KnowledgeVersion:
-    project_id: int
-    source_id: str
-    external_id: str
-    revision: str
-    title: str
-    body: str
-    status: str = "active"
-    source_url: str = ""
-    acl: dict[str, t.Any] = field(default_factory=lambda: {"visibility": "project", "principals": []})
-    reason: str = "connector poll"
-    actor: str = "connector"
-    version_id: str = field(default_factory=lambda: str(uuid.uuid4()))
-    recorded_at: dt.datetime = field(default_factory=lambda: dt.datetime.now(dt.timezone.utc))
-
-    def __post_init__(self) -> None:
-        if self.project_id <= 0 or not self.source_id or not self.external_id:
-            raise ValueError("knowledge versions require project, source, and external ids")
-        if self.status not in {"active", "archived", "deleted"}:
-            raise ValueError("invalid knowledge lifecycle status")
-        if self.recorded_at.tzinfo is None:
-            raise ValueError("recorded_at must be timezone-aware")
 
 
 class IcebergDocumentStore:
@@ -99,10 +67,10 @@ class IcebergDocumentStore:
                 latest[row["document_key"]] = row
         return latest
 
-    def append(self, version: KnowledgeVersion) -> dict[str, t.Any]:
+    def append(self, version: DocumentVersion) -> dict[str, t.Any]:
         key = document_key(version.project_id, version.source_id, version.external_id)
-        content_hash = hashlib.sha256(version.body.encode()).hexdigest()
-        acl_json = json.dumps(version.acl, sort_keys=True, separators=(",", ":"))
+        content_hash = version.content_hash
+        acl_json = version.acl_json
         with self._lock:
             latest = self._latest(self._rows(key=key)).get(key)
             # Replayed connector pages are idempotent. ACL and lifecycle changes
@@ -144,7 +112,7 @@ class IcebergDocumentStore:
         current = self.get(project_id, source_id, external_id, include_deleted=True)
         if current is None:
             raise KeyError("document does not exist")
-        return self.append(KnowledgeVersion(
+        return self.append(DocumentVersion(
             project_id=project_id, source_id=source_id, external_id=external_id,
             revision=current["revision"], title=current["title"], body=current["body"],
             status=status, source_url=current["source_url"],
