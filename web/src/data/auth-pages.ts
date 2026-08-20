@@ -22,6 +22,7 @@ export function buildLogin(
   magicLinkTo = "",
   /** The server reports the sign-in bypass is on. */
   allowBypass = false,
+  allowRegister = false,
 ): LoginData {
   const providers: LoginProvider[] = [
     ...(oauth.github ? (["github"] as const) : []),
@@ -39,7 +40,7 @@ export function buildLogin(
     // so the field stays hidden rather than showing an invented name.
     workspace: null,
     providers,
-    allowRegister: true,
+    allowRegister,
     // Straight from /auth/me. The button exists only where the endpoint behind
     // it will actually answer, so it can never be a control that 404s.
     allowBypass,
@@ -53,24 +54,18 @@ export function buildLogin(
 }
 
 export function useLogin(): PageData<LoginData> {
-  const { oauth, loading, bypassEnabled } = useAuth();
+  const { oauth, loading, bypassEnabled, registrationEnabled } = useAuth();
 
-  /* Which auth step is on screen is ROUTE state, not component state. It was
-     a `useState` that nothing could ever set, so requesting a magic link
-     posted successfully and left you staring at the sign-in form — the send
-     worked and the app never said so.
-
-     Putting it in the query string means the confirmation survives a reload,
-     can be linked to, and gives "Back to sign in" something real to undo. */
   const [params] = useSearchParams();
-  const register = params.get("register") === "1" || Boolean(params.get("invite"));
-  const sentTo = params.get("sent") ?? "";
-  const screen: LoginData["screen"] = sentTo ? "magic-link" : "credentials";
+  const invited = params.has("invite");
+  const register = invited || (registrationEnabled && params.get("register") === "1");
+  const screen: LoginData["screen"] = "credentials";
 
   /* Nothing can have failed before anyone types: the app no longer signs
      visitors in on its own, so the demo button is the first call this screen
      places, and its failure surfaces through the page's own action handling. */
-  return { data: buildLogin(oauth, screen, register, sentTo, bypassEnabled), loading, error: null };
+  return { data: buildLogin(oauth, screen, register, "", bypassEnabled,
+    registrationEnabled || invited), loading, error: null };
 }
 
 /** Pure: whether first-run claiming has happened → everything Setup renders. */

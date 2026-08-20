@@ -125,7 +125,7 @@ class InvitationTests(unittest.TestCase):
             auth.register(body, request(), Response())
 
 
-class PasswordAndMagicTests(unittest.TestCase):
+class PasswordTests(unittest.TestCase):
     def setUp(self):
         auth._ATTEMPTS.clear()
 
@@ -138,16 +138,9 @@ class PasswordAndMagicTests(unittest.TestCase):
             auth.login(body, request(), Response())
         verify.assert_called_once_with("wrong", auth._DUMMY_PASSWORD_HASH)
 
-    def test_magic_link_is_consumed_by_one_conditional_update(self):
-        conn = FakeConn(lambda sql, _args: Result({"user_id": 9})
-                        if sql.startswith("UPDATE magic_links") else Result())
-        with patch.object(auth, "_conn", return_value=conn), patch.object(auth, "_create_session"):
-            response = auth.magic_consume("once", request())
-        self.assertEqual(response.status_code, 303)
-        statements = [sql for sql, _ in conn.calls]
-        self.assertEqual(len(statements), 1)
-        self.assertIn("used_at IS NULL", statements[0])
-        self.assertIn("RETURNING user_id", statements[0])
+    def test_unimplemented_email_delivery_routes_are_absent(self):
+        self.assertFalse(hasattr(auth, "magic_link"))
+        self.assertFalse(hasattr(auth, "magic_consume"))
 
     def test_first_run_check_does_not_mint_or_log_a_credential(self):
         with patch.object(auth, "_warn_if_bypass_enabled") as warn, \

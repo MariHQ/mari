@@ -34,9 +34,6 @@ router = APIRouter(prefix="/auth")
 DB_URL_REF: dict = {"url": config.get("database", "url")}
 COOKIE = "mari_session"
 
-# How long a magic sign-in link stays valid.
-MAGIC_LINK_TTL_MIN = 15
-
 # Invitations are bearer credentials, not merely rows with a recognizable
 # email address.  Seven days is long enough for an administrator to deliver a
 # link out of band while keeping forgotten invitations from living forever.
@@ -157,9 +154,8 @@ def _normalize_email(value: str | None) -> str:
 def issue_invitation(name: str, email: str, role: str, invited_by: str) -> str:
     """Create or rotate an invitation and return its one-time bearer token.
 
-    The GraphQL mutation deliberately continues returning ``bool``.  Until an
-    email transport exists, the link is delivered through the same explicit
-    log channel as setup and magic-link credentials.
+    The GraphQL mutation deliberately continues returning ``bool``. The token
+    is returned to the caller that owns the invitation delivery workflow.
     """
     email = _normalize_email(email)
     name = (name or "").strip()
@@ -867,66 +863,6 @@ def oauth_callback(provider: str, code: str, request: Request, state: str = ""):
     _create_session(user["id"], resp, request)
     resp.delete_cookie(STATE_COOKIE)
     return resp
-
-# ————— magic link —————
-# The console has always offered "Email me a magic link instead"; there was no
-# endpoint behind it, so the control did nothing. This follows the same shape
-# as first-run setup: mint a single-use token, store only its hash, and print
-# the link to the server log. Sending it by email needs SMTP the deployment
-# does not configure yet, and printing it is honest about that — it is exactly
-# how the admin setup token already reaches you.
-
-
-class MagicLinkIn(BaseModel):
-    email: str
-
-
-@router.post("/magic-link")
-def magic_link(body: MagicLinkIn, request: Request):
-    """Mint a one-time sign-in link. Always reports success: telling a caller
-    whether an address exists is an account-enumeration oracle."""
-    email = (body.email or "").strip().lower()
-    _rate_limit("magic-ip", _client_ip(request), 10, 300)
-    _rate_limit("magic-account", email, 3, 300)
-    with _conn() as conn:
-        conn.execute("""CREATE TABLE IF NOT EXISTS magic_links (
-                          token_hash text PRIMARY KEY,
-                          user_id    int NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-                          created_at timestamptz NOT NULL DEFAULT now(),
-                          used_at    timestamptz)""")
-        user = conn.execute("SELECT id FROM users WHERE lower(email) = %s", (email,)).fetchone()
-        if user:
-            token = secrets.token_urlsafe(32)
-            conn.execute("DELETE FROM magic_links WHERE user_id = %s AND used_at IS NULL", (user["id"],))
-            conn.execute("INSERT INTO magic_links (token_hash, user_id) VALUES (%s, %s)",
-                         (hashlib.sha256(token.encode()).hexdigest(), user["id"]))
-            base = config.get("auth", "oauth_redirect_base") or "http://localhost:5173"
-            print("\n" + "=" * 68, flush=True)
-            print(f"  Magic sign-in link for {email} (valid once, {MAGIC_LINK_TTL_MIN} minutes):", flush=True)
-            print(f"\n      {base}/auth/magic/{token}\n", flush=True)
-            print("=" * 68 + "\n", flush=True)
-    return {"ok": True, "sent": True}
-
-
-@router.get("/magic/{token}")
-def magic_consume(token: str, request: Request):
-    """Spend the token, start a session, and land on the console."""
-    from fastapi.responses import RedirectResponse
-    digest = hashlib.sha256(token.encode()).hexdigest()
-    with _conn() as conn:
-        row = conn.execute(
-            """UPDATE magic_links SET used_at = now()
-                WHERE token_hash = %s AND used_at IS NULL
-                  AND created_at > now() - (%s * interval '1 minute')
-                RETURNING user_id""",
-            (digest, MAGIC_LINK_TTL_MIN)).fetchone()
-        if not row:
-            # Expired, already spent, or never real: one message for all three.
-            return RedirectResponse("/login?error=magic-link-invalid", status_code=303)
-    resp = RedirectResponse("/", status_code=303)
-    _create_session(row["user_id"], resp, request)
-    return resp
-
 
 # ── Preferences: the signed-in person's own account ─────────────────────────
 #

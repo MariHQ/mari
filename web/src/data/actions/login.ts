@@ -37,15 +37,6 @@ export function loginActions({ refresh, navigate }: {
       });
       await refresh();
     },
-    magicLink: async (email: string) => {
-      // Always reports success, by design: the endpoint will not say whether
-      // an address has an account, because that is an enumeration oracle.
-      await authPost("/auth/magic-link", { email });
-      // The confirmation is a route, so a reload does not silently undo it and
-      // "Back to sign in" has something to return from.
-      navigate(`/login?sent=${encodeURIComponent(email)}`);
-    },
-    backToSignIn: () => navigate("/login"),
     bypass: async () => {
       // The server decides whether this is allowed; it 404s when the bypass is
       // off, and the page only offers the button when /auth/me says it is on.
@@ -55,11 +46,7 @@ export function loginActions({ refresh, navigate }: {
     /* Three of the screen's newer intents stay unwired, and are therefore not
        drawn at all:
 
-         • `resetPassword`. `/auth` offers login, register, magic-link, oauth
-           and bypass — there is no reset endpoint, and no mailer behind one.
-           Offering the magic link in its place is what left this product with
-           no password reset: it signs you in and leaves the password still
-           forgotten.
+         • `resetPassword`. There is no mailer or reset endpoint.
          • `resendCode` and `verifyCode`. There is no second factor on this
            server: no enrolment, no code, nothing to verify or re-send. The
            two-factor screen is a state this app never routes to, and a resend

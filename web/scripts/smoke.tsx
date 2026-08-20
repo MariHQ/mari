@@ -927,6 +927,7 @@ const loginData = buildLogin({ github: true, google: false }, "credentials", fal
 check("login: only providers with credentials are offered", loginData.providers.join() === "github");
 check("login: a server with no OAuth configured offers none",
   buildLogin({}, "credentials", false).providers.length === 0);
+check("login: invite-only workspaces do not offer open registration", !loginData.allowRegister);
 check("login: renders the form",
   render(login, { data: loginData, loading: false, error: null }).length > 500);
 states(login, buildLogin({}, "credentials", false));

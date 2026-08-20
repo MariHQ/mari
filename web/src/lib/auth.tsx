@@ -20,6 +20,7 @@ type AuthContextValue = {
   user: AuthUser | null;
   needsSetup: boolean;
   bypassEnabled: boolean;
+  registrationEnabled: boolean;
   oauth: OAuthAvailability;
   projects: AuthProject[];
   activeProject: AuthProject | null;
@@ -33,6 +34,7 @@ const AuthContext = createContext<AuthContextValue>({
   user: null,
   needsSetup: false,
   bypassEnabled: false,
+  registrationEnabled: false,
   oauth: { github: false, google: false },
   projects: [],
   activeProject: null,
@@ -60,6 +62,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(null);
   const [needsSetup, setNeedsSetup] = useState(false);
   const [bypassEnabled, setBypassEnabled] = useState(false);
+  const [registrationEnabled, setRegistrationEnabled] = useState(false);
   const [oauth, setOauth] = useState<OAuthAvailability>({ github: false, google: false });
   const [projects, setProjects] = useState<AuthProject[]>([]);
   const [active, setActive] = useState<AuthProject | null>(null);
@@ -99,6 +102,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         applyUser(next);
         setNeedsSetup(Boolean(data?.needsSetup));
         setBypassEnabled(Boolean(data?.bypassEnabled));
+        setRegistrationEnabled(Boolean(data?.registrationEnabled));
         lastBypassEnabled.current = Boolean(data?.bypassEnabled);
         setOauth({ github: Boolean(data?.oauth?.github), google: Boolean(data?.oauth?.google) });
         const available = (data?.projects ?? []) as AuthProject[];
@@ -167,7 +171,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [recheck]);
 
   return (
-    <AuthContext.Provider value={{ user, needsSetup, bypassEnabled, oauth, projects, activeProject: active, selectProject, loading, refresh, logout }}>
+    <AuthContext.Provider value={{ user, needsSetup, bypassEnabled, registrationEnabled, oauth, projects, activeProject: active, selectProject, loading, refresh, logout }}>
       {children}
     </AuthContext.Provider>
   );

@@ -164,7 +164,7 @@ export async function installMockApi(page: Page, options: {
     const activeProject = projects.find((project) => String(project.id) === requested || project.slug === requested)
       ?? (projects.length === 1 ? projects[0] : null);
     return route.fulfill({ json: {
-      user: signedIn ? USER : null, needsSetup, bypassEnabled: false,
+      user: signedIn ? USER : null, needsSetup, bypassEnabled: false, registrationEnabled: false,
       oauth: { github: true, google: true }, projects, activeProject,
       capabilities: activeProject?.capabilities ?? [],
     } });

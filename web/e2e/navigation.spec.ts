@@ -144,6 +144,8 @@ test("the login route is a labelled, overflow-safe browser surface", async ({ pa
   await installMockApi(page, { signedIn: false });
   await page.goto("/login");
   await expect(page.getByRole("heading", { name: "Sign in" })).toBeVisible();
+  await expect(page.getByRole("button", { name: /Email me a magic link/i })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /Create an account/i })).toHaveCount(0);
   await expectUiContract(page);
 });
 
