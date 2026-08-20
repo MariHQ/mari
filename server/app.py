@@ -15,7 +15,6 @@ root, merged below via inheritance). This file wires the app together.
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import pathlib
@@ -26,15 +25,15 @@ from contextlib import asynccontextmanager
 import psycopg
 import strawberry
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
+from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
 from strawberry.fastapi import GraphQLRouter
 
 import config
 import ingest
 import llm
 from mari_server.api import agent as agent_api
+from mari_server.api import chat as chat_api
 from mari_server.api.graphql_destinations import DestinationMutations
 from mari_server.api.graphql_workflows import WorkflowMutations
 import access as access_module
@@ -50,7 +49,7 @@ import enterprise_identity
 import gdrive_events
 
 from db import close_pool, ensure_schema, exec_, open_pool, q, q1
-from queries import Query, hybrid_search, like_pattern
+from queries import Query
 from mutations_knowledge import MutKnowledge
 from mutations_admin import MutAdmin
 
@@ -127,7 +126,10 @@ app.include_router(provider_events.router)
 app.include_router(mcp.router)  # published MCP servers authenticate with their own bearer tokens
 app.include_router(connectors_api.router, dependencies=_authed)
 app.include_router(agent_api.router, dependencies=_authed)
+app.include_router(chat_api.router)
 app.include_router(onboard.router, dependencies=_authed)
+
+from pydantic import BaseModel
 
 class ApiSearchIn(BaseModel):
     query: str
@@ -164,136 +166,6 @@ def api_search(body: ApiSearchIn, authorization: str = Header(default="")) -> di
                           "score": item.get("score", 0)} for item in rows]}
 
 
-# ————————————————— chat (SSE streaming, DESIGN.md §10) —————————————————
-
-
-class ChatIn(BaseModel):
-    session_id: int | None = None
-    message: str
-
-
-def _log_chat_usage(detail: str) -> None:
-    """Honest telemetry (BOTS-CONTRACT §A): one chat_answer per completed turn.
-    Guarded — db.log_usage is added by another agent; never crash if absent."""
-    try:
-        import db as _db
-        if hasattr(_db, "log_usage"):
-            _db.log_usage("chat_answer", detail)
-        else:
-            exec_("INSERT INTO usage_log (kind, detail) VALUES (%s, %s)", ("chat_answer", detail))
-    except Exception:
-        pass
-
-
-CHAT_SYSTEM = (
-    "You are Mari, the team's knowledge assistant. Answer from the "
-    "provided context. Be concise (2-4 sentences), cite sources as [1], [2]. If the "
-    "context doesn't cover it, say so."
-)
-
-
-@app.post("/chat")
-def chat(body: ChatIn, access: t.Any = Depends(auth_module.require_project)):
-    return _chat_for_access(body, access, "web")
-
-
-def _chat_for_access(body: ChatIn, access: access_module.AccessContext, usage_detail: str):
-    project_id = access.project_id
-    session_id = body.session_id
-    if not session_id:
-        from mari_server.infrastructure import postgres
-        with postgres.connect() as conn:
-            session_id = conn.execute(
-                """INSERT INTO chat_sessions (project_id, owner_user_id, title)
-                   VALUES (%s, %s, %s) RETURNING id""",
-                (project_id, access.user_id or None, body.message[:60])
-            ).fetchone()[0]
-    else:
-        owned = q1("""SELECT id FROM chat_sessions WHERE id = %s AND project_id = %s
-                      AND (owner_user_id = %s OR owner_user_id IS NULL)""",
-                   (session_id, project_id, access.user_id))
-        if not owned:
-            raise HTTPException(404, "Chat session not found.")
-    exec_("""INSERT INTO chat_messages (project_id, session_id, role, content)
-             VALUES (%s, %s, 'user', %s)""", (project_id, session_id, body.message))
-
-    # Approved answers first (DESIGN.md canon: curated answers beat generation).
-    qvec = llm.embed(body.message)
-    approved = None
-    if qvec:
-        approved = q1("""
-          SELECT id, question, answer, 1 - (embedding <=> %s::vector) AS sim
-          FROM approved_answers
-          WHERE project_id = %s AND status = 'approved' AND embedding IS NOT NULL
-          ORDER BY embedding <=> %s::vector LIMIT 1
-        """, (str(qvec), project_id, str(qvec)))
-        if approved and approved["sim"] < 0.62:
-            approved = None
-    if not approved:
-        hit = q1("""SELECT id, question, answer, 1.0 AS sim FROM approved_answers
-                    WHERE project_id = %s AND status = 'approved'
-                      AND (question ILIKE %s OR position(lower(question) in lower(%s)) > 0)
-                    LIMIT 1""", (project_id, like_pattern(body.message[:60]), body.message))
-        approved = hit
-
-    if approved:
-        exec_("""UPDATE approved_answers SET served = served + 1
-                 WHERE id = %s AND project_id = %s""", (approved["id"], project_id))
-        sources = [{"n": 1, "source": "approved", "title": approved["question"],
-                    "meta": "Approved answer · served verbatim", "href": f"/answers?answer={approved['id']}"}]
-        text = approved["answer"]
-
-        def stream_approved():
-            yield f"event: meta\ndata: {json.dumps({'session_id': session_id, 'sources': sources, 'approved': True})}\n\n"
-            yield f"data: {json.dumps({'token': text})}\n\n"
-            exec_("""INSERT INTO chat_messages (project_id, session_id, role, content, sources)
-                     VALUES (%s, %s, 'assistant', %s, %s)""",
-                  (project_id, session_id, text, json.dumps(sources)))
-            _log_chat_usage(usage_detail)
-            yield "event: done\ndata: {}\n\n"
-
-        return StreamingResponse(stream_approved(), media_type="text/event-stream")
-
-    # FastAPI executes this synchronous route and its dependency in separate
-    # worker calls. The AccessContext object is therefore passed explicitly,
-    # but ContextVar-based retrieval helpers need it installed in this call's
-    # execution context as well.
-    with access_module.use_access(access):
-        docs = hybrid_search(body.message, 4)
-    context = "\n\n".join(
-        f"[{i + 1}] {d['title']} ({d['source']})\n{d['body'] or d['snippet']}" for i, d in enumerate(docs))
-    facts = q("SELECT claim FROM facts WHERE project_id = %s AND status = 'Verified' LIMIT 8", (project_id,))
-    context += "\n\nVerified facts:\n" + "\n".join(f"- {f['claim']}" for f in facts)
-    sources = [{"n": i + 1, "source": d["source"], "title": d["title"],
-                "meta": d["snippet"][:110], "document_id": d["id"],
-                "href": f"/knowledge/doc?id={d['id']}"} for i, d in enumerate(docs)]
-
-    history = q("""SELECT role, content FROM chat_messages
-                   WHERE project_id = %s AND session_id = %s ORDER BY id DESC LIMIT 10""",
-                (project_id, session_id))
-    messages = [{"role": m["role"], "content": m["content"]} for m in reversed(history)]
-    messages[-1]["content"] = f"Context:\n{context}\n\nQuestion: {body.message}"
-
-    def stream():
-        yield f"event: meta\ndata: {json.dumps({'session_id': session_id, 'sources': sources})}\n\n"
-        answer = []
-        for token in llm.chat_stream(messages, CHAT_SYSTEM):
-            answer.append(token)
-            yield f"data: {json.dumps({'token': token})}\n\n"
-        if not answer:
-            unavailable = "The configured language model is unavailable. Check Models settings and try again."
-            answer.append(unavailable)
-            yield f"event: warning\ndata: {json.dumps({'message': unavailable})}\n\n"
-            yield f"data: {json.dumps({'token': unavailable})}\n\n"
-        exec_("""INSERT INTO chat_messages (project_id, session_id, role, content, sources)
-                 VALUES (%s, %s, 'assistant', %s, %s)""",
-              (project_id, session_id, "".join(answer), json.dumps(sources)))
-        _log_chat_usage(usage_detail)
-        yield "event: done\ndata: {}\n\n"
-
-    return StreamingResponse(stream(), media_type="text/event-stream")
-
-
 @app.get("/livez", include_in_schema=False)
 def livez() -> dict[str, t.Any]:
     return {"ok": True, "service": "mari-api"}
@@ -328,42 +200,6 @@ def metrics() -> str:
     except Exception:  # noqa: BLE001 — metrics remain available during DB incidents
         observability.METRICS.inc("mari_metrics_dependency_errors_total", dependency="database")
     return observability.METRICS.render()
-
-
-@app.get("/knowledge-chat-api/{project_slug}/{destination_slug}", response_class=JSONResponse)
-def knowledge_chat_destination(project_slug: str, destination_slug: str) -> dict[str, t.Any]:
-    """Public configuration for a deployed interactive destination."""
-    row = _live_knowledge_chat(project_slug, destination_slug)
-    return {"name": row["name"], "slug": row["slug"], "title": row["title"],
-            "welcome": row["welcome"], "project": project_slug}
-
-
-def _live_knowledge_chat(project_slug: str, destination_slug: str) -> dict[str, t.Any]:
-    row = q1("""SELECT d.id, d.project_id, d.name, d.slug, d.title, d.welcome,
-                       p.slug AS project_slug, p.name AS project_name
-                  FROM knowledge_chat_destinations d
-                  JOIN projects p ON p.id = d.project_id
-                 WHERE p.slug = %s AND p.status = 'active'
-                   AND d.slug = %s AND d.status = 'live'""",
-             (project_slug, destination_slug))
-    if not row:
-        raise HTTPException(404, "Knowledge chat destination not found.")
-    return row
-
-
-@app.post("/knowledge-chat-api/{project_slug}/{destination_slug}/chat")
-def public_knowledge_chat(project_slug: str, destination_slug: str, body: ChatIn):
-    """Answer through one live destination without opening the Mari console API.
-
-    Resolving the live destination on every turn is the publication/revocation
-    boundary. Retrieval receives only the destination's project and read scope.
-    """
-    row = _live_knowledge_chat(project_slug, destination_slug)
-    access = access_module.external_access(
-        row["project_id"], row["project_slug"], row["project_name"],
-        "knowledge_chat", str(row["id"]), frozenset({"knowledge.read"}),
-    )
-    return _chat_for_access(body, access, f"knowledge_chat:{row['id']}")
 
 
 # In the Lambda container the API also serves the compiled React application.

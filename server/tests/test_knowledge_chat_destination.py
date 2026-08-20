@@ -6,8 +6,7 @@ from unittest.mock import patch
 
 from fastapi import HTTPException
 
-import app
-from mari_server.api import graphql_destinations
+from mari_server.api import chat as chat_api, graphql_destinations
 from mari_server.application import knowledge_chat
 
 
@@ -68,24 +67,22 @@ class KnowledgeChatDestinationTests(unittest.TestCase):
     def test_live_config_is_public_but_only_resolves_live_destination(self):
         row = {"id": 2, "project_id": 7, "project_slug": "acme", "project_name": "Acme",
                "name": "Company KB", "slug": "company-kb", "title": "Ask Acme", "welcome": "Welcome"}
-        with patch.object(app, "q1", return_value=row) as q1:
-            self.assertEqual(app.knowledge_chat_destination("acme", "company-kb")["title"], "Ask Acme")
-            self.assertEqual(q1.call_args.args[1], ("acme", "company-kb"))
-            self.assertIn("status = 'live'", q1.call_args.args[0])
-        with patch.object(app, "q1", return_value=None):
+        with patch.object(chat_api, "live_destination", return_value=row):
+            self.assertEqual(chat_api.destination("acme", "company-kb")["title"], "Ask Acme")
+        with patch.object(chat_api, "live_destination", return_value=None):
             with self.assertRaises(HTTPException) as caught:
-                app.knowledge_chat_destination("acme", "company-kb")
+                chat_api.destination("acme", "company-kb")
             self.assertEqual(caught.exception.status_code, 404)
 
     def test_public_chat_uses_destination_scoped_read_access(self):
         row = {"id": 2, "project_id": 7, "project_slug": "acme", "project_name": "Acme",
                "name": "Company KB", "slug": "company-kb", "title": "Ask Acme", "welcome": "Welcome"}
         sentinel = object()
-        with patch.object(app, "q1", return_value=row), \
-             patch.object(app, "_chat_for_access", return_value=sentinel) as answer:
-            result = app.public_knowledge_chat("acme", "company-kb", app.ChatIn(message="policy"))
+        with patch.object(chat_api, "live_destination", return_value=row), \
+             patch.object(chat_api, "_sse", return_value=sentinel) as answer:
+            result = chat_api.public_chat("acme", "company-kb", chat_api.ChatIn(message="policy"))
         self.assertIs(result, sentinel)
-        destination_access = answer.call_args.args[1]
+        destination_access = answer.call_args.args[0]
         self.assertEqual(destination_access.project_id, 7)
         self.assertEqual(destination_access.principal_type, "knowledge_chat")
         self.assertEqual(destination_access.capabilities, frozenset({"knowledge.read"}))
