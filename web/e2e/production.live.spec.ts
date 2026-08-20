@@ -5,8 +5,13 @@ const env = process.env;
 const mutations = env.MARI_E2E_MUTATIONS === "1";
 
 async function signIn(page: Page) {
-  await page.goto("/sources");
-  if (!page.url().endsWith("/login")) return;
+  await page.goto("/login");
+  const current = await page.request.get("/auth/me").then((response) => response.json());
+  if (current.user) {
+    await page.goto("/sources");
+    await expect(page).toHaveURL(/\/sources$/);
+    return;
+  }
   if (env.MARI_E2E_EMAIL && env.MARI_E2E_PASSWORD) {
     await page.getByLabel("Email").fill(env.MARI_E2E_EMAIL);
     await page.getByLabel("Password").fill(env.MARI_E2E_PASSWORD);
@@ -16,7 +21,8 @@ async function signIn(page: Page) {
   } else {
     throw new Error("Live app requires MARI_E2E_EMAIL and MARI_E2E_PASSWORD (or auth bypass).");
   }
-  await expect(page).not.toHaveURL(/\/login$/);
+  await page.goto("/sources");
+  await expect(page).toHaveURL(/\/sources$/);
 }
 
 const connectors = [
@@ -47,6 +53,33 @@ const connectors = [
     fields: { "Personal access token": "MARI_E2E_GITHUB_TOKEN", "Repository": "MARI_E2E_GITHUB_REPO" },
   },
 ] as const;
+
+const productRoutes = [
+  "/", "/tasks", "/facts", "/decisions", "/knowledge", "/knowledge/doc?id=1",
+  "/answers", "/insights", "/audit", "/lineage", "/flows", "/library",
+  "/publish", "/publish?tab=mcp", "/publish?tab=bots", "/trajectories", "/sources",
+  "/preferences", "/settings/general", "/settings/models", "/settings/design",
+  "/settings/members", "/settings/api-keys", "/settings/audit",
+] as const;
+
+test("LIVE every authenticated product route renders without browser or server failures", async ({ page }) => {
+  await signIn(page);
+  const pageErrors: string[] = [];
+  const serverErrors: string[] = [];
+  page.on("pageerror", (error) => pageErrors.push(error.message));
+  page.on("response", (response) => {
+    if (response.status() >= 500) serverErrors.push(`${response.status()} ${response.url()}`);
+  });
+  for (const route of productRoutes) {
+    await page.goto(route, { waitUntil: "domcontentloaded" });
+    expect(new URL(page.url()).pathname, `${route} must not redirect`).toBe(new URL(route, "https://mari.test").pathname);
+    await expect(page.getByRole("main", { name: "Main content" })).toBeVisible();
+    const overflow = await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1);
+    expect(overflow, `${route} must not overflow horizontally`).toBe(false);
+  }
+  expect(pageErrors).toEqual([]);
+  expect(serverErrors).toEqual([]);
+});
 
 async function configureConnector(page: Page, connector: typeof connectors[number]) {
   await signIn(page);
