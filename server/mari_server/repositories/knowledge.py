@@ -694,3 +694,82 @@ def save_decision_impact(decision_id: int, summary: str, count: int) -> None:
     with db.connect() as conn, conn.transaction():
         conn.execute("UPDATE decisions SET impact_summary = %s, impact_count = %s WHERE project_id = %s AND id = %s",
                      (summary[:300], count, project_id, decision_id))
+
+
+def documents_for_analysis(limit: int | None = None, sources: list[str] | None = None) -> list[dict]:
+    project_id = access.require_current_access().project_id
+    sql = "SELECT id, title, body, snippet, source, updated_src FROM documents WHERE project_id = %s"
+    args: list = [project_id]
+    if sources:
+        sql += " AND source = ANY(%s)"
+        args.append(sources)
+    sql += " ORDER BY updated_src DESC NULLS LAST, id"
+    if limit:
+        sql += " LIMIT %s"
+        args.append(limit)
+    with db.connect() as conn:
+        return conn.execute(sql, tuple(args)).fetchall()
+
+
+def save_readability(scores: list[tuple[int, str]]) -> None:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn, conn.transaction():
+        for document_id, score in scores:
+            conn.execute("UPDATE documents SET readability = %s WHERE project_id = %s AND id = %s",
+                         (score, project_id, document_id))
+
+
+def save_glossary_candidates(candidates: list[tuple[str, str, str, str, int]]) -> int:
+    project_id = access.require_current_access().project_id
+    added = 0
+    with db.connect() as conn, conn.transaction():
+        for term, definition, variants, evidence, document_id in candidates:
+            row = conn.execute("""INSERT INTO glossary
+              (project_id, term, definition, owner_name, updated, candidate, variants, evidence, evidence_doc_id)
+              VALUES (%s, %s, %s, 'Mari (harvest)', now(), true, %s, %s, %s)
+              ON CONFLICT (project_id, term) DO NOTHING RETURNING id""",
+              (project_id, term, definition, variants, evidence, document_id)).fetchone()
+            added += int(bool(row))
+    return added
+
+
+def decide_glossary_candidate(candidate_id: int, accept: bool) -> str | None:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn, conn.transaction():
+        row = conn.execute("SELECT term FROM glossary WHERE project_id = %s AND id = %s",
+                           (project_id, candidate_id)).fetchone()
+        if not row:
+            return None
+        if accept:
+            conn.execute("UPDATE glossary SET candidate = false WHERE project_id = %s AND id = %s",
+                         (project_id, candidate_id))
+        else:
+            conn.execute("DELETE FROM glossary WHERE project_id = %s AND id = %s AND candidate",
+                         (project_id, candidate_id))
+    return str(row["term"])
+
+
+def answer_candidate_inputs(sources: list[str]) -> tuple[set[str], list[dict], list[str]]:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn:
+        existing = {str(r["question"]).lower() for r in conn.execute(
+            "SELECT question FROM approved_answers WHERE project_id = %s", (project_id,)).fetchall()}
+        docs = conn.execute("""SELECT id, title, snippet, body, source, updated_src FROM documents
+          WHERE project_id = %s AND source = ANY(%s) ORDER BY updated_src DESC NULLS LAST LIMIT 16""",
+          (project_id, sources)).fetchall() if sources else []
+        chats = [str(r["content"]) for r in conn.execute("""SELECT content FROM chat_messages
+          WHERE project_id = %s AND role = 'user' ORDER BY id DESC LIMIT 10""", (project_id,)).fetchall()]
+    return existing, docs, chats
+
+
+def toggle_watch(document_id: int, user_name: str) -> bool:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn, conn.transaction():
+        deleted = conn.execute("""DELETE FROM watches WHERE project_id = %s
+          AND user_name = %s AND document_id = %s RETURNING document_id""",
+          (project_id, user_name, document_id)).fetchone()
+        if deleted:
+            return False
+        conn.execute("""INSERT INTO watches (project_id, user_name, document_id) VALUES (%s, %s, %s)
+          ON CONFLICT DO NOTHING""", (project_id, user_name, document_id))
+    return True

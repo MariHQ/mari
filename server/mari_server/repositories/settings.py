@@ -31,3 +31,19 @@ def github_member_count() -> int:
         row = conn.execute("""SELECT count(*) AS n FROM project_members pm JOIN users u ON u.id = pm.user_id
           WHERE pm.project_id = %s AND pm.status = 'active' AND u.provider = 'github'""", (project_id,)).fetchone()
     return int(row["n"])
+
+
+def member_role(user_name: str) -> str | None:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn:
+        row = conn.execute("""SELECT pm.role FROM project_members pm JOIN users u ON u.id = pm.user_id
+          WHERE pm.project_id = %s AND pm.status = 'active' AND u.name = %s""",
+          (project_id, user_name)).fetchone()
+    return str(row["role"]) if row else None
+
+
+def mark_notifications_read(user_name: str) -> None:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn, conn.transaction():
+        conn.execute("UPDATE notifications SET read = true WHERE project_id = %s AND user_name = %s",
+                     (project_id, user_name))

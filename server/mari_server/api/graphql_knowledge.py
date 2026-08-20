@@ -12,7 +12,6 @@ import typing as t
 
 import strawberry
 
-from mari_server.api import access
 from mari_server.services import workflow_runtime as flowengine
 from mari_server.integrations import llm
 from mari_server.repositories import lineage_repository as links
@@ -20,7 +19,8 @@ from mari_server.services import review as review_application
 from mari_server.domain.review import ReviewRecord
 from mari_server.repositories import review_repository
 from mari_server.repositories import knowledge as knowledge_store
-from mari_server.repositories.database import actor_name, audit, exec_, jload, q, q1, transaction
+from mari_server.repositories import settings as settings_store, workflows as workflow_store
+from mari_server.repositories.database import actor_name, audit
 from mari_server.api.graphql_types import AnswerCandidate, ImpactDoc, ImpactResult, ReviewPolicyDecision
 from mari_server.services.search import hybrid_search, like_pattern
 from mari_components import KnowledgeDocument
@@ -53,8 +53,8 @@ class MutKnowledge:
         reviewer = actor_name()
 
         def permitted(actor: str, candidate: ReviewRecord) -> bool:
-            member = q1("SELECT role FROM users WHERE name = %s AND status = 'active'", (actor,))
-            return bool(member and (member["role"] in ("admin", "manager") or
+            role = settings_store.member_role(actor)
+            return bool(role and (role in ("admin", "manager") or
                                     candidate.assignee.casefold() == actor.casefold()))
 
         result = review_application.decide(
@@ -74,8 +74,7 @@ class MutKnowledge:
         )[:min(max(first, 1), 100)]
 
         def permitted(actor: str, candidate: ReviewRecord) -> bool:
-            member = q1("SELECT role FROM users WHERE name = %s AND status = 'active'", (actor,))
-            return bool(member and member["role"] in ("admin", "manager"))
+            return settings_store.member_role(actor) in ("admin", "manager")
 
         results = [review_application.decide(
             item, reviewer, review_repository.ports(), dry_run=dry_run, permission=permitted,
@@ -485,7 +484,8 @@ class MutKnowledge:
     @strawberry.mutation
     def score_readability(self) -> int:
         """Deterministic readability grades (brand: determinism over vibes)."""
-        rows = q("SELECT id, title, body, snippet FROM documents")
+        rows = knowledge_store.documents_for_analysis()
+        scores = []
         for r in rows:
             text = (r["body"] or r["snippet"] or "")
             words = text.split()
@@ -495,50 +495,40 @@ class MutKnowledge:
             score = avg_len + long_words * 40
             grade = "A" if score < 14 else "B" if score < 20 else "C"
             note = f"{avg_len:.0f} words/sentence"
-            exec_("UPDATE documents SET readability = %s WHERE id = %s", (f"{grade}|{note}", r["id"]))
+            scores.append((r["id"], f"{grade}|{note}"))
+        knowledge_store.save_readability(scores)
         audit("scored readability", f"{len(rows)} documents")
         return len(rows)
 
     @strawberry.mutation
     def harvest_glossary(self) -> int:
-        docs = q("SELECT id, title, snippet, body, source, updated_src FROM documents")
+        docs = knowledge_store.documents_for_analysis()
         components = [_component_document(doc) for doc in docs]
         candidates = component_harvest_glossary(
             components,
             generate_json=lambda prompt, _version: llm.generate_json(
                 prompt, system="You harvest glossary terms from a documentation corpus."),
         )
-        added = 0
         by_id = {str(doc["id"]): doc for doc in docs}
-        project_id = access.require_current_access().project_id
+        rows = []
         for candidate in candidates[:3]:
             evidence = candidate.evidence[0]
             doc = by_id.get(evidence.document_id)
             if not doc:
                 continue
-            exec_("""INSERT INTO glossary (project_id, term, definition, owner_name, updated, candidate,
-                                           variants, evidence, evidence_doc_id)
-                     VALUES (%s, %s, %s, 'Mari (harvest)', now(), true, %s, %s, %s)
-                     ON CONFLICT (project_id, term) DO NOTHING""",
-                  (project_id, candidate.term[:80], candidate.definition[:300],
-                   " · ".join(candidate.aliases)[:200], doc["title"], doc["id"]))
-            added += 1
+            rows.append((candidate.term[:80], candidate.definition[:300],
+                         " · ".join(candidate.aliases)[:200], doc["title"], doc["id"]))
+        added = knowledge_store.save_glossary_candidates(rows)
         audit("harvested glossary terms", f"{added} candidates")
         return added
 
     @strawberry.mutation
     def promote_glossary_candidate(self, id: int, accept: bool) -> bool:
-        project_id = access.require_current_access().project_id
-        term = q1("SELECT term FROM glossary WHERE project_id = %s AND id = %s", (project_id, id))
+        term = knowledge_store.decide_glossary_candidate(id, accept)
         if not term:
             return False
         if accept:
-            exec_("UPDATE glossary SET candidate = false WHERE project_id = %s AND id = %s",
-                  (project_id, id))
-            audit("accepted glossary term", term["term"])
-        else:
-            exec_("DELETE FROM glossary WHERE project_id = %s AND id = %s AND candidate",
-                  (project_id, id))
+            audit("accepted glossary term", term)
         return True
 
     @strawberry.mutation
@@ -566,12 +556,7 @@ class MutKnowledge:
         like every other long job here, not something a link fires and forgets.
         """
         wf_id = flowengine.ensure_fact_scan_flow()
-        project_id = access.require_current_access().project_id
-        run = q1("""INSERT INTO workflow_runs
-                    (project_id, workflow_id, number, status, started_label, duration, progress, stats, rows_data)
-                    VALUES (%s, %s, nextval('workflow_run_number_seq'), 'running',
-                            to_char(now(), 'Mon DD, HH12:MI AM'), '00:00:00', 0, '{}', '[]')
-                    RETURNING id, number""", (project_id, wf_id))
+        run = workflow_store.create_run(wf_id)
         n = run["number"]
         audit(f"started run #{n}", flowengine.FACT_SCAN_FLOW)
         flowengine.start_run(run["id"])
@@ -584,12 +569,7 @@ class MutKnowledge:
         through a model and writes to the ledger, so it belongs in the run
         history rather than behind a link that fires and forgets."""
         wf_id = flowengine.ensure_decision_scan_flow()
-        project_id = access.require_current_access().project_id
-        run = q1("""INSERT INTO workflow_runs
-                    (project_id, workflow_id, number, status, started_label, duration, progress, stats, rows_data)
-                    VALUES (%s, %s, nextval('workflow_run_number_seq'), 'running',
-                            to_char(now(), 'Mon DD, HH12:MI AM'), '00:00:00', 0, '{}', '[]')
-                    RETURNING id, number""", (project_id, wf_id))
+        run = workflow_store.create_run(wf_id)
         n = run["number"]
         audit(f"started run #{n}", flowengine.DECISION_SCAN_FLOW)
         flowengine.start_run(run["id"])
@@ -600,19 +580,15 @@ class MutKnowledge:
         """Mine selected connector documents and optional recent chat questions
         for FAQ answer candidates. Inserts NOTHING — the wizard's review step
         decides what becomes an approved answer."""
-        existing = {r["question"].lower() for r in q("SELECT question FROM approved_answers")}
         from mari_components.connectors import CONNECTOR_CATALOG
 
         selected = sorted(set(sources) & set(CONNECTOR_CATALOG))
-        docs = q("""SELECT id, title, snippet, body, source, updated_src FROM documents
-                     WHERE source = ANY(%s) ORDER BY updated_src DESC NULLS LAST LIMIT 16""",
-                 (selected,)) if selected else []
+        existing, docs, chats = knowledge_store.answer_candidate_inputs(selected)
         components = [_component_document(doc) for doc in docs]
         if "chat" in sources:
-            for index, message in enumerate(q(
-                    "SELECT content FROM chat_messages WHERE role = 'user' ORDER BY id DESC LIMIT 10"), 1):
+            for index, message in enumerate(chats, 1):
                 components.append(KnowledgeDocument(
-                    f"chat:{index}", "Recent user question", str(message["content"])[:200],
+                    f"chat:{index}", "Recent user question", message[:200],
                     revision="recent-chat"))
         mined = component_mine_answers(
             components,
@@ -668,22 +644,17 @@ class MutKnowledge:
                 raise ValueError(f"unknown trigger keys: {sorted(unknown)}")
             clean = {"on": on, "source_id": trig.get("source_id"),
                      "tag": trig.get("tag"), "path_glob": trig.get("path_glob")}
-        if not q1("SELECT id FROM workflows WHERE id = %s", (workflow_id,)):
+        if not workflow_store.set_trigger(workflow_id, clean):
             return False
-        exec_("UPDATE workflows SET trigger = %s WHERE id = %s", (json.dumps(clean), workflow_id))
         audit("set flow trigger", f"workflow #{workflow_id} → {on or 'manual-only'}")
         return True
 
     # ——— notifications / watches ———
     @strawberry.mutation
     def mark_notifications_read(self) -> bool:
-        exec_("UPDATE notifications SET read = true WHERE user_name = %s", (actor_name(),))
+        settings_store.mark_notifications_read(actor_name())
         return True
 
     @strawberry.mutation
     def toggle_watch(self, document_id: int) -> bool:
-        if q1("SELECT 1 AS x FROM watches WHERE user_name = %s AND document_id = %s", (actor_name(), document_id)):
-            exec_("DELETE FROM watches WHERE user_name = %s AND document_id = %s", (actor_name(), document_id))
-            return False
-        exec_("INSERT INTO watches (user_name, document_id) VALUES (%s, %s) ON CONFLICT DO NOTHING", (actor_name(), document_id))
-        return True
+        return knowledge_store.toggle_watch(document_id, actor_name())

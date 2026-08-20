@@ -133,6 +133,23 @@ def get_run(run_id: int) -> dict | None:
         ).fetchone()
 
 
+def create_run(workflow_id: int) -> dict:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn, conn.transaction():
+        return conn.execute("""INSERT INTO workflow_runs
+          (project_id, workflow_id, number, status, started_label, duration, progress, stats, rows_data)
+          VALUES (%s, %s, nextval('workflow_run_number_seq'), 'running',
+          to_char(now(), 'Mon DD, HH12:MI AM'), '00:00:00', 0, '{}', '[]') RETURNING id, number""",
+          (project_id, workflow_id)).fetchone()
+
+
+def set_trigger(workflow_id: int, trigger: dict) -> bool:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn, conn.transaction():
+        return bool(conn.execute("UPDATE workflows SET trigger = %s WHERE project_id = %s AND id = %s RETURNING id",
+                                 (json.dumps(trigger), project_id, workflow_id)).fetchone())
+
+
 def create_notification(recipient: str, text: str, detail: str) -> None:
     project_id = access.require_current_access().project_id
     with db.connect() as conn, conn.transaction():
