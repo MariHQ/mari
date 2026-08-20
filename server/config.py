@@ -55,7 +55,7 @@ _DEFAULTS: dict[str, t.Any] = {
     },
     "s3": {"bucket": "", "region": "", "endpoint_url": ""},
     "audit": {"languages": ["es", "fr"], "default_tag": "customer-facing"},
-    "github": {"token": "", "poll_minutes": 10, "webhook_secret": ""},
+    "github": {"token": "", "webhook_secret": ""},
 }
 
 
@@ -128,7 +128,6 @@ def _load() -> dict:
         "MARI_CORS_ORIGINS": ("server", "cors_origins"),
         "MARI_TRUSTED_PROXIES": ("server", "trusted_proxies"),
         "MARI_GITHUB_TOKEN": ("github", "token"),
-        "MARI_GITHUB_POLL_MINUTES": ("github", "poll_minutes"),
         "MARI_GITHUB_WEBHOOK_SECRET": ("github", "webhook_secret"),
     }
     for env, (section, key) in env_map.items():
@@ -145,7 +144,7 @@ def _load() -> dict:
                     continue
                 if not isinstance(value, dict):
                     continue
-            elif key in ("poll_minutes", "max_retries"):
+            elif key == "max_retries":
                 try:
                     value = int(value)
                 except ValueError:

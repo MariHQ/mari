@@ -20,7 +20,6 @@ class GitHubPollingTests(unittest.TestCase):
         with patch.object(mutations_admin, "_require_admin", return_value={"name": "Admin"}), \
              patch.object(mutations_admin.access, "require_current_access",
                           return_value=SimpleNamespace(project_id=7)), \
-             patch.object(mutations_admin.github, "token", return_value="configured"), \
              patch.object(mutations_admin.github, "push_token", return_value=None), \
              patch.object(mutations_admin.github, "pop_token"), \
              patch.object(mutations_admin.github, "default_branch", return_value="main"), \
@@ -29,21 +28,30 @@ class GitHubPollingTests(unittest.TestCase):
              patch.object(mutations_admin, "audit"), \
              patch.object(mutations_admin.flowengine, "ensure_sync_flow"), \
              patch.object(mutations_admin.ingest, "start_sync"):
-            source_id = mutations_admin.MutAdmin().connect_github_repo(object(), "acme/docs")
+            source_id = mutations_admin.MutAdmin().connect_github_repo(
+                object(), "acme/docs", token="explicit-token"
+            )
         self.assertEqual(source_id, 12)
         self.assertEqual(query.call_args_list[0].args[1], (7, "acme/docs"))
+        self.assertIn("'connector'", execute.call_args.args[0])
         self.assertEqual(execute.call_args.args[1][0], 7)
+        stored_config = json.loads(execute.call_args.args[1][3])
+        self.assertEqual(stored_config["provider_key"], "github")
+        self.assertEqual(stored_config["token"], "explicit-token")
+        self.assertIn("item_hashes", stored_config)
+        self.assertNotIn("shas", stored_config)
         self.assertEqual(query.call_args_list[1].args[1], (7, "github:acme/docs"))
 
     def test_connect_repo_rejects_case_only_duplicate(self) -> None:
         with patch.object(mutations_admin, "_require_admin", return_value={"name": "Admin"}), \
              patch.object(mutations_admin.access, "require_current_access",
                           return_value=SimpleNamespace(project_id=7)), \
-             patch.object(mutations_admin.github, "token", return_value="configured"), \
              patch.object(mutations_admin, "q1", return_value={"id": 1}) as query, \
              patch.object(mutations_admin.github, "default_branch") as branch:
             with self.assertRaisesRegex(ValueError, "already connected"):
-                mutations_admin.MutAdmin().connect_github_repo(object(), "MariHQ/mari/")
+                mutations_admin.MutAdmin().connect_github_repo(
+                    object(), "MariHQ/mari/", token="explicit-token"
+                )
 
         self.assertIn("lower(config->>'repo') = lower(%s)", query.call_args.args[0])
         self.assertEqual(query.call_args.args[1], (7, "MariHQ/mari"))

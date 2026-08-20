@@ -270,10 +270,11 @@ class MutAdmin:
         if repo.count("/") != 1 or any(not part.strip() for part in repo.split("/")):
             raise ValueError("Repository must be in owner/name form")
         requested_token = (token or "").strip()
-        if not requested_token and not github.token():
-            raise ValueError("No GitHub token configured (github.token / MARI_GITHUB_TOKEN)")
+        if not requested_token:
+            raise ValueError("GitHub token is required")
         if q1("""SELECT id FROM sources
-                 WHERE project_id = %s AND kind = 'github'
+                 WHERE project_id = %s AND kind = 'connector'
+                   AND split_part(provider, ':', 1) = 'github'
                    AND lower(config->>'repo') = lower(%s)""", (project_id, repo)):
             raise ValueError(f"Repository {repo} is already connected")
         token_state = github.push_token(requested_token)
@@ -281,12 +282,12 @@ class MutAdmin:
             branch = github.default_branch(repo)  # also validates the repo is reachable
         finally:
             github.pop_token(token_state)
-        cfg = {"repo": repo, "branch": branch, "paths": paths or "",
+        cfg = {"provider_key": "github", "repo": repo, "branch": branch, "paths": paths or "",
                "token": requested_token, "cursor": "", "last_sync_at": "",
-               "last_error": "", "shas": {}}
+               "last_error": "", "item_hashes": {}}
         exec_("""INSERT INTO sources (project_id, provider, display_name, kind, status, stat_num, stat_unit, bars,
                                       config, docs_count, health)
-                 VALUES (%s, %s, %s, 'github', 'active', '0', 'docs', '{}', %s, 0, 'Syncing')""",
+                 VALUES (%s, %s, %s, 'connector', 'active', '0', 'docs', '{}', %s, 0, 'Syncing')""",
               (project_id, f"github:{repo}", repo, json.dumps(cfg)))
         source_id = q1("SELECT id FROM sources WHERE project_id = %s AND provider = %s", (project_id, f"github:{repo}"))["id"]
         audit("connected GitHub repo", repo, actor["name"],
@@ -324,13 +325,12 @@ class MutAdmin:
     # ——— sources / ingestion ———
     @strawberry.mutation
     def sync_now(self, info: strawberry.Info, provider: str) -> bool:
-        # Real github/connector sources delegate to the real sync engines
-        # (ingest.start_sync dispatches by kind); anything else has no sync
+        # Connector sources delegate to the shared sync engine; anything else has no sync
         # implementation, so we say so instead of faking progress.
         _require_manager(info)
         project_id = access.require_current_access().project_id
         src = q1("SELECT id, kind FROM sources WHERE project_id = %s AND provider = %s", (project_id, provider))
-        if src and src.get("kind") in ("github", "connector"):
+        if src and src.get("kind") == "connector":
             ingest.start_sync(src["id"])
             audit("triggered sync", provider)
             return True

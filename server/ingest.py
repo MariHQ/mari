@@ -476,17 +476,14 @@ _RUNNING: set[int] = set()
 
 
 def _worker_for(source_id: int):
-    """Dispatch by sources.kind: 'github' → the worker above, 'connector' →
-    connect_sync's generic worker (CONNECTORS-CONTRACT.md). Both share this
-    module's status registry and _RUNNING guard, so syncStatus/syncSource/
-    resyncSource and flow sync_source steps work unchanged for either kind."""
+    """Dispatch connector sources through the shared component-backed worker."""
     with _conn() as conn:
         row = conn.execute("SELECT kind FROM sources WHERE id = %s AND project_id = %s",
                            (source_id, access.require_current_access().project_id)).fetchone()
-    if row and row.get("kind") == "connector":
-        import connect_sync  # late import — connect_sync imports ingest
-        return connect_sync._sync_worker
-    return _sync_worker
+    if not row or row.get("kind") != "connector":
+        raise RuntimeError("source is not a connector")
+    import connect_sync  # late import — connect_sync imports ingest
+    return connect_sync._sync_worker
 
 
 def _run_guarded(source_id: int, full: bool, project_access=None) -> dict:
@@ -531,8 +528,7 @@ def run_sync(source_id: int, full: bool = False) -> dict | None:
 
 # ————————————————— startup wiring —————————————————
 #
-# Periodic GitHub polling is no longer an env knob (MARI_GITHUB_POLL_MINUTES):
-# each github source gets a schedule-triggered "Sync <repo>" flow with a
+# Every connector gets a schedule-triggered "Sync <source>" flow with a
 # sync_source step, visible and editable in the Flows UI. The public name is
 # kept because app.py's startup path calls start_poller().
 

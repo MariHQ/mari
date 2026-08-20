@@ -54,13 +54,11 @@ def _connected_map() -> dict[str, int]:
     """provider key → newest live source id."""
     out: dict[str, int] = {}
     for r in q("""SELECT id, kind, provider, config FROM sources
-                  WHERE project_id = %s AND kind IN ('github', 'connector') ORDER BY id""",
+                  WHERE project_id = %s AND kind = 'connector' ORDER BY id""",
                (access.require_current_access().project_id,)):
         cfg = r["config"] if isinstance(r["config"], dict) else json.loads(r["config"] or "{}")
         if r["kind"] == "connector":
             out[connect_sync.provider_key_of(r["provider"], cfg)] = r["id"]
-        elif r["kind"] == "github":  # legacy rows migrate on their next reconnect
-            out[r["kind"]] = r["id"]
     return out
 
 

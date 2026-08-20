@@ -793,11 +793,6 @@ class Query:
             cfg = jload(r["config"]) or {}
             if r.get("kind") == "connector":
                 return connect_sync.masked_config(r["provider"], cfg)
-            if r.get("kind") == "github":
-                token = str(cfg.pop("token", "") or "")
-                if token:
-                    cfg["token_set"] = True
-                    cfg["token_hint"] = _mask_secret(token)
             return {k: v for k, v in cfg.items() if k != "shas"}
 
         # A source's automatic cadence is not a column on `sources`: it is the
@@ -834,7 +829,8 @@ class Query:
         """Repos visible to the configured token; [] (never errors) without a token."""
         source = q1(
             """SELECT config FROM sources
-               WHERE kind = 'github' AND config->>'token' <> ''
+               WHERE kind = 'connector' AND split_part(provider, ':', 1) = 'github'
+                 AND config->>'token' <> ''
                ORDER BY id DESC LIMIT 1"""
         )
         source_cfg = jload(source["config"]) if source else {}
@@ -849,7 +845,8 @@ class Query:
         finally:
             github.pop_token(token_state)
         connected = {jload(r["config"]).get("repo", "")
-                     for r in q("SELECT config FROM sources WHERE kind = 'github'")}
+                     for r in q("""SELECT config FROM sources WHERE kind = 'connector'
+                                   AND split_part(provider, ':', 1) = 'github'""")}
         return [GithubRepo(
             full_name=r["full_name"], description=r.get("description") or "",
             private=bool(r.get("private")), default_branch=r.get("default_branch") or "main",
@@ -863,11 +860,8 @@ class Query:
         src = q1("""SELECT kind, config, last_sync_at FROM sources
                     WHERE project_id = %s AND id = %s""", (project_id, source_id))
         cfg = jload(src["config"]) if src else {}
-        # github cursors are commit shas (shown short); connector cursors are
-        # provider-native (timestamps, delta tokens) and shown whole.
+        # Connector cursors are provider-native and shown as bounded text.
         cursor = cfg.get("cursor") or ""
-        if src and src.get("kind") == "github":
-            cursor = cursor[:7]
         counts = q1("""
           SELECT count(DISTINCT d.id) AS docs, count(c.id) AS chunks,
                  count(c.id) FILTER (WHERE c.embedding IS NOT NULL) AS embedded

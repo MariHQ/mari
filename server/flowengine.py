@@ -799,7 +799,7 @@ def seed_scheduled_flows() -> None:
     flow; the weekly digest gets a refresh flow. Idempotent — existing kept."""
     with _conn() as conn:
         srcs = conn.execute(
-            "SELECT id, display_name, config FROM sources WHERE kind IN ('github', 'connector')").fetchall()
+            "SELECT id, display_name, config FROM sources WHERE kind = 'connector'").fetchall()
     for s in srcs:
         cfg = s["config"] if isinstance(s["config"], dict) else json.loads(s["config"] or "{}")
         ensure_sync_flow(s["id"], cfg.get("repo") or s["display_name"])

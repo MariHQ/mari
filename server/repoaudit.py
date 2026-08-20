@@ -1,6 +1,6 @@
 """Mari — repository audit engine (DESIGN.md §20, FLOWS-DESIGN.md).
 
-Scans the connected GitHub repo (sources with kind='github') for markdown
+Scans connected GitHub connector sources for markdown
 docs, localization variants, git authorship, and tag coverage. Findings land in
 audit_findings with per-finding fix actions; re-audit any time. Clean by
 design: every finding has exactly one obvious fix.
@@ -53,7 +53,7 @@ def ensure_schema() -> None:
             decided_at timestamptz NOT NULL DEFAULT now())""")
 
 
-# ——— real GitHub repo resolution (sources with kind='github') ———
+# ——— real GitHub repository connector resolution ———
 
 BUILDS_DIR = pathlib.Path(
     os.environ.get("MARI_REPO_AUDIT_DIR", pathlib.Path(__file__).parent / "data" / "repo-audit")
@@ -64,7 +64,8 @@ def _github_source() -> dict | None:
     """First connected GitHub source (lowest id) with a repo configured."""
     with _conn() as conn:
         return conn.execute(
-            "SELECT id, provider, config FROM sources WHERE kind = 'github' "
+            """SELECT id, provider, config FROM sources WHERE kind = 'connector'
+                 AND split_part(provider, ':', 1) = 'github' """
             "AND coalesce(config->>'repo', '') <> '' ORDER BY id LIMIT 1").fetchone()
 
 

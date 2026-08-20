@@ -117,7 +117,8 @@ async def github_webhook(request: Request):
         raise HTTPException(400, "GitHub repository is required")
     source = q1(
         """SELECT id FROM sources
-            WHERE project_id=%s AND kind='github' AND config->>'repo'=%s
+            WHERE project_id=%s AND kind='connector'
+              AND split_part(provider, ':', 1)='github' AND config->>'repo'=%s
               AND COALESCE(status, 'active') <> 'disconnected'""",
         (installation["project_id"], repository),
     )
@@ -237,7 +238,10 @@ def process_github_delivery(row: dict[str, t.Any]) -> None:
     )
     if not installation:
         raise RuntimeError("GitHub installation is no longer active")
-    source = _source(int(envelope.get("source_id") or 0), int(row["project_id"]), kind="github")
+    source = _source(
+        int(envelope.get("source_id") or 0), int(row["project_id"]),
+        kind="connector", provider="github",
+    )
     if not source:
         raise RuntimeError("GitHub source is no longer active")
     expected_repo = str(_json(source.get("config")).get("repo") or "")

@@ -554,7 +554,9 @@ def bots_status(current: access.AccessContext = Depends(auth.require_project)) -
     env_secret = (config.get("github", "webhook_secret") or "").strip()
     repos = q(
         "SELECT id, config->>'repo' AS repo FROM sources "
-        "WHERE project_id = %s AND kind = 'github' AND config->>'repo' IS NOT NULL ORDER BY id",
+        """WHERE project_id = %s AND kind = 'connector'
+             AND split_part(provider, ':', 1) = 'github'
+             AND config->>'repo' IS NOT NULL ORDER BY id""",
         (project_id,),
     )
     return {
