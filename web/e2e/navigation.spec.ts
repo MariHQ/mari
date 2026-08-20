@@ -58,6 +58,15 @@ async function expectUiContract(page: import("@playwright/test").Page) {
         .slice(0, 4).map((node) => `${node.tagName.toLowerCase()}.${node.className}`);
       issues.push(`horizontal overflow ${document.documentElement.scrollWidth}px > ${window.innerWidth}px: ${offenders.join(" | ")}`);
     }
+    const main = document.querySelector<HTMLElement>("#main-content");
+    if (main && main.scrollWidth > main.clientWidth + 1) {
+      const edge = main.getBoundingClientRect().right;
+      const offenders = [...main.querySelectorAll<HTMLElement>("*")]
+        .filter((node) => visible(node) && node.getBoundingClientRect().right > edge + 1)
+        .slice(0, 4)
+        .map((node) => `${node.tagName.toLowerCase()}.${node.className}`);
+      issues.push(`main content overflow ${main.scrollWidth}px > ${main.clientWidth}px: ${offenders.join(" | ")}`);
+    }
     return issues;
   });
   expect(violations).toEqual([]);
