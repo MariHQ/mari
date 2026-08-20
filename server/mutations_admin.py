@@ -94,9 +94,9 @@ class MutAdmin:
         exec_("UPDATE sources SET status = 'paused', health = 'Paused' WHERE project_id = %s AND provider = %s", (project_id, provider))
         exec_("UPDATE ingest_checkpoints SET status = 'paused' WHERE provider = %s AND status = 'running'", (provider,))
         exec_("""INSERT INTO sync_events (provider, event, detail, at_label)
-                 VALUES (%s, 'disconnected', 'Paused by admin', to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))""",
+                 VALUES (%s, 'paused', 'Paused by admin', to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))""",
               (provider,))
-        audit("disconnected source", provider, actor["name"])
+        audit("paused source", provider, actor["name"])
         return True
 
     # ——— members (admin-only; audit the real caller) ———
