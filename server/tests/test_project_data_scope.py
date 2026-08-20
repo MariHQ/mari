@@ -99,13 +99,19 @@ class ProjectDataScopeTests(unittest.TestCase):
             {"id": 3, "source": "website", "title": "Public", "snippet": "deploy", "body": "",
              "author": "", "author_initials": "", "updated_src": None, "kind": "page", "tags": [],
              "boost": 1, "acl_visibility": "public", "acl_principals": []},
+            {"id": 4, "source": "confluence", "title": "Project knowledge", "snippet": "deploy", "body": "",
+             "author": "", "author_initials": "", "updated_src": None, "kind": "page", "tags": [],
+             "boost": 1, "acl_visibility": "connector_scope", "acl_principals": []},
         ]
         slack_access = access.external_access(
             7, "acme", "Acme", "slack", "install-1", principals=frozenset({"channel:C-A"}))
         with access.use_access(slack_access), patch.object(queries.llm, "embed", return_value=None), \
              patch.object(queries, "q", return_value=rows):
             result = queries.hybrid_search("deploy")
-        self.assertEqual({row["title"] for row in result}, {"Channel A", "Public"})
+        self.assertEqual(
+            {row["title"] for row in result},
+            {"Channel A", "Public", "Project knowledge"},
+        )
 
     def test_vector_artifact_paths_are_project_partitioned(self):
         with tempfile.TemporaryDirectory() as directory, patch.dict(

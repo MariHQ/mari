@@ -24,8 +24,10 @@ import time
 import urllib.error
 import urllib.request
 
-from fastapi import APIRouter, Depends, Request, Response
+import psycopg
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import PlainTextResponse
+from pydantic import BaseModel
 
 import auth
 import access
@@ -64,6 +66,11 @@ class _BoundedExecutor:
 
 _SLACK_EXECUTOR = _BoundedExecutor(SLACK_WORKERS, SLACK_PENDING)
 _SLACK_EVENTS = EventLedger()
+
+
+class SlackSetupIn(BaseModel):
+    bot_token: str
+    signing_secret: str
 
 
 # ————————————————— settings helpers —————————————————
@@ -141,7 +148,7 @@ def answer_question(question: str) -> str:
     caller_access = access.require_current_access()
     # Curated answers beat generation (same canon as /chat).
     qvec = llm.embed(question)
-    if qvec and caller_access.principal_type == "user":
+    if qvec:
         approved = q1(
             """SELECT question, answer, 1 - (embedding <=> %s::vector) AS sim
                FROM approved_answers
@@ -157,8 +164,7 @@ def answer_question(question: str) -> str:
         f"[{i + 1}] {d['title']} ({d['source']})\n{d['body'] or d['snippet']}"
         for i, d in enumerate(docs)
     )
-    facts = (pq("SELECT claim FROM facts WHERE project_id = %s AND status = 'Verified' LIMIT 8")
-             if caller_access.principal_type == "user" else [])
+    facts = pq("SELECT claim FROM facts WHERE project_id = %s AND status = 'Verified' LIMIT 8")
     if facts:
         context += "\n\nVerified facts:\n" + "\n".join(f"- {f['claim']}" for f in facts)
 
@@ -388,10 +394,76 @@ def bots_status() -> dict:
     }
 
 
+# ————————————————— POST /bots/slack/setup —————————————————
+
+
+@router.post("/bots/slack/setup",
+             dependencies=[Depends(auth.require_capability("destination.manage"))])
+def slack_setup(body: SlackSetupIn) -> dict:
+    """Verify credentials and persist the installation webhook routing uses.
+
+    `auth.test` is the identity proof: callers do not get to choose a team id,
+    and failed credentials never replace a working installation.
+    """
+    token = body.bot_token.strip()
+    signing_secret = body.signing_secret.strip()
+    if not token.startswith("xoxb-") or len(token) > 500:
+        raise HTTPException(400, "A Slack bot token beginning with xoxb- is required.")
+    if not signing_secret or len(signing_secret) > 500:
+        raise HTTPException(400, "A Slack signing secret is required.")
+    verified = slack_call("auth.test", token)
+    if not verified.get("ok"):
+        raise HTTPException(400, f"Slack rejected the bot token: {verified.get('error', 'invalid_auth')}")
+    team_id = str(verified.get("team_id") or "").strip()
+    if not team_id:
+        raise HTTPException(502, "Slack auth.test returned no team id.")
+    team_name = str(verified.get("team") or "").strip()[:200]
+    bot_user = str(verified.get("user") or "").strip()[:200]
+    project_id = access.require_current_access().project_id
+    config_patch = {
+        "bot_token": token,
+        "signing_secret": signing_secret,
+        "team_name": team_name,
+        "bot_user": bot_user,
+        "connected_at": _now_iso(),
+        "last_error": "",
+    }
+    try:
+        with auth._conn() as conn:
+            current = conn.execute(
+                """SELECT id, external_team_id FROM bot_installations
+                    WHERE project_id = %s AND provider = 'slack'
+                    ORDER BY id LIMIT 1 FOR UPDATE""", (project_id,)).fetchone()
+            owner = conn.execute(
+                """SELECT id, project_id FROM bot_installations
+                    WHERE provider = 'slack' AND external_team_id = %s
+                      AND external_installation_id = '' FOR UPDATE""", (team_id,)).fetchone()
+            if owner and owner["project_id"] != project_id:
+                raise HTTPException(409, "That Slack workspace is already connected to another project.")
+            if current:
+                row = conn.execute(
+                    """UPDATE bot_installations
+                          SET external_team_id = %s, external_installation_id = '',
+                              config = config || %s, status = 'connected', updated_at = now()
+                        WHERE id = %s AND project_id = %s RETURNING id""",
+                    (team_id, json.dumps(config_patch), current["id"], project_id)).fetchone()
+            else:
+                row = conn.execute(
+                    """INSERT INTO bot_installations
+                         (project_id, provider, external_team_id, external_installation_id, config, status)
+                       VALUES (%s, 'slack', %s, '', %s, 'connected') RETURNING id""",
+                    (project_id, team_id, json.dumps(config_patch))).fetchone()
+    except psycopg.errors.UniqueViolation:
+        raise HTTPException(409, "That Slack workspace was connected concurrently; retry setup.") from None
+    return {"ok": True, "team": team_name, "teamId": team_id,
+            "botUser": bot_user, "installationId": row["id"]}
+
+
 # ————————————————— POST /bots/slack/test —————————————————
 
 
-@router.post("/bots/slack/test", dependencies=[Depends(auth.require_project)])
+@router.post("/bots/slack/test",
+             dependencies=[Depends(auth.require_capability("destination.manage"))])
 def slack_test() -> dict:
     row = pq1("""SELECT id, config FROM bot_installations
                  WHERE project_id = %s AND provider = 'slack' AND status = 'connected'

@@ -67,7 +67,7 @@ test("Sources exposes connector ingestion without a Bots tab", async ({ page }) 
   await expect(page.getByRole("button", { name: "Connectors", exact: true })).toHaveCount(0);
 });
 
-test("Slack bot setup saves secrets, calls auth.test, and never renders the token", async ({ page }) => {
+test("Slack bot setup persists the verified project installation, calls auth.test, and never renders the token", async ({ page }) => {
   await openBotsDestination(page);
   await page.getByRole("button", { name: "Manage setup" }).first().click();
   const drawer = page.getByRole("dialog", { name: "Set up Slack bot" });
@@ -80,9 +80,9 @@ test("Slack bot setup saves secrets, calls auth.test, and never renders the toke
   await drawer.getByRole("button", { name: "Test connection" }).click();
   await expect(drawer.getByText(/Connected in Acme/)).toBeVisible();
   await expect(page.getByText("xoxb-browser-secret", { exact: true })).toHaveCount(0);
-  expect(api.calls.some((c) => c.query.includes("updateSetting") && c.variables.key === "slack_bot")).toBeTruthy();
-  const saved = api.calls.find((c) => c.query.includes("updateSetting") && c.variables.key === "slack_bot");
-  expect((saved?.variables.value as any).bot_token).toBe("xoxb-browser-secret");
+  const setup = api.restCalls.find((c) => c.path === "/bots/slack/setup");
+  expect(setup?.body).toEqual({ bot_token: "xoxb-browser-secret", signing_secret: "signing-browser-secret" });
+  expect(api.calls.some((c) => c.query.includes("updateSetting") && c.variables.key === "slack_bot")).toBeFalsy();
   expect(api.restCalls.some((c) => c.path === "/bots/slack/test")).toBeTruthy();
 });
 

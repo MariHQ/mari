@@ -367,11 +367,17 @@ def invalidate_search(project_id: int) -> None:
 
 
 def _document_visible(row: dict, ctx: access.AccessContext) -> bool:
-    """Project members see their project; external principals need an ACL match."""
+    """Project members see their project; Slack additionally honors channel ACLs.
+
+    A verified Slack installation is already bound to exactly one project.
+    Project and connector-scoped documents are therefore its shared knowledge
+    base, while documents explicitly marked restricted still require the
+    channel principal carried by the incoming event.
+    """
     if ctx.principal_type != "slack":
         return True
     visibility = str(row.get("acl_visibility") or "project")
-    if visibility == "public":
+    if visibility in {"public", "project", "connector_scope"}:
         return True
     principals = row.get("acl_principals") or []
     if isinstance(principals, str):

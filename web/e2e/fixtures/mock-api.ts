@@ -259,6 +259,12 @@ export async function installMockApi(page: Page, options: {
     restCalls.push({ path: "/bots/slack/test", body: {} });
     await route.fulfill({ json: { ok: true, team: "Acme", user: "mari" } });
   });
+  await page.route("**/bots/slack/setup", async (route) => {
+    const body = route.request().postDataJSON();
+    restCalls.push({ path: "/bots/slack/setup", body });
+    await route.fulfill({ json: { ok: true, team: "Acme", teamId: "T-ACME",
+      botUser: "mari", installationId: 5 } });
+  });
   await page.route("**/onboard/upload", async (route) => {
     restCalls.push({ path: "/onboard/upload", body: "multipart" });
     await route.fulfill({ json: { ok: true, sourceId: 43, files: [{ name: "runbook.md", docId: 3, chunks: 1, embedded: 1 }] } });

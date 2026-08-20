@@ -1,5 +1,5 @@
 import type { SourcesBotsActions } from "@mari-design/components/features/SourcesBots";
-import { gqlResult, projectHeaders } from "../../lib/api";
+import { authenticatedFetch, gqlResult, projectHeaders } from "../../lib/api";
 import { mutate } from "./index";
 
 const UPDATE_SETTING = `mutation($key: String!, $value: JSON!) { updateSetting(key: $key, value: $value) }`;
@@ -7,7 +7,7 @@ const UPDATE_SETTING = `mutation($key: String!, $value: JSON!) { updateSetting(k
 /** Everything in a bot's settings row except the masked, derived secret
  * indicators. updateSetting replaces the row, so status metadata must survive
  * a credential rotation. */
-async function botRow(key: "slack_bot" | "github_bot"): Promise<Record<string, unknown>> {
+async function botRow(key: "github_bot"): Promise<Record<string, unknown>> {
   const res = await gqlResult<{ settings: { key: string; value: unknown }[] }>(`{ settings { key value } }`);
   if (!res.ok) throw new Error(res.error);
   const row = (res.data?.settings ?? []).find((s) => s.key === key)?.value;
@@ -18,11 +18,11 @@ async function botRow(key: "slack_bot" | "github_bot"): Promise<Record<string, u
   );
 }
 
-async function postBot<T>(path: string): Promise<T> {
-  const res = await fetch(path, {
+async function postBot<T>(path: string, body: Record<string, unknown> = {}): Promise<T> {
+  const res = await authenticatedFetch(path, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...projectHeaders() },
-    body: "{}",
+    body: JSON.stringify(body),
   });
   const json = await res.json().catch(() => ({}));
   if (!res.ok) {
@@ -38,9 +38,9 @@ async function postBot<T>(path: string): Promise<T> {
 export function botActions(): SourcesBotsActions {
   return {
     saveSlackCredentials: async ({ botToken, signingSecret }) => {
-      await mutate(UPDATE_SETTING, {
-        key: "slack_bot",
-        value: { ...(await botRow("slack_bot")), bot_token: botToken.trim(), signing_secret: signingSecret.trim() },
+      await postBot("/bots/slack/setup", {
+        bot_token: botToken.trim(),
+        signing_secret: signingSecret.trim(),
       });
     },
     testSlackConnection: async () => {
