@@ -6,10 +6,10 @@ import json
 
 from mari_server.domain import access
 from mari_server.integrations import llm
-from mari_server.repositories.database import exec_, log_usage, q, q1
-from mari_server.services.search import hybrid_search, like_pattern
+from mari_server.repositories.database import log_usage
+from mari_server.repositories import chat as chat_store
+from mari_server.services.search import hybrid_search
 from mari_components.destinations.chat import ChatContext, ChatPorts
-from mari_server import db as postgres
 
 
 SYSTEM = (
@@ -19,12 +19,7 @@ SYSTEM = (
 
 
 def live_destination(project_slug: str, destination_slug: str):
-    return q1("""SELECT d.id, d.project_id, d.name, d.slug, d.title, d.welcome,
-                       p.slug AS project_slug, p.name AS project_name
-                  FROM knowledge_chat_destinations d JOIN projects p ON p.id = d.project_id
-                 WHERE p.slug = %s AND p.status = 'active'
-                   AND d.slug = %s AND d.status = 'live'""",
-              (project_slug, destination_slug))
+    return chat_store.live_destination(project_slug, destination_slug)
 
 
 def ports(project_access: access.AccessContext, usage_detail: str) -> ChatPorts:
@@ -32,43 +27,15 @@ def ports(project_access: access.AccessContext, usage_detail: str) -> ChatPorts:
 
     def prepare(session_id: int | None, message: str) -> ChatContext:
         if session_id is None:
-            with postgres.connect() as connection:
-                row = connection.execute(
-                    """INSERT INTO chat_sessions (project_id, owner_user_id, title)
-                         VALUES (%s, %s, %s) RETURNING id""",
-                    (project_id, project_access.user_id or None, message[:60]),
-                ).fetchone()
-                session_id = int(row[0])
-        elif not q1(
-            """SELECT id FROM chat_sessions WHERE id = %s AND project_id = %s
-                 AND (owner_user_id = %s OR owner_user_id IS NULL)""",
-            (session_id, project_id, project_access.user_id),
-        ):
+            session_id = chat_store.create_session(
+                project_id, project_access.user_id or None, message,
+            )
+        elif not chat_store.session_exists(project_id, project_access.user_id, session_id):
             raise LookupError("Chat session not found.")
-        exec_("""INSERT INTO chat_messages (project_id, session_id, role, content)
-                  VALUES (%s, %s, 'user', %s)""", (project_id, session_id, message))
+        chat_store.add_message(project_id, session_id, "user", message)
 
-        approved = None
-        vector = llm.embed(message)
-        if vector:
-            approved = q1(
-                """SELECT id, question, answer, 1 - (embedding <=> %s::vector) AS sim
-                     FROM approved_answers WHERE project_id = %s AND status = 'approved'
-                       AND embedding IS NOT NULL ORDER BY embedding <=> %s::vector LIMIT 1""",
-                (str(vector), project_id, str(vector)),
-            )
-            if approved and approved["sim"] < 0.62:
-                approved = None
-        if approved is None:
-            approved = q1(
-                """SELECT id, question, answer FROM approved_answers
-                     WHERE project_id = %s AND status = 'approved'
-                       AND (question ILIKE %s OR position(lower(question) in lower(%s)) > 0)
-                     LIMIT 1""", (project_id, like_pattern(message[:60]), message),
-            )
+        approved = chat_store.approved_answer(project_id, message, llm.embed(message))
         if approved:
-            exec_("UPDATE approved_answers SET served = served + 1 WHERE project_id = %s AND id = %s",
-                  (project_id, approved["id"]))
             sources = [{"n": 1, "source": "approved", "title": approved["question"],
                         "meta": "Approved answer · served verbatim",
                         "href": f"/answers?answer={approved['id']}"}]
@@ -80,16 +47,13 @@ def ports(project_access: access.AccessContext, usage_detail: str) -> ChatPorts:
             f"[{i + 1}] {row['title']} ({row['source']})\n{row['body'] or row['snippet']}"
             for i, row in enumerate(documents)
         )
-        facts = q("SELECT claim FROM facts WHERE project_id = %s AND status = 'Verified' LIMIT 8",
-                  (project_id,))
+        facts = chat_store.verified_facts(project_id)
         context += "\n\nVerified facts:\n" + "\n".join(f"- {row['claim']}" for row in facts)
         sources = [{"n": i + 1, "source": row["source"], "title": row["title"],
                     "meta": row["snippet"][:110], "document_id": row["id"],
                     "href": f"/knowledge/doc?id={row['id']}"}
                    for i, row in enumerate(documents)]
-        history = q("""SELECT role, content FROM chat_messages
-                        WHERE project_id = %s AND session_id = %s ORDER BY id DESC LIMIT 10""",
-                    (project_id, session_id))
+        history = chat_store.messages(project_id, session_id, 10)
         messages = [{"role": row["role"], "content": row["content"]}
                     for row in reversed(history)]
         messages[-1]["content"] = f"Context:\n{context}\n\nQuestion: {message}"
@@ -98,10 +62,8 @@ def ports(project_access: access.AccessContext, usage_detail: str) -> ChatPorts:
     return ChatPorts(
         prepare=prepare,
         generate=lambda messages: llm.chat_stream([dict(row) for row in messages], SYSTEM),
-        persist=lambda session_id, answer, sources: exec_(
-            """INSERT INTO chat_messages (project_id, session_id, role, content, sources)
-                 VALUES (%s, %s, 'assistant', %s, %s)""",
-            (project_id, session_id, answer, json.dumps(list(sources))),
+        persist=lambda session_id, answer, sources: chat_store.add_message(
+            project_id, session_id, "assistant", answer, json.dumps(list(sources)),
         ),
         record_usage=lambda: log_usage("chat_answer", usage_detail),
     )

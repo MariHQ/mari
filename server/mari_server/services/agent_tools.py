@@ -10,15 +10,9 @@ from mari_components.agents.runtime import ToolBinding, ToolOutcome
 from mari_server.domain.navigation import PRODUCT_SURFACES, valid_navigation
 
 
-Query = Callable[[str, tuple[Any, ...]], Sequence[Mapping[str, Any]]]
-QueryOne = Callable[[str, tuple[Any, ...]], Mapping[str, Any] | None]
-
-
 @dataclass(frozen=True, slots=True)
 class ToolDependencies:
-    project_id: int
-    query: Query
-    query_one: QueryOne
+    store: Any
     search: Callable[[str, int], Sequence[Mapping[str, Any]]]
     record_search: Callable[[str], None]
     review_items: Callable[[], Sequence[Any]]
@@ -54,17 +48,10 @@ def build_tool_bindings(deps: ToolDependencies) -> dict[str, ToolBinding]:
             document_id = int(arguments.get("id"))
         except (TypeError, ValueError):
             return ToolOutcome(False, "read_document needs a valid id", "error: invalid id")
-        document = deps.query_one(
-            """SELECT id, title, body, snippet, source, author, updated_src
-                 FROM documents WHERE project_id = %s AND id = %s""",
-            (deps.project_id, document_id),
-        )
+        document = deps.store.document(document_id)
         if not document:
             return ToolOutcome(False, f"document {document_id} not found", "error: no document")
-        tags = deps.query(
-            """SELECT tag FROM tags WHERE project_id = %s AND document_id = %s ORDER BY tag""",
-            (deps.project_id, document_id),
-        )
+        tags = deps.store.document_tags(document_id)
         names = [str(row["tag"]) for row in tags]
         raw_body = str(document.get("body") or document.get("snippet") or "")
         updated = document.get("updated_src")
@@ -95,10 +82,7 @@ def build_tool_bindings(deps: ToolDependencies) -> dict[str, ToolBinding]:
         return ToolOutcome(True, f"{len(detail)} connector types", detail)
 
     def list_sources(_arguments: Mapping[str, Any]) -> ToolOutcome:
-        rows = deps.query(
-            """SELECT id, display_name, provider, kind, status, health, docs_count
-                 FROM sources WHERE project_id = %s ORDER BY id""", (deps.project_id,),
-        )
+        rows = deps.store.sources()
         detail = [{
             "id": row["id"], "name": row["display_name"], "provider": row["provider"],
             "status": row["status"], "health": row["health"], "docs": row["docs_count"],
@@ -106,10 +90,7 @@ def build_tool_bindings(deps: ToolDependencies) -> dict[str, ToolBinding]:
         return ToolOutcome(True, f"{len(detail)} sources", detail)
 
     def list_flows(_arguments: Mapping[str, Any]) -> ToolOutcome:
-        rows = deps.query(
-            """SELECT id, name, status, description FROM workflows
-                 WHERE project_id = %s ORDER BY id""", (deps.project_id,),
-        )
+        rows = deps.store.workflows()
         detail = [{
             "id": row["id"], "name": row["name"], "status": row["status"],
             "description": str(row.get("description") or "")[:100],
@@ -121,30 +102,17 @@ def build_tool_bindings(deps: ToolDependencies) -> dict[str, ToolBinding]:
             workflow_id = int(arguments.get("id"))
         except (TypeError, ValueError):
             return ToolOutcome(False, "inspect_flow needs a workflow id", "error: invalid id")
-        row = deps.query_one(
-            """SELECT id, name, description, status, nodes, trigger
-                 FROM workflows WHERE project_id = %s AND id = %s""",
-            (deps.project_id, workflow_id),
-        )
+        row = deps.store.workflow(workflow_id)
         if not row:
             return ToolOutcome(False, f"workflow {workflow_id} not found", "error: no workflow")
-        runs = deps.query(
-            """SELECT id, number, status, progress, stats, rows_data, triggered_by
-                 FROM workflow_runs WHERE project_id = %s AND workflow_id = %s
-                ORDER BY id DESC LIMIT 10""", (deps.project_id, workflow_id),
-        )
+        runs = deps.store.workflow_runs(workflow_id)
         return ToolOutcome(
             True, f'inspected "{row["name"]}" and {len(runs)} recent runs',
             {"workflow": dict(row), "runs": [dict(run) for run in runs]},
         )
 
     def list_workflow_observations(arguments: Mapping[str, Any]) -> ToolOutcome:
-        rows = deps.query(
-            """SELECT id, prompt, status, layer2, category, macro_intent,
-                      step_count, failure_count, rework_count, started_at
-                 FROM trajectories WHERE project_id = %s
-                ORDER BY started_at DESC, id DESC LIMIT 50""", (deps.project_id,),
-        )
+        rows = deps.store.trajectories()
         wanted = str(arguments.get("query") or "").strip().casefold()
         if wanted:
             rows = [row for row in rows if wanted in " ".join(
@@ -164,20 +132,11 @@ def build_tool_bindings(deps: ToolDependencies) -> dict[str, ToolBinding]:
             trajectory_id = int(arguments.get("id"))
         except (TypeError, ValueError):
             return ToolOutcome(False, "workflow observation needs an id", "error: invalid id")
-        row = deps.query_one(
-            """SELECT id, prompt, status, layer1, layer2, category, macro_intent,
-                      phases, step_count, failure_count, rework_count
-                 FROM trajectories WHERE project_id = %s AND id = %s""",
-            (deps.project_id, trajectory_id),
-        )
+        row = deps.store.trajectory(trajectory_id)
         if not row:
             return ToolOutcome(False, f"workflow observation {trajectory_id} not found",
                                "error: no observation")
-        steps = deps.query(
-            """SELECT ordinal, tool, action_family, summary, ok
-                 FROM trajectory_steps WHERE project_id = %s AND trajectory_id = %s
-                ORDER BY ordinal""", (deps.project_id, trajectory_id),
-        )
+        steps = deps.store.trajectory_steps(trajectory_id)
         return ToolOutcome(True, f"inspected observed workflow {trajectory_id}",
                            {**dict(row), "steps": [dict(step) for step in steps]})
 
@@ -191,10 +150,7 @@ def build_tool_bindings(deps: ToolDependencies) -> dict[str, ToolBinding]:
         return ToolOutcome(True, f"{len(detail)} review items ({open_count} open)", detail)
 
     def list_answers(_arguments: Mapping[str, Any]) -> ToolOutcome:
-        rows = deps.query(
-            """SELECT id, question, status, served FROM approved_answers
-                 WHERE project_id = %s ORDER BY id""", (deps.project_id,),
-        )
+        rows = deps.store.answers()
         detail = [dict(row) for row in rows]
         return ToolOutcome(True, f"{len(detail)} answers", detail)
 

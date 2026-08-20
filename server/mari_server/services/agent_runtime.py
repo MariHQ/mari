@@ -4,15 +4,13 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any
-
-import psycopg
 
 from mari_server.domain import access
 from mari_server.integrations import llm
 from mari_server.repositories import trajectories as trajectory
-from mari_server.repositories.database import exec_, log_usage, q, q1
-from mari_server import db as postgres
+from mari_server.repositories.database import log_usage
+from mari_server.repositories import chat as chat_store
+from mari_server.repositories.agent_tools import AgentToolStore
 from mari_components.connectors import connector_definitions
 from mari_server.services.search import hybrid_search
 
@@ -57,35 +55,22 @@ class ProductionAgentRuntime:
         return self.project_access.project_id
 
     def create_session(self, title: str) -> int:
-        with postgres.connect() as connection:
-            row = connection.execute(
-                """INSERT INTO chat_sessions (project_id, owner_user_id, title)
-                     VALUES (%s, %s, %s) RETURNING id""",
-                (self.project_id, self.project_access.user_id or None, title[:60]),
-            ).fetchone()
-        return int(row[0])
+        return chat_store.create_session(
+            self.project_id, self.project_access.user_id or None, title,
+        )
 
     def require_session(self, session_id: int) -> None:
-        row = q1(
-            """SELECT id FROM chat_sessions WHERE id = %s AND project_id = %s
-                 AND (owner_user_id = %s OR owner_user_id IS NULL)""",
-            (session_id, self.project_id, self.project_access.user_id),
-        )
-        if not row:
+        if not chat_store.session_exists(
+            self.project_id, self.project_access.user_id, session_id,
+        ):
             raise LookupError("Chat session not found.")
 
     def append_user_message(self, session_id: int, message: str) -> None:
-        exec_(
-            """INSERT INTO chat_messages (project_id, session_id, role, content)
-                 VALUES (%s, %s, 'user', %s)""",
-            (self.project_id, session_id, message),
-        )
+        chat_store.add_message(self.project_id, session_id, "user", message)
 
     def bindings(self) -> dict[str, ToolBinding]:
         dependencies = ToolDependencies(
-            project_id=self.project_id,
-            query=lambda sql, params: q(sql, params),
-            query_one=lambda sql, params: q1(sql, params),
+            store=AgentToolStore(self.project_id),
             search=lambda text, limit: hybrid_search(text, limit),
             record_search=lambda text: log_usage("search", text),
             review_items=review_repository.project_items,
@@ -97,21 +82,15 @@ class ProductionAgentRuntime:
         system = planner_instructions(bindings)
 
         def history(session_id: int):
-            rows = q(
-                """SELECT role, content FROM chat_messages
-                     WHERE project_id = %s AND session_id = %s ORDER BY id DESC LIMIT 12""",
-                (self.project_id, session_id),
-            )
+            rows = chat_store.messages(self.project_id, session_id, 12)
             return [
                 {"role": str(row["role"]), "content": str(row["content"])[:2000]}
-                for row in reversed(rows)
+                for row in rows
             ]
 
         def save_answer(session_id: int, answer: str, trace) -> None:
-            exec_(
-                """INSERT INTO chat_messages (project_id, session_id, role, content, sources)
-                     VALUES (%s, %s, 'assistant', %s, %s)""",
-                (self.project_id, session_id, answer, json.dumps(list(trace))),
+            chat_store.add_message(
+                self.project_id, session_id, "assistant", answer, json.dumps(list(trace)),
             )
 
         return AgentPorts(
