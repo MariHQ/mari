@@ -35,6 +35,7 @@ from gqltypes import (
     FreshnessRow, GithubRepo, GithubTeamSync, GlossaryCandidate, GlossaryTerm,
     GraphStats, GraphView, InsightStats, LineageEdge, LineageNode, McpServer,
     Member, Notification, Provisioning, ReadabilityRow, RelatedDoc, Release, Setting, Site,
+    KnowledgeChatDestination,
     SiteFeature, SiteThemePreset, SourcePulse, StyleGuide, StyleRule, SyncEvent,
     SyncStatus, TagDef, Task, TaskSummary, ReviewConnection, ReviewItem, ReviewPageInfo,
     TopCited, UploadFile, UploadManifest,
@@ -1450,6 +1451,18 @@ class Query:
                      theme=jload(r["theme"]), sources=jload(r["sources"]), nav=jload(r["nav"]),
                      gates=jload(r["gates"]), docs=r["docs"], warnings=r["warnings"])
                 for r in q("SELECT * FROM sites WHERE project_id = %s ORDER BY id", (project_id,))]
+
+    @strawberry.field
+    def knowledge_chat_destinations(self) -> list[KnowledgeChatDestination]:
+        project_id = access.require_current_access().project_id
+        project = q1("SELECT slug FROM projects WHERE id = %s", (project_id,)) or {"slug": ""}
+        return [KnowledgeChatDestination(
+                    id=r["id"], name=r["name"], slug=r["slug"], title=r["title"],
+                    welcome=r["welcome"], status=r["status"],
+                    url=f"/knowledge-chat/{project['slug']}/{r['slug']}")
+                for r in q("""SELECT id, name, slug, title, welcome, status
+                             FROM knowledge_chat_destinations
+                             WHERE project_id = %s ORDER BY id""", (project_id,))]
 
     @strawberry.field
     def releases(self, site_id: int | None = None) -> list[Release]:

@@ -26,7 +26,7 @@ from contextlib import asynccontextmanager
 import psycopg
 import strawberry
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
-from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from strawberry.fastapi import GraphQLRouter
@@ -252,7 +252,7 @@ def chat(body: ChatIn, access: t.Any = Depends(auth_module.require_project)):
         exec_("""UPDATE approved_answers SET served = served + 1
                  WHERE id = %s AND project_id = %s""", (approved["id"], project_id))
         sources = [{"n": 1, "source": "approved", "title": approved["question"],
-                    "meta": "Approved answer · served verbatim"}]
+                    "meta": "Approved answer · served verbatim", "href": f"/answers?answer={approved['id']}"}]
         text = approved["answer"]
 
         def stream_approved():
@@ -272,7 +272,8 @@ def chat(body: ChatIn, access: t.Any = Depends(auth_module.require_project)):
     facts = q("SELECT claim FROM facts WHERE project_id = %s AND status = 'Verified' LIMIT 8", (project_id,))
     context += "\n\nVerified facts:\n" + "\n".join(f"- {f['claim']}" for f in facts)
     sources = [{"n": i + 1, "source": d["source"], "title": d["title"],
-                "meta": d["snippet"][:110]} for i, d in enumerate(docs)]
+                "meta": d["snippet"][:110], "document_id": d["id"],
+                "href": f"/knowledge/doc?id={d['id']}"} for i, d in enumerate(docs)]
 
     history = q("""SELECT role, content FROM chat_messages
                    WHERE project_id = %s AND session_id = %s ORDER BY id DESC LIMIT 10""",
@@ -375,6 +376,30 @@ def metrics() -> str:
     except Exception:  # noqa: BLE001 — metrics remain available during DB incidents
         observability.METRICS.inc("mari_metrics_dependency_errors_total", dependency="database")
     return observability.METRICS.render()
+
+
+@app.get("/knowledge-chat-api/{project_slug}/{destination_slug}", response_class=JSONResponse)
+def knowledge_chat_destination(project_slug: str, destination_slug: str, request: Request) -> dict[str, t.Any]:
+    """Configuration for a deployed, project-scoped interactive destination.
+
+    The destination UI intentionally calls the existing authenticated `/chat`
+    endpoint for answers; this endpoint only proves that the named destination
+    is live and that the current member can read its project.
+    """
+    user = auth_module.current_user(request)
+    if not user:
+        raise HTTPException(401, "Authentication required.")
+    project, _ = access_module.resolve_access(user, project_slug, auth_module._conn)
+    if project is None:
+        raise HTTPException(403, "You do not have access to that project.")
+    row = q1("""SELECT name, slug, title, welcome
+                FROM knowledge_chat_destinations
+                WHERE project_id = %s AND slug = %s AND status = 'live'""",
+             (project.project_id, destination_slug))
+    if not row:
+        raise HTTPException(404, "Knowledge chat destination not found.")
+    return {"name": row["name"], "slug": row["slug"], "title": row["title"],
+            "welcome": row["welcome"], "project": project_slug}
 
 
 # In the Lambda container the API also serves the compiled React application.

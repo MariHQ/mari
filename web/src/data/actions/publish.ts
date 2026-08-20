@@ -44,6 +44,13 @@ const UPDATE_SERVER = `mutation($id: Int!, $scope: String, $capabilities: JSON!)
 }`;
 const DELETE_SERVER = `mutation($id: Int!) { deleteMcpServer(id: $id) }`;
 const TEST_SERVER = `mutation($id: Int!) { testMcpServer(id: $id) }`;
+const CREATE_CHAT = `mutation($name: String!, $slug: String!, $title: String!, $welcome: String!) {
+  createKnowledgeChatDestination(name: $name, slug: $slug, title: $title, welcome: $welcome)
+}`;
+const UPDATE_CHAT = `mutation($id: Int!, $name: String!, $title: String!, $welcome: String!) {
+  updateKnowledgeChatDestination(id: $id, name: $name, title: $title, welcome: $welcome)
+}`;
+const DEPLOY_CHAT = `mutation($id: Int!) { deployKnowledgeChatDestination(id: $id) }`;
 
 type SiteRow = { id: number; name: string; status: string; theme: Record<string, unknown> | null };
 
@@ -115,6 +122,15 @@ export function publishActions({ navigate }: ActionContext): PublishActions {
       const row = cur && typeof cur === "object" ? { ...(cur as Record<string, unknown>) } : {};
       await mutate(UPDATE_SETTING, { key: "deploy", value: { ...row, bucket, region } });
     },
+    openKnowledgeChat: (id) => navigate(`/publish?tab=chat&chat=${id}`),
+    createKnowledgeChat: async (args) => {
+      const data = await mutate(CREATE_CHAT, args);
+      const id = data?.createKnowledgeChatDestination;
+      if (typeof id !== "number" || id <= 0) throw new Error("The knowledge chat could not be created.");
+      navigate(`/publish?tab=chat&chat=${id}`);
+    },
+    updateKnowledgeChat: async (id, args) => { await mutate(UPDATE_CHAT, { id, ...args }); },
+    deployKnowledgeChat: async (id) => { await mutate(DEPLOY_CHAT, { id }); },
 
     /* ── MCP servers ──────────────────────────────────────────────────────*/
     createServer: async ({ name, scope, capabilities }) => {

@@ -10,6 +10,7 @@ import { SEARCH_SCOPES, globalSearch } from "./data/search";
 import { ACTION_FACTORIES } from "./data/actions";
 import { AuthProvider, useAuth } from "./lib/auth";
 import { AgentDock } from "./components/AgentDock";
+import { KnowledgeChatDestination } from "./components/KnowledgeChatDestination";
 import { useIsMobile } from "./lib/mobile";
 
 /* The whole console, routed off the component library's own page registry.
@@ -163,6 +164,7 @@ function Routed() {
     <NavProvider navigate={navigate}>
       <RouteFocus />
       <Routes>
+          <Route path="/knowledge-chat/:project/:slug" element={<Gate><KnowledgeChatDestination /></Gate>} />
           {ROUTES.map(({ page, Element }) => (
             <Route
               key={page.id}
@@ -181,9 +183,14 @@ function Routed() {
           changes — which is the point: the agent's navigate events move the
           SPA underneath it while the conversation stays open. Renders nothing
           until there is a session. */}
-      <AgentDock />
+      <RouteAgentDock />
     </NavProvider>
   );
+}
+
+function RouteAgentDock() {
+  const { pathname } = useLocation();
+  return pathname.startsWith("/knowledge-chat/") ? null : <AgentDock />;
 }
 
 /** Move keyboard/screen-reader context after an SPA page navigation. Skip the

@@ -558,6 +558,17 @@ class Site:
 
 
 @strawberry.type
+class KnowledgeChatDestination:
+    id: int
+    name: str
+    slug: str
+    title: str
+    welcome: str
+    status: str
+    url: str
+
+
+@strawberry.type
 class Release:
     id: int
     site_id: int

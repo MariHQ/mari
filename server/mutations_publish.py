@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import hashlib
 import os
+import re
 import time
 import threading
 from functools import wraps
@@ -224,6 +225,66 @@ class MutPublish:
         return True
 
     # ——— publishing ———
+    @strawberry.mutation
+    def create_knowledge_chat_destination(
+        self, info: strawberry.Info, name: str, slug: str, title: str, welcome: str = ""
+    ) -> int:
+        _require_admin(info)
+        project = info.context.get("access")
+        if project is None:
+            raise PermissionError("Choose a project.")
+        name, slug, title, welcome = (name or "").strip(), (slug or "").strip().lower(), (title or "").strip(), (welcome or "").strip()
+        if not name or not title:
+            raise ValueError("A knowledge chat needs a name and assistant title.")
+        if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", slug):
+            raise ValueError("URL slug must contain lowercase letters, numbers, and single hyphens.")
+        if q1("SELECT id FROM knowledge_chat_destinations WHERE project_id = %s AND (name = %s OR slug = %s)",
+              (project.project_id, name, slug)):
+            raise ValueError("A knowledge chat with that name or URL slug already exists.")
+        row = q1("""INSERT INTO knowledge_chat_destinations
+                    (project_id, name, slug, title, welcome)
+                    VALUES (%s, %s, %s, %s, %s) RETURNING id""",
+                 (project.project_id, name, slug, title, welcome))
+        audit("created knowledge chat", name)
+        return int(row["id"])
+
+    @strawberry.mutation
+    def update_knowledge_chat_destination(
+        self, info: strawberry.Info, id: int, name: str, title: str, welcome: str
+    ) -> bool:
+        _require_admin(info)
+        project = info.context.get("access")
+        if project is None:
+            raise PermissionError("Choose a project.")
+        name, title, welcome = (name or "").strip(), (title or "").strip(), (welcome or "").strip()
+        if not name or not title:
+            raise ValueError("A knowledge chat needs a name and assistant title.")
+        row = q1("SELECT name FROM knowledge_chat_destinations WHERE project_id = %s AND id = %s",
+                 (project.project_id, id))
+        if not row:
+            return False
+        exec_("""UPDATE knowledge_chat_destinations SET name = %s, title = %s,
+                 welcome = %s, updated_at = now() WHERE project_id = %s AND id = %s""",
+              (name, title, welcome, project.project_id, id))
+        audit("updated knowledge chat", name)
+        return True
+
+    @strawberry.mutation
+    def deploy_knowledge_chat_destination(self, info: strawberry.Info, id: int) -> str:
+        _require_admin(info)
+        project = info.context.get("access")
+        if project is None:
+            raise PermissionError("Choose a project.")
+        row = q1("""SELECT d.name, d.slug, p.slug AS project_slug
+                    FROM knowledge_chat_destinations d JOIN projects p ON p.id = d.project_id
+                    WHERE d.project_id = %s AND d.id = %s""", (project.project_id, id))
+        if not row:
+            raise ValueError("Knowledge chat not found in this project.")
+        exec_("""UPDATE knowledge_chat_destinations SET status = 'live', updated_at = now()
+                 WHERE project_id = %s AND id = %s""", (project.project_id, id))
+        audit("deployed knowledge chat", row["name"])
+        return f"/knowledge-chat/{row['project_slug']}/{row['slug']}"
+
     @staticmethod
     @_locked_site
     def _do_build(id: int, generator: str | None) -> dict:

@@ -285,6 +285,16 @@ The `JSON` scalar type represents JSON values as specified by [ECMA-404](https:/
 """
 scalar JSON @specifiedBy(url: "https://ecma-international.org/wp-content/uploads/ECMA-404_2nd_edition_december_2017.pdf")
 
+type KnowledgeChatDestination {
+  id: Int!
+  name: String!
+  slug: String!
+  title: String!
+  welcome: String!
+  status: String!
+  url: String!
+}
+
 type LineageEdge {
   id: Int!
   fromId: String!
@@ -397,6 +407,9 @@ type Mutation {
   deleteWorkflow(id: Int!): Boolean!
   setWorkflowStatus(id: Int!, status: String!): Boolean!
   setWorkflowPinned(id: Int!, pinned: Boolean!): Boolean!
+  createKnowledgeChatDestination(name: String!, slug: String!, title: String!, welcome: String! = ""): Int!
+  updateKnowledgeChatDestination(id: Int!, name: String!, title: String!, welcome: String!): Boolean!
+  deployKnowledgeChatDestination(id: Int!): String!
   buildSite(id: Int!, generator: String = null): String!
   buildSiteEx(id: Int!, generator: String = null): JSON!
   aiCustomizeSite(id: Int!, instruction: String!): JSON!
@@ -503,6 +516,7 @@ type Query {
   workflowRuns(workflowId: Int = null): [WorkflowRun!]!
   workflowRun(id: Int!): WorkflowRun
   sites: [Site!]!
+  knowledgeChatDestinations: [KnowledgeChatDestination!]!
   releases(siteId: Int = null): [Release!]!
   notifications: [Notification!]!
   workspace: Workspace!

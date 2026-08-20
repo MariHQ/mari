@@ -1115,6 +1115,21 @@ ALTER TABLE workflows ADD COLUMN IF NOT EXISTS project_id int REFERENCES project
 ALTER TABLE workflow_runs ADD COLUMN IF NOT EXISTS project_id int REFERENCES projects(id);
 ALTER TABLE sites ADD COLUMN IF NOT EXISTS project_id int REFERENCES projects(id);
 ALTER TABLE releases ADD COLUMN IF NOT EXISTS project_id int REFERENCES projects(id);
+CREATE TABLE IF NOT EXISTS knowledge_chat_destinations (
+  id              serial PRIMARY KEY,
+  project_id      int NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  name            text NOT NULL,
+  slug            text NOT NULL,
+  title           text NOT NULL,
+  welcome         text NOT NULL DEFAULT '',
+  status          text NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'live')),
+  created_at      timestamptz NOT NULL DEFAULT now(),
+  updated_at      timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (project_id, name),
+  UNIQUE (project_id, slug)
+);
+CREATE INDEX IF NOT EXISTS knowledge_chat_destinations_project_idx
+  ON knowledge_chat_destinations (project_id, id);
 ALTER TABLE digest_topics ADD COLUMN IF NOT EXISTS project_id int REFERENCES projects(id);
 ALTER TABLE graph_views ADD COLUMN IF NOT EXISTS project_id int REFERENCES projects(id);
 ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS project_id int REFERENCES projects(id);

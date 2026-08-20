@@ -91,6 +91,7 @@ function initialData() {
     sites: [{ id: 1, name: "Acme Docs", domain: "docs.example.test", status: "live", theme: { theme: "Mari Editorial", accent: "#b04e2c" }, sources: ["canonical"], nav: [{ label: "Guides", docs: 1 }], gates: [{ gate: "Fact check", status: "pass" }], docs: 1, warnings: 0 }],
     releases: [{ id: 1, siteId: 1, version: "v1.0.0", status: "live", deployed: "Aug 19", docs: 1, notes: "Published" }],
     mcpServers: [{ id: 1, name: "support-kb", url: "http://localhost:8000/mcp/support-kb", scope: "workspace", status: "connected", tools: 2, config: { capabilities: ["search", "facts"] } }],
+    knowledgeChatDestinations: [],
     siteThemePresets: [{ key: "editorial", name: "Mari Editorial", accent: "#b04e2c", bg: "#faf7f2" }],
     siteFeatures: [{ key: "search", label: "Search", hint: "Client-side index", on: true }],
     settings: [
@@ -216,6 +217,19 @@ export async function installMockApi(page: Page, options: {
       data = { createMcpServer: "mari_mcp_browser_test" };
     } else if (/testMcpServer/.test(query)) {
       data = { testMcpServer: { ok: true, latency_ms: 7, checks: { search: 1, facts: 2 } } };
+    } else if (/createKnowledgeChatDestination/.test(query)) {
+      const id = 7;
+      state.knowledgeChatDestinations.push({ id, name: variables.name, slug: variables.slug, title: variables.title,
+        welcome: variables.welcome, status: "draft", url: `/knowledge-chat/default/${variables.slug}` });
+      data = { createKnowledgeChatDestination: id };
+    } else if (/updateKnowledgeChatDestination/.test(query)) {
+      const chat = state.knowledgeChatDestinations.find((row: any) => row.id === variables.id);
+      if (chat) Object.assign(chat, { name: variables.name, title: variables.title, welcome: variables.welcome });
+      data = { updateKnowledgeChatDestination: true };
+    } else if (/deployKnowledgeChatDestination/.test(query)) {
+      const chat = state.knowledgeChatDestinations.find((row: any) => row.id === variables.id);
+      if (chat) chat.status = "live";
+      data = { deployKnowledgeChatDestination: chat?.url ?? "" };
     } else if (/deleteMcpServer/.test(query)) {
       data = { deleteMcpServer: true };
     } else if (/updateMcpServer/.test(query)) {
@@ -250,6 +264,16 @@ export async function installMockApi(page: Page, options: {
   await page.route("**/connectors/validate", async (route) => {
     const body = route.request().postDataJSON(); restCalls.push({ path: "/connectors/validate", body });
     await route.fulfill({ json: { ok: true, error: "" } });
+  });
+  await page.route("**/knowledge-chat-api/*/*", async (route) => {
+    restCalls.push({ path: new URL(route.request().url()).pathname, body: null });
+    await route.fulfill({ json: { name: "Company knowledge", title: "Ask Acme", welcome: "Ask about company policy.", project: "default" } });
+  });
+  await page.route("**/chat", async (route) => {
+    const body = route.request().postDataJSON(); restCalls.push({ path: "/chat", body });
+    await route.fulfill({ status: 200, contentType: "text/event-stream", body:
+      'event: meta\ndata: {"session_id":41,"sources":[{"n":1,"source":"github","title":"Retention runbook","meta":"Canonical policy","document_id":1,"href":"/knowledge/doc?id=1"}]}\n\n' +
+      'data: {"token":"Retention is 30 days [1]."}\n\nevent: done\ndata: {}\n\n' });
   });
   await page.route("**/connectors/connect", async (route) => {
     const body = route.request().postDataJSON(); restCalls.push({ path: "/connectors/connect", body });

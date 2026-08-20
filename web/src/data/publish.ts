@@ -17,7 +17,7 @@ import { useSearchParams } from "react-router-dom";
 
 import type {
   DocSite, McpCreated, McpDraft, NavSection, PublishData, PublishGate,
-  PublishSection, SiteFeature, SiteRelease, SiteSummary, SiteTheme,
+  PublishSection, SiteFeature, SiteRelease, SiteSummary, SiteTheme, KnowledgeChatDestination,
 } from "@mari-design/components/pages/PublishPage";
 import type { McpServer } from "@mari-design/components/features/PublishMcpServers";
 import { useQuery } from "../lib/api";
@@ -30,6 +30,7 @@ const QUERY = `{
   sites { id name domain status theme sources nav gates docs warnings }
   releases { id siteId version status deployed docs notes }
   mcpServers { id name url scope status tools config }
+  knowledgeChatDestinations { id name slug title welcome status url }
   siteThemePresets { key name accent bg }
   settings { key value }
   tagDefs { tag }
@@ -59,6 +60,7 @@ type Res = BotsStatusResponse & {
     id: number; name: string; url: string; scope: string; status: string;
     tools: number; config: { capabilities?: string[] } | null;
   }[];
+  knowledgeChatDestinations: KnowledgeChatDestination[];
   siteThemePresets: { key: string; name: string; accent: string; bg: string }[];
   settings: { key: string; value: unknown }[];
   tagDefs: { tag: string }[];
@@ -173,6 +175,7 @@ export const EMPTY: PublishData = {
   view: "site-list", editorTab: "content", phase: "draft",
   sites: [], tagOptions: [], site: null, servers: [], serverCount: 0,
   draft: NO_DRAFT, created: NO_CREATED,
+  chats: [], selectedChatId: null,
   slack: EMPTY_BOTS.slack, github: EMPTY_BOTS.github,
 };
 
@@ -181,12 +184,12 @@ export const EMPTY: PublishData = {
  *  which renders the switch list as the empty block it is at that moment. */
 export function buildPublish(
   res: Res | null, siteId: number | null = null, creating = false, features: SiteFeature[] = [],
-  section: PublishSection = "sites",
+  section: PublishSection = "sites", selectedChatId: number | null = null,
 ): PublishData {
   /* `?tab=mcp` is the MCP half whatever else the route says, so the tab the
      reader clicked is the tab a reload comes back to. */
   const opening = (site: DocSite | null): PublishData["view"] =>
-    section === "bots" ? "bots" : section === "mcp" ? "mcp-list"
+    section === "bots" ? "bots" : section === "chat" ? "chat" : section === "mcp" ? "mcp-list"
       : site ? "site-editor" : creating ? "site-new" : "site-list";
   if (!res) return { ...EMPTY, view: opening(null) };
   const servers = mapServers(res);
@@ -212,6 +215,8 @@ export function buildPublish(
     serverCount: servers.length,
     draft: NO_DRAFT,
     created: NO_CREATED,
+    chats: (res.knowledgeChatDestinations ?? []).map((row) => ({ ...row, status: row.status === "live" ? "live" : "draft" })),
+    selectedChatId,
     slack: bots.slack,
     github: bots.github,
   };
@@ -227,7 +232,9 @@ export function usePublish(): PageData<PublishData> {
   // Which top-level tab the reader is on. Anything but the MCP half is the
   // doc sites half, which is also what a URL with no `tab` at all means.
   const tab = params.get("tab");
-  const section: PublishSection = tab === "mcp" || tab === "bots" ? tab : "sites";
+  const section: PublishSection = tab === "mcp" || tab === "chat" || tab === "bots" ? tab : "sites";
+  const chat = Number(params.get("chat"));
+  const selectedChatId = Number.isInteger(chat) && chat > 0 ? chat : null;
   const q = useQuery<Res>(QUERY, { map: (d: Res) => d });
 
 /* The route names the subject; the query behind it takes no variables, so
@@ -261,8 +268,8 @@ export function usePublish(): PageData<PublishData> {
      render. `f.data ?? []` is also a new empty array per render, which is the
      same trap on a site whose feature list is genuinely empty. */
   const data = useMemo(
-    () => buildPublish(q.data, askedId, creating, f.data ?? [], section),
-    [q.data, askedId, creating, f.data, section],
+    () => buildPublish(q.data, askedId, creating, f.data ?? [], section, selectedChatId),
+    [q.data, askedId, creating, f.data, section, selectedChatId],
   );
   return {
     data,
