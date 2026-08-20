@@ -673,6 +673,26 @@ def _mask_setting(key: str, value):
     return out
 
 
+def _effective_model_setting(key: str, value):
+    """Overlay deployment-owned model selection on the editable workspace row.
+
+    The runtime already gives environment/TOML configuration precedence over
+    database settings. Returning the raw row made Settings claim Ollama was
+    active while the process was actually using a gateway and local Sentence
+    Transformers. The console must describe the process that will answer the
+    next request, not the seed values left in PostgreSQL.
+    """
+    if key not in {"llm", "embedding"}:
+        return value
+    out = dict(value) if isinstance(value, dict) else {}
+    provider, model = llm.generation_model() if key == "llm" else llm.embedding_model()
+    if provider and model:
+        out.update({"provider": provider, "model": model})
+    if key == "llm" and provider == "gateway":
+        out["gateway"] = llm.gateway_config()
+    return out
+
+
 # ————————————————— Query —————————————————
 
 
@@ -1549,7 +1569,8 @@ class Query:
 
     @strawberry.field
     def settings(self) -> list[Setting]:
-        return [Setting(key=r["key"], value=_mask_setting(r["key"], jload(r["value"])))
+        return [Setting(key=r["key"], value=_mask_setting(
+                    r["key"], _effective_model_setting(r["key"], jload(r["value"]))))
                 for r in q("SELECT * FROM settings ORDER BY key")]
 
     @strawberry.field
