@@ -13,7 +13,8 @@ import numpy as np
 from mari_server.domain import access
 from mari_server.integrations import llm
 from mari_server.integrations import vector_index as retrieval
-from mari_server.repositories.database import jload, q, q1
+from mari_server.repositories.database import jload
+from mari_server.repositories import search as search_store
 
 # ————————————————— hybrid search ranking constants —————————————————
 
@@ -221,17 +222,8 @@ def hybrid_count(query: str) -> int:
     ctx = access.require_current_access()
     if ctx.principal_type == "slack":
         return ranked_count
-    if not query.strip():
-        row = q1("SELECT count(*) AS n FROM documents WHERE project_id = %s", (ctx.project_id,))
-    else:
-        patterns = keyword_patterns(query)
-        row = q1("""SELECT count(*) AS n FROM documents
-                    WHERE project_id = %s
-                      AND EXISTS (SELECT 1 FROM unnest(%s::text[]) AS needle
-                                  WHERE title ILIKE needle OR snippet ILIKE needle
-                                     OR body ILIKE needle)""",
-                 (ctx.project_id, patterns))
-    return max(ranked_count, int((row or {}).get("n") or 0))
+    patterns = keyword_patterns(query) if query.strip() else None
+    return max(ranked_count, search_store.document_count(ctx.project_id, patterns))
 
 
 # MUVERA/PolarQuant replaces the pgvector ANN half of the old CTE above. The
@@ -290,35 +282,9 @@ def _rank_hybrid(query: str) -> list[dict]:
             return hit[1]
 
     patterns = keyword_patterns(query)
-    if query.strip():
-        keyword_rows = q("""
-          SELECT d.id, d.source, d.title, d.snippet, d.body, d.author, d.author_initials,
-                 d.updated_src, d.kind, d.acl_visibility, d.acl_principals,
-                 array_remove(array_agg(t.tag), NULL) AS tags,
-                 coalesce(max(td.search_weight), 1.0) AS boost
-            FROM documents d
-            LEFT JOIN tags t ON t.document_id = d.id AND t.project_id = d.project_id
-            LEFT JOIN tag_definitions td ON td.tag = t.tag
-           WHERE d.project_id = %s
-             AND EXISTS (SELECT 1 FROM unnest(%s::text[]) AS needle
-                         WHERE d.title ILIKE needle OR d.snippet ILIKE needle
-                            OR d.body ILIKE needle)
-           GROUP BY d.id
-           ORDER BY d.updated_src DESC NULLS LAST, d.id DESC
-           LIMIT %s""", (project_id, patterns, MAX_K * 2))
-    else:
-        keyword_rows = q("""
-          SELECT d.id, d.source, d.title, d.snippet, d.body, d.author, d.author_initials,
-                 d.updated_src, d.kind, d.acl_visibility, d.acl_principals,
-                 array_remove(array_agg(t.tag), NULL) AS tags,
-                 coalesce(max(td.search_weight), 1.0) AS boost
-            FROM documents d
-            LEFT JOIN tags t ON t.document_id = d.id AND t.project_id = d.project_id
-            LEFT JOIN tag_definitions td ON td.tag = t.tag
-           WHERE d.project_id = %s
-           GROUP BY d.id
-           ORDER BY d.updated_src DESC NULLS LAST, d.id DESC
-           LIMIT %s""", (project_id, MAX_K * 2))
+    keyword_rows = search_store.keyword_candidates(
+        project_id, patterns if query.strip() else None, MAX_K * 2,
+    )
 
     semantic: dict[int, float] = {}
     vec = query_vector(query) if query.strip() else None
@@ -335,15 +301,7 @@ def _rank_hybrid(query: str) -> list[dict]:
     missing = [doc_id for doc_id, score in semantic.items()
                if score > SIM_FLOOR and doc_id not in rows_by_id]
     if missing:
-        for row in q("""
-          SELECT d.id, d.source, d.title, d.snippet, d.body, d.author, d.author_initials,
-                 d.updated_src, d.kind, d.acl_visibility, d.acl_principals,
-                 array_remove(array_agg(t.tag), NULL) AS tags,
-                 coalesce(max(td.search_weight), 1.0) AS boost
-            FROM documents d
-            LEFT JOIN tags t ON t.document_id = d.id AND t.project_id = d.project_id
-            LEFT JOIN tag_definitions td ON td.tag = t.tag
-           WHERE d.project_id = %s AND d.id = ANY(%s) GROUP BY d.id""", (project_id, missing)):
+        for row in search_store.documents_by_id(project_id, missing):
             rows_by_id[int(row["id"])] = row
 
     terms = [word for word in re.findall(r"[a-z0-9][a-z0-9_-]*", query.lower()) if len(word) > 1]
