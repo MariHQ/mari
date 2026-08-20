@@ -29,7 +29,7 @@ import links
 import llm
 import retrieval
 import access
-from excerpt import excerpt
+from mari_server.infrastructure import document_repository
 
 DB_URL_REF: dict = {"url": "postgresql://localhost/mari_cloud"}
 
@@ -123,28 +123,18 @@ def _upsert_document(conn, source_id: int, external_id: str, title: str, body: s
     """Upsert one document. Returns (doc_id, inserted) — inserted is True for a
     brand-new row, False for an update (xmax = 0 only on fresh inserts).
     `source`/`initials` default to github; connect_sync passes the provider key."""
-    snippet = excerpt(body, title)
     project_id = access.require_current_access().project_id
-    row = conn.execute("""
-        INSERT INTO documents (project_id, source, external_id, title, snippet, body, author, author_initials,
-                               kind, updated_src, created_src, content_hash, source_path, source_id,
-                               acl_visibility, acl_principals)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_DATE, CURRENT_DATE, %s, %s, %s, %s, %s)
-        ON CONFLICT (project_id, source, external_id) DO UPDATE SET
-          title = EXCLUDED.title, snippet = EXCLUDED.snippet, body = EXCLUDED.body,
-          author = EXCLUDED.author, kind = EXCLUDED.kind, updated_src = CURRENT_DATE,
-          content_hash = EXCLUDED.content_hash, source_path = EXCLUDED.source_path,
-          source_id = EXCLUDED.source_id, acl_visibility = EXCLUDED.acl_visibility,
-          acl_principals = EXCLUDED.acl_principals
-        RETURNING id, (xmax = 0) AS inserted""",
-        (project_id, source, external_id, title, snippet, body, author, initials, kind,
-         content_hash, source_path, source_id, acl_visibility, json.dumps(list(acl_principals)))
-    ).fetchone()
+    doc_id, inserted = document_repository.upsert(
+        conn, source_id=source_id, external_id=external_id, title=title, body=body,
+        source_path=source_path, kind=kind, revision=content_hash, author=author,
+        source=source, initials=initials, acl_visibility=acl_visibility,
+        acl_principals=acl_principals,
+    )
     conn.commit()
     # Import lazily: queries imports ingest for status resolvers.
     from queries import invalidate_search
     invalidate_search(project_id)
-    return row["id"], bool(row["inserted"])
+    return doc_id, inserted
 
 
 def _sync_chunks(conn, doc_id: int, title: str, body: str,
@@ -194,11 +184,7 @@ def _sync_chunks(conn, doc_id: int, title: str, body: str,
 def _delete_documents(conn, doc_ids: list[int]) -> None:
     if not doc_ids:
         return
-    for table, col in (("tags", "document_id"), ("findings", "document_id"), ("changes", "document_id"),
-                       ("watches", "document_id")):
-        conn.execute(f"DELETE FROM {table} WHERE {col} = ANY(%s)", (doc_ids,))
-    conn.execute("DELETE FROM edges WHERE from_doc = ANY(%s) OR to_doc = ANY(%s)", (doc_ids, doc_ids))
-    conn.execute("DELETE FROM documents WHERE id = ANY(%s)", (doc_ids,))
+    document_repository.delete(conn, doc_ids)
     conn.commit()
     from queries import invalidate_search
     invalidate_search(access.require_current_access().project_id)

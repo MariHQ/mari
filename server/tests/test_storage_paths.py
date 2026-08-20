@@ -4,15 +4,15 @@ import pathlib
 import unittest
 
 import config
-import iceberg
 import retrieval
+from mari_server.infrastructure import iceberg_warehouse
 
 
 class StoragePathTests(unittest.TestCase):
     def test_default_runtime_paths_never_use_dot_mari(self) -> None:
         paths = [
             str(config._DEFAULTS["sentence_transformers"]["cache_dir"]),
-            str(iceberg._default_root()),
+            str(iceberg_warehouse._default_root()),
             str(retrieval.DerivedVectorIndex().path),
         ]
         for path in paths:

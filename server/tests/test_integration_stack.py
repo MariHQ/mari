@@ -14,10 +14,11 @@ class IntegrationStackTests(unittest.TestCase):
         import numpy as np
 
         import access
-        import iceberg
         import llm
         import retrieval
         import schema_migrations
+        from mari_server.infrastructure.document_store import IcebergDocumentStore, KnowledgeVersion
+        from mari_server.infrastructure.iceberg_warehouse import warehouse
         from db import q1
 
         context = access.AccessContext(
@@ -44,8 +45,12 @@ class IntegrationStackTests(unittest.TestCase):
             retrieval.index_for(1).build(
                 {int(document["id"]): matrix}, {int(document["id"]): "ci"},
             )
+            IcebergDocumentStore().append(KnowledgeVersion(
+                project_id=1, source_id="integration", external_id="retention-runbook",
+                revision="ci-1", title="Retention runbook", body="Retention policy",
+            ))
 
-        self.assertIn("mutation_journal", iceberg.warehouse().table_names())
+        self.assertEqual(warehouse().table_names(), ["knowledge_versions"])
         self.assertEqual(schema_migrations.migrate(), [])
         migration = q1("SELECT version, checksum FROM schema_migrations WHERE version = %s", ("0001_baseline",))
         self.assertEqual(migration["version"], "0001_baseline")

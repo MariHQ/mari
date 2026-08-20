@@ -10,7 +10,6 @@ from __future__ import annotations
 import atexit
 import json
 import os
-import threading
 import typing as t
 
 import psycopg
@@ -23,7 +22,7 @@ import flowengine
 import ingest
 import repoaudit
 import observability
-from audit_log import AuditEvent, IcebergAuditTrail
+from mari_server.domain.audit import AuditEvent, chained_row
 
 DB_URL = os.environ.get("MARI_DB", "postgresql://localhost/mari_cloud")
 flowengine.DB_URL_REF["url"] = DB_URL
@@ -113,18 +112,6 @@ def pexec(sql: str, args: tuple = ()) -> None:
     exec_(sql, (project_id(), *args))
 
 
-_AUDIT_TRAIL: IcebergAuditTrail | None = None
-_AUDIT_LOCK = threading.Lock()
-
-
-def _audit_trail() -> IcebergAuditTrail:
-    global _AUDIT_TRAIL
-    with _AUDIT_LOCK:
-        if _AUDIT_TRAIL is None:
-            _AUDIT_TRAIL = IcebergAuditTrail()
-        return _AUDIT_TRAIL
-
-
 def audit(verb: str, target: str, actor: str | None = None,
           detail: t.Sequence[tuple[str, t.Any]] | None = None, *,
           resource_type: str = "record", resource_id: str = "",
@@ -142,9 +129,7 @@ def audit(verb: str, target: str, actor: str | None = None,
     request_id, correlation_id = observability.request_context()
     current_user = auth_module.caller() or {}
     project = scope.project_id if scope else 0
-    # Iceberg is the canonical append-only audit record. The SQL row remains a
-    # query-optimized UI projection during the storage migration.
-    _audit_trail().append(AuditEvent(
+    event = AuditEvent(
         project_id=project,
         actor_type=scope.principal_type if scope else "service",
         actor_id=scope.principal_id if scope else str(current_user.get("id") or "mari"),
@@ -152,9 +137,37 @@ def audit(verb: str, target: str, actor: str | None = None,
         resource_id=resource_id or target, outcome=outcome, reason=reason,
         request_id=request_id, correlation_id=correlation_id,
         detail={row["label"]: row["value"] for row in rows},
-    ))
-    exec_("INSERT INTO events (project_id, actor, verb, target, detail) VALUES (%s, %s, %s, %s, %s)",
-          (project or None, actor, verb, target, json.dumps(rows)))
+    )
+
+    def append(conn):
+        # Serialize only this project's chain. The canonical row and the UI
+        # projection commit together in Postgres.
+        conn.execute("SELECT pg_advisory_xact_lock(%s)", (8_041_700_000 + project,))
+        prior = conn.execute(
+            """SELECT event_hash FROM audit_events WHERE project_id = %s
+                 ORDER BY occurred_at DESC, event_id DESC LIMIT 1""", (project,),
+        ).fetchone()
+        chained = chained_row(event, str(prior["event_hash"]) if prior else "")
+        conn.execute(
+            """INSERT INTO audit_events
+               (event_id, occurred_at, project_id, actor_type, actor_id, actor_name,
+                action, resource_type, resource_id, outcome, reason, request_id,
+                correlation_id, detail_json, previous_hash, event_hash)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                       %s::jsonb, %s, %s)""",
+            tuple(chained[key] for key in (
+                "event_id", "occurred_at", "project_id", "actor_type", "actor_id",
+                "actor_name", "action", "resource_type", "resource_id", "outcome",
+                "reason", "request_id", "correlation_id", "detail_json",
+                "previous_hash", "event_hash",
+            )),
+        )
+        conn.execute(
+            "INSERT INTO events (project_id, actor, verb, target, detail) VALUES (%s, %s, %s, %s, %s)",
+            (project or None, actor, verb, target, json.dumps(rows)),
+        )
+
+    transaction(append)
 
 
 def log_usage(kind: str, detail: str = "") -> None:

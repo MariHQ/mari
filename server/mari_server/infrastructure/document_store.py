@@ -16,8 +16,9 @@ import uuid
 from dataclasses import dataclass, field
 
 import pyarrow as pa
+from pyiceberg.expressions import EqualTo
 
-from iceberg import IcebergWarehouse, warehouse
+from mari_server.infrastructure.iceberg_warehouse import IcebergWarehouse, warehouse
 
 
 TABLE = "mari.knowledge_versions"
@@ -70,7 +71,7 @@ class KnowledgeVersion:
             raise ValueError("recorded_at must be timezone-aware")
 
 
-class KnowledgeStore:
+class IcebergDocumentStore:
     def __init__(self, store: IcebergWarehouse | None = None):
         self.store = store or warehouse()
         self._lock = threading.RLock()
@@ -79,8 +80,15 @@ class KnowledgeStore:
         except Exception:
             self.store.catalog.create_table(TABLE, schema=SCHEMA)
 
-    def _rows(self) -> list[dict[str, t.Any]]:
-        return self.store.catalog.load_table(TABLE).scan().to_arrow().to_pylist()
+    def _rows(self, *, key: str | None = None, project_id: int | None = None) -> list[dict[str, t.Any]]:
+        table = self.store.catalog.load_table(TABLE)
+        if key is not None:
+            scan = table.scan(row_filter=EqualTo("document_key", key))
+        elif project_id is not None:
+            scan = table.scan(row_filter=EqualTo("project_id", project_id))
+        else:
+            scan = table.scan()
+        return scan.to_arrow().to_pylist()
 
     @staticmethod
     def _latest(rows: list[dict[str, t.Any]]) -> dict[str, dict[str, t.Any]]:
@@ -96,7 +104,7 @@ class KnowledgeStore:
         content_hash = hashlib.sha256(version.body.encode()).hexdigest()
         acl_json = json.dumps(version.acl, sort_keys=True, separators=(",", ":"))
         with self._lock:
-            latest = self._latest(self._rows()).get(key)
+            latest = self._latest(self._rows(key=key)).get(key)
             # Replayed connector pages are idempotent. ACL and lifecycle changes
             # remain versions even when source content did not change.
             if latest and all((
@@ -145,15 +153,16 @@ class KnowledgeStore:
 
     def get(self, project_id: int, source_id: str, external_id: str,
             *, include_deleted: bool = False) -> dict[str, t.Any] | None:
-        row = self._latest(self._rows()).get(document_key(project_id, source_id, external_id))
+        key = document_key(project_id, source_id, external_id)
+        row = self._latest(self._rows(key=key)).get(key)
         return row if row and (include_deleted or row["status"] != "deleted") else None
 
     def current(self, project_id: int, *, include_archived: bool = False) -> list[dict[str, t.Any]]:
-        rows = [row for row in self._latest(self._rows()).values() if row["project_id"] == project_id]
+        rows = list(self._latest(self._rows(project_id=project_id)).values())
         allowed = {"active", "archived"} if include_archived else {"active"}
         return sorted((row for row in rows if row["status"] in allowed), key=lambda row: row["title"].lower())
 
     def history(self, project_id: int, source_id: str, external_id: str) -> list[dict[str, t.Any]]:
         key = document_key(project_id, source_id, external_id)
-        rows = [row for row in self._rows() if row["document_key"] == key and row["project_id"] == project_id]
+        rows = [row for row in self._rows(key=key) if row["project_id"] == project_id]
         return sorted(rows, key=lambda row: (row["recorded_at"], row["version_id"]))
