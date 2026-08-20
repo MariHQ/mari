@@ -15,22 +15,18 @@ from __future__ import annotations
 import concurrent.futures as cf
 import time
 
-import psycopg
 from fastapi import APIRouter, File, HTTPException, UploadFile
-from psycopg.rows import dict_row
 from pydantic import BaseModel
 
 from mari_server.integrations import llm
-from mari_server.api import access
 from mari_components import KnowledgeDocument
 from mari_components.knowledge import harvest_glossary as component_harvest_glossary
 # Reuse the real GitHub ingestion pipeline pieces (chunk + content-hash + embed +
 # mean-pooled doc embedding). ingest._upsert_document is github-specific
 # (hardcodes source='github'), so the document upsert lives here instead.
-from mari_server.integrations.document_index import chunk_settings, content_hash, sync_chunks, title_of
+from mari_server.integrations.document_index import chunk_settings, sync_chunks, title_of
 
-from mari_server import db as postgres
-from mari_server.services.excerpt import excerpt
+from mari_server.repositories import onboarding as onboarding_store
 
 router = APIRouter(prefix="/onboard")
 
@@ -41,7 +37,7 @@ ACTOR = "Upload"
 
 
 def _conn():
-    return postgres.connect()
+    return onboarding_store.connection()
 
 
 # ————————————————— 1. file upload ingestion —————————————————
@@ -49,32 +45,12 @@ def _conn():
 
 def _upload_source(conn) -> int:
     """Create or reuse the single 'upload' source (sources.provider is UNIQUE)."""
-    row = conn.execute("""
-        INSERT INTO sources (project_id, provider, display_name, kind, stat_unit, status, health)
-        VALUES (%s, 'upload', 'Uploads', 'upload', 'docs', 'active', 'Healthy')
-        ON CONFLICT (project_id, provider) DO UPDATE SET kind = 'upload', display_name = 'Uploads'
-        RETURNING id""", (access.require_current_access().project_id,)).fetchone()
-    conn.commit()
-    return row["id"]
+    return onboarding_store.upload_source(conn)
 
 
 def _upsert_upload_document(conn, source_id: int, filename: str, text: str) -> int:
     """Same shape as ingest._upsert_document, with source='upload'."""
-    title = title_of(text, filename)
-    snippet = excerpt(text, title)
-    row = conn.execute("""
-        INSERT INTO documents (project_id, source, external_id, title, snippet, body, author, author_initials,
-                               kind, updated_src, created_src, content_hash, source_path, source_id)
-        VALUES (%s, 'upload', %s, %s, %s, %s, %s, 'UP', 'page', CURRENT_DATE, CURRENT_DATE, %s, %s, %s)
-        ON CONFLICT (project_id, source, external_id) DO UPDATE SET
-          title = EXCLUDED.title, snippet = EXCLUDED.snippet, body = EXCLUDED.body,
-          updated_src = CURRENT_DATE, content_hash = EXCLUDED.content_hash,
-          source_path = EXCLUDED.source_path, source_id = EXCLUDED.source_id
-        RETURNING id""",
-        (access.require_current_access().project_id, f"upload:{filename}", title, snippet, text, ACTOR, content_hash(text),
-         f"upload/{filename}", source_id)).fetchone()
-    conn.commit()
-    return row["id"]
+    return onboarding_store.upsert_upload_document(conn, source_id, filename, text)
 
 
 @router.post("/upload")
@@ -125,23 +101,7 @@ async def upload(files: list[UploadFile] = File(...)):
             n, e = sync_chunks(conn, doc_id, title_of(text, name), text, max_tokens, overlap)
             results.append({"name": name, "docId": doc_id, "chunks": n, "embedded": e})
 
-        ok_files = [r for r in results if r.get("docId")]
-        doc_count = conn.execute("SELECT count(*) AS n FROM documents WHERE source_id = %s",
-                                 (source_id,)).fetchone()["n"]
-        conn.execute("""UPDATE sources SET last_sync_at = now(), docs_count = %s,
-                        stat_num = %s, stat_unit = 'docs' WHERE id = %s""",
-                     (doc_count, str(doc_count), source_id))
-        detail = (f"{len(ok_files)} file(s) ingested · "
-                  f"{sum(r['chunks'] for r in ok_files)} chunks · "
-                  f"{sum(r['embedded'] for r in ok_files)} embedded · "
-                  f"{sum(1 for r in ok_files if r['embedded'] == 0)} unchanged (hash skip)")
-        conn.execute("""INSERT INTO sync_events (provider, event, detail, at_label)
-                        VALUES ('upload', %s, %s,
-                                to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))""",
-                     (f"upload: {len(files)} file(s)", detail))
-        conn.execute("INSERT INTO events (actor, verb, target) VALUES (%s, %s, %s)",
-                     (ACTOR, f"uploaded {len(ok_files)} file(s)", "Uploads"))
-        conn.commit()
+        onboarding_store.finish_upload(conn, source_id, len(files), results)
     return {"ok": True, "sourceId": source_id, "files": results}
 
 
@@ -187,39 +147,11 @@ def _harvest_docs(source_id: int | None, limit: int) -> list[dict]:
     discarded (SQL-4). `degree` aggregates the edge table once, in a single pass
     over both endpoints, and joins in. A document nothing links to is absent
     from it and coalesces to 0 — the same answer count(*) gave it."""
-    where = "d.kind = 'page' AND d.body <> ''"
-    args: list = []
-    if source_id is not None:
-        where += " AND d.source_id = %s"
-        args.append(source_id)
-    args.append(limit)
-    with _conn() as conn:
-        return conn.execute(f"""
-            WITH degree AS (
-              SELECT doc, count(*) AS n FROM (
-                SELECT from_doc AS doc FROM edges
-                UNION ALL
-                SELECT to_doc AS doc FROM edges
-              ) x GROUP BY doc
-            )
-            SELECT d.id, d.title, d.body, coalesce(g.n, 0) AS degree
-            FROM documents d
-            LEFT JOIN degree g ON g.doc = d.id
-            WHERE {where}
-            ORDER BY degree DESC, d.updated_src DESC NULLS LAST, d.id DESC
-            LIMIT %s""", tuple(args)).fetchall()
+    return onboarding_store.harvest_documents(source_id, limit)
 
 
 def _existing_terms() -> set[str]:
-    with _conn() as conn:
-        rows = conn.execute("SELECT term, variants FROM glossary").fetchall()
-    seen: set[str] = set()
-    for r in rows:
-        seen.add(r["term"].strip().lower())
-        for v in (r["variants"] or "").split(","):
-            if v.strip():
-                seen.add(v.strip().lower())
-    return seen
+    return onboarding_store.existing_terms()
 
 
 def _llm_batch(docs: list[dict]) -> list[dict]:
