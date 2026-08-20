@@ -200,6 +200,11 @@ def require_project(request: Request) -> AccessContext:
     if isinstance(scope, dict):
         scope["mari_access"] = context
     assert context is not None
+    # REST dependencies are resolved inside the endpoint execution context.
+    # Publish the resolved membership there as well as on the request scope so
+    # project-scoped helpers (search, retrieval, audit) cannot observe an empty
+    # ContextVar on the first non-GraphQL request for a project.
+    set_access(context)
     return context
 
 

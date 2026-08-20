@@ -145,9 +145,12 @@ export function useQuery<T>(
    *  the idle state and no network call. It used to have to invent a harmless
    *  query instead, which still hit /graphql and still needed a session. */
   query: string | null,
-  opts?: { variables?: Record<string, unknown>; map?: (data: any) => T },
+  opts?: { variables?: Record<string, unknown>; map?: (data: any) => T; cacheKey?: string },
 ): QueryResult<T> {
-  const key = query ? query + (opts?.variables ? "::" + JSON.stringify(opts.variables) : "") : "";
+  const key = query
+    ? query + (opts?.variables ? "::" + JSON.stringify(opts.variables) : "")
+      + (opts?.cacheKey ? "::view=" + opts.cacheKey : "")
+    : "";
   const cachedRaw = key ? cacheGet(key) : undefined;
   const cached = cachedRaw === undefined
     ? undefined

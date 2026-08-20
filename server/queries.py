@@ -194,6 +194,26 @@ def like_pattern(query: str) -> str:
     return f"%{query.translate(_LIKE_ESCAPE)}%"
 
 
+_SEARCH_STOP_WORDS = frozenset({
+    "and", "are", "can", "does", "for", "from", "how", "into", "our",
+    "the", "their", "this", "was", "what", "when", "where", "which", "who",
+    "why", "with", "you", "your",
+})
+
+
+def keyword_patterns(query: str) -> list[str]:
+    """Literal LIKE patterns for meaningful words in a natural-language query.
+
+    Requiring the entire question as one substring made chat retrieval miss a
+    document that plainly contained several of its terms whenever the vector
+    snapshot had not been built yet. Keyword search is the reliable fallback,
+    so it must understand questions as words rather than exact prose.
+    """
+    words = [word for word in re.findall(r"[a-z0-9][a-z0-9_-]*", query.lower())
+             if len(word) > 2 and word not in _SEARCH_STOP_WORDS]
+    return [like_pattern(word) for word in dict.fromkeys(words)] or [like_pattern(query.strip())]
+
+
 # The scoring CTE, shared by the page query and the count query so a total can
 # never describe a different match set from the rows it is counting.
 #
@@ -343,11 +363,13 @@ def hybrid_count(query: str) -> int:
     if not query.strip():
         row = q1("SELECT count(*) AS n FROM documents WHERE project_id = %s", (ctx.project_id,))
     else:
-        pattern = like_pattern(query.strip())
+        patterns = keyword_patterns(query)
         row = q1("""SELECT count(*) AS n FROM documents
                     WHERE project_id = %s
-                      AND (title ILIKE %s OR snippet ILIKE %s OR body ILIKE %s)""",
-                 (ctx.project_id, pattern, pattern, pattern))
+                      AND EXISTS (SELECT 1 FROM unnest(%s::text[]) AS needle
+                                  WHERE title ILIKE needle OR snippet ILIKE needle
+                                     OR body ILIKE needle)""",
+                 (ctx.project_id, patterns))
     return max(ranked_count, int((row or {}).get("n") or 0))
 
 
@@ -406,7 +428,7 @@ def _rank_hybrid(query: str) -> list[dict]:
         if hit and now - hit[0] < _RANK_TTL_SECONDS:
             return hit[1]
 
-    pattern = like_pattern(query.strip())
+    patterns = keyword_patterns(query)
     if query.strip():
         keyword_rows = q("""
           SELECT d.id, d.source, d.title, d.snippet, d.body, d.author, d.author_initials,
@@ -417,10 +439,12 @@ def _rank_hybrid(query: str) -> list[dict]:
             LEFT JOIN tags t ON t.document_id = d.id AND t.project_id = d.project_id
             LEFT JOIN tag_definitions td ON td.tag = t.tag
            WHERE d.project_id = %s
-             AND (d.title ILIKE %s OR d.snippet ILIKE %s OR d.body ILIKE %s)
+             AND EXISTS (SELECT 1 FROM unnest(%s::text[]) AS needle
+                         WHERE d.title ILIKE needle OR d.snippet ILIKE needle
+                            OR d.body ILIKE needle)
            GROUP BY d.id
            ORDER BY d.updated_src DESC NULLS LAST, d.id DESC
-           LIMIT %s""", (project_id, pattern, pattern, pattern, MAX_K * 2))
+           LIMIT %s""", (project_id, patterns, MAX_K * 2))
     else:
         keyword_rows = q("""
           SELECT d.id, d.source, d.title, d.snippet, d.body, d.author, d.author_initials,

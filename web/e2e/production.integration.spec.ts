@@ -94,3 +94,45 @@ test("agent setup help reaches the real MCP workflow with actionable instruction
   await expect(page.getByText(/bearer token.*shown.*once/i)).toBeVisible();
   await expect(page.getByText(/Test connection/)).toBeVisible();
 });
+
+test("knowledge chat is created, deployed, and answers from real indexed knowledge", async ({ page }) => {
+  test.setTimeout(120_000);
+  const suffix = Date.now().toString(36);
+  const slug = `ci-knowledge-${suffix}`;
+  await page.goto("/publish?tab=chat");
+  const destinationName = page.getByLabel("Destination name");
+  const newDestination = page.getByRole("button", { name: "New knowledge chat" });
+  await expect(destinationName.or(newDestination)).toBeVisible();
+  if (await newDestination.isVisible()) await newDestination.click();
+  await destinationName.fill(`CI knowledge ${suffix}`);
+  await page.getByLabel("URL slug").fill(slug);
+  await page.getByLabel("Assistant title").fill("Ask CI knowledge");
+  await page.getByLabel("Welcome message").fill("Ask about verified product knowledge.");
+  await page.getByRole("button", { name: "Create knowledge chat" }).click();
+  await expect(page).toHaveURL(/\/publish\?tab=chat&chat=\d+$/);
+  const deployed = page.waitForResponse((response) =>
+    response.url().endsWith("/graphql")
+      && response.request().method() === "POST"
+      && (response.request().postData() ?? "").includes("deployKnowledgeChatDestination"),
+  );
+  await page.getByRole("button", { name: "Deploy", exact: true }).click();
+  const deployResponse = await deployed;
+  expect(deployResponse.ok()).toBe(true);
+  const deployBody = await deployResponse.json() as {
+    data?: { deployKnowledgeChatDestination?: string };
+    errors?: { message?: string }[];
+  };
+  expect(deployBody.errors, deployBody.errors?.[0]?.message).toBeUndefined();
+  expect(deployBody.data?.deployKnowledgeChatDestination).toBe(`/knowledge-chat/default/${slug}`);
+
+  await page.goto(`/knowledge-chat/default/${slug}`);
+  await expect(page.getByRole("heading", { name: "Ask CI knowledge" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Open the Mari agent" })).toHaveCount(0);
+  await page.getByLabel("Ask a question").fill("How long are customer records retained?");
+  await page.getByRole("button", { name: "Ask", exact: true }).click();
+  await expect(page.getByRole("list", { name: "Sources" })).toContainText("Retention runbook");
+  await expect(page.getByRole("button", { name: "Answering…" })).toHaveCount(0, { timeout: 90_000 });
+  await expect(page.locator("article").last().locator("div").first()).not.toBeEmpty();
+  await page.getByRole("link", { name: /Retention runbook/ }).click();
+  await expect(page).toHaveURL(/\/knowledge\/doc\?id=1$/);
+});

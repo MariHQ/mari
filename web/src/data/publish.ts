@@ -235,7 +235,13 @@ export function usePublish(): PageData<PublishData> {
   const section: PublishSection = tab === "mcp" || tab === "chat" || tab === "bots" ? tab : "sites";
   const chat = Number(params.get("chat"));
   const selectedChatId = Number.isInteger(chat) && chat > 0 ? chat : null;
-  const q = useQuery<Res>(QUERY, { map: (d: Res) => d });
+  // The selected chat lives in the URL but the GraphQL query has no variables.
+  // Give that view identity to the read hook so create -> ?chat=<id> performs
+  // a real re-read instead of retaining the pre-create empty destination list.
+  const q = useQuery<Res>(QUERY, {
+    cacheKey: `chat:${selectedChatId ?? "list"}`,
+    map: (d: Res) => d,
+  });
 
 /* The route names the subject; the query behind it takes no variables, so
    navigating from the list to one site does not change useQuery's key and

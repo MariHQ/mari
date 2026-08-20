@@ -41,6 +41,13 @@ class ProjectDataScopeTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             db.pq("SELECT 1 WHERE %s = %s", (1,))
 
+    def test_natural_language_search_uses_meaningful_literal_terms(self):
+        self.assertEqual(
+            queries.keyword_patterns("How long are customer records retained?"),
+            ["%long%", "%customer%", "%records%", "%retained%"],
+        )
+        self.assertEqual(queries.keyword_patterns("100%_safe"), ["%100%", "%safe%"])
+
     def test_core_knowledge_queries_always_bind_active_project(self):
         with access.use_access(context(7, "acme")), \
              patch.object(queries, "q", return_value=[]) as query:

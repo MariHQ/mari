@@ -14,7 +14,7 @@
 
 ## What is Mari?
 
-Mari is a self-hosted **product knowledge platform**. It continuously ingests the places your team's knowledge actually lives — GitHub repos, Slack threads, wikis, tickets, docs — into one searchable, verifiable, traceable knowledge base, then puts an **agent** on top of it that can answer questions *and act*: edit documents, tag drift, trigger syncs, run workflows, and walk you around the product.
+Mari is a self-hosted **product knowledge platform**. It continuously ingests the places your team's knowledge actually lives — GitHub repos, Slack threads, wikis, tickets, docs — into one searchable, verifiable, traceable knowledge base, then puts an **agent** on top of it that can answer questions *and act*: identify drift, create review work, trigger syncs, run workflows, and walk you around the product. Connector documents remain read-only records of their source systems.
 
 Where a search tool stops at "here are ten links," Mari keeps going:
 
@@ -23,7 +23,7 @@ Where a search tool stops at "here are ten links," Mari keeps going:
 - **What changed, and what did it break?** A living lineage graph ties documents, commits, PRs, and decisions together with real extracted links — structural (`#123` references, markdown links) and semantic (embedding similarity).
 - **Now publish it.** Turn curated knowledge into a deployed docs site (native generator or Docusaurus) with one flow.
 
-Everything runs on your infrastructure: Postgres + pgvector for storage and search, local LLMs via ollama (with graceful degradation when they're offline), and a React front end with a hand-drawn "editorial notebook" design system.
+Everything runs on your infrastructure: Postgres for transactional state, Iceberg for durable knowledge snapshots, rebuildable MUVERA/PolarQuant retrieval artifacts on filesystem or S3, local LLMs via Ollama (with graceful degradation when they're offline), and a React front end with a hand-drawn "editorial notebook" design system.
 
 ---
 
@@ -36,14 +36,14 @@ Everything runs on your infrastructure: Postgres + pgvector for storage and sear
 - GitHub ingestion goes beyond files: **commit messages, PR descriptions, issues, and comments** become searchable knowledge documents.
 
 ### 🔎 Hybrid search & cited answers
-- Postgres-native hybrid retrieval: tsvector keyword scoring + pgvector cosine similarity over chunk embeddings, tag-weight boosted.
+- Hybrid retrieval: literal keyword candidates fused with MUVERA approximate retrieval, PolarQuant packing, and exact MaxSim reranking, with project-scoped rebuildable artifacts.
 - Chat answers stream with **numbered citations** back to their sources.
 - Honest telemetry: usage counters ("searches", "answers served") count real events, from the day counting started.
 
 ### 🤖 The Mari agent
 - An **agent dock** on every page (floating launcher, bottom right): compact stream, visible tool calls with expandable results, streaming tokens.
-- It can do what you can do: search, read **and edit** documents, tag, approve answers, sync sources, run flows, create tasks — and **navigate the app** while the conversation stays open.
-- Safety rails: edits require the agent to read the document first in the same turn; navigation is whitelist-validated; every action lands in the audit trail.
+- It can search and read source documents, manage governed knowledge, sync sources, run automations, create Review items, and **navigate the app** while the conversation stays open.
+- Safety rails: source content is read-only, navigation is whitelist-validated, write tools are capability-gated, and every action lands in the audit trail.
 
 ### 🕸 Lineage you can actually read
 - A single-pane Cytoscape graph of your whole knowledge ecosystem, with a time axis and as-of scrubbing.
@@ -68,6 +68,7 @@ Everything runs on your infrastructure: Postgres + pgvector for storage and sear
 ### 🚀 Publishing
 - Turn tagged documents into a deployed docs site under `/sites/<slug>`: the native handcrafted generator, or a real **Docusaurus** build (warm builds in seconds).
 - Site editor with theme controls, navigation, release gates, and an AI customizer.
+- Deploy a project-scoped interactive **Knowledge chat** destination with streamed answers and evidence links, or expose the same corpus through MCP and the scoped Search API.
 
 ### 💬 Bots (self-serve)
 - **Slack bot**: copy a generated app manifest, paste your bot token, verify — then @mention Mari in any channel and it answers from your knowledge base.
@@ -140,11 +141,12 @@ make test-integration        # production images + Postgres + Iceberg + MinIO + 
 `make test-integration` is the assembled-system gate used in CI. It starts the
 same API and nginx images shipped by the deployment, applies the schema to a
 fresh pgvector/Postgres database, seeds one scoped project, persists Iceberg
-state and SQLite control state on the API data volume, mirrors a real
+state and durable session/webhook control records in Postgres, mirrors a real
 MUVERA/PolarQuant generation into MinIO, and calls real Ollama embedding and
 generation models. Playwright then signs in through the explicit development
 bypass and verifies health/security headers, real search results, durable
-Review writes, project identity, and the audit surface. The stack is isolated
+Review writes, project identity, audit data, and a created/deployed interactive
+knowledge chat that answers from indexed evidence. The stack is isolated
 and deleted after the run; no third-party credentials are used.
 
 Credential-gated sandbox connector and bot checks are documented in
@@ -174,7 +176,6 @@ Everything is env-driven (`.env.example` documents the full list; env overrides 
 | `MARI_S3_BUCKET` | S3 site publishing |
 | `MARI_AUTH_BYPASS` | One-click demo login, off unless you set it to `true`. It signs anyone who can reach the port in as the workspace admin, with no credential — turn it on only for throwaway demo instances. The server logs a warning at startup while it is on |
 | `MARI_AUTH_REGISTRATION` | Open sign-up (default off — the workspace is invite-only). Invited people can always register whether or not this is set |
-| `MARI_CONTROL_DB` | SQLite path for revocable, ephemeral control state such as login sessions (default `.mari/control.sqlite3`) |
 | `MARI_CRAWL_ALLOW_LOOPBACK` | Allow the website connector to crawl localhost (dev only) |
 
 ### Desktop app

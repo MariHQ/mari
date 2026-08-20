@@ -14,11 +14,11 @@ GitHub Actions workflow is `.github/workflows/integration-stack.yml`.
 | Burndown area | Browser + server assurance | Status / remaining production check |
 | --- | --- | --- |
 | Demo → OSS migration | Every console route loads under a shared landmark/accessibility/overflow contract on desktop and mobile; Firefox and WebKit smoke every route; OSS messaging and Ollama settings are asserted | **External check:** compare the deployed demo artifact, environment, migrations, and routing with this revision |
-| Confluence polling | Browser credential wizard validates, connects, and schedules a poll; server covers auth failures, body conversion, and cursor filtering | **Live check ready:** sandbox tenant credentials. The original list said “confluent”; tests assume **Confluence**, not Confluent Kafka |
-| Slack polling | Browser validates and connects; server covers day-safe incremental polling and bot filtering | **Live check ready:** sandbox bot token and channels |
-| Google Docs/Drive polling | Browser validates and connects; server covers pagination, Docs export, text download, and cursor escaping | **Live check ready:** OAuth token/folder plus refresh-token lifecycle; bearer tokens are short-lived |
-| GitHub polling | Browser validates/connects and exercises incremental/full polls; server covers pagination caps and scoped token reset | **Live check ready:** sandbox token and repository |
-| Slack bot | Browser saves masked secrets and invokes `auth.test`; server covers signing, mention/DM answering, citations, and posting | **Live check ready:** Slack app install and an actual Events API delivery |
+| Confluence polling | Browser credential wizard validates, connects, and schedules a poll; server covers ordered pagination checkpoints, restrictions, cap safety, retry, deletion safety, and cursor filtering | **Credential canary:** `make test-live-connectors` waits for a completed sandbox sync with persisted documents/chunks. The original list said “confluent”; this is **Confluence**, not Kafka |
+| Slack polling | Browser validates and connects; server covers day-safe incremental polling, edit lookback, replies, cap safety, ACL metadata, and deleted-day reconciliation | **Credential canary:** `make test-live-connectors` requires a completed sandbox sync |
+| Google Docs/Drive polling | Browser validates and connects; server covers Docs export, full pagination, Changes API tombstones, native cursors, ACL metadata, and token refresh | **Credential canary:** `make test-live-connectors` requires a completed sandbox sync |
+| GitHub polling | Browser validates/connects and exercises incremental/full polls; server covers files/issues/commits, truncation fallback, deletion, retry, and non-destructive full resync | **Credential canary:** `make test-live-connectors` requires a completed sandbox sync |
+| Slack bot | Browser performs project-scoped setup; a fake Slack HTTP service proves `auth.test`, signed mention/DM routing, ACL filtering, deduplication, and real `chat.postMessage` | **Credential canary:** live suite sends a signed event and verifies the actual Slack reply/status update |
 | GitHub webhook/bot | Browser setup saves a generated secret and renders observed delivery; server covers rotating HMAC secrets | **External check:** install a webhook on a sandbox repo and send a real delivery to a publicly reachable deployment |
 | MCP | Browser creates, reveals the one-time token, configures, and health-checks a server; server covers bearer/slug auth and JSON-RPC initialize/ping/tools | **Live check ready:** deployed URL and an independent MCP client |
 | Workflows / queue | Browser runs, dry-runs, pauses, creates, and follows a flow into its editor; server covers trigger filters, bounded execution, retry, checkpoint/approval semantics | **Not production-scale:** queue is process-local; no durable cross-instance lease/recovery yet |
@@ -27,11 +27,11 @@ GitHub Actions workflow is `.github/workflows/integration-stack.yml`.
 | Lineage | Browser renders server-grounded nodes, opens detail, and proves a 2,000-node response is reduced to a ranked 35-node viewport with an omission count on desktop and mobile | **Partial:** tuning settings requested in the burndown do not exist yet |
 | Agent trajectories | Browser covers progressive disclosure, taxonomy filters, URL pagination, errors, and a bounded 5,000-row archive; Ollama-backed harvesting is exercised through the server | **Implemented:** production evaluation still needs a privacy and taxonomy review against real Rippling traces |
 | High-volume UI | Tasks (1,500), answers (1,200), facts (1,000), members (700), trajectories (5,000), and lineage (2,000 nodes) assert bounded DOM pages and no viewport overflow | Complete for these highest-growth surfaces; add equivalent fixtures whenever a new unbounded collection ships |
-| Automated fact approval | Manual verification, contradiction review, and workflow approval are tested | **Not implemented:** there is no confidence/policy auto-approval engine |
-| Rippling user management | Browser invite and GitHub-team provisioning are tested; current SSO state is rendered | **Partial:** Rippling IdP contract is unknown and SCIM endpoint is explicitly unavailable |
-| Deployment / scheduled tasks | Browser saves the S3 publish target and deploys a site | **Partial:** no selected Rippling platform contract, k8s manifests, or production scheduler design |
-| LLM gateway | Direct Ollama execution is tested | **Not implemented:** no gateway adapter/configuration exists |
-| Glean-like search publish target | Knowledge search is browser-tested and URL-addressable | **Not implemented:** search is not available as a Publish target/API contract |
+| Automated approval | Unified Review projects facts, decisions, answers, findings, changes, tasks, and waiting workflows; deterministic policy tests cover thresholds, trusted evidence, separation of duties, dry-run, audit reason, and replay | **Implemented conservatively:** absent/ambiguous signals remain manual by design |
+| Enterprise identity | Browser member workflows plus server tests cover generic OIDC PKCE/JWK verification, immutable identity linking, group-to-project roles, and SCIM Users/Groups deprovisioning | **Integration check:** configure Rippling's issuer/client/group mapping and run its sandbox conformance flow |
+| Deployment / scheduled tasks | Production images, health probes, graceful lifecycle, K8s manifests/PDB/HPA, restore drill, restart/failure injection, and 1k-request load gate run in `make test-integration` | **Deployment choice remains operator-owned:** the bundled scheduler intentionally keeps the API at one replica unless replaced by an external scheduler |
+| LLM gateway | Ollama remains the default; OpenAI-compatible gateway generation/embedding/streaming, routing headers, masking, retry, health, telemetry, settings UI, and failure behavior are tested | **Integration check:** supply the enterprise gateway URL/token/model routing contract |
+| Search/chat publish targets | Destinations provides deployable interactive Knowledge chat; production CI creates it, deploys it, asks a real Ollama-backed question, verifies a source citation, and follows the evidence link. Scoped `/api/search` and MCP cover machine consumers | **Implemented:** external hosting/domain policy is deployment-specific |
 | Claude-plugin messaging | Browser asserts standard MCP instructions and absence of Claude-plugin promotion on primary surfaces | Complete for current primary browser messaging; keep any optional integration outside the main path |
 
 ## Credential-gated browser checks
@@ -58,11 +58,11 @@ The live spec reads these only from the environment:
 
 ## Architecture status not disguised as tests
 
-- The current `ThreadPoolExecutor` provides backpressure only inside one API
-  process. For a large deployment, use a durable Postgres-backed queue first
-  (transactional enqueue, `FOR UPDATE SKIP LOCKED`, leases, attempts, idempotency
-  keys), then allow a managed queue adapter if Rippling's deployment platform
-  already standardizes on one.
+- Scheduled workflow execution is intentionally process-local and bounded; the
+  supplied K8s deployment keeps one scheduler-bearing API replica. Connector
+  checkpoints, workflow state, sessions, webhook deduplication, and review/audit
+  records are durable in Postgres. Move execution to an external scheduler only
+  when the selected deployment platform requires horizontal workers.
 - Iceberg storage primitives provide a typed mutation journal and snapshot time
   travel, with catalog and application transactions sharing the managed
   PostgreSQL recovery boundary. Derived vector artifacts remain rebuildable.
@@ -70,13 +70,11 @@ The live spec reads these only from the environment:
   store and flush atomically to filesystem or S3. Continue measuring recall@k,
   nDCG, latency, storage amplification, and rerank cost against fixed corpora;
   every result retains document/chunk identity for lineage.
-- Lineage tuning should be workspace settings with validated bounds (edge-type
-  weights, similarity threshold, recency decay, collapse threshold, max nodes),
-  plus a reset-to-default action and saved views.
-- Automated fact approval should begin with policy rules and confidence bands:
-  auto-approve only claims backed by multiple current authoritative sources;
-  queue conflicts, single-source claims, and high-impact policy claims.
-- User-management, Kubernetes/scheduled-job design, and LLM gateway support need
-  Rippling's identity provider, deployment platform, and gateway contracts before
-  implementation. Search-as-a-publish-target likewise needs an API contract,
-  auth/scoping model, and freshness SLO.
+- Lineage exposes bounded graph modes and tuning controls; production defaults
+  should still be calibrated against the target corpus and user research.
+- Automated approval intentionally auto-applies only deterministic, policy-safe
+  outcomes backed by sufficient trusted evidence; conflicts and low-confidence
+  items stay in Unified Review.
+- OIDC/SCIM, Kubernetes, the OpenAI-compatible gateway, scoped Search API, MCP,
+  and interactive Knowledge chat are implemented. Their final environment
+  values and vendor sandbox certification require the customer's real contracts.

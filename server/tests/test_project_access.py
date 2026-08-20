@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import unittest
 from dataclasses import FrozenInstanceError
+from unittest.mock import patch
 
 from fastapi import HTTPException
+from starlette.requests import Request
 
 import access
 
@@ -45,6 +47,9 @@ def factory(state):
 
 
 class ProjectAccessTests(unittest.TestCase):
+    def tearDown(self):
+        access.set_access(None)
+
     def test_role_capability_matrix_is_central_and_least_privilege(self):
         self.assertEqual(access.capabilities_for_role("owner"), access.CAPABILITIES)
         self.assertEqual(access.capabilities_for_role("admin"), access.CAPABILITIES)
@@ -127,6 +132,15 @@ class ProjectAccessTests(unittest.TestCase):
     def test_unknown_capability_dependency_fails_at_startup(self):
         with self.assertRaisesRegex(ValueError, "Unknown capability"):
             access.require_capability("root.everything")
+
+    def test_rest_project_dependency_publishes_access_for_scoped_helpers(self):
+        context = access.AccessContext(
+            1, 7, "acme", "Acme", "admin", access.capabilities_for_role("admin"))
+        request = Request({"type": "http", "method": "POST", "path": "/chat", "headers": []})
+        with patch("auth.require_user", return_value={"id": 1}), \
+             patch.object(access, "resolve_access", return_value=(context, [])):
+            self.assertIs(access.require_project(request), context)
+        self.assertIs(access.current_access(), context)
 
 
 if __name__ == "__main__":

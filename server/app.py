@@ -266,7 +266,12 @@ def chat(body: ChatIn, access: t.Any = Depends(auth_module.require_project)):
 
         return StreamingResponse(stream_approved(), media_type="text/event-stream")
 
-    docs = hybrid_search(body.message, 4)
+    # FastAPI executes this synchronous route and its dependency in separate
+    # worker calls. The AccessContext object is therefore passed explicitly,
+    # but ContextVar-based retrieval helpers need it installed in this call's
+    # execution context as well.
+    with access_module.use_access(access):
+        docs = hybrid_search(body.message, 4)
     context = "\n\n".join(
         f"[{i + 1}] {d['title']} ({d['source']})\n{d['body'] or d['snippet']}" for i, d in enumerate(docs))
     facts = q("SELECT claim FROM facts WHERE project_id = %s AND status = 'Verified' LIMIT 8", (project_id,))
