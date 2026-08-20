@@ -6,6 +6,8 @@
 desktop/
 output/
 artifacts/
+.artifacts/
+var/
 DESIGN.md
 FLOWS-DESIGN.md
 README.md
