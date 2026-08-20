@@ -33,7 +33,7 @@ JOURNAL_SCHEMA = pa.schema([
 
 
 def _default_root() -> pathlib.Path:
-    return pathlib.Path(__file__).resolve().parent.parent / ".mari" / "iceberg"
+    return pathlib.Path(__file__).resolve().parent.parent / "var" / "mari" / "iceberg"
 
 
 def _json_default(value: t.Any) -> t.Any:

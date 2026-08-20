@@ -1072,7 +1072,7 @@ def build_docusaurus_site(site: dict, docs: list[dict]) -> str:
     out = BUILDS / f"site_{site['id']}"
     shutil.rmtree(out, ignore_errors=True)
     shutil.copytree(built, out)
-    (out / ".mari-build.json").write_text(json.dumps(
+    (out / "build-manifest.json").write_text(json.dumps(
         {"generator": "docusaurus", "docusaurus": DOCUSAURUS_VERSION,
          "seconds": round(time.time() - t0, 1), "pages": len(docs)}))
     return str(out)

@@ -214,7 +214,7 @@ class DerivedVectorIndex:
     """Atomic, reloadable derived index with optional S3 mirroring."""
 
     def __init__(self, uri: str | None = None, config: FDEConfig | None = None):
-        default_path = pathlib.Path(__file__).resolve().parent.parent / ".mari" / "vectors"
+        default_path = pathlib.Path(__file__).resolve().parent.parent / "var" / "mari" / "vectors"
         self.uri = uri or os.environ.get("MARI_VECTOR_URI", str(default_path))
         self.config = config or FDEConfig()
         self._lock = threading.RLock()
@@ -223,7 +223,7 @@ class DerivedVectorIndex:
         self._snapshot_generation = ""
         self._reload_seconds = max(0.0, float(os.environ.get("MARI_VECTOR_RELOAD_SECONDS", "5")))
         if self.uri.startswith("s3://"):
-            cache = os.environ.get("MARI_VECTOR_CACHE", ".mari/vector-cache")
+            cache = os.environ.get("MARI_VECTOR_CACHE", "var/mari/cache/vectors")
             self.path = pathlib.Path(cache)
         else:
             self.path = pathlib.Path(self.uri).expanduser()
@@ -450,7 +450,7 @@ def index_for(project_id: int) -> DerivedVectorIndex:
     project_id = int(project_id)
     with _INDEXES_LOCK:
         if project_id not in _INDEXES:
-            default_path = pathlib.Path(__file__).resolve().parent.parent / ".mari" / "vectors"
+            default_path = pathlib.Path(__file__).resolve().parent.parent / "var" / "mari" / "vectors"
             base = os.environ.get("MARI_VECTOR_URI", str(default_path))
             _INDEXES[project_id] = DerivedVectorIndex(_project_uri(base, project_id))
         return _INDEXES[project_id]

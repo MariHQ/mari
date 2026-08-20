@@ -23,7 +23,7 @@ _DEFAULTS: dict[str, t.Any] = {
     "models": {"generation_provider": "", "generation_model": "",
                "embedding_provider": "", "embedding_model": ""},
     "sentence_transformers": {
-        "cache_dir": ".mari/sentence-transformers",
+        "cache_dir": "var/mari/cache/sentence-transformers",
     },
     "llm_gateway": {
         "base_url": "", "token": "", "headers": {}, "metadata": {},
