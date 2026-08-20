@@ -66,6 +66,13 @@ test("connected sources can request incremental and full polls", async ({ page }
   await expect.poll(() => api.calls.some((c) => c.query.includes("resyncSource"))).toBeTruthy();
 });
 
+test("Sources renders the scheduler's ten-minute connector cadence", async ({ page }) => {
+  await openSources(page);
+  const schedule = page.getByRole("combobox", { name: "Sync schedule for acme/handbook" });
+  await expect(schedule).toHaveValue("10");
+  await expect(schedule.getByRole("option", { name: "Every 10 minutes" })).toHaveCount(1);
+});
+
 test("pausing a source is labelled as a pause, not a destructive disconnect", async ({ page }) => {
   await openSources(page);
   await expect(page.getByRole("button", { name: "Disconnect", exact: true })).toHaveCount(0);

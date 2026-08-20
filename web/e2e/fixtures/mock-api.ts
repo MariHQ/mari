@@ -45,7 +45,7 @@ function initialData() {
     search: [{ id: 1, source: "github", title: "Retention runbook", snippet: "Retention is 30 days.", body: "# Retention\nRetention is 30 days.", kind: "page", author: "Dana", authorInitials: "DR", date: now, tags: ["canonical"] }],
     searchTotal: 1,
     sourcePulse: [
-      { id: 1, provider: "github", name: "acme/handbook", status: "active", stat: "1", unit: "docs", docsCount: 1, health: "Healthy", kind: "github", lastSyncAt: now, bars: [1, 2, 1], syncIntervalMinutes: 60, syncFlowId: 11 },
+      { id: 1, provider: "github", name: "acme/handbook", status: "active", stat: "1", unit: "docs", docsCount: 1, health: "Healthy", kind: "github", lastSyncAt: now, bars: [1, 2, 1], syncIntervalMinutes: 10, syncFlowId: 11 },
       { id: 2, provider: "confluence", name: "Confluence — ENG", status: "active", stat: "1", unit: "docs", docsCount: 1, health: "Healthy", kind: "connector", lastSyncAt: now, bars: [1], syncIntervalMinutes: 60, syncFlowId: 12 },
     ],
     workflows: [{ id: 1, name: "Fact review", description: "Scan and approve facts", color: "#5c7a4c", pinned: true, status: "active", trigger: { on: "schedule", every_minutes: 60 }, nodes: [
