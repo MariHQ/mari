@@ -7,6 +7,7 @@ database. db.py must stay import-cycle-free: it never imports app/queries/mutati
 
 from __future__ import annotations
 
+import atexit
 import json
 import os
 import threading
@@ -53,6 +54,21 @@ POOL = ConnectionPool(
     open=True,
     name="mari-api",
 )
+
+
+def open_pool() -> None:
+    """Open the request pool after a prior lifespan/test shutdown."""
+    if POOL.closed:
+        POOL.open()
+
+
+def close_pool() -> None:
+    """Release worker threads and connections deterministically."""
+    if not POOL.closed:
+        POOL.close()
+
+
+atexit.register(close_pool)
 
 
 def q(sql: str, args: tuple = ()) -> list[dict]:

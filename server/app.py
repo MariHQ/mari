@@ -47,7 +47,7 @@ import observability
 import enterprise_identity
 from sitefiles import PublishedSiteFiles
 
-from db import DB_URL, ensure_schema, exec_, q, q1
+from db import DB_URL, close_pool, ensure_schema, exec_, open_pool, q, q1
 from queries import Query, hybrid_search, like_pattern
 from mutations_knowledge import MutKnowledge
 from mutations_publish import MutPublish
@@ -80,6 +80,7 @@ async def lifespan(application: FastAPI):
     application.state.ready = False
     application.state.started_at = time.time()
     try:
+        open_pool()
         ensure_schema()
         auth_module.ensure_schema()
         repoaudit.ensure_schema()
@@ -91,6 +92,7 @@ async def lifespan(application: FastAPI):
     finally:
         application.state.ready = False
         ingest.stop_poller()
+        close_pool()
         logging.getLogger("mari.lifecycle").info("application stopped")
 
 

@@ -1,4 +1,4 @@
-.PHONY: test test-server test-web test-browser test-live-ollama test-integration test-reliability test-restore
+.PHONY: test test-server test-web test-browser test-contracts test-live-ollama test-integration test-reliability test-restore
 
 test: test-server test-web test-browser
 
@@ -10,6 +10,9 @@ test-web:
 
 test-browser:
 	npm --prefix web run e2e
+
+test-contracts:
+	PYTHONPATH=server server/.venv/bin/python -m export_graphql_schema
 
 test-live-ollama:
 	MARI_TEST_LIVE_OLLAMA=1 PYTHONPATH=server server/.venv/bin/python -m unittest server.tests.test_llm_ollama.LiveOllamaTests -v

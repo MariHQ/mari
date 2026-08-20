@@ -1,0 +1,809 @@
+type ActivityBucket {
+  date: String!
+  count: Int!
+}
+
+type ActivityItem {
+  id: Int!
+  kind: String!
+  actor: String!
+  text: String!
+  target: String!
+  at: String!
+  secondsAgo: Int!
+}
+
+type AnswerCandidate {
+  question: String!
+  draftAnswer: String!
+  sourceLabel: String!
+  confidence: String!
+}
+
+type ApiKey {
+  id: Int!
+  name: String!
+  prefix: String!
+  scopes: String!
+  created: String!
+  lastUsed: String!
+  revoked: Boolean!
+}
+
+type ApprovedAnswer {
+  id: Int!
+  question: String!
+  answer: String!
+  status: String!
+  owner: String!
+  channels: [String!]!
+  sources: JSON!
+  served: Int!
+  spark: [Int!]!
+  updated: String!
+}
+
+type AuditDetail {
+  label: String!
+  value: String!
+}
+
+type AuditEvent {
+  id: Int!
+  actor: String!
+  verb: String!
+  target: String!
+  at: String!
+  detail: [AuditDetail!]!
+}
+
+type AuditFinding {
+  id: Int!
+  runId: Int!
+  kind: String!
+  title: String!
+  detail: String!
+  fixAction: String!
+  fixPayload: JSON!
+  status: String!
+}
+
+type AuditRun {
+  id: Int!
+  provider: String!
+  repo: String!
+  findings: Int!
+  fixed: Int!
+  ranAt: String!
+}
+
+type Change {
+  id: Int!
+  original: String!
+  replacement: String!
+  reason: String!
+  status: String!
+}
+
+type ChatMessage {
+  id: Int!
+  role: String!
+  content: String!
+  sources: JSON!
+}
+
+type ChatSession {
+  id: Int!
+  title: String!
+  messages: [ChatMessage!]!
+}
+
+type Checkpoint {
+  id: Int!
+  provider: String!
+  item: String!
+  stage: String!
+  progress: Int!
+  total: Int!
+  cursorId: String!
+  duration: String!
+  status: String!
+}
+
+type Decision {
+  id: Int!
+  statement: String!
+  context: String!
+  status: String!
+  sourceLabel: String!
+  owners: [String!]!
+  decidedOn: String!
+  supersededBy: Int
+  supersededByStatement: String!
+  impactSummary: String!
+  impactCount: Int!
+}
+
+type DigestImpact {
+  name: String!
+  tone: String!
+}
+
+type DigestTopic {
+  title: String!
+  summary: String!
+  where: [DigestWhere!]!
+  impact: [DigestImpact!]!
+}
+
+type DigestWhere {
+  source: String!
+  label: String!
+}
+
+type DocHistory {
+  at: String!
+  actor: String!
+  verb: String!
+  detail: String!
+}
+
+type Document {
+  id: Int!
+  source: String!
+  title: String!
+  snippet: String!
+  body: String!
+  kind: String!
+  author: String!
+  authorInitials: String!
+  date: String!
+  tags: [String!]!
+  watched: Boolean!
+}
+
+type DocumentTemplate {
+  key: String!
+  name: String!
+  category: String!
+  description: String!
+  sections: [String!]!
+  icon: String!
+  standard: Boolean!
+}
+
+type Fact {
+  id: Int!
+  claim: String!
+  source: String!
+  owner: String!
+  ownerTint: Int!
+  status: String!
+  verified: String!
+}
+
+type FactContradiction {
+  factId: Int!
+  claim: String!
+  status: String!
+  otherFactId: Int!
+  otherClaim: String!
+  otherStatus: String!
+  reason: String!
+  detail: String!
+}
+
+type Finding {
+  id: Int!
+  kind: String!
+  severity: String!
+  text: String!
+  note: String!
+}
+
+type FreshnessRow {
+  source: String!
+  provider: String!
+  fresh: Int!
+  aging: Int!
+  stale: Int!
+}
+
+type GithubRepo {
+  fullName: String!
+  description: String!
+  private: Boolean!
+  defaultBranch: String!
+  updatedAt: String!
+  connected: Boolean!
+}
+
+type GithubTeamSync {
+  team: String!
+  connected: Boolean!
+  credential: Boolean!
+  syncedMembers: Int!
+}
+
+type GlossaryCandidate {
+  id: Int!
+  term: String!
+  variants: String!
+  definition: String!
+  evidence: String!
+  evidenceDocId: Int!
+}
+
+type GlossaryTerm {
+  id: Int!
+  term: String!
+  definition: String!
+  owner: String!
+  updated: String!
+}
+
+type GraphStats {
+  docs: Int!
+  stale: Int!
+  orphans: Int!
+  untranslated: Int!
+  unowned: Int!
+  contradictions: Int!
+  topCited: [TopCited!]!
+  activity: [ActivityBucket!]!
+}
+
+type GraphView {
+  id: Int!
+  name: String!
+  state: String!
+}
+
+type ImpactDoc {
+  title: String!
+  source: String!
+  severity: String!
+  reason: String!
+}
+
+type ImpactResult {
+  claim: String!
+  summary: String!
+  docs: [ImpactDoc!]!
+}
+
+type InsightStats {
+  searches: Int!
+  answersServed: Int!
+  driftCaught: Int!
+  docsFixed: Int!
+  since: String!
+}
+
+"""
+The `JSON` scalar type represents JSON values as specified by [ECMA-404](https://ecma-international.org/wp-content/uploads/ECMA-404_2nd_edition_december_2017.pdf).
+"""
+scalar JSON @specifiedBy(url: "https://ecma-international.org/wp-content/uploads/ECMA-404_2nd_edition_december_2017.pdf")
+
+type LineageEdge {
+  id: Int!
+  fromId: String!
+  toId: String!
+  kind: String!
+  date: String!
+  curve: Float
+  meta: JSON!
+}
+
+type LineageNode {
+  id: String!
+  docId: Int!
+  source: String!
+  title: String!
+  meta: String!
+  icon: String!
+  x: Float!
+  y: Float!
+  pinned: Boolean!
+  date: String!
+  createdDate: String!
+  warn: Boolean!
+  owner: String!
+  tags: [String!]!
+  staleDays: Int!
+  orphan: Boolean!
+  inbound: Int!
+  outbound: Int!
+  docKind: String!
+  group: String!
+}
+
+type McpServer {
+  id: Int!
+  name: String!
+  url: String!
+  scope: String!
+  status: String!
+  tools: Int!
+  config: JSON!
+  token: String!
+}
+
+type Member {
+  id: Int!
+  name: String!
+  initials: String!
+  tint: Int!
+  email: String!
+  role: String!
+  provider: String!
+  status: String!
+  joined: String!
+}
+
+type Mutation {
+  evaluateReviewItem(reviewId: String!, dryRun: Boolean! = true): ReviewPolicyDecision!
+  automateReview(first: Int! = 100, dryRun: Boolean! = true): [ReviewPolicyDecision!]!
+  setTaskDone(id: Int!, done: Boolean!): Boolean!
+  clearDoneTasks: Int!
+  verifyFact(id: Int!): Boolean!
+  createTask(title: String!, kind: String! = "factcheck", kindLabel: String! = "Fact check", assignee: String! = "", due: String = null, subjectType: String! = "", subjectId: String! = "", subjectTitle: String! = "", subjectHref: String! = ""): Boolean!
+  setTaskDue(id: Int!, due: String = null): Boolean!
+  addFact(claim: String!, source: String!, owner: String! = "", documentId: Int = null): Boolean!
+  upsertGlossary(term: String!, definition: String!, id: Int = null, evidence: String! = "", evidenceDocId: Int = null): Boolean!
+  deleteGlossary(id: Int!): Boolean!
+  upsertStyleGuide(key: String!, name: String!, description: String! = "", tone: String! = "ink"): Boolean!
+  deleteStyleGuide(key: String!): Boolean!
+  upsertStyleRule(id: String!, guideKey: String!, description: String!, family: String! = "", severity: String! = "advisory", pack: String! = "", suggestion: String! = ""): Boolean!
+  deleteStyleRule(id: String!): Boolean!
+  setDefaultStylePack(key: String!): Boolean!
+  setVoiceLayer(voice: String! = "", terms: String! = "", banned: String! = "", inclusive: Boolean! = false, jargon: Boolean! = false, sentenceCase: Boolean! = false): Boolean!
+  upsertDocumentTemplate(key: String!, name: String!, category: String! = "", description: String! = "", sections: [String!] = null, icon: String! = "file-text"): Boolean!
+  deleteDocumentTemplate(key: String!): Boolean!
+  setTagWeight(tag: String!, weight: Float!): Boolean!
+  upsertTagDef(tag: String!, label: String!, kind: String! = "neutral", searchWeight: Float! = 1, behaviors: String! = ""): Boolean!
+  deleteTagDef(tag: String!): Boolean!
+  tagDocument(documentId: Int!, tag: String!): [String!]!
+  untagDocument(documentId: Int!, tag: String!): [String!]!
+  factCheck(documentId: Int!): Int!
+  deriveLinks: Int!
+  pinNode(documentId: Int!, x: Float!, y: Float!): Boolean!
+  unpinNode(documentId: Int!): Boolean!
+  saveGraphView(name: String!, state: String!): Int!
+  deleteGraphView(id: Int!): Boolean!
+  regenerateDigest: Boolean!
+  impactAnalysis(claim: String!): ImpactResult!
+  upsertAnswer(question: String!, answer: String!, id: Int = null): Boolean!
+  setAnswerStatus(id: Int!, status: String!): Boolean!
+  setAnswerChannels(id: Int!, channels: [String!]!): Boolean!
+  addDecision(statement: String!, context: String! = "", sourceLabel: String! = ""): Boolean!
+  ratifyDecision(id: Int!): Boolean!
+  supersedeDecision(id: Int!, byStatement: String!): Boolean!
+  decisionImpact(id: Int!): ImpactResult!
+  scoreReadability: Int!
+  harvestGlossary: Int!
+  promoteGlossaryCandidate(id: Int!, accept: Boolean!): Boolean!
+  scanDecisions: Int!
+  scanFacts: Int!
+  startFactScan: Int!
+  startDecisionScan: Int!
+  scanAnswerCandidates(sources: [String!]!): [AnswerCandidate!]!
+  setWorkflowTrigger(workflowId: Int!, trigger: String!): Boolean!
+  markNotificationsRead: Boolean!
+  toggleWatch(documentId: Int!): Boolean!
+  runWorkflow(workflowId: Int!, dryRun: Boolean! = false): Int!
+  approveRun(runId: Int!): Boolean!
+  saveWorkflow(name: String!, description: String!, steps: JSON!, id: Int = null, color: String! = "#5c7a4c", pinned: Boolean! = true): Int!
+  deleteWorkflow(id: Int!): Boolean!
+  setWorkflowStatus(id: Int!, status: String!): Boolean!
+  setWorkflowPinned(id: Int!, pinned: Boolean!): Boolean!
+  buildSite(id: Int!, generator: String = null): String!
+  buildSiteEx(id: Int!, generator: String = null): JSON!
+  aiCustomizeSite(id: Int!, instruction: String!): JSON!
+  createSite(name: String!, domain: String!, sources: JSON!): Int!
+  renameSite(id: Int!, name: String!): Boolean!
+  updateSiteTheme(id: Int!, theme: JSON!): Boolean!
+  setSiteNav(id: Int!, nav: JSON!): Boolean!
+  setSiteFeature(id: Int!, key: String!, on: Boolean!): Boolean!
+  deploySite(id: Int!): String!
+  rollbackRelease(id: Int!): Boolean!
+  importBrand(url: String!): JSON!
+  createMcpServer(name: String!, scope: String!, capabilities: JSON!): String!
+  updateMcpServer(id: Int!, scope: String = null, capabilities: JSON!): Boolean!
+  deleteMcpServer(id: Int!): Boolean!
+  testMcpServer(id: Int!): JSON!
+  connectSource(provider: String!, displayName: String!, config: JSON!): Boolean!
+  disconnectSource(provider: String!): Boolean!
+  inviteMember(name: String!, email: String!, role: String! = "user"): Boolean!
+  setMemberRole(id: Int!, role: String!): Boolean!
+  removeMember(id: Int!): Boolean!
+  createApiKey(name: String!, scopes: String! = "read"): String!
+  revokeApiKey(id: Int!): Boolean!
+  updateSetting(key: String!, value: JSON!): Boolean!
+  testLlmGateway: JSON!
+  setWorkspaceName(name: String!): Boolean!
+  setGithubTeam(team: String!): Boolean!
+  connectGithubRepo(repo: String!, paths: String = null, token: String = null): Int!
+  syncSource(sourceId: Int!): Boolean!
+  resyncSource(sourceId: Int!): Boolean!
+  extractLinks(sourceId: Int = null): Int!
+  syncNow(provider: String!): Boolean!
+  updateSourceConfig(provider: String!, config: JSON!): Boolean!
+  runRepoAudit(provider: String! = "github"): Int!
+  fixAuditFinding(id: Int!, memberName: String! = ""): String!
+  fixAllAuditFindings(runId: Int!, kind: String!): Int!
+  dismissAuditFinding(id: Int!): Boolean!
+}
+
+type Notification {
+  id: Int!
+  kind: String!
+  text: String!
+  detail: String!
+  at: String!
+  read: Boolean!
+}
+
+type Provisioning {
+  manualInvites: Boolean!
+  githubTeam: GithubTeamSync!
+  ssoProviders: [String!]!
+  ssoEnabled: Boolean!
+  scimEnabled: Boolean!
+  scimStatus: String!
+}
+
+type Query {
+  trajectories(limit: Int! = 50, offset: Int! = 0, category: String = null): [Trajectory!]!
+  trajectoryTotal(category: String = null): Int!
+  trajectoryCategories: [String!]!
+  overviewStats(since: String = null): JSON!
+  sourcePulse: [SourcePulse!]!
+  githubRepos: [GithubRepo!]!
+  syncStatus(sourceId: Int!): SyncStatus!
+  search(query: String! = "", k: Int! = 10, offset: Int! = 0): [Document!]!
+  searchTotal(query: String! = ""): Int!
+  recentSearches(limit: Int! = 6): [String!]!
+  relatedDocuments(documentId: Int!): [RelatedDoc!]!
+  document(id: Int!): Document
+  revisions(documentId: Int!): [AuditEvent!]!
+  findings(documentId: Int!): [Finding!]!
+  changes(documentId: Int!): [Change!]!
+  lineage: [LineageNode!]!
+  lineageEdges: [LineageEdge!]!
+  graphStats: GraphStats!
+  docHistory(documentId: Int!): [DocHistory!]!
+  graphViews: [GraphView!]!
+  facts: [Fact!]!
+  claims(documentId: Int!): [Fact!]!
+  factContradictions: [FactContradiction!]!
+  tasks: [Task!]!
+  reviewItems(first: Int! = 50, after: String! = "", kinds: [String!] = null, statuses: [String!] = null, sources: [String!] = null, assignees: [String!] = null, due: String! = ""): ReviewConnection!
+  tasksSummary: TaskSummary
+  digest: [DigestTopic!]!
+  members: [Member!]!
+  glossary: [GlossaryTerm!]!
+  tagDefs: [TagDef!]!
+  styleGuides: [StyleGuide!]!
+  styleRules(guideKey: String = null): [StyleRule!]!
+  defaultStylePack: String!
+  voiceLayer: VoiceLayer!
+  documentTemplates: [DocumentTemplate!]!
+  uploadManifest: UploadManifest!
+  siteThemePresets: [SiteThemePreset!]!
+  siteFeatures(siteId: Int = null): [SiteFeature!]!
+  apiKeys: [ApiKey!]!
+  mcpServers: [McpServer!]!
+  checkpoints: [Checkpoint!]!
+  syncEvents: [SyncEvent!]!
+  auditLog(limit: Int! = 40, query: String! = "", dateFrom: String = null, dateTo: String = null): [AuditEvent!]!
+  auditLogTotal(query: String! = "", dateFrom: String = null, dateTo: String = null): Int!
+  activityFeed(limit: Int! = 12): [ActivityItem!]!
+  workflows: [Workflow!]!
+  workflowRuns(workflowId: Int = null): [WorkflowRun!]!
+  workflowRun(id: Int!): WorkflowRun
+  sites: [Site!]!
+  releases(siteId: Int = null): [Release!]!
+  notifications: [Notification!]!
+  workspace: Workspace!
+  provisioning: Provisioning!
+  settings: [Setting!]!
+  approvedAnswers: [ApprovedAnswer!]!
+  answerCoverageGaps(limit: Int! = 8): [String!]!
+  answerHarvestSources: JSON!
+  indexStats: JSON!
+  botsStatus: JSON!
+  connectorCatalog: JSON!
+  decisions: [Decision!]!
+  insightStats(since: String = null, until: String = null): InsightStats!
+  freshness: [FreshnessRow!]!
+  readability: [ReadabilityRow!]!
+  glossaryCandidates: [GlossaryCandidate!]!
+  auditRuns: [AuditRun!]!
+  auditFindings(runId: Int = null): [AuditFinding!]!
+  chatSessions: [ChatSession!]!
+}
+
+type ReadabilityRow {
+  id: Int!
+  title: String!
+  source: String!
+  grade: String!
+  note: String!
+}
+
+type RelatedDoc {
+  id: Int!
+  source: String!
+  title: String!
+  rel: String!
+  direction: String!
+}
+
+type Release {
+  id: Int!
+  siteId: Int!
+  version: String!
+  status: String!
+  deployed: String!
+  docs: Int!
+  notes: String!
+}
+
+type ReviewConnection {
+  items: [ReviewItem!]!
+  totalCount: Int!
+  pageInfo: ReviewPageInfo!
+}
+
+type ReviewItem {
+  id: String!
+  kind: String!
+  title: String!
+  status: String!
+  source: String!
+  assignee: String!
+  due: String!
+  subjectType: String!
+  subjectId: String!
+  subjectTitle: String!
+  subjectHref: String!
+  confidence: Float!
+  evidenceCount: Int!
+  trustedSource: Boolean!
+}
+
+type ReviewPageInfo {
+  endCursor: String!
+  hasNextPage: Boolean!
+}
+
+type ReviewPolicyDecision {
+  reviewId: String!
+  outcome: String!
+  explanation: String!
+  policyVersion: String!
+  replayed: Boolean!
+  dryRun: Boolean!
+}
+
+type Setting {
+  key: String!
+  value: JSON!
+}
+
+type Site {
+  id: Int!
+  name: String!
+  domain: String!
+  status: String!
+  theme: JSON!
+  sources: JSON!
+  nav: JSON!
+  gates: JSON!
+  docs: Int!
+  warnings: Int!
+}
+
+type SiteFeature {
+  key: String!
+  label: String!
+  hint: String!
+  on: Boolean!
+}
+
+type SiteThemePreset {
+  key: String!
+  name: String!
+  accent: String!
+  bg: String!
+}
+
+type SourcePulse {
+  id: Int!
+  provider: String!
+  name: String!
+  status: String!
+  stat: String!
+  unit: String!
+  bars: [Int!]!
+  docsCount: Int!
+  health: String!
+  config: JSON!
+  kind: String!
+  lastSyncAt: String!
+  syncIntervalMinutes: Int
+  syncFlowId: Int
+}
+
+type StyleGuide {
+  key: String!
+  name: String!
+  description: String!
+  tone: String!
+  builtin: Boolean!
+  rules: Int!
+  preview: [String!]!
+}
+
+type StyleRule {
+  id: String!
+  guideKey: String!
+  family: String!
+  severity: String!
+  description: String!
+  pack: String!
+  suggestion: String!
+}
+
+type SyncEvent {
+  id: Int!
+  provider: String!
+  event: String!
+  detail: String!
+  at: String!
+}
+
+type SyncStatus {
+  state: String!
+  phase: String!
+  done: Int!
+  total: Int!
+  lastSyncAt: String!
+  lastError: String!
+  cursor: String!
+  docCount: Int!
+  chunkCount: Int!
+  embeddedCount: Int!
+}
+
+type TagDef {
+  tag: String!
+  label: String!
+  kind: String!
+  searchWeight: Float!
+  isDefault: Boolean!
+  behaviors: String!
+  usage: Int!
+}
+
+type Task {
+  id: Int!
+  title: String!
+  assigneeInitials: String!
+  assigneeTint: Int!
+  kind: String!
+  kindLabel: String!
+  done: Boolean!
+  due: String!
+  overdue: Boolean!
+  subjectType: String!
+  subjectId: String!
+  subjectTitle: String!
+  subjectHref: String!
+}
+
+type TaskSummary {
+  title: String!
+  tags: [String!]!
+  people: [String!]!
+  statValue: String!
+  statLabel: String!
+  openCount: Int!
+  doneCount: Int!
+  overdueCount: Int!
+  dueSoonCount: Int!
+}
+
+type TopCited {
+  title: String!
+  docId: Int!
+  inbound: Int!
+}
+
+type Trajectory {
+  id: Int!
+  sessionId: Int
+  prompt: String!
+  status: String!
+  model: String!
+  layer1: String!
+  layer2: String!
+  category: String!
+  macroIntent: String!
+  phases: JSON!
+  stepCount: Int!
+  failureCount: Int!
+  reworkCount: Int!
+  startedAt: String!
+  completedAt: String!
+  steps: [TrajectoryStep!]!
+}
+
+type TrajectoryStep {
+  ordinal: Int!
+  tool: String!
+  actionFamily: String!
+  args: JSON!
+  summary: String!
+  ok: Boolean!
+}
+
+type UploadFile {
+  name: String!
+  docId: Int!
+  chunks: Int!
+  embedded: Int!
+  detail: String!
+  ingestedAt: String!
+}
+
+type UploadManifest {
+  files: [UploadFile!]!
+  fileCount: Int!
+  chunkCount: Int!
+  embeddedCount: Int!
+  summary: String!
+}
+
+type VoiceLayer {
+  voice: String!
+  terms: String!
+  banned: String!
+  inclusive: Boolean!
+  jargon: Boolean!
+  sentenceCase: Boolean!
+}
+
+type Workflow {
+  id: Int!
+  name: String!
+  description: String!
+  color: String!
+  pinned: Boolean!
+  status: String!
+  nodes: JSON!
+  trigger: JSON!
+}
+
+type WorkflowRun {
+  id: Int!
+  workflowId: Int!
+  workflowName: String!
+  number: Int!
+  status: String!
+  started: String!
+  duration: String!
+  progress: Int!
+  stats: JSON!
+  rows: JSON!
+  triggeredBy: String!
+}
+
+type Workspace {
+  name: String!
+  slug: String!
+  plan: String!
+  timezone: String!
+  language: String!
+}
