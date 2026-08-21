@@ -344,7 +344,8 @@ class Query:
             rework_count=int(row["rework_count"]), started_at=row["started_at"].isoformat(),
             completed_at=row["completed_at"].isoformat() if row.get("completed_at") else "",
             steps=by_id[int(row["id"])], evidence=evidence_by_id[int(row["id"])],
-            promoted_workflow_id=row.get("promoted_workflow_id")) for row in rows]
+            promoted_workflow_id=row.get("promoted_workflow_id"),
+            promoted_workflow_status=row.get("promoted_workflow_status") or "") for row in rows]
 
     @strawberry.field
     def trajectory_total(self, category: str | None = None) -> int:

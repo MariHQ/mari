@@ -44,7 +44,12 @@ def list_trajectories(
         where += " AND category = %s"
         args.append(category)
     args.extend((limit, offset))
-    rows = q(f"SELECT * FROM trajectories WHERE {where} ORDER BY started_at DESC, id DESC LIMIT %s OFFSET %s",
+    rows = q(f"""SELECT t.*, aw.status AS promoted_workflow_status
+                    FROM trajectories t
+                    LEFT JOIN assistant_workflows aw
+                      ON aw.project_id = t.project_id AND aw.id = t.promoted_workflow_id
+                   WHERE {where.replace('project_id', 't.project_id')}
+                   ORDER BY t.started_at DESC, t.id DESC LIMIT %s OFFSET %s""",
              tuple(args))
     if not rows:
         return [], [], []
@@ -311,7 +316,7 @@ def tune_evidence(trajectory_id: int, document_id: int, relevance: str, note: st
 
 
 def promote_to_workflow(trajectory_id: int, name: str) -> int:
-    """Create a paused, editable workflow from the human-tuned trace."""
+    """Codify a human-tuned trace as active assistant guidance."""
     project_id = access.require_current_access().project_id
     clean_name = name.strip()
     if not clean_name:
@@ -328,7 +333,8 @@ def promote_to_workflow(trajectory_id: int, name: str) -> int:
         if row.get("promoted_workflow_id"):
             return int(row["promoted_workflow_id"])
         if conn.execute(
-            "SELECT 1 FROM workflows WHERE project_id = %s AND name = %s", (project_id, clean_name),
+            "SELECT 1 FROM assistant_workflows WHERE project_id = %s AND name = %s",
+            (project_id, clean_name),
         ).fetchone():
             raise ValueError("A workflow with that name already exists.")
         observed = conn.execute(
@@ -339,25 +345,21 @@ def promote_to_workflow(trajectory_id: int, name: str) -> int:
         ).fetchall()
         if not observed:
             raise ValueError("Include at least one tool call before creating a workflow.")
-        nodes = [{"kind": "trigger", "label": "Manual", "config": {"label": "Human approved"}}]
-        nodes.extend({
-            "kind": "observed_tool", "label": str(step["tool"]),
-            "config": {
+        steps = [{
                 "tool": str(step["tool"]),
                 "arguments": jload(step.get("edited_args")) if step.get("edited_args") is not None
                 else (jload(step.get("args")) or {}),
                 "family": str(step["action_family"]),
                 "disposition": str(step["disposition"]),
-            },
-        } for step in observed)
+        } for step in observed]
         workflow = conn.execute(
-            """INSERT INTO workflows
-                 (project_id, name, description, color, pinned, status, nodes, trigger)
-               VALUES (%s, %s, %s, '#5f6f52', false, 'paused', %s, '{"on":""}'::jsonb)
+            """INSERT INTO assistant_workflows
+                 (project_id, trajectory_id, name, description, status, steps)
+               VALUES (%s, %s, %s, %s, 'active', %s)
                RETURNING id""",
-            (project_id, clean_name,
+            (project_id, trajectory_id, clean_name,
              str(row.get("layer2") or row.get("macro_intent") or "Observed agent workflow")[:500],
-             json.dumps(nodes)),
+             json.dumps(steps)),
         ).fetchone()
         workflow_id = int(workflow["id"])
         conn.execute(
@@ -368,3 +370,22 @@ def promote_to_workflow(trajectory_id: int, name: str) -> int:
 
     from mari_server.persistence.postgres.database import transaction
     return transaction(promote)
+
+
+def set_workflow_enabled(workflow_id: int, enabled: bool) -> bool:
+    project_id = access.require_current_access().project_id
+    return bool(q1(
+        """UPDATE assistant_workflows SET status = %s, updated_at = now()
+              WHERE project_id = %s AND id = %s RETURNING id""",
+        ("active" if enabled else "paused", project_id, workflow_id),
+    ))
+
+
+def active_workflows(limit: int = 20) -> list[dict]:
+    project_id = access.require_current_access().project_id
+    return q(
+        """SELECT id, name, description, steps FROM assistant_workflows
+              WHERE project_id = %s AND status = 'active'
+              ORDER BY updated_at DESC, id DESC LIMIT %s""",
+        (project_id, max(1, min(int(limit), 50))),
+    )

@@ -138,6 +138,7 @@ function initialData() {
       ],
       evidence: [{ documentId: 1, title: "Retention runbook", reason: "used as answer context", rank: 1, relevance: "observed", note: "" }],
       promotedWorkflowId: null,
+      promotedWorkflowStatus: "",
     }],
     trajectoryTotal: 1,
     trajectoryCategories: ["Documentation maintenance"],
@@ -238,6 +239,8 @@ export async function installMockApi(page: Page, options: {
       data = { tuneTrajectoryEvidence: true };
     } else if (/promoteTrajectoryToWorkflow/.test(query)) {
       data = { promoteTrajectoryToWorkflow: 44 };
+    } else if (/setAssistantWorkflowEnabled/.test(query)) {
+      data = { setAssistantWorkflowEnabled: true };
     } else if (/workflowRun\(/.test(query)) {
       data = { workflowRun: { id: 99, number: 1900, workflowName: "Fact scan", status: "passed", progress: 100, stats: { facts: 2 }, rows: [{ step: "Scan facts", status: "passed", detail: "2 claims", duration: "00:00:01" }] } };
     } else if (/approveRun/.test(query)) {

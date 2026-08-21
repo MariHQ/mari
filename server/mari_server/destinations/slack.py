@@ -111,6 +111,11 @@ BOT_SYSTEM = (
 )
 
 
+def _bot_system(question: str) -> str:
+    from mari_server.conversations.workflows import guidance
+    return BOT_SYSTEM + guidance(question)
+
+
 def answer_question(question: str, supplemental_context: str = "") -> str:
     """Hybrid search + strict, evidence-preserving component answer recipe."""
     caller_access = access.require_current_access()
@@ -146,7 +151,7 @@ def answer_question(question: str, supplemental_context: str = "") -> str:
     result = component_answer_question(
         question,
         knowledge,
-        generate_json=lambda prompt, _version: llm.generate_json(prompt, system=BOT_SYSTEM),
+        generate_json=lambda prompt, _version: llm.generate_json(prompt, system=_bot_system(question)),
     )
     by_id = {document.external_id: document for document in knowledge}
     cited = []
@@ -185,7 +190,7 @@ def stream_answer_question(question: str, supplemental_context: str = ""):
     prompt = "Context:\n" + "\n\n".join(sections) + f"\n\nQuestion: {question}"
 
     emitted = False
-    for token in llm.chat_stream([{"role": "user", "content": prompt}], BOT_SYSTEM):
+    for token in llm.chat_stream([{"role": "user", "content": prompt}], _bot_system(question)):
         if token:
             emitted = True
             yield token

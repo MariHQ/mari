@@ -640,6 +640,7 @@ class Trajectory:
     steps: list[TrajectoryStep]
     evidence: list[TrajectoryEvidence]
     promoted_workflow_id: int | None
+    promoted_workflow_status: str
 
 
 @strawberry.type

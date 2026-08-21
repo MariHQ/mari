@@ -77,7 +77,7 @@ CASES = (
         ("reporting range", "evidence-backed", "affected knowledge", "review item"),
     ),
     AgentEvalCase(
-        "trajectories", "Show me how to inspect agent trajectories", "/trajectories",
+        "workflows", "Show me how to inspect and codify observed workflows", "/workflows",
         ("category or status", "steps", "failures", "rework"),
     ),
     AgentEvalCase(

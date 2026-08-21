@@ -2,7 +2,7 @@ import type { TrajectoriesActions } from "@mari-design/components/pages/Trajecto
 import type { ActionContext } from "./index";
 import { mutate } from "./index";
 
-export function trajectoriesActions({ replace, navigate }: ActionContext): TrajectoriesActions {
+export function trajectoriesActions({ replace }: ActionContext): TrajectoriesActions {
   const route = (changes: { category?: string | null; offset?: number }) => {
     const params = new URLSearchParams(window.location.search);
     if ("category" in changes) {
@@ -13,7 +13,7 @@ export function trajectoriesActions({ replace, navigate }: ActionContext): Traje
     if (changes.offset !== undefined && changes.offset > 0) params.set("offset", String(changes.offset));
     else if (changes.offset !== undefined) params.delete("offset");
     const query = params.toString();
-    replace(query ? `/trajectories?${query}` : "/trajectories");
+    replace(query ? `/workflows?${query}` : "/workflows");
   };
   return {
     setCategory: (category) => route({ category }),
@@ -34,6 +34,10 @@ export function trajectoriesActions({ replace, navigate }: ActionContext): Traje
       }`, { trajectoryId, name });
       return Number(data.promoteTrajectoryToWorkflow);
     },
-    openWorkflow: (workflowId) => navigate(`/flows?workflow=${workflowId}`),
+    setWorkflowEnabled: async (workflowId, enabled) => {
+      await mutate(`mutation($workflowId: Int!, $enabled: Boolean!) {
+        setAssistantWorkflowEnabled(workflowId: $workflowId, enabled: $enabled)
+      }`, { workflowId, enabled });
+    },
   };
 }

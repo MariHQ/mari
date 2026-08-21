@@ -51,3 +51,13 @@ class TrajectoryMutations:
         audit("promoted trajectory", f"trajectory:{trajectory_id}",
               detail=[("workflow", workflow_id)])
         return workflow_id
+
+    @strawberry.mutation
+    def set_assistant_workflow_enabled(self, info: strawberry.Info,
+                                       workflow_id: int, enabled: bool) -> bool:
+        _access(info)
+        changed = trajectories.set_workflow_enabled(workflow_id, enabled)
+        if changed:
+            audit("enabled assistant workflow" if enabled else "paused assistant workflow",
+                  f"assistant-workflow:{workflow_id}")
+        return changed

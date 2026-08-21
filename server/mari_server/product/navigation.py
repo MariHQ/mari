@@ -20,7 +20,7 @@ PRODUCT_SURFACES = (
     ProductSurface("/publish", "Documentation destinations"),
     ProductSurface("/publish?tab=mcp", "MCP servers"),
     ProductSurface("/publish?tab=bots", "Bots"), ProductSurface("/insights", "Analytics"),
-    ProductSurface("/trajectories", "Agent trajectories"),
+    ProductSurface("/workflows", "Workflows"),
     ProductSurface("/library", "Library"), ProductSurface("/sources", "Sources"),
     ProductSurface("/audit", "Repository audit"),
     ProductSurface("/preferences", "Preferences"), ProductSurface("/welcome", "Onboarding"),

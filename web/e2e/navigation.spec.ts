@@ -7,7 +7,7 @@ const ROUTES = [
   ["/knowledge/doc?id=1", "Retention runbook", "Knowledge"], ["/answers", "Approved answers", "Answers"],
   ["/insights", "Insights", "Analytics"], ["/audit", "Repository audit", "Review"], ["/lineage", "Lineage", "Lineage"],
   ["/flows", "Automations", null], ["/library", "Library", "Knowledge"], ["/publish", "Destinations", "Destinations"],
-  ["/trajectories", "Agent trajectories", "Trajectories"],
+  ["/workflows", "Workflows", "Workflows"],
   ["/sources", "Sources", "Sources"], ["/settings/general", "General", "Settings"],
   ["/settings/models", "Models", "Settings"], ["/settings/design", "Design & brand", "Settings"],
   ["/settings/members", "Members", "Settings"], ["/settings/api-keys", "API keys", "Settings"],
@@ -15,7 +15,7 @@ const ROUTES = [
 ] as const;
 
 const PRIMARY_DESTINATIONS = [
-  "Home", "Knowledge", "Facts", "Answers", "Decisions", "Lineage", "Trajectories", "Review", "Destinations", "Analytics", "Sources", "Settings",
+  "Home", "Knowledge", "Facts", "Answers", "Decisions", "Lineage", "Workflows", "Review", "Destinations", "Analytics", "Sources", "Settings",
 ] as const;
 
 const LEGACY_PRIMARY_LABELS = [

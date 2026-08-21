@@ -301,6 +301,7 @@ const trajectoryData = buildTrajectories({
     category: "Documentation", macroIntent: "Repair docs", phases: [], stepCount: 2,
     failureCount: 0, reworkCount: 0, startedAt: "2026-08-19T12:00:00Z",
     completedAt: "2026-08-19T12:00:01Z", steps: [], evidence: [], promotedWorkflowId: null,
+    promotedWorkflowStatus: "",
   }], trajectoryTotal: 1, trajectoryCategories: ["Documentation"],
 }, null, 0);
 const trajectoryHtml = render(trajectories, { data: trajectoryData, loading: false, error: null });

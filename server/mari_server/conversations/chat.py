@@ -11,6 +11,7 @@ from mari_server.persistence.postgres import chat as chat_store
 from mari_server.persistence.postgres import trajectories as trajectory_store
 from mari_server.search.service import hybrid_search
 from mari_components.destinations.chat import ChatContext, ChatPorts, answer_search_query
+from mari_server.conversations.workflows import guidance as workflow_guidance
 
 
 SYSTEM = (
@@ -67,7 +68,10 @@ def ports(project_access: access.AccessContext, usage_detail: str,
 
     return ChatPorts(
         prepare=prepare,
-        generate=lambda messages: llm.chat_stream([dict(row) for row in messages], SYSTEM),
+        generate=lambda messages: llm.chat_stream(
+            [dict(row) for row in messages],
+            SYSTEM + workflow_guidance(str(messages[-1].get("content") or "") if messages else ""),
+        ),
         persist=lambda session_id, answer, sources: chat_store.add_message(
             project_id, session_id, "assistant", answer, json.dumps(list(sources)),
         ),

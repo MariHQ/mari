@@ -5,7 +5,7 @@ import { installMockApi } from "./fixtures/mock-api";
 const ROUTES = [
   "/", "/tasks", "/facts", "/decisions", "/knowledge", "/knowledge/doc?id=1",
   "/answers", "/insights", "/audit", "/lineage", "/flows", "/library",
-  "/publish", "/trajectories", "/sources", "/preferences", "/welcome",
+  "/publish", "/workflows", "/sources", "/preferences", "/welcome",
   "/settings/general", "/settings/models", "/settings/design", "/settings/members",
   "/settings/api-keys", "/settings/audit",
 ] as const;

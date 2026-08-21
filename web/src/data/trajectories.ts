@@ -11,7 +11,7 @@ const QUERY = `query Trajectories($limit: Int!, $offset: Int!, $category: String
     stepCount failureCount reworkCount startedAt completedAt
     steps { ordinal tool actionFamily args summary ok disposition editedArgs }
     evidence { documentId title reason rank relevance note }
-    promotedWorkflowId
+    promotedWorkflowId promotedWorkflowStatus
   }
   trajectoryTotal(category: $category)
   trajectoryCategories
@@ -36,6 +36,7 @@ export function buildTrajectories(res: Res | null, category: string | null, offs
       })),
       evidence: row.evidence ?? [],
       promotedWorkflowId: row.promotedWorkflowId ?? null,
+      promotedWorkflowStatus: row.promotedWorkflowStatus ?? "",
     })),
     total: res?.trajectoryTotal ?? 0,
     categories: res?.trajectoryCategories ?? [],
@@ -59,6 +60,6 @@ export function useTrajectories(): PageData<TrajectoriesData> {
   return {
     data,
     loading: query.loading,
-    error: query.error ? (query.errorText ?? "Agent trajectories are temporarily unavailable.") : null,
+    error: query.error ? (query.errorText ?? "Workflows are temporarily unavailable.") : null,
   };
 }
