@@ -71,10 +71,10 @@ export function AgentDock() {
 
     const ok = await agentChatStream(text, sessionRef.current, {
       onMeta: (sid) => { sessionRef.current = sid; },
-      onWorkflowSelected: ({ id, name, workflowScore, phaseIndex, stepIndex }) =>
+      onWorkflowSelected: ({ id, name, workflowScore, phaseIndex, stepIndex, cacheHit }) =>
         patchLast((m) => ({ ...m, tools: [...(m.tools ?? []), {
           name: `Workflow · ${name}`, args: { workflowId: id }, ok: true,
-          state: "complete", summary: `Matched phase ${phaseIndex + 1}, step ${stepIndex + 1} · ${workflowScore.toFixed(2)}`,
+          state: "complete", summary: `${cacheHit ? "Served reviewed cache · " : ""}Matched phase ${phaseIndex + 1}, step ${stepIndex + 1} · ${workflowScore.toFixed(2)}`,
         } as ToolCallData] })),
       onToolProposal: ({ name, args }) =>
         patchLast((m) => ({ ...m, tools: [...(m.tools ?? []), { name, args, ok: null, state: "proposed" } as ToolCallData] })),

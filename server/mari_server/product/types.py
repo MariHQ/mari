@@ -641,6 +641,10 @@ class Trajectory:
     evidence: list[TrajectoryEvidence]
     promoted_workflow_id: int | None
     promoted_workflow_status: str
+    promoted_workflow_cache_policy: str
+    promoted_workflow_cache_state: str
+    promoted_workflow_cache_refreshed_at: str
+    promoted_workflow_dependency_count: int
 
 
 @strawberry.type

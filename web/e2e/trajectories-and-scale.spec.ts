@@ -40,6 +40,23 @@ test("a human can tune evidence and tool calls before codifying a trajectory", a
   await expect.poll(() => api.calls.some((call) => call.query.includes("setAssistantWorkflowEnabled")
     && call.variables.enabled === false)).toBeTruthy();
   await expect(page.getByRole("button", { name: "Enable workflow" })).toBeVisible();
+  await page.getByRole("button", { name: "Cache reviewed answer" }).click();
+  await expect.poll(() => api.calls.some((call) => call.query.includes("setAssistantWorkflowCache")
+    && call.variables.enabled === true)).toBeTruthy();
+  await expect(page.getByText("Current", { exact: true })).toBeVisible();
+});
+
+test("stale reviewed-answer workflows can be reconciled together", async ({ page }) => {
+  const row = api.getData("trajectories")[0];
+  api.setData("trajectories", [{
+    ...row, promotedWorkflowId: 44, promotedWorkflowStatus: "active",
+    promotedWorkflowCachePolicy: "reviewed_answer", promotedWorkflowCacheState: "stale",
+    promotedWorkflowDependencyCount: 2, promotedWorkflowCacheRefreshedAt: "2026-08-20T12:00:00Z",
+  }]);
+  await page.goto("/workflows");
+  await page.getByRole("button", { name: "Reconcile stale caches (1)" }).click();
+  await expect.poll(() => api.calls.some((call) =>
+    call.query.includes("reconcileStaleAssistantWorkflows"))).toBeTruthy();
 });
 
 test("trajectory taxonomy filter and pagination remain URL-addressable", async ({ page }) => {

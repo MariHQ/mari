@@ -345,7 +345,16 @@ class Query:
             completed_at=row["completed_at"].isoformat() if row.get("completed_at") else "",
             steps=by_id[int(row["id"])], evidence=evidence_by_id[int(row["id"])],
             promoted_workflow_id=row.get("promoted_workflow_id"),
-            promoted_workflow_status=row.get("promoted_workflow_status") or "") for row in rows]
+            promoted_workflow_status=row.get("promoted_workflow_status") or "",
+            promoted_workflow_cache_policy=row.get("promoted_workflow_cache_policy") or "none",
+            promoted_workflow_cache_state=row.get("promoted_workflow_cache_state") or "disabled",
+            promoted_workflow_cache_refreshed_at=(
+                row["promoted_workflow_cache_refreshed_at"].isoformat()
+                if row.get("promoted_workflow_cache_refreshed_at") else ""
+            ),
+            promoted_workflow_dependency_count=int(
+                row.get("promoted_workflow_dependency_count") or 0
+            )) for row in rows]
 
     @strawberry.field
     def trajectory_total(self, category: str | None = None) -> int:

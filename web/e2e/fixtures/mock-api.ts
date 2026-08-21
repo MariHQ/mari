@@ -13,6 +13,7 @@ export type MockApi = {
   failNext: (pattern: RegExp, message: string) => void;
   failNextAuthCheck: (status?: number) => void;
   setData: (key: string, value: any) => void;
+  getData: (key: string) => any;
 };
 
 const now = "2026-08-19T12:00:00Z";
@@ -139,6 +140,10 @@ function initialData() {
       evidence: [{ documentId: 1, title: "Retention runbook", reason: "used as answer context", rank: 1, relevance: "observed", note: "" }],
       promotedWorkflowId: null,
       promotedWorkflowStatus: "",
+      promotedWorkflowCachePolicy: "none",
+      promotedWorkflowCacheState: "disabled",
+      promotedWorkflowCacheRefreshedAt: "",
+      promotedWorkflowDependencyCount: 0,
     }],
     trajectoryTotal: 1,
     trajectoryCategories: ["Documentation maintenance"],
@@ -241,6 +246,10 @@ export async function installMockApi(page: Page, options: {
       data = { promoteTrajectoryToWorkflow: 44 };
     } else if (/setAssistantWorkflowEnabled/.test(query)) {
       data = { setAssistantWorkflowEnabled: true };
+    } else if (/setAssistantWorkflowCache/.test(query)) {
+      data = { setAssistantWorkflowCache: true };
+    } else if (/reconcileStaleAssistantWorkflows/.test(query)) {
+      data = { reconcileStaleAssistantWorkflows: 1 };
     } else if (/workflowRun\(/.test(query)) {
       data = { workflowRun: { id: 99, number: 1900, workflowName: "Fact scan", status: "passed", progress: 100, stats: { facts: 2 }, rows: [{ step: "Scan facts", status: "passed", detail: "2 claims", duration: "00:00:01" }] } };
     } else if (/approveRun/.test(query)) {
@@ -368,5 +377,6 @@ settings:
     failNext: (pattern, message) => { failure = { pattern, message }; },
     failNextAuthCheck: (status = 503) => { authFailureStatus = status; },
     setData: (key, value) => { state[key] = value; },
+    getData: (key) => state[key],
   };
 }

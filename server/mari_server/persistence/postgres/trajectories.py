@@ -44,7 +44,25 @@ def list_trajectories(
         where += " AND category = %s"
         args.append(category)
     args.extend((limit, offset))
-    rows = q(f"""SELECT t.*, aw.status AS promoted_workflow_status
+    rows = q(f"""SELECT t.*, aw.status AS promoted_workflow_status,
+                            COALESCE(aw.cache_policy, 'none') AS promoted_workflow_cache_policy,
+                            CASE
+                              WHEN aw.id IS NULL OR aw.cache_policy = 'none' THEN 'disabled'
+                              WHEN aw.cached_answer = '' THEN 'empty'
+                              WHEN EXISTS (
+                                SELECT 1
+                                  FROM jsonb_array_elements(aw.cache_dependencies) dependency
+                                  LEFT JOIN documents d
+                                    ON d.project_id = aw.project_id
+                                   AND d.id = (dependency->>'document_id')::int
+                                 WHERE d.id IS NULL
+                                    OR COALESCE(d.content_hash, '') <> COALESCE(dependency->>'content_hash', '')
+                              ) THEN 'stale'
+                              ELSE 'fresh'
+                            END AS promoted_workflow_cache_state,
+                            aw.cache_refreshed_at AS promoted_workflow_cache_refreshed_at,
+                            jsonb_array_length(COALESCE(aw.cache_dependencies, '[]'))
+                              AS promoted_workflow_dependency_count
                     FROM trajectories t
                     LEFT JOIN assistant_workflows aw
                       ON aw.project_id = t.project_id AND aw.id = t.promoted_workflow_id
@@ -386,13 +404,180 @@ def set_workflow_enabled(workflow_id: int, enabled: bool) -> bool:
 def active_workflows(limit: int = 20) -> list[dict]:
     project_id = access.require_current_access().project_id
     return q(
-        """SELECT id, name, description, steps, phases, match_index,
-                  embedding_profile, match_threshold
-             FROM assistant_workflows
-              WHERE project_id = %s AND status = 'active'
-              ORDER BY updated_at DESC, id DESC LIMIT %s""",
+        """SELECT aw.id, aw.trajectory_id, aw.name, aw.description, aw.steps, aw.phases,
+                  aw.match_index, aw.embedding_profile, aw.match_threshold, aw.cache_policy,
+                  aw.cached_answer, aw.cached_sources, aw.cache_dependencies,
+                  aw.cache_refreshed_at, t.prompt AS trajectory_prompt
+             FROM assistant_workflows aw JOIN trajectories t
+               ON t.project_id = aw.project_id AND t.id = aw.trajectory_id
+            WHERE aw.project_id = %s AND aw.status = 'active'
+            ORDER BY aw.updated_at DESC, aw.id DESC LIMIT %s""",
         (project_id, max(1, min(int(limit), 50))),
     )
+
+
+def workflow_cache_state(workflow: dict) -> str:
+    if workflow.get("cache_policy") != "reviewed_answer":
+        return "disabled"
+    if not str(workflow.get("cached_answer") or ""):
+        return "empty"
+    dependencies = jload(workflow.get("cache_dependencies")) or []
+    if not dependencies:
+        return "fresh"
+    project_id = access.require_current_access().project_id
+    document_ids = [int(row["document_id"]) for row in dependencies]
+    current = {int(row["id"]): str(row.get("content_hash") or "") for row in q(
+        "SELECT id, content_hash FROM documents WHERE project_id = %s AND id = ANY(%s)",
+        (project_id, document_ids),
+    )}
+    return "stale" if any(
+        current.get(int(row["document_id"])) != str(row.get("content_hash") or "")
+        for row in dependencies
+    ) else "fresh"
+
+
+def cached_response(workflow: dict) -> dict | None:
+    if workflow_cache_state(workflow) != "fresh":
+        return None
+    return {
+        "answer": str(workflow.get("cached_answer") or ""),
+        "sources": jload(workflow.get("cached_sources")) or [],
+        "refreshed_at": workflow.get("cache_refreshed_at"),
+    }
+
+
+def _dependencies(conn, project_id: int, document_ids: list[int]) -> list[dict]:
+    if not document_ids:
+        return []
+    return [{"document_id": int(row["id"]), "content_hash": str(row.get("content_hash") or "")}
+            for row in conn.execute(
+                """SELECT id, content_hash FROM documents
+                     WHERE project_id = %s AND id = ANY(%s) ORDER BY id""",
+                (project_id, list(dict.fromkeys(document_ids))),
+            ).fetchall()]
+
+
+def _source_snapshots(conn, project_id: int, document_ids: list[int]) -> list[dict]:
+    if not document_ids:
+        return []
+    return [{
+        "n": index, "document_id": int(row["id"]), "title": str(row["title"]),
+        "source": str(row["source"]), "href": f"/knowledge/doc?id={row['id']}",
+    } for index, row in enumerate(conn.execute(
+        """SELECT id, title, source FROM documents
+             WHERE project_id = %s AND id = ANY(%s)
+             ORDER BY array_position(%s::int[], id)""",
+        (project_id, list(dict.fromkeys(document_ids)), list(dict.fromkeys(document_ids))),
+    ).fetchall(), 1)]
+
+
+def configure_workflow_cache(workflow_id: int, enabled: bool) -> bool:
+    """Explicitly enable a reviewed-response cache or remove it completely."""
+    project_id = access.require_current_access().project_id
+
+    def configure(conn):
+        workflow = conn.execute(
+            """SELECT id, trajectory_id FROM assistant_workflows
+                 WHERE project_id = %s AND id = %s FOR UPDATE""",
+            (project_id, workflow_id),
+        ).fetchone()
+        if not workflow:
+            return False
+        if not enabled:
+            conn.execute(
+                """UPDATE assistant_workflows SET cache_policy = 'none', cached_answer = '',
+                          cached_sources = '[]', cache_dependencies = '[]',
+                          cache_refreshed_at = NULL, updated_at = now()
+                     WHERE project_id = %s AND id = %s""",
+                (project_id, workflow_id),
+            )
+            return True
+        trajectory = conn.execute(
+            "SELECT session_id FROM trajectories WHERE project_id = %s AND id = %s",
+            (project_id, workflow["trajectory_id"]),
+        ).fetchone()
+        message = None
+        if trajectory and trajectory.get("session_id"):
+            message = conn.execute(
+                """SELECT content FROM chat_messages
+                     WHERE project_id = %s AND session_id = %s AND role = 'assistant'
+                     ORDER BY id DESC LIMIT 1""",
+                (project_id, trajectory["session_id"]),
+            ).fetchone()
+        if not message or not str(message.get("content") or "").strip():
+            raise ValueError("This workflow has no reviewed answer to cache. Reconcile it first.")
+        evidence = conn.execute(
+            """SELECT document_id FROM trajectory_evidence
+                 WHERE project_id = %s AND trajectory_id = %s AND relevance <> 'irrelevant'
+                 ORDER BY rank, id""",
+            (project_id, workflow["trajectory_id"]),
+        ).fetchall()
+        document_ids = [int(row["document_id"]) for row in evidence]
+        dependencies = _dependencies(conn, project_id, document_ids)
+        if not dependencies:
+            raise ValueError("This workflow has no tracked documents to validate.")
+        sources = _source_snapshots(conn, project_id, document_ids)
+        conn.execute(
+            """UPDATE assistant_workflows
+                  SET cache_policy = 'reviewed_answer', cached_answer = %s,
+                      cached_sources = %s, cache_dependencies = %s,
+                      cache_refreshed_at = now(), updated_at = now()
+                WHERE project_id = %s AND id = %s""",
+            (str(message["content"]), json.dumps(sources),
+             json.dumps(dependencies), project_id, workflow_id),
+        )
+        return True
+
+    from mari_server.persistence.postgres.database import transaction
+    return bool(transaction(configure))
+
+
+def workflow_for_reconcile(workflow_id: int) -> dict | None:
+    project_id = access.require_current_access().project_id
+    return q1(
+        """SELECT aw.*, t.prompt
+             FROM assistant_workflows aw JOIN trajectories t
+               ON t.project_id = aw.project_id AND t.id = aw.trajectory_id
+            WHERE aw.project_id = %s AND aw.id = %s""",
+        (project_id, workflow_id),
+    )
+
+
+def stale_workflow_ids(limit: int = 50) -> list[int]:
+    project_id = access.require_current_access().project_id
+    rows = q(
+        """SELECT aw.id FROM assistant_workflows aw
+            WHERE aw.project_id = %s AND aw.cache_policy = 'reviewed_answer'
+              AND (aw.cached_answer = '' OR EXISTS (
+                SELECT 1 FROM jsonb_array_elements(aw.cache_dependencies) dependency
+                LEFT JOIN documents d ON d.project_id = aw.project_id
+                  AND d.id = (dependency->>'document_id')::int
+                WHERE d.id IS NULL OR COALESCE(d.content_hash, '') <>
+                  COALESCE(dependency->>'content_hash', '')
+              ))
+            ORDER BY aw.updated_at, aw.id LIMIT %s""",
+        (project_id, max(1, min(int(limit), 100))),
+    )
+    return [int(row["id"]) for row in rows]
+
+
+def save_workflow_cache(workflow_id: int, answer: str, sources: list[dict],
+                        document_ids: list[int]) -> bool:
+    project_id = access.require_current_access().project_id
+
+    def save(conn):
+        dependencies = _dependencies(conn, project_id, document_ids)
+        return bool(conn.execute(
+            """UPDATE assistant_workflows
+                  SET cached_answer = %s, cached_sources = %s, cache_dependencies = %s,
+                      cache_refreshed_at = now(), updated_at = now()
+                WHERE project_id = %s AND id = %s
+                  AND cache_policy = 'reviewed_answer' RETURNING id""",
+            (answer, json.dumps(sources), json.dumps(dependencies), project_id, workflow_id),
+        ).fetchone())
+
+    from mari_server.persistence.postgres.database import transaction
+    return bool(transaction(save))
 
 
 def save_match_index(workflow_id: int, profile: str, value: dict) -> None:

@@ -14,6 +14,7 @@ from mari_components.destinations.chat import ChatContext, ChatPorts, answer_sea
 from mari_server.conversations.workflows import guidance as workflow_guidance
 from mari_server.conversations.workflows import retrieval_query as workflow_retrieval_query
 from mari_server.conversations.workflows import select as select_workflow
+from mari_server.conversations.workflows import cached_response as workflow_cached_response
 
 
 SYSTEM = (
@@ -34,6 +35,7 @@ def ports(project_access: access.AccessContext, usage_detail: str,
     def prepare(session_id: int | None, message: str) -> ChatContext:
         retrieval_question = answer_search_query(message)
         selected_state["workflow"] = workflow = select_workflow(retrieval_question, {"search"})
+        cached = workflow_cached_response(workflow)
         retrieval_question = workflow_retrieval_query(retrieval_question, workflow)
         if session_id is None:
             session_id = chat_store.create_session(
@@ -42,6 +44,11 @@ def ports(project_access: access.AccessContext, usage_detail: str,
         elif not chat_store.session_exists(project_id, project_access.user_id, session_id):
             raise LookupError("Chat session not found.")
         chat_store.add_message(project_id, session_id, "user", message)
+
+        if cached:
+            return ChatContext(
+                session_id, cached.get("sources") or (), (), cached["answer"], True,
+            )
 
         approved = (chat_store.approved_answer(project_id, message, llm.embed(message))
                     if "answers" in enabled_tools else None)

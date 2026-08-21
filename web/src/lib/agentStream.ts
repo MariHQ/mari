@@ -9,7 +9,7 @@ import { projectHeaders } from "./api";
 type AgentToolStart = { name: string; args: Record<string, unknown> };
 type AgentToolResult = { name: string; summary: string; ok: boolean };
 type AgentAuthRequest = { name: string; provider: string; kind: string; scopes: string[]; setupUrl: string };
-type AgentWorkflow = { id: number; name: string; workflowScore: number; phaseIndex: number; stepIndex: number };
+type AgentWorkflow = { id: number; name: string; workflowScore: number; phaseIndex: number; stepIndex: number; cacheHit: boolean };
 
 export type AgentStreamHandlers = {
   onMeta?: (sessionId: number) => void;
@@ -54,7 +54,7 @@ export async function agentChatStream(
       try { data = JSON.parse(dataText); } catch { return; }
       switch (event) {
         case "meta": handlers.onMeta?.(data.session_id); break;
-        case "workflow_selected": handlers.onWorkflowSelected?.({ id: Number(data.id), name: String(data.name ?? ""), workflowScore: Number(data.workflow_score), phaseIndex: Number(data.phase_index), stepIndex: Number(data.step_index) }); break;
+        case "workflow_selected": handlers.onWorkflowSelected?.({ id: Number(data.id), name: String(data.name ?? ""), workflowScore: Number(data.workflow_score), phaseIndex: Number(data.phase_index), stepIndex: Number(data.step_index), cacheHit: !!data.cache_hit }); break;
         case "tool_proposal": handlers.onToolProposal?.({ name: data.name, args: data.args ?? {} }); break;
         case "tool_start": handlers.onToolStart?.({ name: data.name, args: data.args ?? {} }); break;
         case "tool_result": handlers.onToolResult?.({ name: data.name, summary: data.summary ?? "", ok: !!data.ok }); break;

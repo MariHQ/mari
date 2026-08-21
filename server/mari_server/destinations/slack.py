@@ -118,7 +118,12 @@ def _bot_system(selected_workflow: dict | None) -> str:
 
 def answer_question(question: str, supplemental_context: str = "") -> str:
     """Hybrid search + strict, evidence-preserving component answer recipe."""
-    caller_access = access.require_current_access()
+    access.require_current_access()
+    from mari_server.conversations.workflows import cached_response, retrieval_query, select
+    selected_workflow = select(question, {"search"})
+    cached = cached_response(selected_workflow) if not supplemental_context else None
+    if cached:
+        return cached["answer"]
     # Curated answers beat generation (same canon as /chat).
     qvec = llm.embed(question)
     if qvec:
@@ -126,8 +131,6 @@ def answer_question(question: str, supplemental_context: str = "") -> str:
         if approved and approved["sim"] >= 0.62:
             return f"{approved['answer']}\n\n_Approved answer · served verbatim_"
 
-    from mari_server.conversations.workflows import retrieval_query, select
-    selected_workflow = select(question, {"search"})
     docs = hybrid_search(retrieval_query(answer_search_query(question), selected_workflow), 8)[:4]
     knowledge = [
         KnowledgeDocument(
@@ -168,6 +171,12 @@ def answer_question(question: str, supplemental_context: str = "") -> str:
 
 def stream_answer_question(question: str, supplemental_context: str = ""):
     """Yield a grounded Slack answer as the model produces it."""
+    from mari_server.conversations.workflows import cached_response, retrieval_query, select
+    selected_workflow = select(question, {"search"})
+    cached = cached_response(selected_workflow) if not supplemental_context else None
+    if cached:
+        yield cached["answer"]
+        return
     qvec = llm.embed(question)
     if qvec:
         approved = bot_store.approved_answer(qvec)
@@ -175,8 +184,6 @@ def stream_answer_question(question: str, supplemental_context: str = ""):
             yield f"{approved['answer']}\n\n_Approved answer · served verbatim_"
             return
 
-    from mari_server.conversations.workflows import retrieval_query, select
-    selected_workflow = select(question, {"search"})
     docs = hybrid_search(retrieval_query(answer_search_query(question), selected_workflow), 8)[:4]
     facts = bot_store.verified_facts()
     if not docs and not facts:

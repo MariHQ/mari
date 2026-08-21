@@ -45,6 +45,7 @@ def agent_chat(
     runtime.append_user_message(session_id, message)
     bindings = runtime.bindings()
     selected_workflow = runtime.select_workflow(message, bindings)
+    cached = runtime.cached_workflow_response(selected_workflow)
     outputs = stream_agent_turn(
         session_id, message, bindings, runtime.ports(bindings, message, selected_workflow),
         minimum_tool_observations=1,
@@ -55,8 +56,14 @@ def agent_chat(
         if selected_workflow:
             yield "event: workflow_selected\ndata: " + json.dumps({
                 "id": selected_workflow["id"], "name": selected_workflow["name"],
-                **selected_workflow["match"],
+                **selected_workflow["match"], "cache_hit": bool(cached),
             }) + "\n\n"
+        if cached:
+            yield "event: token\ndata: " + json.dumps({"token": cached["answer"]}) + "\n\n"
+            with access.use_access(project_access):
+                runtime.save_cached_workflow_response(session_id, cached)
+            yield f"event: done\ndata: {json.dumps({'session_id': session_id, 'cache_hit': True})}\n\n"
+            return
         iterator = iter(outputs)
         while True:
             # StreamingResponse may resume a synchronous generator in a

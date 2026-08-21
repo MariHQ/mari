@@ -7,6 +7,7 @@ from strawberry.scalars import JSON
 
 from mari_server.persistence.postgres.database import audit
 from mari_server.persistence.postgres import trajectories
+from mari_server.conversations import workflows as workflow_service
 
 
 def _access(info: strawberry.Info):
@@ -61,3 +62,23 @@ class TrajectoryMutations:
             audit("enabled assistant workflow" if enabled else "paused assistant workflow",
                   f"assistant-workflow:{workflow_id}")
         return changed
+
+    @strawberry.mutation
+    def set_assistant_workflow_cache(self, info: strawberry.Info,
+                                     workflow_id: int, enabled: bool) -> bool:
+        _access(info)
+        changed = trajectories.configure_workflow_cache(workflow_id, enabled)
+        if changed:
+            audit("enabled assistant workflow cache" if enabled
+                  else "disabled assistant workflow cache",
+                  f"assistant-workflow:{workflow_id}")
+        return changed
+
+    @strawberry.mutation
+    def reconcile_stale_assistant_workflows(self, info: strawberry.Info,
+                                            limit: int = 50) -> int:
+        _access(info)
+        reconciled = workflow_service.reconcile_stale(limit)
+        audit("reconciled stale assistant workflows", "assistant-workflows",
+              detail=[("count", reconciled)])
+        return reconciled

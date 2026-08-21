@@ -82,6 +82,16 @@ class ProductionAgentRuntime:
     def select_workflow(self, message: str, bindings: dict[str, ToolBinding]) -> dict | None:
         return assistant_workflows.select(message, set(bindings))
 
+    def cached_workflow_response(self, selected: dict | None) -> dict | None:
+        return assistant_workflows.cached_response(selected)
+
+    def save_cached_workflow_response(self, session_id: int, response: dict) -> None:
+        chat_store.add_message(
+            self.project_id, session_id, "assistant", response["answer"],
+            json.dumps(response.get("sources") or []),
+        )
+        log_usage("chat_answer", "assistant-workflow-cache")
+
     def ports(self, bindings: dict[str, ToolBinding], message: str = "",
               selected: dict | None = None) -> AgentPorts:
         selected = selected if selected is not None else self.select_workflow(message, bindings)

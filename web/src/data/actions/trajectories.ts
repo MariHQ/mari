@@ -39,5 +39,16 @@ export function trajectoriesActions({ replace }: ActionContext): TrajectoriesAct
         setAssistantWorkflowEnabled(workflowId: $workflowId, enabled: $enabled)
       }`, { workflowId, enabled });
     },
+    setWorkflowCache: async (workflowId, enabled) => {
+      await mutate(`mutation($workflowId: Int!, $enabled: Boolean!) {
+        setAssistantWorkflowCache(workflowId: $workflowId, enabled: $enabled)
+      }`, { workflowId, enabled });
+    },
+    reconcileStale: async () => {
+      const data = await mutate(`mutation {
+        reconcileStaleAssistantWorkflows(limit: 50)
+      }`);
+      return Number(data.reconcileStaleAssistantWorkflows);
+    },
   };
 }

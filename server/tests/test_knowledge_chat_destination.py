@@ -22,6 +22,7 @@ class KnowledgeChatDestinationTests(unittest.TestCase):
                     "body": "Mari manages product knowledge.", "snippet": "Mari manages"}
         with patch.object(conversation_chat.chat_store, "create_session", return_value=9), \
              patch.object(conversation_chat.chat_store, "add_message"), \
+             patch.object(conversation_chat, "select_workflow", return_value=None), \
              patch.object(conversation_chat.chat_store, "messages", return_value=[
                  {"role": "user", "content": "mari"},
              ]), patch.object(conversation_chat, "hybrid_search", return_value=[document]) as search:
