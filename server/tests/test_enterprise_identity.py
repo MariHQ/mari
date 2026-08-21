@@ -11,7 +11,7 @@ from fastapi import HTTPException
 from jwt.algorithms import RSAAlgorithm
 from starlette.requests import Request
 
-import enterprise_identity as ent
+from mari_server.identity import enterprise as ent
 
 
 class Result:

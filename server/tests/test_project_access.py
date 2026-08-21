@@ -18,32 +18,10 @@ PROJECTS = {
 }
 
 
-class Result:
-    def __init__(self, rows):
-        self.rows = rows
-
-    def fetchall(self):
-        return list(self.rows)
-
-
-class Connection:
-    def __init__(self, state):
-        self.state = state
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_):
-        return None
-
-    def execute(self, _sql, args=()):
-        user_id = args[0]
-        rows = [row for row in self.state.get(user_id, ()) if row["status"] == "active"]
-        return Result(rows)
-
-
-def factory(state):
-    return lambda: Connection(state)
+def resolve(state, requested=None, *, required=True):
+    rows = [row for row in state.get(1, ()) if row["status"] == "active"]
+    with patch.object(access.identity, "memberships", return_value=rows):
+        return access.resolve_access({"id": 1}, requested, required=required)
 
 
 class ProjectAccessTests(unittest.TestCase):
@@ -69,7 +47,7 @@ class ProjectAccessTests(unittest.TestCase):
             context.project_id = 9  # type: ignore[misc]
 
     def test_exactly_one_membership_is_inferred(self):
-        context, memberships = access.resolve_access({"id": 1}, None, factory({1: [PROJECTS[7]]}))
+        context, memberships = resolve({1: [PROJECTS[7]]})
         self.assertIsNotNone(context)
         self.assertEqual(context.project_id, 7)
         self.assertEqual(context.role, "admin")
@@ -78,52 +56,48 @@ class ProjectAccessTests(unittest.TestCase):
     def test_header_selects_project_by_id_or_slug(self):
         for selector in ("7", "acme"):
             with self.subTest(selector=selector):
-                context, _ = access.resolve_access(
-                    {"id": 1}, selector, factory({1: [PROJECTS[7], PROJECTS[9]]}))
+                context, _ = resolve({1: [PROJECTS[7], PROJECTS[9]]}, selector)
                 self.assertIsNotNone(context)
                 self.assertEqual(context.project_id, 7)
 
     def test_two_projects_require_an_explicit_header(self):
         with self.assertRaises(HTTPException) as caught:
-            access.resolve_access({"id": 1}, None, factory({1: [PROJECTS[7], PROJECTS[9]]}))
+            resolve({1: [PROJECTS[7], PROJECTS[9]]})
         self.assertEqual(caught.exception.status_code, 400)
         self.assertIn("X-Mari-Project", caught.exception.detail)
 
     def test_me_mode_lists_two_projects_without_selecting_one(self):
-        context, memberships = access.resolve_access(
-            {"id": 1}, None, factory({1: [PROJECTS[7], PROJECTS[9]]}), required=False)
+        context, memberships = resolve({1: [PROJECTS[7], PROJECTS[9]]}, required=False)
         self.assertIsNone(context)
         self.assertEqual([m.project_slug for m in memberships], ["acme", "beta"])
 
     def test_invalid_or_other_project_header_is_denied(self):
         for selector in ("404", "other"):
             with self.subTest(selector=selector), self.assertRaises(HTTPException) as caught:
-                access.resolve_access({"id": 1}, selector, factory({1: [PROJECTS[7]]}))
+                resolve({1: [PROJECTS[7]]}, selector)
             self.assertEqual(caught.exception.status_code, 403)
 
     def test_header_is_normalized(self):
-        context, _ = access.resolve_access(
-            {"id": 1}, " beta ", factory({1: [PROJECTS[7], PROJECTS[9]]}))
+        context, _ = resolve({1: [PROJECTS[7], PROJECTS[9]]}, " beta ")
         self.assertEqual(context.project_id, 9)
 
     def test_no_active_membership_is_denied(self):
         disabled = {**PROJECTS[7], "status": "disabled"}
         with self.assertRaises(HTTPException) as caught:
-            access.resolve_access({"id": 1}, None, factory({1: [disabled]}))
+            resolve({1: [disabled]})
         self.assertEqual(caught.exception.status_code, 403)
 
     def test_membership_revocation_takes_effect_on_next_resolution(self):
         state = {1: [dict(PROJECTS[7])]}
-        first, _ = access.resolve_access({"id": 1}, None, factory(state))
+        first, _ = resolve(state)
         self.assertEqual(first.project_id, 7)
         state[1][0]["status"] = "disabled"
         with self.assertRaises(HTTPException) as caught:
-            access.resolve_access({"id": 1}, None, factory(state))
+            resolve(state)
         self.assertEqual(caught.exception.status_code, 403)
 
     def test_users_can_have_different_roles_in_different_projects(self):
-        context, memberships = access.resolve_access(
-            {"id": 1}, "beta", factory({1: [PROJECTS[7], PROJECTS[9]]}))
+        context, memberships = resolve({1: [PROJECTS[7], PROJECTS[9]]}, "beta")
         self.assertEqual(context.role, "viewer")
         self.assertEqual(context.capabilities, frozenset({"knowledge.read"}))
         self.assertEqual({m.project_slug: m.role for m in memberships},

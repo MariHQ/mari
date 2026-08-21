@@ -156,6 +156,8 @@ class PasswordTests(unittest.TestCase):
                 return Result()
             if sql.startswith("SELECT 1 FROM users WHERE lower(email)"):
                 return Result()
+            if sql.startswith("SELECT id FROM projects WHERE status = 'active'"):
+                return Result({"id": 1})
             if sql.startswith("SELECT * FROM users WHERE lower(email)"):
                 return Result(owner)
             return Result()

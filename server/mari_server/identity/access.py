@@ -8,8 +8,6 @@ any project's data.
 
 from __future__ import annotations
 
-from typing import Callable
-
 from fastapi import HTTPException, Request
 from mari_server.identity.context import (
     AccessContext, CAPABILITIES, ProjectMembership, capabilities_for_role,
@@ -18,7 +16,7 @@ from mari_server.identity.context import (
 from mari_server.persistence.postgres import identity
 
 
-def memberships_for_user(user_id: int, conn_factory: Callable) -> list[ProjectMembership]:
+def memberships_for_user(user_id: int) -> list[ProjectMembership]:
     return [ProjectMembership(**dict(row)) for row in identity.memberships(user_id)]
 
 
@@ -47,11 +45,11 @@ def select_membership(memberships: list[ProjectMembership], requested: str | Non
     raise HTTPException(400, "Choose a project with the X-Mari-Project header.")
 
 
-def resolve_access(user: dict, requested: str | None, conn_factory: Callable,
-                   *, required: bool = True) -> tuple[AccessContext | None, list[ProjectMembership]]:
+def resolve_access(user: dict, requested: str | None, *, required: bool = True
+                   ) -> tuple[AccessContext | None, list[ProjectMembership]]:
     # Memberships are read on every request, rather than copied into the
     # session, so disabling one revokes access immediately.
-    memberships = memberships_for_user(int(user["id"]), conn_factory)
+    memberships = memberships_for_user(int(user["id"]))
     membership = select_membership(memberships, requested, required=required)
     if membership is None:
         set_access(None)
@@ -79,7 +77,7 @@ def require_project(request: Request) -> AccessContext:
             raise HTTPException(403, "You do not have access to an active project.")
         set_access(context)
         return context
-    context, _ = resolve_access(user, request.headers.get("X-Mari-Project"), auth._conn)
+    context, _ = resolve_access(user, request.headers.get("X-Mari-Project"))
     if isinstance(scope, dict):
         scope["mari_access"] = context
     assert context is not None

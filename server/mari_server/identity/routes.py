@@ -19,6 +19,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+import psycopg
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel
 
@@ -349,9 +350,7 @@ class CallerMiddleware:
             if user:
                 try:
                     project, _ = access_module.resolve_access(
-                        user, request.headers.get("X-Mari-Project"), _conn,
-                        required=False,
-                    )
+                        user, request.headers.get("X-Mari-Project"), required=False)
                     scope["mari_access"] = project
                     access_module.set_access(project)
                 except HTTPException:
@@ -481,7 +480,7 @@ def me(request: Request, response: Response):
     memberships = []
     if u:
         active, memberships = access_module.resolve_access(
-            u, request.headers.get("X-Mari-Project"), _conn, required=False)
+            u, request.headers.get("X-Mari-Project"), required=False)
     return {"user": _user_out(u) if u else None, "needsSetup": needs_setup, "oauth": oauth,
             "workspace": {"name": str(value.get("name") or "")},
             "projects": [membership.as_dict() for membership in memberships],
