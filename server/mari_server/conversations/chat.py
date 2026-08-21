@@ -12,6 +12,7 @@ from mari_server.persistence.postgres import trajectories as trajectory_store
 from mari_server.search.service import hybrid_search
 from mari_components.destinations.chat import ChatContext, ChatPorts, answer_search_query
 from mari_server.conversations.workflows import guidance as workflow_guidance
+from mari_server.conversations.workflows import retrieval_query as workflow_retrieval_query
 
 
 SYSTEM = (
@@ -29,7 +30,7 @@ def ports(project_access: access.AccessContext, usage_detail: str,
     project_id = project_access.project_id
 
     def prepare(session_id: int | None, message: str) -> ChatContext:
-        retrieval_question = answer_search_query(message)
+        retrieval_question = workflow_retrieval_query(answer_search_query(message))
         if session_id is None:
             session_id = chat_store.create_session(
                 project_id, project_access.user_id or None, message,

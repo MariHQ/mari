@@ -45,7 +45,7 @@ def agent_chat(
     runtime.append_user_message(session_id, message)
     bindings = runtime.bindings()
     outputs = stream_agent_turn(
-        session_id, message, bindings, runtime.ports(bindings),
+        session_id, message, bindings, runtime.ports(bindings, message),
         minimum_tool_observations=1,
     )
 

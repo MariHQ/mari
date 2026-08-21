@@ -126,7 +126,8 @@ def answer_question(question: str, supplemental_context: str = "") -> str:
         if approved and approved["sim"] >= 0.62:
             return f"{approved['answer']}\n\n_Approved answer · served verbatim_"
 
-    docs = hybrid_search(answer_search_query(question), 8)[:4]
+    from mari_server.conversations.workflows import retrieval_query
+    docs = hybrid_search(retrieval_query(answer_search_query(question)), 8)[:4]
     knowledge = [
         KnowledgeDocument(
             f"document:{d.get('id') or d.get('external_id') or index}",
@@ -173,7 +174,8 @@ def stream_answer_question(question: str, supplemental_context: str = ""):
             yield f"{approved['answer']}\n\n_Approved answer · served verbatim_"
             return
 
-    docs = hybrid_search(answer_search_query(question), 8)[:4]
+    from mari_server.conversations.workflows import retrieval_query
+    docs = hybrid_search(retrieval_query(answer_search_query(question)), 8)[:4]
     facts = bot_store.verified_facts()
     if not docs and not facts:
         yield "I couldn't find enough product knowledge to answer that yet."

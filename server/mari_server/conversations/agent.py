@@ -19,7 +19,7 @@ from mari_components.agents.runtime import (
     ToolBinding,
 )
 from mari_server.conversations.tools import ToolDependencies, build_tool_bindings
-from mari_server.conversations.workflows import guidance as workflow_guidance
+from mari_server.conversations import workflows as assistant_workflows
 from mari_server.persistence.postgres import review as review_repository
 
 
@@ -79,8 +79,12 @@ class ProductionAgentRuntime:
         )
         return build_tool_bindings(dependencies)
 
-    def ports(self, bindings: dict[str, ToolBinding]) -> AgentPorts:
-        system = planner_instructions(bindings, workflow_guidance())
+    def ports(self, bindings: dict[str, ToolBinding], message: str = "") -> AgentPorts:
+        selected = assistant_workflows.select(message, set(bindings))
+        reviewed_calls = iter(selected.get("steps") or [] if selected else [])
+        system = planner_instructions(
+            bindings, assistant_workflows.guidance(message, set(bindings)),
+        )
         decision_schema = {
             "type": "object",
             "properties": {
@@ -111,11 +115,17 @@ class ProductionAgentRuntime:
                 self.project_id, session_id, "assistant", answer, json.dumps(list(trace)),
             )
 
+        def plan(prompt: str, _version: str):
+            try:
+                step = next(reviewed_calls)
+            except StopIteration:
+                return llm.generate_json(prompt, system=system, timeout=90.0, schema=decision_schema)
+            arguments = step.get("arguments") if isinstance(step.get("arguments"), dict) else {}
+            return {"action": "tool", "tool": step["tool"], "arguments": arguments}
+
         return AgentPorts(
             history=history,
-            plan=lambda prompt, _version: llm.generate_json(
-                prompt, system=system, timeout=90.0, schema=decision_schema,
-            ),
+            plan=plan,
             answer=lambda transcript: llm.chat_stream(
                 [dict(row) for row in transcript], system=ANSWER_INSTRUCTIONS,
             ),
