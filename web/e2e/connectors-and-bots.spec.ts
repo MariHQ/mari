@@ -76,7 +76,7 @@ test("pausing a source is labelled as a pause, not a destructive disconnect", as
   const pause = page.getByRole("button", { name: "Pause", exact: true }).first();
   await pause.click();
   await page.getByRole("button", { name: "Pause this source?", exact: true }).click();
-  await expect.poll(() => api.calls.some((c) => c.query.includes("disconnectSource"))).toBeTruthy();
+  await expect.poll(() => api.calls.some((c) => c.query.includes("pauseSource"))).toBeTruthy();
 });
 
 test("Sources exposes connector ingestion without a Bots tab", async ({ page }) => {
