@@ -211,18 +211,38 @@ class OnyxSubstrate:
 
     def list_sources(self) -> list[Source]:
         payload = self._transport("GET", "/api/manage/admin/connector/status", None) or []
+        status_payload = self._transport("POST", "/api/manage/admin/connector/indexing-status", {
+            "get_all_connectors": True,
+        }) or []
+        statuses = {
+            str(item.get("cc_pair_id")): item
+            for group in status_payload if isinstance(group, dict)
+            for item in group.get("indexing_statuses", []) if isinstance(item, dict)
+        }
         sources: list[Source] = []
         for row in payload if isinstance(payload, list) else []:
             if not isinstance(row, dict):
                 continue
             connector = row.get("connector") if isinstance(row.get("connector"), dict) else {}
             credential = row.get("credential") if isinstance(row.get("credential"), dict) else {}
+            source_id = str(row.get("cc_pair_id") or row.get("id") or "")
+            state = statuses.get(source_id, {})
+            if state.get("in_progress"):
+                status = "syncing"
+            elif state.get("in_repeated_error_state") or state.get("last_status") == "failed":
+                status = "error"
+            else:
+                status = str(state.get("cc_pair_status") or "active").lower()
             sources.append(Source(
-                source_id=str(row.get("cc_pair_id") or row.get("id") or ""),
+                source_id=source_id,
                 name=str(row.get("name") or connector.get("name") or "Unnamed source"),
                 kind=str(connector.get("source") or "unknown"),
-                status=str(row.get("status") or "active"),
+                status=status,
                 credential_id=str(credential.get("id") or ""),
+                document_count=(int(state["docs_indexed"])
+                                if state.get("docs_indexed") is not None else None),
+                last_run_at=_timestamp(state.get("last_success")),
+                error=("Latest ingestion failed" if status == "error" else ""),
                 configuration=connector.get("connector_specific_config") or {},
             ))
         return sources
@@ -295,4 +315,10 @@ class OnyxSubstrate:
         connector_id, credential_id = self._source_ids(source_id)
         self._transport(
             "DELETE", f"/api/manage/connector/{connector_id}/credential/{credential_id}", None,
+        )
+
+    def pause_source(self, source_id: str) -> None:
+        self._transport(
+            "PUT", f"/api/manage/admin/cc-pair/{urllib.parse.quote(source_id)}/status",
+            {"status": "PAUSED"},
         )

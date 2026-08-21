@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from mari_server import settings as config
 from mari_server.destinations import slack
 from mari_server.identity import routes as identity_routes
 from mari_server.operations import telemetry
@@ -39,13 +40,16 @@ async def lifespan(application: FastAPI):
             )
         sync.start_poller()
         slack.start_event_dispatcher()
-        gdrive_events.start_watch_renewal()
+        native_ingestion = str(config.get("knowledge_substrate", "provider", "native")).lower() == "native"
+        if native_ingestion:
+            gdrive_events.start_watch_renewal()
         application.state.ready = True
         logging.getLogger("mari.lifecycle").info("application ready")
         yield
     finally:
         application.state.ready = False
-        gdrive_events.stop_watch_renewal()
+        if str(config.get("knowledge_substrate", "provider", "native")).lower() == "native":
+            gdrive_events.stop_watch_renewal()
         slack.stop_event_dispatcher()
         sync.stop_poller()
         close_pool()

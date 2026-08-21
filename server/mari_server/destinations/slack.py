@@ -43,7 +43,7 @@ from mari_components import KnowledgeDocument
 from mari_components.knowledge import answer_question as component_answer_question
 from mari_server.persistence.postgres.event_inbox import DEFAULT_INBOX, EventDispatcher
 from mari_server.persistence.postgres import bots as bot_store
-from mari_server.search.service import hybrid_search
+from mari_server.substrates import query as substrate_query
 
 router = APIRouter()
 
@@ -120,7 +120,7 @@ def answer_question(question: str, supplemental_context: str = "") -> str:
         if approved and approved["sim"] >= 0.62:
             return f"{approved['answer']}\n\n_Approved answer · served verbatim_"
 
-    docs = hybrid_search(question, 4)
+    docs = substrate_query.search(question, 4)
     knowledge = [
         KnowledgeDocument(
             f"document:{d.get('id') or d.get('external_id') or index}",

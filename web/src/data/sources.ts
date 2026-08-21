@@ -43,7 +43,7 @@ type Res = {
    can only show the document count it was given, and must not draw a
    last-sync line it does not have. */
 const tierOf = (kind: string): Tier =>
-  kind === "github" || kind === "connector" || kind === "upload" ? "live" : "legacy";
+  kind === "github" || kind === "connector" || kind === "substrate" || kind === "upload" ? "live" : "legacy";
 
 /* sources.health is a display word the ingest side writes. The card has four
    states and colors each one; anything unrecognized reads as healthy, which is

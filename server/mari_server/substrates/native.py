@@ -57,5 +57,8 @@ class NativeSubstrate:
     def run_source(self, source_id: str, *, full: bool = False) -> str:
         return self._unsupported("source execution")
 
+    def pause_source(self, source_id: str) -> None:
+        self._unsupported("source pausing")
+
     def delete_source(self, source_id: str) -> None:
         self._unsupported("source deletion")

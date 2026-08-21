@@ -28,6 +28,9 @@ from mari_server.sources import sync as ingest
 from mari_server.persistence.postgres import sources as source_store
 from mari_server.persistence.postgres.database import audit
 from mari_components.connectors import connector_definition, connector_definitions
+from mari_components.substrates import SourceRegistration
+from mari_server.substrates.service import configured_substrate
+from mari_server.persistence.postgres import substrate_references
 
 router = APIRouter(prefix="/connectors")
 
@@ -53,6 +56,15 @@ def _field_specs(definition) -> list[dict]:
 
 def _connected_map() -> dict[str, int]:
     """provider key → newest live source id."""
+    substrate = configured_substrate()
+    info = substrate.info()
+    if info.provider != "native":
+        rows = substrate_references.record_sources(
+            access.require_current_access().project_id, info.provider,
+            substrate.list_sources(),
+        )
+        aliases = {"google_drive": "gdrive"}
+        return {aliases.get(str(row["kind"]), str(row["kind"])): int(row["id"]) for row in rows}
     out: dict[str, int] = {}
     for r in source_store.connector_sources():
         cfg = r["config"] if isinstance(r["config"], dict) else json.loads(r["config"] or "{}")
@@ -167,6 +179,34 @@ def connect(body: ProviderIn) -> dict:
     qual = _qualifier(definition, body.config or {})
     provider_col = f"{key}:{qual}" if qual else key
     display = f"{definition.name} — {qual}" if qual else definition.name
+    substrate = configured_substrate()
+    info = substrate.info()
+    if info.provider != "native":
+        registration = _substrate_registration(key, display, body.config or {})
+        existing_sources = substrate.list_sources()
+        existing = next((source for source in existing_sources
+                         if source.kind == registration.kind
+                         and source.name.casefold() == registration.name.casefold()), None)
+        if existing:
+            rows = substrate_references.record_sources(
+                access.require_current_access().project_id, info.provider,
+                existing_sources,
+            )
+            row = next((value for value in rows if value["external_id"] == existing.source_id), None)
+            if not row:
+                return {"error": "The existing substrate source could not be resolved."}
+            return {"sourceId": int(row["id"])}
+        remote = substrate.create_source(registration)
+        rows = substrate_references.record_sources(
+            access.require_current_access().project_id, info.provider,
+            substrate.list_sources(),
+        )
+        row = next((value for value in rows if value["external_id"] == remote.source_id), None)
+        if not row:
+            return {"error": "The substrate created the source but did not return it in its catalog."}
+        substrate.run_source(remote.source_id, full=True)
+        audit("connected source", display)
+        return {"sourceId": int(row["id"])}
     cfg = dict(body.config or {})
     cfg.update({"provider_key": key, "cursor": "", "item_hashes": {},
                 "last_sync_at": "", "last_error": ""})
@@ -178,3 +218,51 @@ def connect(body: ProviderIn) -> dict:
     flowengine.ensure_sync_flow(source_id, display)
     ingest.start_sync(source_id)  # dispatches to connect_sync by kind
     return {"sourceId": source_id}
+
+
+def _substrate_registration(key: str, display: str, cfg: dict) -> SourceRegistration:
+    """Translate Mari's stable connector form into the selected substrate contract."""
+    if key == "github":
+        owner, repository = str(cfg["repo"]).split("/", 1)
+        return SourceRegistration(
+            display, "github",
+            {"repo_owner": owner, "repositories": repository,
+             "branch": str(cfg.get("branch") or "main"), "include_prs": True,
+             "include_issues": True, "include_files": True},
+            {"github_access_token": str(cfg["token"])}, 600, 86400,
+        )
+    if key == "slack":
+        channels = [value.strip() for value in str(cfg.get("channels") or "").split(",") if value.strip()]
+        return SourceRegistration(
+            display, "slack",
+            {"channels": channels or None, "exclude_channels": None,
+             "include_bot_messages": False, "channel_regex_enabled": False,
+             "exclude_channel_regex_enabled": False},
+            {"slack_bot_token": str(cfg["bot_token"])}, 600, 86400,
+        )
+    if key == "confluence":
+        return SourceRegistration(
+            display, "confluence",
+            {"wiki_base": str(cfg["site_url"]).rstrip("/"),
+             "space": str(cfg.get("space_key") or "") or None,
+             "is_cloud": True, "index_recursively": True, "include_attachments": True},
+            {"confluence_username": str(cfg["email"]),
+             "confluence_access_token": str(cfg["api_token"])}, 600, 86400,
+        )
+    if key == "gdrive":
+        tokens = json.dumps({
+            "token": str(cfg["access_token"]),
+            "refresh_token": str(cfg.get("refresh_token") or ""),
+            "client_id": str(cfg.get("client_id") or ""),
+            "client_secret": str(cfg.get("client_secret") or ""),
+            "token_uri": "https://oauth2.googleapis.com/token",
+        })
+        folder_id = str(cfg.get("folder_id") or "").strip()
+        return SourceRegistration(
+            display, "google_drive",
+            {"include_shared_drives": False, "include_my_drives": not bool(folder_id),
+             "shared_folder_urls": (f"https://drive.google.com/drive/folders/{folder_id}"
+                                    if folder_id else "")},
+            {"google_tokens": tokens, "google_primary_admin": ""}, 600, 86400,
+        )
+    raise ValueError(f"Connector {key!r} is not supported by the configured substrate")

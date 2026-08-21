@@ -75,15 +75,17 @@ def fact_claims(*, verified_only: bool = False) -> set[str]:
     return {str(row["claim"]).lower() for row in rows}
 
 
-def add_fact(claim: str, source: str, owner: str, document_id: int | None) -> bool:
+def add_fact(claim: str, source: str, owner: str, document_id: int | None,
+             substrate_document_id: int | None = None) -> bool:
     project_id = access.require_current_access().project_id
     with db.connect() as conn, conn.transaction():
         row = conn.execute(
             """INSERT INTO facts
-               (project_id, claim, source, owner_name, owner_tint, status, verified, document_id)
-               VALUES (%s, %s, %s, %s, 1, 'Needs review', '—', %s)
+               (project_id, claim, source, owner_name, owner_tint, status, verified,
+                document_id, substrate_document_id)
+               VALUES (%s, %s, %s, %s, 1, 'Needs review', '—', %s, %s)
                ON CONFLICT (project_id, claim) DO NOTHING RETURNING id""",
-            (project_id, claim, source, owner, document_id),
+            (project_id, claim, source, owner, document_id, substrate_document_id),
         ).fetchone()
     return bool(row)
 
@@ -253,6 +255,16 @@ def facts(document_id: int | None = None) -> list[dict]:
     with db.connect() as conn:
         return conn.execute(
             f"SELECT * FROM facts WHERE project_id = %s{clause} ORDER BY id", args,
+        ).fetchall()
+
+
+def facts_for_substrate_document(document_id: int) -> list[dict]:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn:
+        return conn.execute(
+            """SELECT * FROM facts
+                 WHERE project_id=%s AND substrate_document_id=%s ORDER BY id""",
+            (project_id, document_id),
         ).fetchall()
 
 
@@ -719,16 +731,19 @@ def save_readability(scores: list[tuple[int, str]]) -> None:
                          (score, project_id, document_id))
 
 
-def save_glossary_candidates(candidates: list[tuple[str, str, str, str, int]]) -> int:
+def save_glossary_candidates(candidates: list[tuple[str, str, str, str, int]],
+                             *, substrate: bool = False) -> int:
     project_id = access.require_current_access().project_id
     added = 0
     with db.connect() as conn, conn.transaction():
         for term, definition, variants, evidence, document_id in candidates:
             row = conn.execute("""INSERT INTO glossary
-              (project_id, term, definition, owner_name, updated, candidate, variants, evidence, evidence_doc_id)
-              VALUES (%s, %s, %s, 'Mari (harvest)', now(), true, %s, %s, %s)
+              (project_id, term, definition, owner_name, updated, candidate, variants, evidence,
+               evidence_doc_id, substrate_document_id)
+              VALUES (%s, %s, %s, 'Mari (harvest)', now(), true, %s, %s, %s, %s)
               ON CONFLICT (project_id, term) DO NOTHING RETURNING id""",
-              (project_id, term, definition, variants, evidence, document_id)).fetchone()
+              (project_id, term, definition, variants, evidence,
+               None if substrate else document_id, document_id if substrate else None)).fetchone()
             added += int(bool(row))
     return added
 

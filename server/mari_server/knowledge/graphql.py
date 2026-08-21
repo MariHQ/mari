@@ -13,16 +13,20 @@ import typing as t
 import strawberry
 
 from mari_server.automations import runtime as flowengine
+from mari_server.identity import context as access
 from mari_server.providers import models as llm
 from mari_server.persistence.postgres import lineage as links
 from mari_components import review as review_application
 from mari_components.review_types import ReviewRecord
 from mari_server.persistence.postgres import review as review_repository
 from mari_server.persistence.postgres import knowledge as knowledge_store
+from mari_server.persistence.postgres import substrate_references
 from mari_server.persistence.postgres import settings as settings_store, workflows as workflow_store
 from mari_server.persistence.postgres.database import actor_name, audit
 from mari_server.product.types import AnswerCandidate, ImpactDoc, ImpactResult, ReviewPolicyDecision
-from mari_server.search.service import hybrid_search, like_pattern
+from mari_server.search.service import like_pattern
+from mari_server.substrates import query as substrate_query
+from mari_server.substrates.service import configured_substrate
 from mari_components import KnowledgeDocument
 from mari_components.knowledge import (
     assess_impact as component_assess_impact,
@@ -342,13 +346,24 @@ class MutKnowledge:
         clean = re.sub(r"[^a-z0-9\-]", "", tag.lower().strip())
         if not clean:
             raise ValueError("Not a valid tag.")
-        title, tags = knowledge_store.set_document_tag(document_id, clean, True)
+        if configured_substrate().info().provider == "native":
+            title, tags = knowledge_store.set_document_tag(document_id, clean, True)
+        else:
+            title, tags = substrate_references.set_tag(
+                access.require_current_access().project_id, document_id, clean, True,
+            )
         audit(f"tagged {clean}", title or f"document {document_id}")
         return tags
 
     @strawberry.mutation
     def untag_document(self, document_id: int, tag: str) -> list[str]:
-        title, tags = knowledge_store.set_document_tag(document_id, tag.lower().strip(), False)
+        if configured_substrate().info().provider == "native":
+            title, tags = knowledge_store.set_document_tag(document_id, tag.lower().strip(), False)
+        else:
+            title, tags = substrate_references.set_tag(
+                access.require_current_access().project_id, document_id,
+                tag.lower().strip(), False,
+            )
         audit(f"untagged {tag}", title or f"document {document_id}")
         return tags
 
@@ -363,7 +378,10 @@ class MutKnowledge:
 
     @strawberry.mutation
     def pin_node(self, document_id: int, x: float, y: float) -> bool:
-        title = knowledge_store.set_node_position(document_id, (x, y))
+        title = (knowledge_store.set_node_position(document_id, (x, y))
+                 if configured_substrate().info().provider == "native"
+                 else substrate_references.set_position(
+                     access.require_current_access().project_id, document_id, (x, y)))
         if not title:
             return False
         audit("pinned graph node", title)
@@ -371,7 +389,10 @@ class MutKnowledge:
 
     @strawberry.mutation
     def unpin_node(self, document_id: int) -> bool:
-        title = knowledge_store.set_node_position(document_id, None)
+        title = (knowledge_store.set_node_position(document_id, None)
+                 if configured_substrate().info().provider == "native"
+                 else substrate_references.set_position(
+                     access.require_current_access().project_id, document_id, None))
         if not title:
             return False
         audit("unpinned graph node", title)
@@ -404,7 +425,7 @@ class MutKnowledge:
     # ——— impact analysis ———
     @strawberry.mutation
     def impact_analysis(self, claim: str) -> ImpactResult:
-        rows = hybrid_search(claim, 6)
+        rows = substrate_query.search(claim, 6)
         documents = [KnowledgeDocument(
             str(row.get("id") or row.get("external_id") or index), row["title"],
             row.get("body") or row.get("snippet") or "", metadata={"source": row["source"]},
@@ -489,7 +510,10 @@ class MutKnowledge:
     @strawberry.mutation
     def score_readability(self) -> int:
         """Deterministic readability grades (brand: determinism over vibes)."""
-        rows = knowledge_store.documents_for_analysis()
+        external = configured_substrate().info().provider != "native"
+        rows = (substrate_references.documents_for_analysis(
+                    access.require_current_access().project_id)
+                if external else knowledge_store.documents_for_analysis())
         scores = []
         for r in rows:
             text = (r["body"] or r["snippet"] or "")
@@ -501,13 +525,21 @@ class MutKnowledge:
             grade = "A" if score < 14 else "B" if score < 20 else "C"
             note = f"{avg_len:.0f} words/sentence"
             scores.append((r["id"], f"{grade}|{note}"))
-        knowledge_store.save_readability(scores)
+        if external:
+            substrate_references.save_readability(
+                access.require_current_access().project_id, scores,
+            )
+        else:
+            knowledge_store.save_readability(scores)
         audit("scored readability", f"{len(rows)} documents")
         return len(rows)
 
     @strawberry.mutation
     def harvest_glossary(self) -> int:
-        docs = knowledge_store.documents_for_analysis()
+        external = configured_substrate().info().provider != "native"
+        docs = (substrate_references.documents_for_analysis(
+                    access.require_current_access().project_id)
+                if external else knowledge_store.documents_for_analysis())
         components = [_component_document(doc) for doc in docs]
         candidates = component_harvest_glossary(
             components,
@@ -523,7 +555,7 @@ class MutKnowledge:
                 continue
             rows.append((candidate.term[:80], candidate.definition[:300],
                          " · ".join(candidate.aliases)[:200], doc["title"], doc["id"]))
-        added = knowledge_store.save_glossary_candidates(rows)
+        added = knowledge_store.save_glossary_candidates(rows, substrate=external)
         audit("harvested glossary terms", f"{added} candidates")
         return added
 
@@ -588,7 +620,13 @@ class MutKnowledge:
         from mari_components.connectors import CONNECTOR_CATALOG
 
         selected = sorted(set(sources) & set(CONNECTOR_CATALOG))
-        existing, docs, chats = knowledge_store.answer_candidate_inputs(selected)
+        external = configured_substrate().info().provider != "native"
+        substrate_sources = ["google_drive" if value == "gdrive" else value for value in selected]
+        existing, native_docs, chats = knowledge_store.answer_candidate_inputs(
+            [] if external else selected)
+        docs = (substrate_references.documents_for_analysis(
+                    access.require_current_access().project_id, 16, substrate_sources)
+                if external else native_docs)
         components = [_component_document(doc) for doc in docs]
         if "chat" in sources:
             for index, message in enumerate(chats, 1):
@@ -662,4 +700,8 @@ class MutKnowledge:
 
     @strawberry.mutation
     def toggle_watch(self, document_id: int) -> bool:
-        return knowledge_store.toggle_watch(document_id, actor_name())
+        if configured_substrate().info().provider == "native":
+            return knowledge_store.toggle_watch(document_id, actor_name())
+        return substrate_references.toggle_watch(
+            access.require_current_access().project_id, document_id, actor_name(),
+        )

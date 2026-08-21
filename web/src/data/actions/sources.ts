@@ -111,7 +111,7 @@ export function sourcesActions(): SourcesActions {
     // Destructive; the page puts it behind a ConfirmButton. The server pauses
     // the source and its running checkpoint rather than deleting documents,
     // which is what "disconnect" has always meant here.
-    disconnect: (s) => mutate(`mutation($p: String!) { disconnectSource(provider: $p) }`, { p: s.provider }),
+    disconnect: (s) => mutate(`mutation($id: Int!) { pauseSource(sourceId: $id) }`, { id: idOf(s) }),
 
     /* A first sync that failed left a real `sources` row behind — the connect
        succeeded, the ingest did not — so retrying is starting that row's sync

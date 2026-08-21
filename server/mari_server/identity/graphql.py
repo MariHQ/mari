@@ -16,7 +16,10 @@ from mari_server.persistence.postgres import lineage as links
 from mari_server.providers import models as llm
 from mari_server.persistence.postgres import repository_audit as repoaudit
 from mari_server.persistence.postgres import admin as admin_store
+from mari_server.persistence.postgres import sources as source_store
 from mari_server.persistence.postgres.database import audit
+from mari_server.persistence.postgres import substrate_references
+from mari_server.substrates.service import configured_substrate
 
 # ————— the authorization rule —————
 #
@@ -84,8 +87,47 @@ class MutAdmin:
     @strawberry.mutation
     def disconnect_source(self, info: strawberry.Info, provider: str) -> bool:
         actor = _require_admin(info)
+        substrate = configured_substrate()
+        info_value = substrate.info()
+        if info_value.provider != "native":
+            rows = substrate_references.record_sources(
+                access.require_current_access().project_id, info_value.provider,
+                substrate.list_sources(),
+            )
+            row = next((value for value in rows if str(value["kind"]) == provider), None)
+            if not row:
+                raise ValueError("Source not found")
+            substrate.pause_source(str(row["external_id"]))
+            audit("paused source", str(row["name"]), actor["name"])
+            return True
         admin_store.pause_source(provider)
         audit("paused source", provider, actor["name"])
+        return True
+
+    @strawberry.mutation
+    def pause_source(self, info: strawberry.Info, source_id: int) -> bool:
+        actor = _require_admin(info)
+        substrate = configured_substrate()
+        substrate_info = substrate.info()
+        if substrate_info.provider != "native":
+            project_id = access.require_current_access().project_id
+            row = substrate_references.get_source(project_id, source_id)
+            if not row:
+                substrate_references.record_sources(
+                    project_id, substrate_info.provider, substrate.list_sources(),
+                )
+                row = substrate_references.get_source(project_id, source_id)
+            if not row:
+                return False
+            substrate.pause_source(str(row["external_id"]))
+            audit("paused source", str(row["name"]), actor["name"])
+            return True
+        row = next((value for value in source_store.connector_sources()
+                    if int(value["id"]) == source_id), None)
+        if not row:
+            return False
+        admin_store.pause_source(str(row["provider"]))
+        audit("paused source", str(row["name"]), actor["name"])
         return True
 
     # ——— members (admin-only; audit the real caller) ———
@@ -243,12 +285,40 @@ class MutAdmin:
     def sync_source(self, info: strawberry.Info, source_id: int) -> bool:
         """Diff-based incremental sync; returns immediately, progress via syncStatus."""
         _require_manager(info)
+        substrate = configured_substrate()
+        info_value = substrate.info()
+        if info_value.provider != "native":
+            row = substrate_references.get_source(
+                access.require_current_access().project_id, source_id,
+            )
+            if not row:
+                substrate_references.record_sources(
+                    access.require_current_access().project_id, info_value.provider,
+                    substrate.list_sources(),
+                )
+                row = substrate_references.get_source(
+                    access.require_current_access().project_id, source_id,
+                )
+            if not row:
+                return False
+            substrate.run_source(str(row["external_id"]))
+            return True
         return ingest.start_sync(source_id)
 
     @strawberry.mutation
     def resync_source(self, info: strawberry.Info, source_id: int) -> bool:
         """Full rebuild escape hatch: drops this source's chunks/hashes, then syncs."""
         _require_manager(info)
+        substrate = configured_substrate()
+        info_value = substrate.info()
+        if info_value.provider != "native":
+            row = substrate_references.get_source(
+                access.require_current_access().project_id, source_id,
+            )
+            if not row:
+                return False
+            substrate.run_source(str(row["external_id"]), full=True)
+            return True
         return ingest.start_sync(source_id, full=True)
 
     @strawberry.mutation

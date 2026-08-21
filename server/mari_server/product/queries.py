@@ -33,7 +33,10 @@ from mari_server.persistence.postgres import mcp as mcp_repository, knowledge_ch
 from mari_server.persistence.postgres import sources as source_store, audit as audit_store
 from mari_server.persistence.postgres import settings as settings_store, analytics as analytics_store
 from mari_server.persistence.postgres import chat as chat_store
+from mari_server.persistence.postgres import substrate_references
 from mari_server.persistence.postgres.database import actor_name, jload
+from mari_server.substrates.service import configured_substrate
+from mari_server.substrates import query as substrate_query
 from mari_components.knowledge.excerpt import excerpt
 from mari_server.product.types import (
     ActivityBucket, ActivityItem, ApiKey, ApprovedAnswer,
@@ -149,7 +152,7 @@ def _doc(row: dict, watched: bool = False) -> Document:
 
 
 # Search implementation lives behind the infrastructure boundary.
-from mari_server.search.service import MAX_K, hybrid_count, hybrid_search, invalidate_search, like_pattern
+from mari_server.search.service import MAX_K, invalidate_search, like_pattern
 
 # ————————————————— search telemetry (SRCH-4) —————————————————
 #
@@ -361,6 +364,24 @@ class Query:
 
     @strawberry.field
     def source_pulse(self) -> list[SourcePulse]:
+        substrate = configured_substrate()
+        info = substrate.info()
+        if info.provider != "native":
+            remote = substrate.list_sources()
+            rows = substrate_references.record_sources(
+                access.require_current_access().project_id, info.provider, remote,
+            )
+            return [SourcePulse(
+                id=int(row["id"]), provider=str(row["kind"]), name=str(row["name"]),
+                status=str(row["status"]), stat=str(row["document_count"] or 0), unit="docs",
+                bars=[], docs_count=int(row["document_count"] or 0),
+                health=("Error" if row["status"] == "error" else
+                        "Syncing" if row["status"] in {"syncing", "scheduled", "initial_indexing"} else
+                        "Paused" if row["status"] == "paused" else "Healthy"),
+                config=jload(row["configuration"]) or {}, kind="substrate",
+                last_sync_at=(row["last_run_at"].isoformat() if row.get("last_run_at") else ""),
+                sync_flow_id=None, sync_interval_minutes=None,
+            ) for row in rows]
         # bars = real per-source doc-change counts by day (last 12 days, empty
         # days = 0), from documents timestamps; [] when a source has no recent
         # activity — never an invented curve.
@@ -436,6 +457,25 @@ class Query:
     @strawberry.field
     def sync_status(self, source_id: int) -> SyncStatus:
         project_id = access.require_current_access().project_id
+        substrate = configured_substrate()
+        info = substrate.info()
+        if info.provider != "native":
+            rows = substrate_references.record_sources(project_id, info.provider, substrate.list_sources())
+            row = next((value for value in rows if int(value["id"]) == source_id), None)
+            if not row:
+                return SyncStatus(state="error", phase="", done=0, total=0,
+                                  last_sync_at="", last_error="Source not found", cursor="",
+                                  doc_count=0, chunk_count=0, embedded_count=0)
+            state = "running" if row["status"] in {"syncing", "scheduled", "initial_indexing"} else (
+                "error" if row["status"] == "error" else "idle")
+            return SyncStatus(
+                state=state, phase="indexing" if state == "running" else "done",
+                done=int(row["document_count"] or 0), total=int(row["document_count"] or 0),
+                last_sync_at=row["last_run_at"].isoformat() if row.get("last_run_at") else "",
+                last_error=str(row["error"] or ""), cursor="",
+                doc_count=int(row["document_count"] or 0), chunk_count=int(row["document_count"] or 0),
+                embedded_count=int(row["document_count"] or 0),
+            )
         live = ingest.status(source_id)
         src, counts = source_store.sync_summary(source_id)
         cfg = jload(src["config"]) if src else {}
@@ -461,9 +501,9 @@ class Query:
         offset, k = max(0, offset), max(1, min(k, MAX_K))
         if query.strip():
             log_search_once(query.strip())
-            rows = hybrid_search(query, k, offset)
+            rows = substrate_query.search(query, k, offset)
         else:
-            rows = document_repository.recent(k, offset)
+            rows = substrate_query.recent(k, offset)
         return [_doc(r) for r in rows]
 
     @strawberry.field
@@ -471,8 +511,10 @@ class Query:
         """How many documents `search` would return for this query with no
         limit. The count the results feed puts above the list."""
         if query.strip():
-            return hybrid_count(query)
-        return document_repository.count()
+            return substrate_query.count(query)
+        substrate = configured_substrate()
+        return (document_repository.count() if substrate.info().provider == "native"
+                else substrate_references.document_count(access.require_current_access().project_id))
 
     @strawberry.field
     def recent_searches(self, limit: int = 6) -> list[str]:
@@ -491,32 +533,45 @@ class Query:
         # this read the whole edge table to answer "what links here". Ordering
         # ends in id so two documents with the same title do not swap places
         # between reads.
+        if configured_substrate().info().provider != "native":
+            return []
         rows = document_repository.related(document_id)
         return [RelatedDoc(id=r["id"], source=r["source"], title=r["title"],
                            rel=r["rel"], direction=r["direction"]) for r in rows]
 
     @strawberry.field
     def document(self, id: int) -> Document | None:
-        row = document_repository.get(id)
+        row = substrate_query.get(id)
         if not row:
             return None
         # Per-user, and it must be the same name toggleWatch writes, or the
         # star never comes back lit for the person who set it.
-        return _doc(row, document_repository.is_watched(id, actor_name()))
+        watched = (document_repository.is_watched(id, actor_name())
+                   if configured_substrate().info().provider == "native"
+                   else bool(row.get("watched")))
+        return _doc(row, watched)
 
     @strawberry.field
     def revisions(self, document_id: int) -> list[AuditEvent]:
+        if configured_substrate().info().provider != "native":
+            return []
         return [AuditEvent(id=r["id"], actor=r["actor"], verb=r["verb"], target=r["target"],
                            at=r["occurred_at"].isoformat(), detail=_details(r))
                 for r in document_repository.revisions(document_id)]
 
     @strawberry.field
     def findings(self, document_id: int) -> list[Finding]:
+        rows = (document_repository.findings(document_id)
+                if configured_substrate().info().provider == "native"
+                else substrate_references.findings(
+                    access.require_current_access().project_id, document_id))
         return [Finding(id=r["id"], kind=r["kind"], severity=r["severity"], text=r["text"], note=r["note"])
-                for r in document_repository.findings(document_id)]
+                for r in rows]
 
     @strawberry.field
     def changes(self, document_id: int) -> list[Change]:
+        if configured_substrate().info().provider != "native":
+            return []
         return [Change(id=r["id"], original=r["original"], replacement=r["replacement"],
                        reason=r["reason"], status=r["status"])
                 for r in document_repository.changes(document_id)]
@@ -524,6 +579,19 @@ class Query:
     @strawberry.field
     def lineage(self) -> list[LineageNode]:
         project_id = access.require_current_access().project_id
+        if configured_substrate().info().provider != "native":
+            references = substrate_references.recent_documents(project_id, 2000, 0)
+            rows = [{
+                "id": row["id"], "external_id": f"{row['substrate']}:{row['external_id']}",
+                "source": row["source"], "title": row["title"],
+                "updated_src": row["updated_at"] or row["observed_at"],
+                "created_src": row["updated_at"] or row["observed_at"],
+                "graph_x": row.get("graph_x"), "graph_y": row.get("graph_y"), "graph_meta": "",
+                "graph_icon": "", "author": row["substrate"], "tags": [],
+                "inbound": 0, "outbound": 0, "source_id": None, "kind": "reference",
+            } for row in references]
+        else:
+            rows = lineage_store.graph(project_id)
         # The two degree counts used to be correlated subqueries evaluated once
         # per document — with no index on edges(to_doc), that is O(documents ×
         # edges) and it grew quadratically with the graph the page exists to
@@ -531,7 +599,6 @@ class Query:
         # pass over both endpoints, and the result is joined in. Documents with
         # no edges are absent from `degree` and coalesce to 0, which is the same
         # answer count(*) gave them.
-        rows = lineage_store.graph(project_id)
         pos = layout_nodes(rows)
         today = dt.date.today()
         out = []
@@ -559,6 +626,8 @@ class Query:
     @strawberry.field
     def lineage_edges(self) -> list[LineageEdge]:
         project_id = access.require_current_access().project_id
+        if configured_substrate().info().provider != "native":
+            return []
         rows = lineage_store.graph_edges(project_id)
         return [LineageEdge(id=r["id"], from_id=r["from_id"], to_id=r["to_id"], kind=r["rel"],
                             date=r["created_at"].isoformat() if r["created_at"] else "",
@@ -567,6 +636,19 @@ class Query:
     @strawberry.field
     def graph_stats(self) -> GraphStats:
         project_id = access.require_current_access().project_id
+        if configured_substrate().info().provider != "native":
+            documents = substrate_references.recent_documents(project_id, 2000, 0)
+            activity: dict[str, int] = {}
+            for row in documents:
+                value = row["updated_at"] or row["observed_at"]
+                day = value.date().isoformat()
+                activity[day] = activity.get(day, 0) + 1
+            return GraphStats(
+                docs=len(documents), stale=0, orphans=len(documents), untranslated=0,
+                unowned=0, contradictions=0, top_cited=[],
+                activity=[ActivityBucket(date=day, count=count)
+                          for day, count in sorted(activity.items())],
+            )
         s, contradictions, cited, activity = lineage_store.graph_stats(project_id)
         return GraphStats(
             docs=s["docs"], stale=s["stale"], orphans=s["orphans"],
@@ -576,6 +658,8 @@ class Query:
 
     @strawberry.field
     def doc_history(self, document_id: int) -> list[DocHistory]:
+        if configured_substrate().info().provider != "native":
+            return []
         return [DocHistory(at=r["at"], actor=r["actor"], verb=r["verb"], detail=r["target"])
                 for r in document_repository.history(document_id)]
 
@@ -603,10 +687,13 @@ class Query:
         free-text `facts.source` label. Facts landed before the column existed
         (and hand-written ones with no citation) carry NULL and belong to no
         document — they are absent here rather than attributed to a guess."""
+        rows = (knowledge_store.facts(document_id)
+                if configured_substrate().info().provider == "native"
+                else knowledge_store.facts_for_substrate_document(document_id))
         return [Fact(id=r["id"], claim=r["claim"], source=r["source"], owner=r["owner_name"],
                      owner_tint=r["owner_tint"], status=r["status"],
                      verified=r["verified_at"].isoformat() if r["verified_at"] else "")
-                for r in knowledge_store.facts(document_id)]
+                for r in rows]
 
     @strawberry.field
     def fact_contradictions(self) -> list[FactContradiction]:
