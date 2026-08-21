@@ -74,8 +74,9 @@ class SlackExecutionTests(unittest.TestCase):
                 self.calls.append((provider, project_id, delivery_id, payload, kwargs))
                 return 1, len(self.calls) == 1
         inbox = Inbox()
-        with patch.object(bots, "q1", return_value=self._installation()), \
-             patch.object(bots, "exec_"), patch.object(bots, "_EVENT_INBOX", inbox):
+        with patch.object(bots.bot_store, "installation_by_team",
+                          return_value=self._installation()), \
+             patch.object(bots, "_EVENT_INBOX", inbox):
             first = asyncio.run(bots.slack_webhook(self._request(payload)))
             duplicate = asyncio.run(bots.slack_webhook(self._request(payload)))
         self.assertEqual(first, {"ok": True})
@@ -88,7 +89,8 @@ class SlackExecutionTests(unittest.TestCase):
                    "event": {"type": "app_mention", "text": "hello", "channel": "C1", "ts": "1"}}
         class FailedInbox:
             def enqueue(self, *_args, **_kwargs): raise OSError("database unavailable")
-        with patch.object(bots, "q1", return_value=self._installation()), \
+        with patch.object(bots.bot_store, "installation_by_team",
+                          return_value=self._installation()), \
              patch.object(bots, "_EVENT_INBOX", FailedInbox()):
             response = asyncio.run(bots.slack_webhook(self._request(payload)))
         self.assertEqual(response.status_code, 503)
