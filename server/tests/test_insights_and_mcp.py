@@ -7,16 +7,10 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from mari_server.knowledge import graphql as mutations_knowledge
+from mari_server.knowledge import service as knowledge_service
 from mari_server.destinations import graphql as graphql_destinations
 from mari_server.persistence.postgres import mcp as mcp_repository
 from mari_server.destinations import mcp
-
-
-def tearDownModule() -> None:
-    # db.py owns a background connection-pool worker; close it before Python's
-    # finalization so test runs end without a misleading thread warning.
-    import db
-    db.POOL.close()
 
 
 class FactInsightTests(unittest.TestCase):
@@ -26,39 +20,36 @@ class FactInsightTests(unittest.TestCase):
             {"claim": "Exports stop at 10 MB."},
             {"claim": "PR #340 · user · closed · updated 2026-01-17T01:57:54Z"},
         ]]
-        writes = []
-        with patch.object(mutations_knowledge, "_scan_batch", return_value=docs), \
-             patch.object(mutations_knowledge, "_scan_concurrently", return_value=(list(zip(docs, model)), 0)), \
-             patch.object(mutations_knowledge, "q", return_value=[]), \
-             patch.object(mutations_knowledge, "exec_", side_effect=lambda sql, args=(): writes.append((sql, args))), \
-             patch.object(mutations_knowledge, "_mark_scanned") as marked, \
-             patch.object(mutations_knowledge, "audit"):
-            added, scanned, note = mutations_knowledge.scan_facts_for([7])
+        with patch.object(knowledge_service, "_scan_batch", return_value=docs), \
+             patch.object(knowledge_service, "_scan_concurrently", return_value=(list(zip(docs, model)), 0)), \
+             patch.object(knowledge_service.knowledge_store, "fact_claims", return_value=set()), \
+             patch.object(knowledge_service.knowledge_store, "add_fact", return_value=True) as add, \
+             patch.object(knowledge_service, "_mark_scanned") as marked, \
+             patch.object(knowledge_service, "audit"):
+            added, scanned, note = knowledge_service.scan_facts_for([7])
         self.assertEqual((added, scanned, note), (1, 1, ""))
-        self.assertEqual(writes[0][1][-1], 7)
-        self.assertEqual(writes[0][1][0], "Exports stop at 10 MB.")
-        marked.assert_called_once_with("facts_scanned_at", [7])
+        self.assertEqual(add.call_args.args[0], "Exports stop at 10 MB.")
+        self.assertEqual(add.call_args.args[3], 7)
+        marked.assert_called_once_with("facts", [7])
 
     def test_fact_check_turns_ollama_json_into_review_findings(self) -> None:
-        writes = []
         doc = {"id": 4, "title": "SLA", "body": "Retention is 10 days.", "snippet": ""}
-        def q1(sql, args=()):
-            return doc
-        with patch.object(mutations_knowledge, "q1", side_effect=q1), \
-             patch.object(mutations_knowledge, "q", return_value=[{"claim": "Retention is 30 days."}]), \
-             patch.object(mutations_knowledge.llm, "generate_json", return_value={
+        with patch.object(knowledge_service.knowledge_store, "document", return_value=doc), \
+             patch.object(knowledge_service.knowledge_store, "fact_claims",
+                          return_value={"Retention is 30 days."}), \
+             patch.object(knowledge_service.llm, "generate_json", return_value={
                  "assessments": [{
                      "claim": "Retention is 30 days.", "verdict": "contradicted",
                      "explanation": "The document says 10 days.", "confidence": .99,
                      "evidence": [{"document_id": "4", "quote": "Retention is 10 days"}],
                  }],
              }) as model, \
-             patch.object(mutations_knowledge, "exec_", side_effect=lambda sql, args=(): writes.append((sql, args))), \
-             patch.object(mutations_knowledge, "audit"):
+             patch.object(knowledge_service.knowledge_store, "add_finding", return_value=True) as add, \
+             patch.object(knowledge_service, "audit"):
             count = mutations_knowledge.MutKnowledge().fact_check(4)
         self.assertEqual(count, 1)
         self.assertIn("Retention is 30 days", model.call_args.args[0])
-        self.assertEqual(writes[0][1][0], 4)
+        self.assertEqual(add.call_args.args[0], 4)
 
 
 class McpLifecycleTests(unittest.TestCase):
@@ -107,7 +98,7 @@ class McpProtocolTests(unittest.TestCase):
 
     def test_tool_call_runs_search_and_rejects_disabled_tool(self) -> None:
         rows = [{"id": 4, "title": "Runbook", "source": "github", "snippet": "Deploy safely"}]
-        with patch.object(mcp, "hybrid_search", return_value=rows) as search:
+        with patch.object(mcp.substrate_query, "search", return_value=rows) as search:
             result = mcp.dispatch(self.SERVER, {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
                 "params": {"name": "search_documents", "arguments": {"query": "deploy", "limit": 99}}})
         search.assert_called_once_with("deploy", 20)
@@ -122,11 +113,11 @@ class McpProtocolTests(unittest.TestCase):
                 return b'{"jsonrpc":"2.0","id":1,"method":"ping"}'
         server = {"id": 4, "name": "Support KB", "config": {"capabilities": ["search"]},
                   "project_id": 7, "project_slug": "acme", "project_name": "Acme"}
-        with patch.object(mcp, "q1", return_value=server):
+        with patch.object(mcp.mcp_repository, "authenticate", return_value=server):
             out = asyncio.run(mcp.mcp_endpoint("support-kb", Request(), "Bearer mari_mcp_token"))
+            with self.assertRaises(Exception) as denied:
+                asyncio.run(mcp.mcp_endpoint("wrong-slug", Request(), "Bearer mari_mcp_token"))
         self.assertEqual(out["result"], {})
-        with self.assertRaises(Exception) as denied:
-            asyncio.run(mcp.mcp_endpoint("wrong-slug", Request(), "Bearer mari_mcp_token"))
         self.assertEqual(getattr(denied.exception, "status_code", None), 401)
 
 

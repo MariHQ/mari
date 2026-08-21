@@ -17,6 +17,8 @@ from mari_server.destinations import slack as bots
 from mari_server.persistence.postgres import database as db
 from mari_server.destinations import mcp
 from mari_server.product import queries
+from mari_server.search import service as search_service
+from mari_server.persistence.postgres import search as search_repository
 from mari_server.providers import vectors as retrieval
 from mari_server.knowledge import graphql as mutations_knowledge
 
@@ -30,8 +32,8 @@ def context(project_id: int, slug: str) -> access.AccessContext:
 class ProjectDataScopeTests(unittest.TestCase):
     def tearDown(self):
         access.set_access(None)
-        queries._vec_cache.clear()
-        queries._rank_cache.clear()
+        search_service._vec_cache.clear()
+        search_service._rank_cache.clear()
         retrieval._INDEXES.clear()
 
     def test_project_db_helper_prepends_only_active_project(self):
@@ -43,24 +45,29 @@ class ProjectDataScopeTests(unittest.TestCase):
 
     def test_natural_language_search_uses_meaningful_literal_terms(self):
         self.assertEqual(
-            queries.keyword_patterns("How long are customer records retained?"),
+            search_repository.keyword_patterns("How long are customer records retained?"),
             ["%long%", "%customer%", "%records%", "%retained%"],
         )
-        self.assertEqual(queries.keyword_patterns("100%_safe"), ["%100%", "%safe%"])
+        self.assertEqual(search_repository.keyword_patterns("100%_safe"), ["%100%", "%safe%"])
 
     def test_core_knowledge_queries_always_bind_active_project(self):
+        seen = []
+        def scoped_rows():
+            seen.append(access.require_current_access().project_id)
+            return []
         with access.use_access(context(7, "acme")), \
-             patch.object(queries, "q", return_value=[]) as query:
+             patch.object(queries.knowledge_store, "facts", side_effect=scoped_rows), \
+             patch.object(queries.knowledge_store, "tasks", side_effect=scoped_rows), \
+             patch.object(queries.knowledge_store, "glossary_terms", side_effect=scoped_rows), \
+             patch.object(queries.knowledge_store, "approved_answers", side_effect=scoped_rows), \
+             patch.object(queries.knowledge_store, "decisions_with_supersession", side_effect=scoped_rows):
             service = queries.Query()
             service.facts()
             service.tasks()
             service.glossary()
             service.approved_answers()
             service.decisions()
-        self.assertEqual(len(query.call_args_list), 5)
-        for call in query.call_args_list:
-            self.assertIn("project_id", call.args[0])
-            self.assertEqual(call.args[1][0], 7)
+        self.assertEqual(seen, [7, 7, 7, 7, 7])
 
     def test_graphql_bot_status_passes_the_authorized_project_explicitly(self):
         project = context(7, "acme")
@@ -70,13 +77,15 @@ class ProjectDataScopeTests(unittest.TestCase):
 
     def test_foreign_knowledge_ids_fail_closed_before_write(self):
         with access.use_access(context(7, "acme")), \
-             patch.object(mutations_knowledge, "q1", return_value=None) as read, \
-             patch.object(mutations_knowledge, "exec_") as write:
+             patch.object(mutations_knowledge.knowledge_store, "set_task_done", return_value=None) as task, \
+             patch.object(mutations_knowledge.knowledge_store, "ratify_decision", return_value=None) as decision, \
+             patch.object(mutations_knowledge.knowledge_store, "set_answer_channels", return_value=None) as answer:
             self.assertFalse(mutations_knowledge.MutKnowledge().set_task_done(99, True))
             self.assertFalse(mutations_knowledge.MutKnowledge().ratify_decision(99))
             self.assertFalse(mutations_knowledge.MutKnowledge().set_answer_channels(99, ["slack"]))
-        self.assertTrue(all(call.args[1][0] == 7 for call in read.call_args_list))
-        write.assert_not_called()
+        task.assert_called_once_with(99, True)
+        decision.assert_called_once_with(99)
+        answer.assert_called_once_with(99, ["slack"])
 
     def test_embedding_and_rank_caches_do_not_cross_projects(self):
         rows = {
@@ -86,19 +95,19 @@ class ProjectDataScopeTests(unittest.TestCase):
                  "author": "", "author_initials": "", "updated_src": None, "kind": "page", "tags": [], "boost": 1}],
         }
 
-        def scoped_rows(_sql, args=()):
-            return [dict(row) for row in rows[int(args[0])]]
+        def scoped_rows(_project_id, _patterns, _limit):
+            return [dict(row) for row in rows[access.require_current_access().project_id]]
 
-        with patch.object(queries.llm, "embed", return_value=None) as embed, \
-             patch.object(queries, "q", side_effect=scoped_rows):
+        with patch.object(search_service.llm, "embed", return_value=None) as embed, \
+             patch.object(search_service.search_store, "keyword_candidates", side_effect=scoped_rows):
             with access.use_access(context(7, "acme")):
-                acme = queries.hybrid_search("deploy")
+                acme = search_service.hybrid_search("deploy")
             with access.use_access(context(9, "beta")):
-                beta = queries.hybrid_search("deploy")
+                beta = search_service.hybrid_search("deploy")
         self.assertEqual(acme[0]["title"], "Acme only")
         self.assertEqual(beta[0]["title"], "Beta only")
         self.assertEqual(embed.call_count, 2)
-        self.assertEqual({(key[0], key[-1]) for key in queries._rank_cache},
+        self.assertEqual({(key[0], key[-1]) for key in search_service._rank_cache},
                          {(7, "deploy"), (9, "deploy")})
 
     def test_slack_principal_only_retrieves_its_channel_and_public_docs(self):
@@ -118,9 +127,9 @@ class ProjectDataScopeTests(unittest.TestCase):
         ]
         slack_access = access.external_access(
             7, "acme", "Acme", "slack", "install-1", principals=frozenset({"channel:C-A"}))
-        with access.use_access(slack_access), patch.object(queries.llm, "embed", return_value=None), \
-             patch.object(queries, "q", return_value=rows):
-            result = queries.hybrid_search("deploy")
+        with access.use_access(slack_access), patch.object(search_service.llm, "embed", return_value=None), \
+             patch.object(search_service.search_store, "keyword_candidates", return_value=rows):
+            result = search_service.hybrid_search("deploy")
         self.assertEqual(
             {row["title"] for row in result},
             {"Channel A", "Public", "Project knowledge"},
@@ -139,15 +148,18 @@ class ProjectDataScopeTests(unittest.TestCase):
         class Info:
             context = {"user": {"id": 42}}
 
-        rows = [[{"id": 8, "title": "Private"}], [{
+        rows = [({"id": 8, "title": "Private"}, [{
             "id": 9, "role": "user", "content": "secret", "sources": [],
-        }]]
+        }])]
+        seen = []
+        def sessions(user_id):
+            seen.append((access.require_current_access().project_id, user_id))
+            return rows
         with access.use_access(context(7, "acme")), patch.object(
-                queries, "q", side_effect=rows) as query:
+                queries.chat_store, "sessions_for_owner", side_effect=sessions):
             result = queries.Query().chat_sessions(Info())
         self.assertEqual(result[0].messages[0].content, "secret")
-        self.assertEqual(query.call_args_list[0].args[1], (7, 42))
-        self.assertEqual(query.call_args_list[1].args[1], (7, 8))
+        self.assertEqual(seen, [(7, 42)])
 
     def test_mcp_token_bootstraps_its_project_context(self):
         class Request:
@@ -162,7 +174,8 @@ class ProjectDataScopeTests(unittest.TestCase):
             seen.append(access.require_current_access())
             return {"jsonrpc": "2.0", "id": 1, "result": {}}
 
-        with patch.object(mcp, "q1", return_value=server), patch.object(mcp, "dispatch", side_effect=dispatch):
+        with patch.object(mcp.mcp_repository, "authenticate", return_value=server), \
+             patch.object(mcp, "dispatch", side_effect=dispatch):
             asyncio.run(mcp.mcp_endpoint("acme-kb", Request(), "Bearer secret"))
         self.assertEqual(seen[0].project_id, 7)
         self.assertEqual(seen[0].principal_type, "mcp")
@@ -190,11 +203,11 @@ class ProjectDataScopeTests(unittest.TestCase):
                 accepted.append((provider, project_id, delivery_id, payload, kwargs))
                 return 1, True
 
-        with patch.object(bots, "q1", return_value=installation) as lookup, \
-             patch.object(bots, "exec_"), patch.object(bots, "_EVENT_INBOX", Inbox()):
+        with patch.object(bots.bot_store, "installation_by_team", return_value=installation) as lookup, \
+             patch.object(bots, "_EVENT_INBOX", Inbox()):
             result = asyncio.run(bots.slack_webhook(Request()))
         self.assertEqual(result, {"ok": True})
-        self.assertEqual(lookup.call_args.args[1], ("T-ACME",))
+        lookup.assert_called_once_with("T-ACME")
         self.assertEqual(accepted[0][1], 7)
         self.assertEqual(accepted[0][3]["installation_id"], 5)
 
