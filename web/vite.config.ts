@@ -48,7 +48,7 @@ const API = "http://localhost:8000";
 /** Everything the FastAPI server owns; the rest is this SPA. Mirrors nginx.conf. */
 const API_ROUTES = [
   "/graphql", "/chat", "/agent", "/healthz", "/sites",
-  "/auth", "/bots", "/webhooks", "/onboard", "/connectors", "/knowledge-chat-api",
+  "/auth", "/bots", "/webhooks", "/onboard", "/connectors", "/knowledge-chat-api", "/api",
 ];
 
 export default defineConfig({
@@ -63,6 +63,9 @@ export default defineConfig({
   },
   server: {
     port: 5173,
+    // Local webhook development uses an ephemeral HTTPS tunnel hostname.
+    // Vite still binds only to the explicitly requested interface.
+    allowedHosts: true,
     proxy: Object.fromEntries(API_ROUTES.map((r) => [r, API])),
   },
 });

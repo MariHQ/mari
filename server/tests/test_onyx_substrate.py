@@ -13,7 +13,7 @@ class FakeTransport:
 
     def __call__(self, method, path, body):
         self.calls.append((method, path, body))
-        if path == "/api/health/ready":
+        if path == "/api/health":
             return {"success": True}
         if path == "/api/admin/search":
             return {"documents": [{

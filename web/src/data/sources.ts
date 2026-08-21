@@ -18,7 +18,7 @@ import type { PageData } from "./types";
 const QUERY = `{
   sourcePulse {
     id provider name status docsCount health kind lastSyncAt bars
-    syncIntervalMinutes syncFlowId
+    syncIntervalMinutes syncFlowId config
   }
   connectorCatalog
 }`;
@@ -28,6 +28,7 @@ type Res = {
     id: number; provider: string; name: string; status: string; docsCount: number;
     health: string; kind: string; lastSyncAt: string; bars: number[];
     syncIntervalMinutes: number | null; syncFlowId: number | null;
+    config: { last_error?: string } | null;
   }[];
   connectorCatalog: {
     key: string; name: string; blurb: string; docsUrl?: string; connected?: boolean;
@@ -72,6 +73,7 @@ export function mapSources(res: Res): Source[] {
       lastSyncAt: s.lastSyncAt || null,
       // [] when a source has had no recent document changes — never a curve.
       bars: s.bars ?? [],
+      lastError: s.config?.last_error || undefined,
       /* A source's cadence is the trigger of the "Sync <name>" flow the engine
          creates alongside it, which is why it can be absent in two different
          ways and the card treats them differently:

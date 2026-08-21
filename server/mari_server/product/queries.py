@@ -540,6 +540,7 @@ class Query:
             doc_kind, group = classify_node(r)
             tags = r["tags"] or []
             updated, created = r["updated_src"], r["created_src"] or r["updated_src"]
+            updated_date = updated.date() if isinstance(updated, dt.datetime) else updated
             out.append(LineageNode(
                 id=r["external_id"], doc_id=r["id"], source=r["source"], title=r["title"],
                 meta=r["graph_meta"] or f"{r['author']} · {updated.strftime('%b %-d, %Y') if updated else '—'}",
@@ -549,7 +550,7 @@ class Query:
                 created_date=created.isoformat() if created else "",
                 warn=bool({"stale", "needs-review"} & set(tags)),
                 owner=r["author"], tags=tags,
-                stale_days=(today - updated).days if updated else 0,
+                stale_days=(today - updated_date).days if updated_date else 0,
                 orphan=r["inbound"] + r["outbound"] == 0,
                 inbound=r["inbound"], outbound=r["outbound"],
                 doc_kind=doc_kind, group=group))

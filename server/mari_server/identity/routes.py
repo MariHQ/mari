@@ -346,13 +346,14 @@ class CallerMiddleware:
             # leave resolver ContextVars empty even though info.context has a
             # valid membership. The route guard remains authoritative and
             # reports invalid/missing selections itself.
-            if user and scope.get("path") == "/graphql":
+            if user:
                 try:
                     project, _ = access_module.resolve_access(
                         user, request.headers.get("X-Mari-Project"), _conn,
                         required=False,
                     )
                     scope["mari_access"] = project
+                    access_module.set_access(project)
                 except HTTPException:
                     pass
         except Exception:  # noqa: BLE001 — identifying the caller must never
@@ -524,17 +525,27 @@ def setup(body: SetupIn, request: Request, response: Response):
         if taken:
             raise HTTPException(409, "A user with that name or email already exists.")
         initials = "".join(w[0].upper() for w in body.name.split()[:2]) or "AD"
+        project = conn.execute(
+            "SELECT id FROM projects WHERE status = 'active' ORDER BY id LIMIT 1"
+        ).fetchone()
+        if not project:
+            raise HTTPException(503, "No active project is available for setup.")
+        project_id = int(project["id"])
         conn.execute("""INSERT INTO users (name, initials, tint, email, role, provider, password_hash)
                         VALUES (%s, %s, 1, %s, 'admin', 'manual', %s)""",
                      (body.name, initials, email, _hash(body.password)))
         if body.workspace:
-            conn.execute("""INSERT INTO settings (key, value) VALUES ('workspace', %s)
-                            ON CONFLICT (key) DO UPDATE SET value = settings.value || EXCLUDED.value""",
-                         (json.dumps({"name": body.workspace}),))
+            conn.execute("""INSERT INTO settings (project_id, key, value)
+                            VALUES (%s, 'workspace', %s)
+                            ON CONFLICT (project_id, key)
+                            DO UPDATE SET value = settings.value || EXCLUDED.value""",
+                         (project_id, json.dumps({"name": body.workspace})))
             conn.execute("""UPDATE projects SET name = %s
                             WHERE id = (SELECT id FROM projects ORDER BY id LIMIT 1)
                               AND (SELECT count(*) FROM projects) = 1""", (body.workspace,))
-        conn.execute("INSERT INTO settings (key, value) VALUES ('setup_complete', 'true') ON CONFLICT DO NOTHING")
+        conn.execute("""INSERT INTO settings (project_id, key, value)
+                        VALUES (%s, 'setup_complete', 'true')
+                        ON CONFLICT (project_id, key) DO NOTHING""", (project_id,))
         user = conn.execute("SELECT * FROM users WHERE lower(email) = %s", (email,)).fetchone()
         _join_single_project(conn, user["id"], "owner")
         conn.execute("INSERT INTO events (actor, verb, target) VALUES (%s, 'completed first-run setup', %s)",
@@ -629,17 +640,21 @@ def register(body: Credentials, request: Request, response: Response):
 
 @router.post("/login")
 def login(body: Credentials, request: Request, response: Response):
-    ip, email = _client_ip(request), _normalize_email(body.email)
+    ip, identifier = _client_ip(request), body.email.strip().casefold()
     _rate_limit("login-ip", ip, 20, 300)
-    _rate_limit("login-account", email, 8, 300)
+    _rate_limit("login-account", identifier, 8, 300)
     with _conn() as conn:
-        user = conn.execute("SELECT * FROM users WHERE lower(email) = %s AND password_hash <> ''",
-                            (email,)).fetchone()
+        user = conn.execute(
+            """SELECT * FROM users
+               WHERE (lower(email) = %s OR lower(name) = %s)
+                 AND password_hash <> ''""",
+            (identifier, identifier),
+        ).fetchone()
     valid_password = _verify(body.password, user["password_hash"] if user else _DUMMY_PASSWORD_HASH)
     if not user or not valid_password:
         raise HTTPException(401, "Wrong email or password.")
     _rate_clear("login-ip", ip)
-    _rate_clear("login-account", email)
+    _rate_clear("login-account", identifier)
     _create_session(user["id"], response, request)
     return {"user": _user_out(user)}
 
@@ -891,7 +906,8 @@ def _load_prefs(conn, user_id: int) -> dict:
 def _save_prefs(conn, user_id: int, prefs: dict) -> None:
     conn.execute(
         """INSERT INTO settings (key, value) VALUES (%s, %s)
-           ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value""",
+           ON CONFLICT (key) WHERE project_id IS NULL
+           DO UPDATE SET value = EXCLUDED.value""",
         (_prefs_key(user_id), json.dumps(prefs)))
 
 

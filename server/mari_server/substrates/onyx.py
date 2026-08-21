@@ -95,7 +95,7 @@ class OnyxSubstrate:
 
     def info(self) -> SubstrateInfo:
         try:
-            response = self._transport("GET", "/api/health/ready", None)
+            response = self._transport("GET", "/api/health", None)
             healthy = not isinstance(response, dict) or response.get("success", True) is not False
             return SubstrateInfo("onyx", "community-api", self._CAPABILITIES, healthy)
         except SubstrateRequestError as error:

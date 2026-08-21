@@ -176,11 +176,17 @@ oauth_config:
   scopes:
     bot:
       - app_mentions:read
+      - channels:read
       - channels:history
       - chat:write
+      - groups:history
+      - groups:read
       - im:history
       - im:read
       - im:write
+      - mpim:history
+      - mpim:read
+      - users:read
 settings:
   event_subscriptions:
     request_url: {base}/webhooks/slack
