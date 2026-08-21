@@ -240,6 +240,17 @@ def record_sources(project_id: int, substrate: str, sources: list[Source]) -> li
     return rows
 
 
+def sources(project_id: int, substrate: str) -> list[dict]:
+    """Last observed source catalog, usable while the substrate is unavailable."""
+    with db.connect() as conn:
+        return conn.execute(
+            """SELECT * FROM substrate_sources
+                 WHERE project_id=%s AND substrate=%s
+                 ORDER BY name, id""",
+            (project_id, substrate),
+        ).fetchall()
+
+
 def get_source(project_id: int, source_id: int) -> dict | None:
     with db.connect() as conn:
         return conn.execute(

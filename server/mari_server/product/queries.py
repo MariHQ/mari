@@ -37,6 +37,7 @@ from mari_server.persistence.postgres import substrate_references
 from mari_server.persistence.postgres.database import actor_name, jload
 from mari_server.substrates.service import configured_substrate, effective_configuration
 from mari_server.substrates import query as substrate_query
+from mari_server.substrates.errors import SubstrateRequestError
 from mari_components.knowledge.excerpt import excerpt
 from mari_server.product.types import (
     ActivityBucket, ActivityItem, ApiKey, ApprovedAnswer,
@@ -368,15 +369,20 @@ class Query:
         substrate = configured_substrate()
         info = substrate.info()
         if info.provider != "native":
-            remote = substrate.list_sources()
-            rows = substrate_references.record_sources(
-                access.require_current_access().project_id, info.provider, remote,
-            )
+            project_id = access.require_current_access().project_id
+            try:
+                if not info.healthy:
+                    raise SubstrateRequestError(503, "source catalog")
+                remote = substrate.list_sources()
+                rows = substrate_references.record_sources(project_id, info.provider, remote)
+            except SubstrateRequestError:
+                rows = substrate_references.sources(project_id, info.provider)
             return [SourcePulse(
                 id=int(row["id"]), provider=str(row["kind"]), name=str(row["name"]),
                 status=str(row["status"]), stat=str(row["document_count"] or 0), unit="docs",
                 bars=[], docs_count=int(row["document_count"] or 0),
-                health=("Error" if row["status"] == "error" else
+                health=("Unavailable" if not info.healthy else
+                        "Error" if row["status"] == "error" else
                         "Syncing" if row["status"] in {"syncing", "scheduled", "initial_indexing"} else
                         "Paused" if row["status"] == "paused" else "Healthy"),
                 config=jload(row["configuration"]) or {}, kind="substrate",
