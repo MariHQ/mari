@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from functools import partial
@@ -31,6 +32,7 @@ def status(source_id: int) -> dict:
 
 
 _RUNNING: set[int] = set()
+log = logging.getLogger(__name__)
 
 
 def _worker_for(source_id: int):
@@ -56,6 +58,14 @@ def _run_guarded(source_id: int, full: bool, project_access=None) -> dict:
             project_access = access.require_current_access()
         with access.use_access(project_access):
             return _worker_for(source_id)(source_id, full)
+    except Exception as error:  # the status registry must never strand a run as active
+        authored = (type(error).__module__ or "").startswith("mari_components") or isinstance(
+            error, (ValueError, RuntimeError, ConnectionError, TimeoutError),
+        )
+        message = str(error) if authored and str(error) else f"Connector crashed ({type(error).__name__})"
+        update_status(source_id, state="error", phase="", error=message)
+        log.exception("source sync %s crashed", source_id)
+        return {"error": message}
     finally:
         with _LOCK:
             _RUNNING.discard(source_id)
