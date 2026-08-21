@@ -13,6 +13,7 @@ from mari_server.search.service import hybrid_search
 from mari_components.destinations.chat import ChatContext, ChatPorts, answer_search_query
 from mari_server.conversations.workflows import guidance as workflow_guidance
 from mari_server.conversations.workflows import retrieval_query as workflow_retrieval_query
+from mari_server.conversations.workflows import select as select_workflow
 
 
 SYSTEM = (
@@ -28,9 +29,12 @@ def live_destination(project_slug: str, destination_slug: str):
 def ports(project_access: access.AccessContext, usage_detail: str,
           enabled_tools: frozenset[str]) -> ChatPorts:
     project_id = project_access.project_id
+    selected_state: dict[str, dict | None] = {"workflow": None}
 
     def prepare(session_id: int | None, message: str) -> ChatContext:
-        retrieval_question = workflow_retrieval_query(answer_search_query(message))
+        retrieval_question = answer_search_query(message)
+        selected_state["workflow"] = workflow = select_workflow(retrieval_question, {"search"})
+        retrieval_question = workflow_retrieval_query(retrieval_question, workflow)
         if session_id is None:
             session_id = chat_store.create_session(
                 project_id, project_access.user_id or None, message,
@@ -71,7 +75,7 @@ def ports(project_access: access.AccessContext, usage_detail: str,
         prepare=prepare,
         generate=lambda messages: llm.chat_stream(
             [dict(row) for row in messages],
-            SYSTEM + workflow_guidance(str(messages[-1].get("content") or "") if messages else ""),
+            SYSTEM + workflow_guidance(selected_state["workflow"]),
         ),
         persist=lambda session_id, answer, sources: chat_store.add_message(
             project_id, session_id, "assistant", answer, json.dumps(list(sources)),

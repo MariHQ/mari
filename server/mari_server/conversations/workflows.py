@@ -1,85 +1,135 @@
-"""Human-codified assistant behavior shared by every conversation surface."""
+"""WorkflowView hierarchy matching over the configured HTTP embedding port."""
 
 from __future__ import annotations
 
 import json
-import re
 
+from mari_components.trajectories import match_hierarchy
 from mari_server.persistence.postgres import trajectories as store
+from mari_server.providers import models as llm
 
 
-def _words(value: str) -> set[str]:
-    return {word for word in re.findall(r"[a-z0-9]+", value.lower()) if len(word) > 2}
+def _json(value, default):
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return default
+    return value if isinstance(value, type(default)) else default
+
+
+def _phase_for(ordinal: int, phases: list[dict]) -> int:
+    for index, phase in enumerate(phases):
+        if int(phase.get("start") or 0) <= ordinal <= int(phase.get("end") or 0):
+            return index
+    return 0
+
+
+def _texts(row: dict) -> tuple[list[str], list[dict], list[dict]]:
+    phases = _json(row.get("phases"), [])
+    steps = _json(row.get("steps"), [])
+    texts = [f"{row.get('name', '')}. {row.get('description', '')}"]
+    texts.extend(
+        f"{phase.get('name', '')}. {phase.get('family', '')}. {phase.get('substate', '')}"
+        for phase in phases
+    )
+    texts.extend(
+        f"{step.get('tool', '')}. {step.get('summary', '')}. "
+        f"{json.dumps(step.get('arguments') or {}, sort_keys=True)}"
+        for step in steps
+    )
+    return texts, phases, steps
+
+
+def _ensure_indexes(rows: list[dict]) -> list[dict]:
+    profile = llm.embedding_profile()
+    pending: list[tuple[dict, list[str], list[dict], list[dict]]] = []
+    all_texts: list[str] = []
+    for row in rows:
+        cached = _json(row.get("match_index"), {})
+        if row.get("embedding_profile") == profile and cached.get("embedding"):
+            row["_index"] = cached
+            continue
+        texts, phases, steps = _texts(row)
+        pending.append((row, texts, phases, steps))
+        all_texts.extend(texts)
+    vectors = iter(llm.embed_many(all_texts)) if all_texts else iter(())
+    for row, texts, phases, steps in pending:
+        embedded = [next(vectors, None) for _ in texts]
+        if any(vector is None for vector in embedded):
+            continue
+        phase_vectors = embedded[1:1 + len(phases)]
+        step_vectors = embedded[1 + len(phases):]
+        index = {
+            "embedding": embedded[0],
+            "phases": [{**phase, "embedding": vector}
+                       for phase, vector in zip(phases, phase_vectors)],
+            "steps": [{**step, "phase_index": _phase_for(int(step.get("ordinal") or 0), phases),
+                       "embedding": vector}
+                      for step, vector in zip(steps, step_vectors)],
+        }
+        store.save_match_index(int(row["id"]), profile, index)
+        row["_index"] = index
+    return [row for row in rows if row.get("_index")]
 
 
 def select(query: str, available_tools: set[str] | None = None) -> dict | None:
-    """Select the single best enabled workflow with an observable intent match."""
-    rows = store.active_workflows(50)
-    if not rows:
+    """Match intent → phase → step using cached provider embeddings."""
+    query_vector = llm.embed(query)
+    if not query_vector:
         return None
-    query_words = _words(query)
-    ranked: list[tuple[int, dict]] = []
+    rows = _ensure_indexes(store.active_workflows(50))
+    candidates = []
+    by_id = {}
     for row in rows:
-        haystack = f"{row.get('name', '')} {row.get('description', '')}"
-        overlap = len(query_words & _words(haystack))
-        if overlap <= 0:
-            continue
-        steps = _steps(row)
+        index = row["_index"]
+        steps = [{**step, "_source_index": position}
+                 for position, step in enumerate(index.get("steps") or [])]
         if available_tools is not None:
-            steps = [step for step in steps if step["tool"] in available_tools]
+            steps = [step for step in steps if step.get("tool") in available_tools]
         if not steps:
             continue
-        row = {**row, "steps": steps}
-        ranked.append((overlap, row))
-    return max(ranked, key=lambda item: item[0])[1] if ranked else None
+        candidate = {"id": row["id"], "embedding": index["embedding"],
+                     "phases": index.get("phases") or [], "steps": steps}
+        candidates.append(candidate)
+        by_id[int(row["id"])] = row
+    match = match_hierarchy(query_vector, candidates, minimum_score=0.0)
+    if match is None:
+        return None
+    row = by_id[match.workflow_id]
+    if match.workflow_score < float(row.get("match_threshold") or 0.55):
+        return None
+    matched_candidate = next(row for row in candidates if int(row["id"]) == match.workflow_id)
+    source_step_index = int(matched_candidate["steps"][match.step_index]["_source_index"])
+    steps = list(row["_index"].get("steps") or [])
+    chosen = [step for index, step in enumerate(steps) if index >= source_step_index]
+    if available_tools is not None:
+        chosen = [step for step in chosen if step.get("tool") in available_tools]
+    return {**row, "steps": chosen, "match": {
+        "workflow_score": match.workflow_score, "phase_index": match.phase_index,
+        "phase_score": match.phase_score, "step_index": source_step_index,
+        "step_score": match.step_score,
+    }}
 
 
-def _steps(row: dict) -> list[dict]:
-    raw_steps = row.get("steps") or []
-    if isinstance(raw_steps, str):
-        try:
-            raw_steps = json.loads(raw_steps)
-        except json.JSONDecodeError:
-            raw_steps = []
-    return [raw for raw in raw_steps[:12] if isinstance(raw, dict)
-            and str(raw.get("tool") or "").strip()]
-
-
-def guidance(query: str, available_tools: set[str] | None = None) -> str:
-    """Describe the deterministically selected workflow to the planner."""
-    selected = select(query, available_tools)
+def guidance(selected: dict | None) -> str:
     if not selected:
         return ""
-    blocks: list[str] = []
-    for row in [selected]:
-        steps = []
-        for raw in _steps(row):
-            tool = str(raw.get("tool") or "").strip()
-            if not tool:
-                continue
-            arguments = raw.get("arguments") if isinstance(raw.get("arguments"), dict) else {}
-            steps.append(f"{tool}({json.dumps(arguments, sort_keys=True)[:500]})")
-        sequence = " -> ".join(steps) or "Answer using the reviewed behavior."
-        blocks.append(
-            f"- {str(row.get('name') or 'Workflow')[:160]}: "
-            f"{str(row.get('description') or '')[:400]}\n  {sequence}"
-        )
+    match = selected["match"]
     return (
-        "\n\nHUMAN-CODIFIED WORKFLOWS:\n"
-        "This workflow was selected deterministically. Its reviewed calls run before planning; "
-        "continue from their results and still enforce permissions.\n" + "\n".join(blocks)
+        "\n\nHUMAN-CODIFIED WORKFLOW SELECTED:\n"
+        f"{selected['name']} (workflow={match['workflow_score']:.3f}, "
+        f"phase={match['phase_index']}, step={match['step_index']}). "
+        "Continue from the reviewed calls and enforce permissions."
     )
 
 
-def retrieval_query(query: str) -> str:
-    """Use a selected workflow's reviewed search arguments for RAG surfaces."""
-    selected = select(query, {"search"})
+def retrieval_query(query: str, selected: dict | None = None) -> str:
+    selected = selected if selected is not None else select(query, {"search"})
     if not selected:
         return query
-    for step in _steps(selected):
+    for step in selected["steps"]:
         arguments = step.get("arguments")
         if step.get("tool") == "search" and isinstance(arguments, dict):
-            reviewed = str(arguments.get("query") or "").strip()
-            if reviewed:
-                return reviewed
+            return str(arguments.get("query") or query)
     return query

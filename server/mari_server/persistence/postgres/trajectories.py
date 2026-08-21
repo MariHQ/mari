@@ -324,7 +324,7 @@ def promote_to_workflow(trajectory_id: int, name: str) -> int:
 
     def promote(conn):
         row = conn.execute(
-            """SELECT id, layer2, macro_intent, promoted_workflow_id FROM trajectories
+            """SELECT id, layer2, macro_intent, phases, promoted_workflow_id FROM trajectories
                  WHERE project_id = %s AND id = %s FOR UPDATE""",
             (project_id, trajectory_id),
         ).fetchone()
@@ -338,7 +338,7 @@ def promote_to_workflow(trajectory_id: int, name: str) -> int:
         ).fetchone():
             raise ValueError("A workflow with that name already exists.")
         observed = conn.execute(
-            """SELECT ordinal, tool, action_family, args, edited_args, disposition
+            """SELECT ordinal, tool, action_family, args, edited_args, disposition, summary
                  FROM trajectory_steps
                 WHERE project_id = %s AND trajectory_id = %s AND disposition <> 'excluded'
                 ORDER BY ordinal""", (project_id, trajectory_id),
@@ -346,20 +346,22 @@ def promote_to_workflow(trajectory_id: int, name: str) -> int:
         if not observed:
             raise ValueError("Include at least one tool call before creating a workflow.")
         steps = [{
+                "ordinal": int(step["ordinal"]),
                 "tool": str(step["tool"]),
                 "arguments": jload(step.get("edited_args")) if step.get("edited_args") is not None
                 else (jload(step.get("args")) or {}),
                 "family": str(step["action_family"]),
                 "disposition": str(step["disposition"]),
+                "summary": str(step.get("summary") or ""),
         } for step in observed]
         workflow = conn.execute(
             """INSERT INTO assistant_workflows
-                 (project_id, trajectory_id, name, description, status, steps)
-               VALUES (%s, %s, %s, %s, 'active', %s)
+                 (project_id, trajectory_id, name, description, status, steps, phases)
+               VALUES (%s, %s, %s, %s, 'active', %s, %s)
                RETURNING id""",
             (project_id, trajectory_id, clean_name,
              str(row.get("layer2") or row.get("macro_intent") or "Observed agent workflow")[:500],
-             json.dumps(steps)),
+             json.dumps(steps), json.dumps(jload(row.get("phases")) or [])),
         ).fetchone()
         workflow_id = int(workflow["id"])
         conn.execute(
@@ -384,8 +386,20 @@ def set_workflow_enabled(workflow_id: int, enabled: bool) -> bool:
 def active_workflows(limit: int = 20) -> list[dict]:
     project_id = access.require_current_access().project_id
     return q(
-        """SELECT id, name, description, steps FROM assistant_workflows
+        """SELECT id, name, description, steps, phases, match_index,
+                  embedding_profile, match_threshold
+             FROM assistant_workflows
               WHERE project_id = %s AND status = 'active'
               ORDER BY updated_at DESC, id DESC LIMIT %s""",
         (project_id, max(1, min(int(limit), 50))),
+    )
+
+
+def save_match_index(workflow_id: int, profile: str, value: dict) -> None:
+    project_id = access.require_current_access().project_id
+    exec_(
+        """UPDATE assistant_workflows
+              SET match_index = %s, embedding_profile = %s, updated_at = now()
+              WHERE project_id = %s AND id = %s""",
+        (json.dumps(value), profile, project_id, workflow_id),
     )

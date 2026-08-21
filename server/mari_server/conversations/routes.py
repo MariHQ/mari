@@ -55,6 +55,7 @@ def agent_chat(
         if selected_workflow:
             yield "event: workflow_selected\ndata: " + json.dumps({
                 "id": selected_workflow["id"], "name": selected_workflow["name"],
+                **selected_workflow["match"],
             }) + "\n\n"
         iterator = iter(outputs)
         while True:

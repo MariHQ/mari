@@ -87,7 +87,7 @@ class ProductionAgentRuntime:
         selected = selected if selected is not None else self.select_workflow(message, bindings)
         reviewed_calls = iter(selected.get("steps") or [] if selected else [])
         system = planner_instructions(
-            bindings, assistant_workflows.guidance(message, set(bindings)),
+            bindings, assistant_workflows.guidance(selected),
         )
         decision_schema = {
             "type": "object",
