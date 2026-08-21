@@ -188,18 +188,17 @@ export function useWelcome(): PageData<WelcomeData> {
     ...q.data,
     sourcePulse: sync.data?.sourcePulse ?? [],
   } : null), [q.data, sync.data]);
-  const refetch = q.refetch;
   const refetchSync = sync.refetch;
   // A connection starts a background ingest after this page's initial read.
   // Keep the remaining onboarding steps live so the just-added source moves
   // from queued/syncing to its actual terminal state without leaving setup.
   useEffect(() => {
-    const timer = window.setInterval(() => {
-      refetch();
-      refetchSync();
-    }, 2_000);
+    // Only the small progress query is polled. Reissuing the full onboarding
+    // query on this cadence can cancel a slower first response forever, which
+    // leaves the entire page stuck on its loading skeleton.
+    const timer = window.setInterval(refetchSync, 2_000);
     return () => window.clearInterval(timer);
-  }, [refetch, refetchSync]);
+  }, [refetchSync]);
   return {
     data,
     loading: q.loading,
