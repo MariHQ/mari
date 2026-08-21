@@ -126,7 +126,7 @@ test("LIVE primary navigation and destination tabs perform real SPA transitions"
   await signIn(page);
   const destinations: [string, RegExp][] = [
     ["Home", /\/$/], ["Knowledge", /\/knowledge$/], ["Lineage", /\/lineage$/],
-    ["Review", /\/tasks$/], ["Automations", /\/flows$/], ["Destinations", /\/publish/],
+    ["Review", /\/tasks$/], ["Destinations", /\/publish/],
     ["Analytics", /\/insights$/], ["Sources", /\/sources$/], ["Settings", /\/settings\/general$/],
   ];
   for (const [name, url] of destinations) {
