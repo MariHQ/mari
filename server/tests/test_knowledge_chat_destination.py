@@ -7,6 +7,7 @@ from unittest.mock import patch
 from fastapi import HTTPException
 
 from mari_server.destinations import chat as chat_api, graphql as graphql_destinations
+from mari_server.conversations import chat as conversation_chat
 from mari_components.destinations import knowledge_chat
 
 
@@ -15,6 +16,21 @@ def info(project_id: int = 7):
 
 
 class KnowledgeChatDestinationTests(unittest.TestCase):
+    def test_terse_entity_prompt_is_a_question_for_retrieval_and_generation(self):
+        project = SimpleNamespace(project_id=7, user_id=0)
+        document = {"id": 4, "title": "Mari README", "source": "github",
+                    "body": "Mari manages product knowledge.", "snippet": "Mari manages"}
+        with patch.object(conversation_chat.chat_store, "create_session", return_value=9), \
+             patch.object(conversation_chat.chat_store, "add_message"), \
+             patch.object(conversation_chat.chat_store, "messages", return_value=[
+                 {"role": "user", "content": "mari"},
+             ]), patch.object(conversation_chat, "hybrid_search", return_value=[document]) as search:
+            context = conversation_chat.ports(project, "test", frozenset({"search"})).prepare(
+                None, "mari",
+            )
+        search.assert_called_once_with("what is mari?", 8)
+        self.assertIn("Question: what is mari?", context.messages[-1]["content"])
+
     def test_create_validates_slug_and_calls_application_port(self):
         ports = knowledge_chat.KnowledgeChatPorts(
             create=lambda project, name, slug, title, welcome, tools: 12,

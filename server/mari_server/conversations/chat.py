@@ -28,6 +28,7 @@ def ports(project_access: access.AccessContext, usage_detail: str,
     project_id = project_access.project_id
 
     def prepare(session_id: int | None, message: str) -> ChatContext:
+        retrieval_question = answer_search_query(message)
         if session_id is None:
             session_id = chat_store.create_session(
                 project_id, project_access.user_id or None, message,
@@ -45,7 +46,7 @@ def ports(project_access: access.AccessContext, usage_detail: str,
             return ChatContext(session_id, sources, (), str(approved["answer"]))
 
         with access.use_access(project_access):
-            documents = (hybrid_search(answer_search_query(message), 8)
+            documents = (hybrid_search(retrieval_question, 8)
                          if "search" in enabled_tools else [])
         documents = documents[:4]
         context = "\n\n".join(
@@ -61,7 +62,7 @@ def ports(project_access: access.AccessContext, usage_detail: str,
         history = chat_store.messages(project_id, session_id, 10)
         messages = [{"role": row["role"], "content": row["content"]}
                     for row in reversed(history)]
-        messages[-1]["content"] = f"Context:\n{context}\n\nQuestion: {message}"
+        messages[-1]["content"] = f"Context:\n{context}\n\nQuestion: {retrieval_question}"
         return ChatContext(session_id, sources, messages)
 
     return ChatPorts(
