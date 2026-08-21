@@ -249,6 +249,7 @@ def ports(conn) -> DocumentPorts:
         append_canonical=lambda version: store.append(version),
         append_canonical_many=store.append_many,
         delete_canonical=lambda version: store.append(version),
+        delete_canonical_many=store.append_many,
         upsert_projection=upsert_projection,
         projected_versions=projected_versions,
         delete_projections=delete_projections,
