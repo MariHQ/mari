@@ -9,7 +9,7 @@
 import type { CField, Repo, Tile, UploadedFile, WelcomeData } from "@mari-design/components/pages/WelcomePage";
 import type { Candidate } from "@mari-design/components/features/WelcomeGlossaryStep";
 import type { SyncRow } from "@mari-design/components/features/WelcomeSyncPanel";
-import { useEffect } from "react";
+import { useEffect, useMemo } from "react";
 import { useQuery } from "../lib/api";
 import type { PageData } from "./types";
 
@@ -19,9 +19,16 @@ const QUERY = `{
   connectorCatalog
   githubRepos { fullName description private defaultBranch connected }
   glossaryCandidates { id term variants definition evidence }
-  sourcePulse { id provider name status docsCount health kind lastSyncAt }
   uploadManifest { summary files { name detail } }
   settings { key value }
+}`;
+
+// Source discovery can involve a remote knowledge substrate. Keep it out of
+// the query that renders the setup controls: an unavailable or slow Onyx
+// instance must not prevent an administrator from opening the screen where
+// they can repair its configuration.
+const SYNC_QUERY = `{
+  sourcePulse { id provider name status docsCount health kind lastSyncAt }
 }`;
 
 type Res = {
@@ -32,7 +39,7 @@ type Res = {
   }[];
   githubRepos: { fullName: string; description: string; private: boolean; defaultBranch: string; connected: boolean }[];
   glossaryCandidates: { id: number; term: string; variants: string; definition: string; evidence: string; evidenceDocId?: number }[];
-  sourcePulse: {
+  sourcePulse?: {
     id: number; provider: string; name: string; status: string;
     docsCount: number; health: string; kind: string; lastSyncAt: string;
   }[];
@@ -175,17 +182,26 @@ export function buildWelcome(res: Res | null): WelcomeData {
 /* ── adapter ────────────────────────────────────────────────────────────── */
 
 export function useWelcome(): PageData<WelcomeData> {
-  const q = useQuery<WelcomeData>(QUERY, { map: buildWelcome });
+  const q = useQuery<Res>(QUERY);
+  const sync = useQuery<Pick<Res, "sourcePulse">>(SYNC_QUERY);
+  const data = useMemo(() => buildWelcome(q.data ? {
+    ...q.data,
+    sourcePulse: sync.data?.sourcePulse ?? [],
+  } : null), [q.data, sync.data]);
   const refetch = q.refetch;
+  const refetchSync = sync.refetch;
   // A connection starts a background ingest after this page's initial read.
   // Keep the remaining onboarding steps live so the just-added source moves
   // from queued/syncing to its actual terminal state without leaving setup.
   useEffect(() => {
-    const timer = window.setInterval(refetch, 2_000);
+    const timer = window.setInterval(() => {
+      refetch();
+      refetchSync();
+    }, 2_000);
     return () => window.clearInterval(timer);
-  }, [refetch]);
+  }, [refetch, refetchSync]);
   return {
-    data: q.data ?? EMPTY,
+    data,
     loading: q.loading,
     error: q.error ? (q.errorText ?? "Setup is temporarily unavailable.") : null,
   };
