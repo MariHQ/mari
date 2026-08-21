@@ -64,6 +64,15 @@ class TrajectoryMutations:
         return changed
 
     @strawberry.mutation
+    def delete_assistant_workflow(self, info: strawberry.Info,
+                                  workflow_id: int) -> bool:
+        _access(info)
+        changed = trajectories.delete_workflow(workflow_id)
+        if changed:
+            audit("deleted assistant workflow", f"assistant-workflow:{workflow_id}")
+        return changed
+
+    @strawberry.mutation
     def set_assistant_workflow_cache(self, info: strawberry.Info,
                                      workflow_id: int, enabled: bool) -> bool:
         _access(info)

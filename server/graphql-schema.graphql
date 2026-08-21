@@ -419,6 +419,7 @@ type Mutation {
   tuneTrajectoryEvidence(trajectoryId: Int!, documentId: Int!, relevance: String!, note: String! = ""): Boolean!
   promoteTrajectoryToWorkflow(trajectoryId: Int!, name: String!): Int!
   setAssistantWorkflowEnabled(workflowId: Int!, enabled: Boolean!): Boolean!
+  deleteAssistantWorkflow(workflowId: Int!): Boolean!
   setAssistantWorkflowCache(workflowId: Int!, enabled: Boolean!): Boolean!
   reconcileStaleAssistantWorkflows(limit: Int! = 50): Int!
   connectSource(provider: String!, displayName: String!, config: JSON!): Boolean!

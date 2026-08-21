@@ -59,6 +59,23 @@ test("stale reviewed-answer workflows can be reconciled together", async ({ page
     call.query.includes("reconcileStaleAssistantWorkflows"))).toBeTruthy();
 });
 
+test("a codified workflow can be deleted without deleting its observed trajectory", async ({ page }) => {
+  const row = api.getData("trajectories")[0];
+  api.setData("trajectories", [{
+    ...row, promotedWorkflowId: 44, promotedWorkflowStatus: "active",
+    promotedWorkflowCachePolicy: "none", promotedWorkflowCacheState: "disabled",
+  }]);
+  await page.goto("/workflows");
+  await page.getByText("Evidence and abstraction layers", { exact: true }).click();
+  await page.getByRole("button", { name: "Delete workflow" }).click();
+  await expect(page.getByText("The observed trajectory will be kept.", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Confirm delete" }).click();
+  await expect.poll(() => api.calls.some((call) => call.query.includes("deleteAssistantWorkflow")
+    && call.variables.workflowId === 44)).toBeTruthy();
+  await expect(page.getByRole("heading", { name: "Repair policy documentation" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Codify workflow" })).toBeVisible();
+});
+
 test("trajectory taxonomy filter and pagination remain URL-addressable", async ({ page }) => {
   const rows = Array.from({ length: 60 }, (_, index) => ({
     id: index + 1, sessionId: index + 100, prompt: `Task ${index + 1}`, status: "ready",

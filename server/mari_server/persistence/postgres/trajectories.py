@@ -414,6 +414,35 @@ def set_workflow_enabled(workflow_id: int, enabled: bool) -> bool:
     ))
 
 
+def delete_workflow(workflow_id: int) -> bool:
+    """Delete the codified workflow while retaining its observed trajectories."""
+    project_id = access.require_current_access().project_id
+
+    def delete(conn):
+        row = conn.execute(
+            """SELECT id FROM assistant_workflows
+                 WHERE project_id = %s AND id = %s FOR UPDATE""",
+            (project_id, workflow_id),
+        ).fetchone()
+        if not row:
+            return False
+        conn.execute(
+            """UPDATE trajectories
+                  SET promoted_workflow_id = NULL, matched_workflow_id = NULL
+                WHERE project_id = %s
+                  AND (promoted_workflow_id = %s OR matched_workflow_id = %s)""",
+            (project_id, workflow_id, workflow_id),
+        )
+        return bool(conn.execute(
+            """DELETE FROM assistant_workflows
+                 WHERE project_id = %s AND id = %s RETURNING id""",
+            (project_id, workflow_id),
+        ).fetchone())
+
+    from mari_server.persistence.postgres.database import transaction
+    return bool(transaction(delete))
+
+
 def active_workflows(limit: int = 20) -> list[dict]:
     project_id = access.require_current_access().project_id
     return q(

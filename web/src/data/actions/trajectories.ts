@@ -50,5 +50,10 @@ export function trajectoriesActions({ replace }: ActionContext): TrajectoriesAct
       }`);
       return Number(data.reconcileStaleAssistantWorkflows);
     },
+    deleteWorkflow: async (workflowId) => {
+      await mutate(`mutation($workflowId: Int!) {
+        deleteAssistantWorkflow(workflowId: $workflowId)
+      }`, { workflowId });
+    },
   };
 }
