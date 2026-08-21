@@ -23,6 +23,7 @@ from mari_server.persistence.postgres import documents as document_repository
 from mari_server.search.service import invalidate_search
 from mari_server.persistence.postgres.event_inbox import DEFAULT_INBOX
 from mari_components.connectors import ConfluenceConfig, fetch_confluence_page
+from mari_components.destinations import requests_fact_validation
 from mari_components.connectors.events import (
     MAX_DIRTY_PATHS, confluence_change_hint, github_change_hint,
     verify_hmac_sha256,
@@ -86,6 +87,17 @@ def _github_hint(event: str, payload: dict[str, t.Any]) -> dict[str, t.Any]:
     }
     if isinstance(hint.get("paths"), tuple):
         hint["paths"] = list(hint["paths"])
+    comment = _json(payload.get("comment"))
+    issue = _json(payload.get("issue"))
+    pull = _json(payload.get("pull_request"))
+    subject = pull or issue
+    actor = _json(comment.get("user") or _json(payload.get("sender")))
+    hint.update(
+        comment_body=str(comment.get("body") or subject.get("body") or "")[:10_000],
+        comment_author=str(actor.get("login") or "")[:200],
+        comment_author_type=str(actor.get("type") or "")[:40],
+        is_pull_request=bool(pull or issue.get("pull_request")),
+    )
     return hint
 
 
@@ -97,37 +109,52 @@ async def github_webhook(request: Request):
     event = request.headers.get("X-GitHub-Event", "").strip()
     if not delivery_id or len(delivery_id) > 200 or not event:
         raise HTTPException(400, "GitHub delivery and event headers are required")
-    external_id = str(_json(payload.get("installation")).get("id") or "")
-    installation = event_store.github_installation(external_id)
-    if not installation:
-        raise HTTPException(401, "unknown GitHub installation")
-    cfg = _json(installation.get("config"))
-    if not _signed(raw, request.headers.get("X-Hub-Signature-256", ""),
-                   str(cfg.get("webhook_secret") or "")):
-        raise HTTPException(401, "bad GitHub signature")
-
     hint = _github_hint(event, payload)
     repository = hint["repository"]
     if not repository:
         if event == "ping":
             return {"ok": True, "queued": False}
         raise HTTPException(400, "GitHub repository is required")
-    source = event_store.github_source(installation["project_id"], repository)
-    if not source:
-        raise HTTPException(404, "repository is not connected to this installation")
-    envelope = {
-        "installation_id": int(installation["id"]),
-        "source_id": int(source["id"]),
-        "hint": hint,
-    }
+    signature = request.headers.get("X-Hub-Signature-256", "")
+    routes: list[tuple[dict, int, str]] = []
+    external_id = str(_json(payload.get("installation")).get("id") or "")
+    installation = event_store.github_installation(external_id) if external_id else None
+    if installation:
+        cfg = _json(installation.get("config"))
+        if not _signed(raw, signature, str(cfg.get("webhook_secret") or "")):
+            raise HTTPException(401, "bad GitHub signature")
+        source = event_store.github_source(installation["project_id"], repository)
+        if not source:
+            raise HTTPException(404, "repository is not connected to this installation")
+        routes.append(({**source, "project_id": installation["project_id"]},
+                       int(installation["id"]), str(cfg.get("bot_login") or "mari")))
+    else:
+        for source in event_store.github_webhook_sources(repository):
+            cfg = _json(source.get("webhook_config"))
+            if _signed(raw, signature, str(cfg.get("webhook_secret") or "")):
+                routes.append((source, 0, str(cfg.get("bot_login") or "mari")))
+        if not routes:
+            raise HTTPException(401, "bad GitHub signature or repository is not connected")
+
+    queued: list[int] = []
     try:
-        row_id, inserted = INBOX.enqueue(
-            "github", int(installation["project_id"]), delivery_id, envelope,
-            coalesce_key=f"source:{source['id']}",
-        )
+        for source, installation_id, bot_login in routes:
+            row_id, inserted = INBOX.enqueue(
+                "github", int(source["project_id"]), delivery_id,
+                {"installation_id": installation_id, "source_id": int(source["id"]),
+                 "bot_login": bot_login, "hint": hint},
+                coalesce_key=f"source:{source['id']}",
+            )
+            if inserted:
+                queued.append(row_id)
     except Exception as exc:
         raise HTTPException(503, "could not durably store GitHub delivery") from exc
-    return {"ok": True, "queued": inserted, "event_id": row_id}
+    response: dict[str, t.Any] = {
+        "ok": True, "queued": bool(queued), "event_id": queued[0] if queued else None,
+    }
+    if len(queued) > 1:
+        response["event_ids"] = queued
+    return response
 
 
 def _confluence_hint(payload: dict[str, t.Any]) -> dict[str, str]:
@@ -204,8 +231,9 @@ def _worker_access(source: dict[str, t.Any], provider: str):
 
 def process_github_delivery(row: dict[str, t.Any]) -> None:
     envelope = _json(row.get("payload"))
-    if not event_store.installation_active(int(envelope.get("installation_id") or 0),
-                                           int(row["project_id"]), "github"):
+    installation_id = int(envelope.get("installation_id") or 0)
+    if installation_id and not event_store.installation_active(
+            installation_id, int(row["project_id"]), "github"):
         raise RuntimeError("GitHub installation is no longer active")
     source = _source(
         int(envelope.get("source_id") or 0), int(row["project_id"]),
@@ -217,11 +245,21 @@ def process_github_delivery(row: dict[str, t.Any]) -> None:
     if expected_repo != str(_json(envelope.get("hint")).get("repository") or ""):
         raise RuntimeError("GitHub delivery does not match its routed source")
     with access.use_access(_worker_access(source, "github")):
+        hint = _json(envelope.get("hint"))
+        if (hint.get("is_pull_request")
+                and str(hint.get("comment_author_type") or "").casefold() != "bot"
+                and requests_fact_validation(
+                    str(hint.get("comment_body") or ""), str(envelope.get("bot_login") or "mari"))):
+            from mari_server.knowledge.service import validate_github_pull_request
+            validate_github_pull_request(
+                source, int(hint.get("number") or 0), str(row.get("delivery_id") or ""),
+            )
         result = ingest.run_sync(int(source["id"]), False)
     if result is None:
         raise RuntimeError("GitHub source sync is already running")
     if result.get("error"):
         raise RuntimeError(str(result["error"]))
+    event_store.mark_github_delivery(int(row["project_id"]))
 
 
 def _sync_confluence_page(source: dict[str, t.Any], page_id: str) -> None:

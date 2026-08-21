@@ -86,6 +86,20 @@ class GitHubEventTests(unittest.TestCase):
                 asyncio.run(provider_events.github_webhook(request_for(self.payload, self.headers)))
         self.assertEqual(raised.exception.status_code, 503)
 
+    def test_repository_webhook_routes_without_a_github_app_installation(self):
+        payload = {"repository": {"full_name": "acme/docs"}, "action": "edited"}
+        headers = {
+            "X-GitHub-Delivery": "delivery-repo", "X-GitHub-Event": "pull_request",
+            "X-Hub-Signature-256": signature(payload, "project-secret"),
+        }
+        source = {"id": 41, "project_id": 3,
+                  "webhook_config": {"webhook_secret": "project-secret"}}
+        with patch.object(provider_events.event_store, "github_webhook_sources", return_value=[source]), \
+             patch.object(provider_events.INBOX, "enqueue", return_value=(19, True)) as enqueue:
+            result = asyncio.run(provider_events.github_webhook(request_for(payload, headers)))
+        self.assertEqual(result["event_id"], 19)
+        self.assertEqual(enqueue.call_args.args[:3], ("github", 3, "delivery-repo"))
+
     def test_worker_refetches_canonical_source_with_external_scope(self):
         source = {"id": 41, "project_id": 3, "project_slug": "acme", "project_name": "Acme",
                   "config": {"repo": "acme/docs"}}
@@ -93,9 +107,25 @@ class GitHubEventTests(unittest.TestCase):
                "hint": {"repository": "acme/docs", "number": 8}}}
         with patch.object(provider_events.event_store, "installation_active", return_value=True), \
              patch.object(provider_events, "_source", return_value=source), \
-             patch.object(provider_events.ingest, "run_sync", return_value={}) as run:
+             patch.object(provider_events.ingest, "run_sync", return_value={}) as run, \
+             patch.object(provider_events.event_store, "mark_github_delivery"):
             provider_events.process_github_delivery(row)
         run.assert_called_once_with(41, False)
+
+    def test_pull_request_mention_runs_fact_validation_before_reconciliation(self):
+        source = {"id": 41, "project_id": 3, "project_slug": "acme", "project_name": "Acme",
+                  "config": {"repo": "acme/docs", "token": "token"}}
+        row = {"project_id": 3, "delivery_id": "mention-1", "payload": {
+            "installation_id": 0, "source_id": 41, "bot_login": "mari",
+            "hint": {"repository": "acme/docs", "number": 8, "is_pull_request": True,
+                     "comment_body": "@Mari validate facts", "comment_author_type": "User"}}}
+        from mari_server.knowledge import service
+        with patch.object(provider_events, "_source", return_value=source), \
+             patch.object(service, "validate_github_pull_request") as validate, \
+             patch.object(provider_events.ingest, "run_sync", return_value={}), \
+             patch.object(provider_events.event_store, "mark_github_delivery"):
+            provider_events.process_github_delivery(row)
+        validate.assert_called_once_with(source, 8, "mention-1")
 
     def test_worker_rejects_delivery_after_installation_disconnects(self):
         row = {"project_id": 3, "payload": {"installation_id": 7, "source_id": 41,
@@ -105,6 +135,21 @@ class GitHubEventTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "installation is no longer active"):
                 provider_events.process_github_delivery(row)
         run.assert_not_called()
+
+    def test_fact_validation_posts_an_honest_result_when_no_facts_exist(self):
+        from mari_server.knowledge import service
+        source = {"config": {"repo": "acme/docs", "token": "token"}}
+        with patch.object(service, "github_issue_comments", return_value=()), \
+             patch.object(service, "github_pull_request", return_value={
+                 "number": 8, "title": "Update docs", "body": "New text", "updated_at": "2026-08-21T00:00:00Z"}), \
+             patch.object(service, "github_pull_files", return_value=()), \
+             patch.object(service.knowledge_store, "fact_claims", return_value=set()), \
+             patch.object(service, "post_github_comment") as post, \
+             patch.object(service, "audit"):
+            service.validate_github_pull_request(source, 8, "delivery-8")
+        body = post.call_args.args[1]
+        self.assertIn("No verified workspace facts", body)
+        self.assertIn("mari-fact-validation:delivery-8", body)
 
 
 class ConfluenceEventTests(unittest.TestCase):

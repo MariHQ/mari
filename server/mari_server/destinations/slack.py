@@ -560,7 +560,8 @@ async def slack_webhook(request: Request):
 @router.get("/bots/status")
 def bots_status(current: access.AccessContext = Depends(auth.require_project)) -> dict:
     project_id = current.project_id
-    slack, gh, repos = bot_store.status(project_id)
+    slack, gh_installation, repos = bot_store.status(project_id)
+    gh = {**bot_store.setting("github_bot"), **gh_installation}
     env_secret = (config.get("github", "webhook_secret") or "").strip()
     return {
         "slack": {

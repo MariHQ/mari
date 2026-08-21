@@ -42,8 +42,9 @@ def select_documents(*, trigger_ids: list[int], tag: str, query: str,
                      ORDER BY {order} LIMIT %s""",
                 (project_id, query, f"%{query}%", limit),
             ).fetchall()
+        needs_scan = (f" AND ({column} IS NULL OR d.updated_src > {column})" if column else "")
         return conn.execute(
-            f"""SELECT d.id, d.title FROM documents d WHERE d.project_id = %s
+            f"""SELECT d.id, d.title FROM documents d WHERE d.project_id = %s{needs_scan}
                  ORDER BY {order} LIMIT %s""", (project_id, limit),
         ).fetchall()
 
@@ -319,10 +320,37 @@ def create_scheduled_run(workflow: dict, trigger: dict, label: str) -> int:
              json.dumps({"ctx": {"trigger": trigger}, "trigger": trigger}), label),
         ).fetchone()
         conn.execute(
-            "INSERT INTO events (actor, verb, target) VALUES (%s, %s, %s)",
-            ("Flow scheduler", f"auto-started run #{row['number']} ({label})", workflow["name"]),
+            "INSERT INTO events (project_id, actor, verb, target) VALUES (%s, %s, %s, %s)",
+            (workflow.get("project_id"), "Flow scheduler",
+             f"auto-started run #{row['number']} ({label})", workflow["name"]),
         )
     return int(row["id"])
+
+
+def run_project(run_id: int) -> dict | None:
+    """Resolve the immutable project identity a background run must carry."""
+    with db.connect() as conn:
+        return conn.execute(
+            """SELECT p.id, p.slug, p.name FROM workflow_runs r
+               JOIN projects p ON p.id = r.project_id
+               WHERE r.id = %s AND p.status = 'active'""", (run_id,),
+        ).fetchone()
+
+
+def fail_unroutable_run(run_id: int, note: str) -> None:
+    with db.connect() as conn, conn.transaction():
+        conn.execute(
+            """UPDATE workflow_runs SET status = 'failed', progress = 100,
+                      stats = coalesce(stats, '{}'::jsonb) || jsonb_build_object('note', %s)
+                 WHERE id = %s AND status = 'running'""", (note[:200], run_id),
+        )
+
+
+def active_projects() -> list[dict]:
+    with db.connect() as conn:
+        return conn.execute(
+            "SELECT id, slug, name FROM projects WHERE status = 'active' ORDER BY id",
+        ).fetchall()
 
 
 def find_by_step(step_kind: str, *, project_scoped: bool = True) -> dict | None:
@@ -346,6 +374,16 @@ def update_nodes(workflow_id: int, nodes: list[dict]) -> None:
         conn.execute(
             "UPDATE workflows SET nodes = %s WHERE project_id = %s AND id = %s",
             (json.dumps(nodes), project_id, workflow_id),
+        )
+
+
+def activate_hourly_fact_scan(workflow_id: int) -> None:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn, conn.transaction():
+        conn.execute(
+            """UPDATE workflows SET status = 'active',
+                   trigger = '{"on":"schedule","every_minutes":60}'::jsonb
+               WHERE project_id = %s AND id = %s""", (project_id, workflow_id),
         )
 
 

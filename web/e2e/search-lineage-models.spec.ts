@@ -42,9 +42,14 @@ test("knowledge exposes every loaded source without overlapping content tabs", a
   await expect(page.getByText("Drive handbook", { exact: true })).toBeHidden();
 });
 
-test("lineage opens as a rolled-up overview and drills into focused provenance", async ({ page }) => {
+test("lineage opens with document detail and can switch to a rolled-up overview", async ({ page }) => {
   await page.goto("/lineage");
   const question = page.getByLabel("Lineage question");
+  await expect(question.getByRole("button", { name: "Documents" })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByText(/1 documents · 0 recorded relationships/i)).toBeVisible();
+  await expect(page.getByRole("group", { name: /Documents\. Use the arrow keys/ })
+    .getByRole("button", { name: /Retention runbook/i })).toBeVisible();
+  await question.getByRole("button", { name: "Overview" }).click();
   await expect(question.getByRole("button", { name: "Overview" })).toHaveAttribute("aria-pressed", "true");
   await expect(page.getByText(/1 group · 1 document, rolled up/i)).toBeVisible();
   await page.getByRole("group", { name: /Documents\. Use the arrow keys/ })

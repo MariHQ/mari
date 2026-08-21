@@ -124,16 +124,17 @@ test("Slack bot setup persists the verified project installation, calls auth.tes
   expect(api.restCalls.some((c) => c.path === "/bots/slack/test")).toBeTruthy();
 });
 
-test("GitHub webhook setup persists a generated signing secret and observes delivery", async ({ page }) => {
+test("GitHub bot setup persists its signing secret and explains PR fact validation", async ({ page }) => {
   await openBotsDestination(page);
   await page.getByRole("button", { name: "Manage setup" }).nth(1).click();
-  const drawer = page.getByRole("dialog", { name: "Set up GitHub webhook" });
+  const drawer = page.getByRole("dialog", { name: "Set up GitHub bot" });
   await expect(drawer.getByText(/webhooks\/github/)).toBeVisible();
-  await expect(drawer.getByText("Pushes, issues, pull requests, and comments")).toBeVisible();
+  await expect(drawer.getByText(/Pushes, issues, pull requests, issue comments/)).toBeVisible();
   await drawer.getByRole("button", { name: "Next" }).click();
   await drawer.getByRole("button", { name: "Generate" }).click();
   await drawer.getByRole("button", { name: "Save secret" }).click();
   await expect(drawer.getByText("Saved", { exact: true })).toBeVisible();
+  await expect(drawer.getByText(/@Mari validate facts/)).toBeVisible();
   await drawer.getByRole("button", { name: "Next" }).click();
   await expect(drawer.getByText(/Delivery received/)).toBeVisible();
   expect(api.calls.some((c) => c.query.includes("updateSetting") && c.variables.key === "github_bot")).toBeTruthy();

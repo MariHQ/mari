@@ -66,7 +66,7 @@ export type LineageView = {
 
 const LENSES = new Set<Lens>(["source", "stale", "owner", "health"]);
 const LAYOUTS = new Set<LayoutMode>(["flow", "timeline"]);
-const MODES = new Set<LineageMode>(["overview", "provenance", "impact"]);
+const MODES = new Set<LineageMode>(["documents", "overview", "provenance", "impact"]);
 
 export function readView(params: URLSearchParams): LineageView {
   const lens = params.get("lens") as Lens | null;
@@ -76,7 +76,7 @@ export function readView(params: URLSearchParams): LineageView {
   return {
     lens: lens && LENSES.has(lens) ? lens : "source",
     layout: layout && LAYOUTS.has(layout) ? layout : "flow",
-    mode: mode && MODES.has(mode) ? mode : "overview",
+    mode: mode && MODES.has(mode) ? mode : "documents",
     focalId: params.get("focal") || null,
     // Direction is part of what a trace IS (upstream provenance vs downstream
     // impact), so a trace with no readable direction traces downstream rather
@@ -202,14 +202,14 @@ export function mapEdges(res: Res, nodes: LNode[]): LEdge[] {
 /** A workspace with no graph at all. Every drawer closed, the scrubber live. */
 export const EMPTY: LineageData = {
   nodes: [], edges: [], dates: [], activity: [], views: [],
-  lens: "source", layout: "flow", mode: "overview", tuning: { maxNodes: 16, hopDepth: 1, minConfidence: 0.8 },
+  lens: "source", layout: "flow", mode: "documents", tuning: { maxNodes: 35, hopDepth: 1, minConfidence: 0.8 },
   focalId: null, trace: null, asOf: null, search: null, drawer: null,
   crumbs: null, extras: null, action: null,
 };
 
 /** The default view: a freshly opened graph, live, whole, nothing selected. */
 const LIVE: LineageView = {
-  lens: "source", layout: "flow", mode: "overview", focalId: null, trace: null,
+  lens: "source", layout: "flow", mode: "documents", focalId: null, trace: null,
   asOf: null, query: null, node: null, edge: null, group: null,
 };
 
@@ -227,7 +227,7 @@ export function buildLineage(res: Res | null, view: LineageView = LIVE): Lineage
   const traced = view.trace && nodes.some((n) => n.id === view.trace!.originId) ? view.trace : null;
   const tuningRow = (res.settings ?? []).find((setting) => setting.key === "lineage")?.value;
   const tuning = tuningRow && typeof tuningRow === "object" ? tuningRow as Record<string, unknown> : {};
-  const maxNodes = Math.round(Math.max(8, Math.min(35, Number(tuning.max_nodes) || 16)));
+  const maxNodes = Math.round(Math.max(8, Math.min(35, Number(tuning.max_nodes) || 35)));
   const hopDepth = Math.round(Math.max(1, Math.min(3, Number(tuning.hop_depth) || 1)));
   const minConfidence = Math.max(0.5, Math.min(1, Number(tuning.min_confidence) || 0.8));
   return {

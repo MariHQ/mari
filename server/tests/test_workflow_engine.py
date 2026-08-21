@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from mari_server.automations import runtime as flowengine
+from mari_server.identity import context as access
 
 
 class WorkflowStepTests(unittest.TestCase):
@@ -36,17 +37,28 @@ class WorkflowStepTests(unittest.TestCase):
 
     def test_bounded_work_queue_receives_run_without_spawning_raw_thread(self) -> None:
         pool = Mock()
-        with patch.object(flowengine, "_run_pool", pool):
+        context = access.external_access(3, "acme", "Acme", "test", "runner")
+        with access.use_access(context), patch.object(flowengine, "_run_pool", pool):
             flowengine.start_run(91, resume_from=3)
-        pool.submit.assert_called_once_with(flowengine._guarded_run, 91, 3)
+        pool.submit.assert_called_once_with(flowengine._guarded_run, 91, 3, context)
         self.assertGreaterEqual(flowengine.FLOW_WORKERS, 1)
 
     def test_scan_steps_use_document_ids_selected_by_fetch_step(self) -> None:
-        with patch("mari_server.knowledge.service.scan_facts_for", return_value=(3, 2, "")) as scan:
+        from mari_server.knowledge import service
+        with patch.object(service, "scan_facts_for", return_value=(3, 2, "")) as scan:
             status, _, updates = flowengine._step_scan_facts({}, {"doc_ids": [7, 8]})
         self.assertEqual(status, "passed")
         self.assertEqual(updates["facts"], 3)
         scan.assert_called_once_with([7, 8])
+
+    def test_fact_extraction_is_registered_hourly_for_each_project(self) -> None:
+        context = access.external_access(3, "acme", "Acme", "test", "seed")
+        with access.use_access(context), \
+             patch.object(flowengine.workflow_store, "find_by_step", return_value=None), \
+             patch.object(flowengine.workflow_store, "create_default_workflow", return_value=17) as create:
+            self.assertEqual(flowengine.ensure_fact_scan_flow(), 17)
+        self.assertEqual(create.call_args.kwargs["trigger"], {"on": "schedule", "every_minutes": 60})
+        self.assertEqual(create.call_args.kwargs["nodes"][1]["config"], {"k": 50, "rotate": "facts"})
 
     def test_scheduler_has_orderly_shutdown_and_can_restart(self) -> None:
         flowengine.stop_scheduler(timeout=0)

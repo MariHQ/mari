@@ -23,6 +23,22 @@ def github_source(project_id: int, repository: str) -> dict | None:
           AND COALESCE(status, 'active') <> 'disconnected'""", (project_id, repository)).fetchone()
 
 
+def github_webhook_sources(repository: str) -> list[dict]:
+    """Candidate project routes for a repository-level webhook."""
+    with db.connect() as conn:
+        return conn.execute(
+            """SELECT s.*, p.slug AS project_slug, p.name AS project_name,
+                      COALESCE(st.value, '{}'::jsonb) AS webhook_config
+                 FROM sources s JOIN projects p ON p.id = s.project_id
+                 LEFT JOIN settings st ON st.project_id = s.project_id
+                                      AND st.key = 'github_bot'
+                WHERE s.kind = 'connector' AND split_part(s.provider, ':', 1) = 'github'
+                  AND lower(s.config->>'repo') = lower(%s)
+                  AND COALESCE(s.status, 'active') <> 'disconnected'
+                  AND p.status = 'active' ORDER BY s.id""", (repository,),
+        ).fetchall()
+
+
 def confluence_source(source_id: int, project_id: int | None = None) -> dict | None:
     with db.connect() as conn:
         if project_id is None:
@@ -54,6 +70,17 @@ def installation_active(installation_id: int, project_id: int, provider: str) ->
     with db.connect() as conn:
         return bool(conn.execute("""SELECT 1 FROM bot_installations WHERE id = %s AND project_id = %s
           AND provider = %s AND status = 'connected'""", (installation_id, project_id, provider)).fetchone())
+
+
+def mark_github_delivery(project_id: int) -> None:
+    with db.connect() as conn, conn.transaction():
+        conn.execute(
+            """INSERT INTO settings (project_id, key, value)
+               VALUES (%s, 'github_bot', jsonb_build_object('last_delivery_at',
+                       to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')))
+               ON CONFLICT (project_id, key) DO UPDATE
+               SET value = settings.value || EXCLUDED.value""", (project_id,),
+        )
 
 
 def create_drive_watch(project_id: int, source_id: int, channel_id: str,

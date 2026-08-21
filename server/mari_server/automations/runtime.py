@@ -17,6 +17,7 @@ import typing as t
 
 from mari_server.providers import models as llm
 from mari_server import settings as config
+from mari_server.identity import context as access
 from mari_server.persistence.postgres import workflows as workflow_store
 from mari_components.workflow_runtime import matching_documents, run_step
 
@@ -352,13 +353,14 @@ FLOW_WORKERS = max(1, int(config.get("runtime", "flow_workers", 4)))
 _run_pool = cf.ThreadPoolExecutor(max_workers=FLOW_WORKERS, thread_name_prefix="mari-flow")
 
 
-def _guarded_run(run_id: int, resume_from: int) -> None:
+def _guarded_run(run_id: int, resume_from: int, project_access: access.AccessContext) -> None:
     """execute_run, with a last-resort failure record. A run whose execution
     raised before it could persist anything would otherwise sit at 'running'
     until the next restart reconciled it — a run that says it is still going
     when nothing is going is the worst of the three possible states."""
     try:
-        execute_run(run_id, resume_from)
+        with access.use_access(project_access):
+            execute_run(run_id, resume_from)
     except Exception as e:  # noqa: BLE001
         try:
             workflow_store.fail_running_run(
@@ -371,7 +373,18 @@ def _guarded_run(run_id: int, resume_from: int) -> None:
 def start_run(run_id: int, resume_from: int = 0) -> None:
     """Queue a run on the worker pool. Returns immediately; the caller gets the
     run id and follows it through workflowRun."""
-    _run_pool.submit(_guarded_run, run_id, resume_from)
+    project_access = access.current_access()
+    if project_access is None:
+        project = workflow_store.run_project(run_id)
+        if not project:
+            workflow_store.fail_unroutable_run(run_id, "run has no active project")
+            return
+        project_access = access.external_access(
+            int(project["id"]), str(project["slug"]), str(project["name"]),
+            "automation", str(run_id),
+            frozenset({"knowledge.read", "knowledge.write", "automation.run", "source.sync"}),
+        )
+    _run_pool.submit(_guarded_run, run_id, resume_from, project_access)
 
 
 # ————— document triggers (init.sql: workflows.trigger jsonb) —————
@@ -557,7 +570,7 @@ def ensure_digest_flow() -> int | None:
     )
 
 
-FACT_SCAN_FLOW = "Fact scan"
+FACT_SCAN_FLOW = "Hourly fact extraction"
 DECISION_SCAN_FLOW = "Decision scan"
 
 
@@ -578,31 +591,38 @@ def _adopt_rotation(row: dict, scan_kind: str, rotate: str) -> None:
     if kinds != ["trigger", "fetch_docs", scan_kind]:
         return
     cfg = nodes[1].get("config") or {}
-    if "rotate" in cfg:
+    changed = False
+    if "rotate" not in cfg:
+        cfg = {**cfg, "rotate": rotate}
+        changed = True
+    if scan_kind == "scan_facts" and int(cfg.get("k") or 8) == 8:
+        cfg = {**cfg, "k": 50}
+        nodes[1]["label"] = "Read new and changed documents"
+        changed = True
+    if not changed:
         return
-    nodes[1]["config"] = {**cfg, "rotate": rotate}
-    nodes[1]["label"] = "Read documents (least recently scanned)"
+    nodes[1]["config"] = cfg
     workflow_store.update_nodes(row["id"], nodes)
 
 
 def ensure_fact_scan_flow() -> int:
-    """Get-or-create the manual 'Fact scan' flow the Facts page starts. Returns
-    its workflow id — the caller needs it to open a run, so unlike the scheduled
-    seeds this one answers with the existing id rather than None."""
+    """Get or create the hourly fact extraction flow for this project."""
     existing = workflow_store.find_by_step("scan_facts")
     if existing:
         _adopt_rotation(existing, "scan_facts", "facts")
+        workflow_store.activate_hourly_fact_scan(existing["id"])
         return existing["id"]
     nodes = [
-            {"kind": "trigger", "label": "Manual", "config": {"label": "Started from Facts"}},
-            {"kind": "fetch_docs", "label": "Read documents (least recently scanned)",
-             "config": {"k": 8, "rotate": "facts"}},
+            {"kind": "trigger", "label": "Every hour", "config": {"label": "Scheduled · hourly"}},
+            {"kind": "fetch_docs", "label": "Read new and changed documents",
+             "config": {"k": 50, "rotate": "facts"}},
             {"kind": "scan_facts", "label": "Extract checkable claims", "config": {}},
         ]
     return workflow_store.create_default_workflow(
         name=FACT_SCAN_FLOW,
-        description="Mines recent documents for atomic, checkable claims and files them for verification.",
-        color="#1E6FA8", status="active", nodes=nodes, trigger={"on": ""},
+        description="Scans new and changed documents for atomic, checkable claims every hour.",
+        color="#1E6FA8", status="active", nodes=nodes,
+        trigger={"on": "schedule", "every_minutes": 60},
     )
 
 
@@ -633,3 +653,11 @@ def seed_scheduled_flows() -> None:
         cfg = s["config"] if isinstance(s["config"], dict) else json.loads(s["config"] or "{}")
         ensure_sync_flow(s["id"], cfg.get("repo") or s["display_name"])
     ensure_digest_flow()
+    for project in workflow_store.active_projects():
+        project_access = access.external_access(
+            int(project["id"]), str(project["slug"]), str(project["name"]),
+            "automation", "fact-extraction-seed",
+            frozenset({"knowledge.read", "knowledge.write", "automation.run"}),
+        )
+        with access.use_access(project_access):
+            ensure_fact_scan_flow()

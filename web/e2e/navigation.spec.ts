@@ -2,9 +2,9 @@ import { expect, test } from "@playwright/test";
 import { installMockApi } from "./fixtures/mock-api";
 
 const ROUTES = [
-  ["/", null, "Home"], ["/tasks", "Review", "Review"], ["/facts", "Facts", "Knowledge"],
-  ["/decisions", "Decisions", "Knowledge"], ["/knowledge", "Knowledge", "Knowledge"],
-  ["/knowledge/doc?id=1", "Retention runbook", "Knowledge"], ["/answers", "Approved answers", "Knowledge"],
+  ["/", null, "Home"], ["/tasks", "Review", "Review"], ["/facts", "Facts", "Facts"],
+  ["/decisions", "Decisions", "Decisions"], ["/knowledge", "Knowledge", "Knowledge"],
+  ["/knowledge/doc?id=1", "Retention runbook", "Knowledge"], ["/answers", "Approved answers", "Answers"],
   ["/insights", "Insights", "Analytics"], ["/audit", "Repository audit", "Review"], ["/lineage", "Lineage", "Lineage"],
   ["/flows", "Automations", null], ["/library", "Library", "Knowledge"], ["/publish", "Destinations", "Destinations"],
   ["/trajectories", "Agent trajectories", "Analytics"],
@@ -15,11 +15,11 @@ const ROUTES = [
 ] as const;
 
 const PRIMARY_DESTINATIONS = [
-  "Home", "Knowledge", "Lineage", "Review", "Destinations", "Analytics", "Sources", "Settings",
+  "Home", "Knowledge", "Facts", "Answers", "Decisions", "Lineage", "Review", "Destinations", "Analytics", "Sources", "Settings",
 ] as const;
 
 const LEGACY_PRIMARY_LABELS = [
-  "Overview", "Tasks", "Answers", "Decisions", "Library", "Facts",
+  "Overview", "Tasks", "Library",
   "Repository audit", "Flows", "Automations", "Publish", "Insights", "Agent trajectories",
 ] as const;
 

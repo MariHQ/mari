@@ -4,6 +4,7 @@ tags, tasks, lineage, digest, insights, watches."""
 from __future__ import annotations
 
 import concurrent.futures as cf
+import contextvars
 import json
 import time
 import typing as t
@@ -14,6 +15,10 @@ from mari_server.persistence.postgres import lineage as links
 from mari_server.persistence.postgres import knowledge as knowledge_store
 from mari_server.persistence.postgres.database import actor_name, audit
 from mari_components import KnowledgeDocument
+from mari_components.connectors import (
+    GitHubConfig, github_issue_comments, github_pull_files, github_pull_request,
+)
+from mari_components.destinations import GitHubCommentTarget, post_github_comment
 from mari_components.knowledge import (
     check_claims as component_check_claims,
     extract_decisions as component_extract_decisions,
@@ -90,24 +95,22 @@ def _scan_concurrently(docs: list[dict], operation) -> tuple[list[tuple[dict, t.
     if not docs:
         return [], 0
     results: list[tuple[dict, t.Any]] = []
-    deadline = time.monotonic() + SCAN_DEADLINE
-    with cf.ThreadPoolExecutor(max_workers=min(SCAN_WORKERS, len(docs)),
-                               thread_name_prefix="mari-scan") as pool:
-        futures = {pool.submit(operation, d): d for d in docs}
-        for future in cf.as_completed(futures):
-            doc = futures[future]
-            try:
-                results.append((doc, future.result()))
-            except Exception:  # noqa: BLE001 — one bad document must not end the scan
-                results.append((doc, None))
-            if time.monotonic() >= deadline:
-                # Stop waiting. Calls already in flight finish into a result
-                # nobody reads, which costs the model's time but not the
-                # caller's; the count below is what the run reports.
-                for pending in futures:
-                    if not pending.done():
-                        pending.cancel()
-                break
+    pool = cf.ThreadPoolExecutor(max_workers=min(SCAN_WORKERS, len(docs)),
+                                 thread_name_prefix="mari-scan")
+    futures = {
+        pool.submit(contextvars.copy_context().run, operation, document): document
+        for document in docs
+    }
+    done, pending = cf.wait(futures, timeout=SCAN_DEADLINE)
+    for future in done:
+        document = futures[future]
+        try:
+            results.append((document, future.result()))
+        except Exception:  # noqa: BLE001 — one bad document must not end the scan
+            results.append((document, None))
+    for future in pending:
+        future.cancel()
+    pool.shutdown(wait=False, cancel_futures=True)
     return results, len(docs) - len(results)
 
 
@@ -270,6 +273,72 @@ def fact_check_document(document_id: int) -> int:
             found += 1
     audit("ran fact check", doc["title"])
     return found
+
+
+def validate_github_pull_request(source: dict, number: int, delivery_id: str = "") -> None:
+    """Check a PR against verified workspace facts and post the result.
+
+    The webhook is only a durable hint. This function fetches the canonical PR
+    and changed-file patches from GitHub before asking the fact checker, then
+    posts one replay-safe inbox result back to the PR conversation.
+    """
+    if number < 1:
+        raise ValueError("GitHub pull request number is required")
+    cfg = source.get("config") if isinstance(source.get("config"), dict) else json.loads(source.get("config") or "{}")
+    token = str(cfg.get("token") or "").strip()
+    repository = str(cfg.get("repo") or "").strip()
+    github = GitHubConfig(token, repository)
+    from mari_server.providers.connectors import http_transport
+    marker = f"<!-- mari-fact-validation:{delivery_id} -->" if delivery_id else ""
+    if marker and any(marker in str(comment.get("body") or "")
+                      for comment in github_issue_comments(github, number, http=http_transport, limit=100)):
+        return
+    pull = github_pull_request(github, number, http=http_transport)
+    files = github_pull_files(github, number, http=http_transport)
+    sections = [str(pull.get("title") or ""), str(pull.get("body") or "")]
+    for file in files[:100]:
+        filename = str(file.get("filename") or "")
+        patch = str(file.get("patch") or "")
+        if patch:
+            sections.append(f"File: {filename}\n{patch}")
+    body = "\n\n".join(section for section in sections if section).strip()
+    claims = sorted(knowledge_store.fact_claims(verified_only=True))
+    if not claims:
+        report = "## Mari fact validation\n\nNo verified workspace facts are available yet, so this pull request could not be validated."
+    elif not body:
+        report = "## Mari fact validation\n\nThis pull request has no readable description or text patch to validate."
+    else:
+        document = KnowledgeDocument(
+            f"github-pr:{repository}#{number}", f"Pull request #{number}", body,
+            revision=str(pull.get("updated_at") or ""),
+        )
+        assessments = component_check_claims(
+            claims, [document],
+            generate_json=lambda prompt, _version: llm.generate_json(
+                prompt, system="You validate proposed GitHub changes against verified product facts."),
+            maximum_claims=50, maximum_documents=1, maximum_characters=60_000,
+        )
+        contradictions = [item for item in assessments if item.verdict == "contradicted"]
+        supported = sum(item.verdict == "supported" for item in assessments)
+        uncertain = len(assessments) - supported - len(contradictions)
+        lines = [
+            "## Mari fact validation", "",
+            f"Checked {len(assessments)} verified workspace facts against this pull request: "
+            f"**{supported} supported**, **{len(contradictions)} contradicted**, **{uncertain} not addressed**.",
+        ]
+        if contradictions:
+            lines.extend(["", "### Contradictions"])
+            for item in contradictions[:10]:
+                lines.append(f"- **{item.claim}** — {item.explanation}")
+        else:
+            lines.extend(["", "No contradictions were found in the text GitHub exposed for this change."])
+        lines.extend(["", "_This checks text evidence against verified Mari facts; it is not a code-quality review._"])
+        report = "\n".join(lines)
+    post_github_comment(
+        GitHubCommentTarget(token, repository, number),
+        report + (f"\n\n{marker}" if marker else ""), http=http_transport,
+    )
+    audit("validated GitHub pull request facts", f"{repository}#{number}")
 
 
 def derive_links() -> int:
