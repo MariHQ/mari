@@ -12,9 +12,6 @@ from mari_server.providers import models as llm
 from mari_server.identity import context as access
 from mari_server.persistence.postgres import lineage as links
 from mari_server.persistence.postgres import knowledge as knowledge_store
-from mari_server.persistence.postgres import substrate_references
-from mari_server.substrates.service import configured_substrate
-from mari_server.substrates import query as substrate_query
 from mari_server.persistence.postgres.database import actor_name, audit
 from mari_components import KnowledgeDocument
 from mari_components.knowledge import (
@@ -73,22 +70,13 @@ def _scan_batch(kind: str, doc_ids: list[int] | None, limit: int) -> list[dict]:
     order given. Without, the least-recently-scanned documents first, newest
     breaking the tie — so every document is reached in turn instead of the two
     newest being re-read on every scan forever."""
-    if configured_substrate().info().provider != "native":
-        return substrate_references.scan_documents(
-            access.require_current_access().project_id, kind, doc_ids, limit,
-        )
     return knowledge_store.scan_documents(kind, doc_ids, limit)
 
 
 def _mark_scanned(kind: str, doc_ids: list[int]) -> None:
     """Record that the scanner read these documents. This is what makes the
     next scan pick different ones; without it the rotation above is a no-op."""
-    if configured_substrate().info().provider != "native":
-        substrate_references.mark_scanned(
-            access.require_current_access().project_id, kind, doc_ids,
-        )
-    else:
-        knowledge_store.mark_scanned(kind, doc_ids)
+    knowledge_store.mark_scanned(kind, doc_ids)
 
 
 def _scan_concurrently(docs: list[dict], operation) -> tuple[list[tuple[dict, t.Any]], int]:
@@ -247,9 +235,7 @@ def scan_facts_for(doc_ids: list[int] | None = None,
             # `source` stays the human label it always was; `document_id`
             # is the key, and it is the document this call actually read.
             if knowledge_store.add_fact(
-                claim, ("Mari scan · " + doc["title"])[:80], actor_name(),
-                doc["id"] if configured_substrate().info().provider == "native" else None,
-                doc["id"] if configured_substrate().info().provider != "native" else None,
+                claim, ("Mari scan · " + doc["title"])[:80], actor_name(), doc["id"],
             ):
                 existing.add(claim.lower())
                 added += 1
@@ -263,8 +249,7 @@ def scan_facts_for(doc_ids: list[int] | None = None,
 
 
 def fact_check_document(document_id: int) -> int:
-    external = configured_substrate().info().provider != "native"
-    doc = substrate_query.get(document_id) if external else knowledge_store.document(document_id)
+    doc = knowledge_store.document(document_id)
     if not doc:
         return 0
     facts = knowledge_store.fact_claims(verified_only=True)
@@ -278,14 +263,10 @@ def fact_check_document(document_id: int) -> int:
     for assessment in assessments[:5]:
         if assessment.verdict != "contradicted" or not assessment.evidence:
             continue
-        wrote = (substrate_references.add_finding(
-                    access.require_current_access().project_id, document_id,
-                    assessment.evidence[0].quote[:200],
-                    f"{assessment.claim}: {assessment.explanation}"[:300])
-                 if external else knowledge_store.add_finding(
-                    document_id, assessment.evidence[0].quote[:200],
-                    f"{assessment.claim}: {assessment.explanation}"[:300]))
-        if wrote:
+        if knowledge_store.add_finding(
+            document_id, assessment.evidence[0].quote[:200],
+            f"{assessment.claim}: {assessment.explanation}"[:300],
+        ):
             found += 1
     audit("ran fact check", doc["title"])
     return found

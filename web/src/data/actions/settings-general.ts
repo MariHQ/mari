@@ -4,7 +4,6 @@
  * it in two places, and the page should not have to know that. */
 
 import type { LineageTuning, SettingsGeneralActions, WorkspaceIdentity } from "@mari-design/components/pages/SettingsGeneralPage";
-import type { KnowledgeSubstrateSettings } from "@mari-design/components/features/KnowledgeSubstrateForm";
 import { gql } from "../../lib/api";
 import { mutate } from "./index";
 
@@ -23,13 +22,6 @@ async function currentWorkspaceRow(): Promise<Record<string, unknown>> {
 }
 
 export function settingsGeneralActions(): SettingsGeneralActions {
-  const substrateValue = (value: KnowledgeSubstrateSettings & { apiKey: string }) => ({
-    provider: value.provider,
-    url: value.url,
-    api_key: value.apiKey || value.apiKeyHint,
-    timeout_seconds: value.timeoutSeconds,
-    search_mode: value.searchMode,
-  });
   return {
     saveWorkspace: async (w: WorkspaceIdentity) => {
       // The name has its own mutation because the server does more with it
@@ -50,17 +42,6 @@ export function settingsGeneralActions(): SettingsGeneralActions {
         key: "lineage",
         value: { max_nodes: tuning.maxNodes, hop_depth: tuning.hopDepth, min_confidence: tuning.minConfidence },
       });
-    },
-    saveKnowledgeSubstrate: async (value) => {
-      await mutate(UPDATE_SETTING, { key: "knowledge_substrate", value: substrateValue(value) });
-    },
-    testKnowledgeSubstrate: async (value) => {
-      const result = await gql<{ testKnowledgeSubstrate: { healthy: boolean; detail?: string } }>(
-        `mutation($value: JSON!) { testKnowledgeSubstrate(value: $value) }`,
-        { value: substrateValue(value) },
-      );
-      if (!result) throw new Error("Knowledge engine test failed.");
-      return result.testKnowledgeSubstrate;
     },
     // No handler for the danger zone: transferring or deleting a workspace has
     // no mutation, and the page leaves those controls local rather than

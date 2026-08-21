@@ -165,8 +165,6 @@ def _step_trigger(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
 def _step_sync_source(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
     """Run the real diff-based ingest sync for one source, synchronously, and
     report honest per-step stats from the sync result."""
-    if str(config.get("knowledge_substrate", "provider", "native")).lower() != "native":
-        return "skipped", "source ingestion is managed by the configured knowledge substrate", {}
     from mari_server.sources import sync as ingest  # late import — ingest imports flowengine at module load
     source_id = int(cfg.get("source_id") or 0)
     name = workflow_store.source_name(source_id)
@@ -631,8 +629,7 @@ def ensure_decision_scan_flow() -> int:
 def seed_scheduled_flows() -> None:
     """Startup seeding: every github/connector source gets a scheduled sync
     flow; the weekly digest gets a refresh flow. Idempotent — existing kept."""
-    if str(config.get("knowledge_substrate", "provider", "native")).lower() == "native":
-        for s in workflow_store.connector_sources():
-            cfg = s["config"] if isinstance(s["config"], dict) else json.loads(s["config"] or "{}")
-            ensure_sync_flow(s["id"], cfg.get("repo") or s["display_name"])
+    for s in workflow_store.connector_sources():
+        cfg = s["config"] if isinstance(s["config"], dict) else json.loads(s["config"] or "{}")
+        ensure_sync_flow(s["id"], cfg.get("repo") or s["display_name"])
     ensure_digest_flow()

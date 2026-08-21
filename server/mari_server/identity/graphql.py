@@ -7,7 +7,6 @@ import json
 import strawberry
 from strawberry.scalars import JSON
 
-from mari_server import settings as config
 from mari_server.identity import access
 from mari_server.identity import routes as auth
 from mari_server.automations import runtime as flowengine
@@ -19,9 +18,6 @@ from mari_server.persistence.postgres import repository_audit as repoaudit
 from mari_server.persistence.postgres import admin as admin_store
 from mari_server.persistence.postgres import sources as source_store
 from mari_server.persistence.postgres.database import audit
-from mari_server.persistence.postgres import substrate_references
-from mari_server.substrates.onyx import OnyxSubstrate
-from mari_server.substrates.service import configured_substrate, reset_configured_substrate
 
 # ————— the authorization rule —————
 #
@@ -89,19 +85,6 @@ class MutAdmin:
     @strawberry.mutation
     def disconnect_source(self, info: strawberry.Info, provider: str) -> bool:
         actor = _require_admin(info)
-        substrate = configured_substrate()
-        info_value = substrate.info()
-        if info_value.provider != "native":
-            rows = substrate_references.record_sources(
-                access.require_current_access().project_id, info_value.provider,
-                substrate.list_sources(),
-            )
-            row = next((value for value in rows if str(value["kind"]) == provider), None)
-            if not row:
-                raise ValueError("Source not found")
-            substrate.pause_source(str(row["external_id"]))
-            audit("paused source", str(row["name"]), actor["name"])
-            return True
         admin_store.pause_source(provider)
         audit("paused source", provider, actor["name"])
         return True
@@ -109,21 +92,6 @@ class MutAdmin:
     @strawberry.mutation
     def pause_source(self, info: strawberry.Info, source_id: int) -> bool:
         actor = _require_admin(info)
-        substrate = configured_substrate()
-        substrate_info = substrate.info()
-        if substrate_info.provider != "native":
-            project_id = access.require_current_access().project_id
-            row = substrate_references.get_source(project_id, source_id)
-            if not row:
-                substrate_references.record_sources(
-                    project_id, substrate_info.provider, substrate.list_sources(),
-                )
-                row = substrate_references.get_source(project_id, source_id)
-            if not row:
-                return False
-            substrate.pause_source(str(row["external_id"]))
-            audit("paused source", str(row["name"]), actor["name"])
-            return True
         row = next((value for value in source_store.connector_sources()
                     if int(value["id"]) == source_id), None)
         if not row:
@@ -206,30 +174,6 @@ class MutAdmin:
                 except json.JSONDecodeError:
                     existing = {}
             value = llm.preserve_masked(existing, value)
-        if key == "knowledge_substrate" and isinstance(value, dict):
-            existing = admin_store.setting(key)
-            existing = existing if isinstance(existing, dict) else {}
-            provider = str(value.get("provider") or "native").strip().lower()
-            if provider not in {"native", "onyx"}:
-                raise ValueError("Knowledge substrate must be native or onyx.")
-            api_key = str(value.get("api_key") or "").strip()
-            if not api_key or "•" in api_key:
-                api_key = str(existing.get("api_key") or config.get(
-                    "knowledge_substrate", "api_key", ""))
-            value = {
-                "provider": provider,
-                "url": str(value.get("url") or "").strip().rstrip("/"),
-                "api_key": api_key,
-                "timeout_seconds": max(1, min(120, int(value.get("timeout_seconds") or 30))),
-                "search_mode": str(value.get("search_mode") or "keyword").strip().lower(),
-            }
-            if provider == "onyx":
-                if not value["url"].startswith(("http://", "https://")):
-                    raise ValueError("Onyx URL must start with http:// or https://.")
-                if not api_key:
-                    raise ValueError("Onyx API key is required.")
-                if value["search_mode"] not in {"keyword", "agentic"}:
-                    raise ValueError("Onyx search mode must be keyword or agentic.")
         admin_store.save_setting(key, value)
         audit("updated setting", key, actor["name"],
               [("Setting", key), ("Fields", ", ".join(sorted(value)) if isinstance(value, dict) else "value")])
@@ -238,33 +182,7 @@ class MutAdmin:
         # the old provider — the page was decorative for half a minute.
         if key in ("llm", "embedding"):
             llm.reload_settings()
-        if key == "knowledge_substrate":
-            reset_configured_substrate()
         return True
-
-    @strawberry.mutation
-    def test_knowledge_substrate(self, info: strawberry.Info, value: JSON) -> JSON:
-        _require_admin(info)
-        if not isinstance(value, dict):
-            raise ValueError("Knowledge substrate configuration is required.")
-        provider = str(value.get("provider") or "native").strip().lower()
-        if provider == "native":
-            return {"healthy": True, "provider": "native", "detail": "Postgres knowledge store"}
-        if provider != "onyx":
-            raise ValueError("Knowledge substrate must be native or onyx.")
-        existing = admin_store.setting("knowledge_substrate")
-        existing = existing if isinstance(existing, dict) else {}
-        api_key = str(value.get("api_key") or "").strip()
-        if not api_key or "•" in api_key:
-            api_key = str(existing.get("api_key") or config.get("knowledge_substrate", "api_key", ""))
-        adapter = OnyxSubstrate(
-            str(value.get("url") or ""), api_key,
-            timeout=float(value.get("timeout_seconds") or 30),
-            search_mode=str(value.get("search_mode") or "keyword"),
-        )
-        result = adapter.info()
-        return {"healthy": result.healthy, "provider": result.provider,
-                "version": result.version, "detail": result.detail}
 
     @strawberry.mutation
     def test_llm_gateway(self, info: strawberry.Info) -> JSON:
@@ -337,40 +255,12 @@ class MutAdmin:
     def sync_source(self, info: strawberry.Info, source_id: int) -> bool:
         """Diff-based incremental sync; returns immediately, progress via syncStatus."""
         _require_manager(info)
-        substrate = configured_substrate()
-        info_value = substrate.info()
-        if info_value.provider != "native":
-            row = substrate_references.get_source(
-                access.require_current_access().project_id, source_id,
-            )
-            if not row:
-                substrate_references.record_sources(
-                    access.require_current_access().project_id, info_value.provider,
-                    substrate.list_sources(),
-                )
-                row = substrate_references.get_source(
-                    access.require_current_access().project_id, source_id,
-                )
-            if not row:
-                return False
-            substrate.run_source(str(row["external_id"]))
-            return True
         return ingest.start_sync(source_id)
 
     @strawberry.mutation
     def resync_source(self, info: strawberry.Info, source_id: int) -> bool:
         """Full rebuild escape hatch: drops this source's chunks/hashes, then syncs."""
         _require_manager(info)
-        substrate = configured_substrate()
-        info_value = substrate.info()
-        if info_value.provider != "native":
-            row = substrate_references.get_source(
-                access.require_current_access().project_id, source_id,
-            )
-            if not row:
-                return False
-            substrate.run_source(str(row["external_id"]), full=True)
-            return True
         return ingest.start_sync(source_id, full=True)
 
     @strawberry.mutation

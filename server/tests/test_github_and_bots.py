@@ -147,7 +147,7 @@ class SlackBotTests(unittest.TestCase):
         docs = [{"title": "Deploy", "source": "github", "body": "Run make deploy", "snippet": ""}]
         ctx = access.AccessContext(1, 7, "acme", "Acme", "admin", access.CAPABILITIES)
         with access.use_access(ctx), patch.object(bots.llm, "embed", return_value=None), \
-             patch.object(bots.substrate_query, "search", return_value=docs), \
+             patch.object(bots, "hybrid_search", return_value=docs), \
              patch.object(bots.bot_store, "verified_facts", return_value=[]), \
              patch.object(bots.llm, "generate_json", return_value={
                  "answer": "Follow the deploy runbook [1].", "confidence": .99,

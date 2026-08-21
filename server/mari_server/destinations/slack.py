@@ -34,7 +34,7 @@ from mari_server.identity import access
 from mari_server import settings as config
 from mari_server.providers import connectors as component_connectors
 from mari_server.providers import models as llm
-from mari_server.search.service import invalidate_search
+from mari_server.search.service import hybrid_search, invalidate_search
 from mari_components.connectors import SlackConfig, fetch_slack_thread_by_id
 from mari_components.connectors.events import (
     verify_hmac_sha256 as component_verify_hmac_sha256,
@@ -45,8 +45,6 @@ from mari_components.destinations.chat import answer_search_query
 from mari_components.knowledge import answer_question as component_answer_question
 from mari_server.persistence.postgres.event_inbox import DEFAULT_INBOX, EventDispatcher
 from mari_server.persistence.postgres import bots as bot_store
-from mari_server.substrates import query as substrate_query
-from mari_server.substrates.errors import SubstrateRequestError
 
 router = APIRouter()
 
@@ -123,7 +121,7 @@ def answer_question(question: str, supplemental_context: str = "") -> str:
         if approved and approved["sim"] >= 0.62:
             return f"{approved['answer']}\n\n_Approved answer · served verbatim_"
 
-    docs = substrate_query.search(answer_search_query(question), 8)[:4]
+    docs = hybrid_search(answer_search_query(question), 8)[:4]
     knowledge = [
         KnowledgeDocument(
             f"document:{d.get('id') or d.get('external_id') or index}",
@@ -170,18 +168,10 @@ def stream_answer_question(question: str, supplemental_context: str = ""):
             yield f"{approved['answer']}\n\n_Approved answer · served verbatim_"
             return
 
-    retrieval_error = False
-    try:
-        docs = substrate_query.search(answer_search_query(question), 8)[:4]
-    except SubstrateRequestError:
-        docs = []
-        retrieval_error = True
+    docs = hybrid_search(answer_search_query(question), 8)[:4]
     facts = bot_store.verified_facts()
     if not docs and not facts:
-        if retrieval_error:
-            yield "Knowledge search is temporarily unavailable. Please try again shortly."
-        else:
-            yield "I couldn't find enough product knowledge to answer that yet."
+        yield "I couldn't find enough product knowledge to answer that yet."
         return
 
     sections = [

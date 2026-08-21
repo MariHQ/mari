@@ -423,7 +423,6 @@ type Mutation {
   createApiKey(name: String!, scopes: String! = "read"): String!
   revokeApiKey(id: Int!): Boolean!
   updateSetting(key: String!, value: JSON!): Boolean!
-  testKnowledgeSubstrate(value: JSON!): JSON!
   testLlmGateway: JSON!
   setWorkspaceName(name: String!): Boolean!
   setGithubTeam(team: String!): Boolean!

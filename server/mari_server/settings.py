@@ -57,10 +57,6 @@ _DEFAULTS: dict[str, t.Any] = {
     "audit": {"languages": ["es", "fr"], "default_tag": "customer-facing"},
     "github": {"token": "", "webhook_secret": ""},
     "runtime": {"flow_workers": 4},
-    "knowledge_substrate": {
-        "provider": "native", "url": "", "api_key": "", "timeout_seconds": 30,
-        "search_mode": "keyword",
-    },
 }
 
 
@@ -136,11 +132,6 @@ def _load() -> dict:
         "MARI_GITHUB_TOKEN": ("github", "token"),
         "MARI_GITHUB_WEBHOOK_SECRET": ("github", "webhook_secret"),
         "MARI_FLOW_WORKERS": ("runtime", "flow_workers"),
-        "MARI_KNOWLEDGE_SUBSTRATE": ("knowledge_substrate", "provider"),
-        "MARI_ONYX_URL": ("knowledge_substrate", "url"),
-        "MARI_ONYX_API_KEY": ("knowledge_substrate", "api_key"),
-        "MARI_SUBSTRATE_TIMEOUT": ("knowledge_substrate", "timeout_seconds"),
-        "MARI_ONYX_SEARCH_MODE": ("knowledge_substrate", "search_mode"),
     }
     for env, (section, key) in env_map.items():
         if os.environ.get(env):
@@ -156,7 +147,7 @@ def _load() -> dict:
                     continue
                 if not isinstance(value, dict):
                     continue
-            elif key in ("max_retries", "pool_max", "flow_workers", "timeout_seconds"):
+            elif key in ("max_retries", "pool_max", "flow_workers"):
                 try:
                     value = int(value)
                 except ValueError:

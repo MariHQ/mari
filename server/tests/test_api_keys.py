@@ -5,7 +5,6 @@ import unittest
 from contextlib import nullcontext
 from unittest.mock import patch
 
-from mari_components.substrates import SearchHit
 from mari_server.identity import access
 from mari_server.search import routes as search_routes
 from mari_server.identity import graphql as mutations_admin
@@ -63,23 +62,20 @@ class ApiKeyTests(unittest.TestCase):
         row = {"id": 5, "project_id": 7, "scopes": "search", "slug": "acme", "project_name": "Acme"}
         seen = []
 
-        class Substrate:
-            def search(self, request):
-                self.request = request
-                seen.append(access.require_current_access())
-                return [SearchHit("2", "Runbook", "deploy", "docs", score=.9)]
-
-        substrate = Substrate()
+        def search(query, limit):
+            seen.append(access.require_current_access())
+            self.assertEqual((query, limit), ("deploy", 10))
+            return [{"id": 2, "title": "Runbook", "snippet": "deploy",
+                     "source": "docs", "score": .9}]
 
         with patch.object(search_routes.identity, "authenticate_api_key", return_value=row), \
              patch.object(search_routes.identity, "touch_api_key") as touch, \
-             patch.object(search_routes, "configured_substrate", return_value=substrate):
+             patch.object(search_routes, "hybrid_search", side_effect=search):
             result = search_routes.api_search(search_routes.ApiSearchIn(query="deploy"), "Bearer secret")
         self.assertEqual(result["results"][0]["title"], "Runbook")
         self.assertEqual(seen[0].project_id, 7)
         self.assertEqual(seen[0].principal_type, "api_key")
         self.assertIsNone(access.current_access())
-        self.assertEqual(substrate.request.query, "deploy")
         touch.assert_called_once_with(5)
 
 

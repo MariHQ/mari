@@ -98,7 +98,7 @@ class McpProtocolTests(unittest.TestCase):
 
     def test_tool_call_runs_search_and_rejects_disabled_tool(self) -> None:
         rows = [{"id": 4, "title": "Runbook", "source": "github", "snippet": "Deploy safely"}]
-        with patch.object(mcp.substrate_query, "search", return_value=rows) as search:
+        with patch.object(mcp, "hybrid_search", return_value=rows) as search:
             result = mcp.dispatch(self.SERVER, {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
                 "params": {"name": "search_documents", "arguments": {"query": "deploy", "limit": 99}}})
         search.assert_called_once_with("deploy", 20)

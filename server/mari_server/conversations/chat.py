@@ -8,7 +8,7 @@ from mari_server.identity import context as access
 from mari_server.providers import models as llm
 from mari_server.persistence.postgres.database import log_usage
 from mari_server.persistence.postgres import chat as chat_store
-from mari_server.substrates import query as substrate_query
+from mari_server.search.service import hybrid_search
 from mari_components.destinations.chat import ChatContext, ChatPorts, answer_search_query
 
 
@@ -42,7 +42,7 @@ def ports(project_access: access.AccessContext, usage_detail: str) -> ChatPorts:
             return ChatContext(session_id, sources, (), str(approved["answer"]))
 
         with access.use_access(project_access):
-            documents = substrate_query.search(answer_search_query(message), 8)
+            documents = hybrid_search(answer_search_query(message), 8)
         documents = documents[:4]
         context = "\n\n".join(
             f"[{i + 1}] {row['title']} ({row['source']})\n{row['body'] or row['snippet']}"

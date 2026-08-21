@@ -18,10 +18,7 @@ from fastapi import APIRouter, Header, HTTPException, Request, Response
 from mari_server.destinations import slack as bots
 from mari_server.identity import access
 from mari_server.persistence.postgres import mcp as mcp_repository
-from mari_server.persistence.postgres import knowledge as knowledge_repository
-from mari_server.persistence.postgres import substrate_references
-from mari_server.substrates import query as substrate_query
-from mari_server.substrates.service import configured_substrate
+from mari_server.search.service import hybrid_search
 from mari_components.knowledge import slug
 
 router = APIRouter(prefix="/mcp")
@@ -79,7 +76,7 @@ def call_tool(server: dict, name: str, args: dict) -> dict:
         if not query:
             raise ValueError("query is required")
         limit = min(max(int(args.get("limit", 8)), 1), 20)
-        rows = substrate_query.search(query, limit)
+        rows = hybrid_search(query, limit)
         return _result([{"id": r.get("id"), "title": r.get("title"), "source": r.get("source"),
                          "snippet": r.get("snippet") or (r.get("body") or "")[:500]} for r in rows])
     if name == "list_facts":
@@ -95,18 +92,6 @@ def call_tool(server: dict, name: str, args: dict) -> dict:
         doc_id = int(args.get("document_id") or 0)
         if doc_id < 1:
             raise ValueError("document_id is required")
-        if configured_substrate().info().provider != "native":
-            document = substrate_query.get(doc_id)
-            if not document:
-                raise ValueError("document not found")
-            project_id = access.require_current_access().project_id
-            return _result({
-                "document": {"id": doc_id, "title": document["title"],
-                             "source": document["source"], "url": document.get("source_url", "")},
-                "facts": knowledge_repository.facts_for_substrate_document(doc_id),
-                "findings": substrate_references.findings(project_id, doc_id),
-                "related": [],
-            })
         return _result(mcp_repository.lineage(doc_id))
     if name == "ask_knowledge":
         question = str(args.get("question") or "").strip()

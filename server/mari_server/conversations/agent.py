@@ -12,9 +12,7 @@ from mari_server.persistence.postgres.database import log_usage
 from mari_server.persistence.postgres import chat as chat_store
 from mari_server.persistence.postgres.agent_tools import AgentToolStore
 from mari_components.connectors import connector_definitions
-from mari_server.substrates import query as substrate_query
-from mari_server.substrates.service import configured_substrate
-from mari_server.persistence.postgres import substrate_references
+from mari_server.search.service import hybrid_search
 
 from mari_components.agents.runtime import (
     AgentPorts,
@@ -71,41 +69,9 @@ class ProductionAgentRuntime:
         chat_store.add_message(self.project_id, session_id, "user", message)
 
     def bindings(self) -> dict[str, ToolBinding]:
-        base_store = AgentToolStore(self.project_id)
-
-        class ProductToolStore:
-            def document(_self, document_id):
-                return substrate_query.get(document_id)
-
-            def document_tags(_self, document_id):
-                if configured_substrate().info().provider != "native":
-                    return substrate_references.tags(self.project_id, document_id)
-                return base_store.document_tags(document_id)
-
-            def sources(_self):
-                substrate = configured_substrate()
-                info = substrate.info()
-                if info.provider == "native":
-                    return base_store.sources()
-                rows = substrate_references.record_sources(
-                    self.project_id, info.provider, substrate.list_sources(),
-                )
-                return [{
-                    "id": row["id"], "display_name": row["name"], "provider": row["kind"],
-                    "status": row["status"],
-                    "health": ("Error" if row["status"] == "error" else
-                               "Paused" if row["status"] == "paused" else
-                               "Syncing" if row["status"] in {"syncing", "scheduled", "initial_indexing"}
-                               else "Healthy"),
-                    "docs_count": row["document_count"] or 0,
-                } for row in rows]
-
-            def __getattr__(_self, name):
-                return getattr(base_store, name)
-
         dependencies = ToolDependencies(
-            store=ProductToolStore(),
-            search=lambda text, limit: substrate_query.search(text, limit),
+            store=AgentToolStore(self.project_id),
+            search=lambda text, limit: hybrid_search(text, limit),
             record_search=lambda text: log_usage("search", text),
             review_items=review_repository.project_items,
             connector_definitions=connector_definitions,
