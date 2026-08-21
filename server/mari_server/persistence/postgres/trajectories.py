@@ -109,6 +109,18 @@ def trajectory_categories() -> list[str]:
         """SELECT category FROM trajectories WHERE project_id = %s
            GROUP BY category ORDER BY count(*) DESC, category""", (project_id,))]
 
+
+def workflow_embedding_indexes(workflow_ids: list[int]) -> dict[int, dict]:
+    if not workflow_ids:
+        return {}
+    project_id = access.require_current_access().project_id
+    return {int(row["id"]): row for row in q(
+        """SELECT id, name, match_index, embedding_profile
+             FROM assistant_workflows
+            WHERE project_id = %s AND id = ANY(%s)""",
+        (project_id, list(dict.fromkeys(workflow_ids))),
+    )}
+
 FAMILY = {
     "search": "discover", "read_document": "inspect", "list_sources": "inspect",
     "list_flows": "inspect", "inspect_flow": "inspect",

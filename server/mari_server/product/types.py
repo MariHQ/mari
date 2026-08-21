@@ -648,6 +648,7 @@ class Trajectory:
     promoted_workflow_cache_state: str
     promoted_workflow_cache_refreshed_at: str
     promoted_workflow_dependency_count: int
+    promoted_workflow_embedding_map: JSON
 
 
 @strawberry.type

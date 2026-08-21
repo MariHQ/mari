@@ -29,6 +29,7 @@ from mari_server.persistence.postgres import review as review_repository
 from mari_server.persistence.postgres import knowledge as knowledge_store
 from mari_server.persistence.postgres import documents as document_repository, lineage as lineage_store
 from mari_server.persistence.postgres import trajectories as trajectory_store, workflows as workflow_store
+from mari_components.trajectories import project_embeddings_2d
 from mari_server.persistence.postgres import mcp as mcp_repository, knowledge_chats as knowledge_chat_repository
 from mari_server.persistence.postgres import sources as source_store, audit as audit_store
 from mari_server.persistence.postgres import settings as settings_store, analytics as analytics_store
@@ -306,6 +307,31 @@ def _effective_model_setting(key: str, value):
     return out
 
 
+def _workflow_embedding_map(row: dict | None) -> dict:
+    if not row:
+        return {"profile": "", "points": []}
+    index = jload(row.get("match_index")) or {}
+    items: list[dict] = []
+    root = index.get("embedding")
+    if isinstance(root, list):
+        items.append({"kind": "intent", "label": str(row.get("name") or "Workflow"),
+                      "embedding": root})
+    for position, phase in enumerate(index.get("phases") or [], 1):
+        if isinstance(phase, dict) and isinstance(phase.get("embedding"), list):
+            items.append({"kind": "phase", "label": str(phase.get("name") or f"Phase {position}"),
+                          "embedding": phase["embedding"]})
+    for position, step in enumerate(index.get("steps") or [], 1):
+        if isinstance(step, dict) and isinstance(step.get("embedding"), list):
+            label = str(step.get("tool") or step.get("summary") or f"Step {position}")
+            items.append({"kind": "tool", "label": label, "embedding": step["embedding"]})
+    coordinates = project_embeddings_2d([item["embedding"] for item in items])
+    return {
+        "profile": str(row.get("embedding_profile") or ""),
+        "points": [{"kind": item["kind"], "label": item["label"], "x": x, "y": y}
+                   for item, (x, y) in zip(items, coordinates)],
+    }
+
+
 # ————————————————— Query —————————————————
 
 
@@ -321,6 +347,9 @@ class Query:
         )
         if not rows:
             return []
+        workflow_ids = [int(row["promoted_workflow_id"]) for row in rows
+                        if row.get("promoted_workflow_id")]
+        embedding_indexes = trajectory_store.workflow_embedding_indexes(workflow_ids)
         by_id: dict[int, list[TrajectoryStep]] = {int(row["id"]): [] for row in rows}
         for step in steps:
             by_id[int(step["trajectory_id"])].append(TrajectoryStep(
@@ -357,6 +386,10 @@ class Query:
             ),
             promoted_workflow_dependency_count=int(
                 row.get("promoted_workflow_dependency_count") or 0
+            ),
+            promoted_workflow_embedding_map=_workflow_embedding_map(
+                embedding_indexes.get(int(row["promoted_workflow_id"]))
+                if row.get("promoted_workflow_id") else None
             )) for row in rows]
 
     @strawberry.field

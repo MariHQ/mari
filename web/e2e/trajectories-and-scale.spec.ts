@@ -16,6 +16,30 @@ test("trajectory view progressively discloses grounded layers and chronological 
   await expect(page.locator("body")).not.toContainText("secret-token");
 });
 
+test("an expanded workflow shows its real embedding projection", async ({ page }) => {
+  const row = api.getData("trajectories")[0];
+  api.setData("trajectories", [{
+    ...row,
+    promotedWorkflowId: 44,
+    promotedWorkflowName: "Repair policy documentation",
+    promotedWorkflowStatus: "active",
+    workflowObservationCount: 3,
+    promotedWorkflowEmbeddingMap: {
+      profile: "openai:text-embedding-3-small:dimensions=768:muvera-unit-v1",
+      points: [
+        { kind: "intent", label: "Repair policy documentation", x: -0.1, y: 0.05 },
+        { kind: "phase", label: "Discover", x: -0.8, y: 0.7 },
+        { kind: "tool", label: "search", x: 1, y: -0.6 },
+      ],
+    },
+  }]);
+  await page.goto("/workflows");
+  await page.getByText("3 chat observations in this workflow", { exact: true }).click();
+  await expect(page.getByRole("figure", { name: "Workflow embedding" })).toBeVisible();
+  await expect(page.getByRole("img", { name: "Embedding projection with 3 points" })).toBeVisible();
+  await expect(page.getByText("openai:text-embedding-3-small:dimensions=768:muvera-unit-v1", { exact: true })).toBeVisible();
+});
+
 test("a human can tune evidence and tool calls before codifying a trajectory", async ({ page }) => {
   await page.goto("/workflows");
   await page.getByText("Evidence and abstraction layers", { exact: true }).click();

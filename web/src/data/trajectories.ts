@@ -14,6 +14,7 @@ const QUERY = `query Trajectories($limit: Int!, $offset: Int!, $category: String
     promotedWorkflowId promotedWorkflowStatus promotedWorkflowCachePolicy
     promotedWorkflowName workflowRootTrajectoryId workflowObservationCount
     promotedWorkflowCacheState promotedWorkflowCacheRefreshedAt promotedWorkflowDependencyCount
+    promotedWorkflowEmbeddingMap
   }
   trajectoryTotal(category: $category)
   trajectoryCategories
@@ -45,6 +46,7 @@ export function buildTrajectories(res: Res | null, category: string | null, offs
     promotedWorkflowCacheState: row.promotedWorkflowCacheState ?? "disabled",
     promotedWorkflowCacheRefreshedAt: row.promotedWorkflowCacheRefreshedAt ?? "",
     promotedWorkflowDependencyCount: row.promotedWorkflowDependencyCount ?? 0,
+    promotedWorkflowEmbeddingMap: row.promotedWorkflowEmbeddingMap ?? { profile: "", points: [] },
   }));
   const grouped = new Map<string, TrajectoryRow>();
   for (const row of mapped) {
