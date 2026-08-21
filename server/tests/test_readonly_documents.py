@@ -15,8 +15,12 @@ class ReadOnlyDocumentTests(unittest.TestCase):
             self.assertNotIn(name, fields)
 
     def test_agent_has_no_document_replacement_tool(self):
+        class EmptyStore:
+            def __getattr__(self, _name):
+                return lambda *_args: ()
+
         bindings = build_tool_bindings(ToolDependencies(
-            project_id=1, query=lambda *_args: (), query_one=lambda *_args: None,
+            store=EmptyStore(),
             search=lambda *_args: (), record_search=lambda _text: None,
             review_items=lambda: (), connector_definitions=lambda: (),
         ))

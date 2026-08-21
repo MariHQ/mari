@@ -12,10 +12,18 @@ from mari_server.conversations.tools import (
 
 class AgentSecurityTests(unittest.TestCase):
     def bindings(self, document=None):
+        class Store:
+            def document(self, _document_id):
+                return document
+
+            def document_tags(self, _document_id):
+                return ()
+
+            def __getattr__(self, _name):
+                return lambda *_args: ()
+
         return build_tool_bindings(ToolDependencies(
-            project_id=7,
-            query=lambda _sql, _args: (),
-            query_one=lambda _sql, _args: document,
+            store=Store(),
             search=lambda _text, _limit: (),
             record_search=lambda _text: None,
             review_items=lambda: (),

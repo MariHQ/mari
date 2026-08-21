@@ -19,8 +19,8 @@ class SlackKnowledgeScopeTests(unittest.TestCase):
         approved = {"question": "How do I deploy?", "answer": "Use the runbook.", "sim": 0.91}
         with access.use_access(slack_context()), \
              patch.object(bots.llm, "embed", return_value=[0.1, 0.2]), \
-             patch.object(bots, "q1", return_value=approved), \
-             patch.object(bots, "hybrid_search") as search:
+             patch.object(bots.bot_store, "approved_answer", return_value=approved), \
+             patch.object(bots.substrate_query, "search") as search:
             answer = bots.answer_question("How do I deploy?")
         self.assertIn("Use the runbook.", answer)
         self.assertIn("Approved answer", answer)
@@ -30,8 +30,9 @@ class SlackKnowledgeScopeTests(unittest.TestCase):
         document = {"title": "Deploy", "source": "confluence", "body": "Run make deploy.", "snippet": ""}
         with access.use_access(slack_context()), \
              patch.object(bots.llm, "embed", return_value=None), \
-             patch.object(bots, "hybrid_search", return_value=[document]), \
-             patch.object(bots, "pq", return_value=[{"claim": "Production deploys require approval."}]), \
+             patch.object(bots.substrate_query, "search", return_value=[document]), \
+             patch.object(bots.bot_store, "verified_facts",
+                          return_value=["Production deploys require approval."]), \
              patch.object(bots.llm, "generate_json", return_value={
                  "answer": "Use the approved deployment path [1].",
                  "confidence": 0.9,
