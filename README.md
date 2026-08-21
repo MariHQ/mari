@@ -148,7 +148,7 @@ run implicitly because they create sources and workflow runs.
 
 ### Configuration
 
-Everything is env-driven (`.env.example` documents the full list; env overrides `mari.toml` — see `server/config.py`):
+Everything is env-driven (`.env.example` documents the full list; env overrides `mari.toml` — see `server/mari_server/settings.py`):
 
 | Variable | Purpose |
 |---|---|

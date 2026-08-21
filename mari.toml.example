@@ -1,5 +1,5 @@
 # Mari configuration — copy to mari.toml (or set MARI_CONFIG).
-# Every value can also be set by environment variable (see server/config.py),
+# Every value can also be set by environment variable (see server/mari_server/settings.py),
 # which is how docker-compose.yml configures the containers.
 
 [database]
@@ -24,7 +24,14 @@ embedding_provider = "sentence-transformers"
 embedding_model = "sentence-transformers/all-mpnet-base-v2"
 
 [sentence_transformers]
-cache_dir = ".mari/sentence-transformers"
+cache_dir = "var/mari/cache/sentence-transformers"
+
+[knowledge_substrate]
+provider = "native" # or "onyx"
+url = ""
+api_key = ""
+timeout_seconds = 30
+search_mode = "keyword"
 
 [llm_gateway]
 base_url = ""

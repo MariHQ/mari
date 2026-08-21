@@ -10,7 +10,9 @@ from pydantic import BaseModel
 
 from mari_server.identity import access
 from mari_server.persistence.postgres import identity
-from mari_server.search.service import hybrid_search
+from mari_server.substrates.errors import SubstrateConfigurationError, SubstrateRequestError
+from mari_server.substrates.service import configured_substrate
+from mari_components.substrates import SearchRequest
 
 
 router = APIRouter()
@@ -37,10 +39,18 @@ def api_search(body: ApiSearchIn, authorization: str = Header(default="")) -> di
         frozenset({"knowledge.read"}),
     )
     with access.use_access(context):
-        rows = hybrid_search(body.query.strip(), max(1, min(body.limit, 50)))
+        try:
+            rows = configured_substrate().search(SearchRequest(
+                body.query.strip(), max(1, min(body.limit, 50)),
+            ))
+        except SubstrateConfigurationError as error:
+            raise HTTPException(409, str(error)) from None
+        except SubstrateRequestError as error:
+            status = error.status if error.status in {400, 401, 403, 404, 409, 422, 429, 503} else 502
+            raise HTTPException(status, str(error)) from None
     identity.touch_api_key(row["id"])
     return {"results": [
-        {"id": item["id"], "title": item["title"], "source": item["source"],
-         "snippet": item["snippet"], "score": item.get("score", 0)}
+        {"id": item.document_id, "title": item.title, "source": item.source,
+         "snippet": item.content, "url": item.url, "score": item.score}
         for item in rows
     ]}

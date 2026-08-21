@@ -47,6 +47,7 @@ from mari_server.product.queries import Query
 from mari_server.knowledge.graphql import MutKnowledge
 from mari_server.identity.graphql import MutAdmin
 from mari_server.search import routes as search_routes
+from mari_server.substrates import routes as substrate_routes
 
 
 @strawberry.type
@@ -97,6 +98,7 @@ app.include_router(agent_api.router, dependencies=_authed)
 app.include_router(chat_api.router)
 app.include_router(onboard.router, dependencies=_authed)
 app.include_router(search_routes.router)
+app.include_router(substrate_routes.router)
 app.include_router(operation_routes.router)
 
 
