@@ -26,6 +26,16 @@ def _phase_for(ordinal: int, phases: list[dict]) -> int:
     return 0
 
 
+def _cache_signature(value: str) -> str:
+    """Canonicalize phrasing, without erasing the subject of the question."""
+    normalized = re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
+    normalized = re.sub(
+        r"^(?:please\s+)?(?:ask\s+about|tell\s+me\s+about|give\s+me\s+an?\s+overview\s+of|"
+        r"explain|describe|what\s+is|who\s+is)\s+", "", normalized,
+    )
+    return " ".join(token for token in normalized.split() if token not in {"a", "an", "the"})
+
+
 def _texts(row: dict) -> tuple[list[str], list[dict], list[dict]]:
     phases = _json(row.get("phases"), [])
     steps = _json(row.get("steps"), [])
@@ -78,6 +88,7 @@ def select(query: str, available_tools: set[str] | None = None) -> dict | None:
     """Match intent → phase → step using cached provider embeddings."""
     rows = store.active_workflows(50)
     normalized = re.sub(r"[^a-z0-9]+", " ", query.lower()).strip()
+    signature = _cache_signature(query)
     exact_matches: list[tuple[bool, dict]] = []
     for row in rows:
         phases = _json(row.get("phases"), [])
@@ -86,13 +97,14 @@ def select(query: str, available_tools: set[str] | None = None) -> dict | None:
             (str(row.get("name") or ""), 0),
             (str(row.get("trajectory_prompt") or ""), 0),
         ]
-        phrases.extend((str(prompt), 0) for prompt in row.get("cluster_prompts") or [])
         phrases.extend(
             (str((step.get("arguments") or {}).get("query") or ""), index)
             for index, step in enumerate(steps) if isinstance(step.get("arguments"), dict)
         )
-        exact_step = next((index for phrase, index in phrases
-                           if phrase and re.sub(r"[^a-z0-9]+", " ", phrase.lower()).strip() == normalized), None)
+        exact_step = next((index for phrase, index in phrases if phrase and (
+            re.sub(r"[^a-z0-9]+", " ", phrase.lower()).strip() == normalized
+            or _cache_signature(phrase) == signature
+        )), None)
         if exact_step is None:
             continue
         chosen = [step for index, step in enumerate(steps) if index >= exact_step]
@@ -152,7 +164,9 @@ def select(query: str, available_tools: set[str] | None = None) -> dict | None:
 
 def cached_response(selected: dict | None) -> dict | None:
     """Return a reviewed response only while its document revisions are current."""
-    return store.cached_response(selected) if selected else None
+    if not selected or not selected.get("match", {}).get("exact"):
+        return None
+    return store.cached_response(selected)
 
 
 def guidance(selected: dict | None) -> str:

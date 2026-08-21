@@ -40,14 +40,19 @@ class AssistantWorkflowCacheTests(unittest.TestCase):
         embed.assert_not_called()
 
     def test_reviewed_cluster_member_uses_the_canonical_cache(self):
-        clustered = {**ROW, "cluster_prompts": ["tell me about mari"]}
-        with patch.object(workflows.store, "active_workflows", return_value=[clustered]), \
+        with patch.object(workflows.store, "active_workflows", return_value=[dict(ROW)]), \
              patch.object(workflows.store, "workflow_cache_state", return_value="fresh"), \
              patch.object(workflows.llm, "embed") as embed:
             selected = workflows.select("tell me about mari", {"search"})
         self.assertEqual(selected["id"], 14)
         self.assertTrue(selected["match"]["exact"])
         embed.assert_not_called()
+
+    def test_semantic_cluster_match_cannot_reuse_a_narrower_cached_answer(self):
+        selected = {**ROW, "match": {"workflow_score": 0.60, "exact": False}}
+        with patch.object(workflows.store, "cached_response") as cached:
+            self.assertIsNone(workflows.cached_response(selected))
+        cached.assert_not_called()
 
     def test_cached_agent_response_never_iterates_the_model_loop(self):
         context = AccessContext(1, 1, "default", "Mari", "owner", frozenset())
