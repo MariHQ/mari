@@ -48,9 +48,31 @@ class TrajectoryMutations:
     def promote_trajectory_to_workflow(self, info: strawberry.Info,
                                        trajectory_id: int, name: str) -> int:
         _access(info)
-        workflow_id = trajectories.promote_to_workflow(trajectory_id, name)
+        row = trajectories.trajectory_for_split(trajectory_id)
+        matched = None
+        if row and not row.get("workflow_id"):
+            selected = workflow_service.select(str(row.get("prompt") or ""), None)
+            matched = int(selected["id"]) if selected else None
+        workflow_id = trajectories.promote_to_workflow(
+            trajectory_id, name, matched_workflow_id=matched,
+        )
         audit("promoted trajectory", f"trajectory:{trajectory_id}",
               detail=[("workflow", workflow_id)])
+        return workflow_id
+
+    @strawberry.mutation
+    def suggest_workflow_split_name(self, info: strawberry.Info,
+                                    trajectory_id: int) -> str:
+        _access(info)
+        return workflow_service.suggest_split_name(trajectory_id)
+
+    @strawberry.mutation
+    def split_assistant_workflow(self, info: strawberry.Info,
+                                 trajectory_id: int, name: str) -> int:
+        _access(info)
+        workflow_id = trajectories.split_workflow(trajectory_id, name)
+        audit("split assistant workflow", f"trajectory:{trajectory_id}",
+              detail=[("workflow", workflow_id), ("name", name)])
         return workflow_id
 
     @strawberry.mutation

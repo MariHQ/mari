@@ -44,7 +44,18 @@ def list_trajectories(
         where += " AND category = %s"
         args.append(category)
     args.extend((limit, offset))
-    rows = q(f"""SELECT t.*, aw.status AS promoted_workflow_status,
+    rows = q(f"""SELECT t.*,
+                            COALESCE(t.promoted_workflow_id, t.matched_workflow_id)
+                              AS promoted_workflow_id,
+                            aw.status AS promoted_workflow_status,
+                            aw.name AS promoted_workflow_name,
+                            aw.trajectory_id AS workflow_root_trajectory_id,
+                            CASE WHEN aw.id IS NULL THEN 1 ELSE (
+                              SELECT count(*) FROM trajectories member
+                               WHERE member.project_id = t.project_id
+                                 AND (member.matched_workflow_id = aw.id
+                                      OR member.promoted_workflow_id = aw.id)
+                            ) END AS workflow_observation_count,
                             COALESCE(aw.cache_policy, 'none') AS promoted_workflow_cache_policy,
                             CASE
                               WHEN aw.id IS NULL OR aw.cache_policy = 'none' THEN 'disabled'
@@ -337,7 +348,8 @@ def tune_evidence(trajectory_id: int, document_id: int, relevance: str, note: st
                    (relevance, note.strip()[:500], project_id, trajectory_id, document_id)))
 
 
-def promote_to_workflow(trajectory_id: int, name: str) -> int:
+def promote_to_workflow(trajectory_id: int, name: str, *, force_new: bool = False,
+                        matched_workflow_id: int | None = None) -> int:
     """Codify a human-tuned trace as active assistant guidance."""
     project_id = access.require_current_access().project_id
     clean_name = name.strip()
@@ -353,14 +365,21 @@ def promote_to_workflow(trajectory_id: int, name: str) -> int:
         ).fetchone()
         if not row:
             raise ValueError("Trajectory not found.")
-        if row.get("promoted_workflow_id"):
+        if row.get("promoted_workflow_id") and not force_new:
             return int(row["promoted_workflow_id"])
-        if row.get("matched_workflow_id"):
-            workflow_id = int(row["matched_workflow_id"])
+        existing_match = row.get("matched_workflow_id") or matched_workflow_id
+        if existing_match and not force_new:
+            workflow_id = int(existing_match)
+            owned = conn.execute(
+                "SELECT id FROM assistant_workflows WHERE project_id = %s AND id = %s",
+                (project_id, workflow_id),
+            ).fetchone()
+            if not owned:
+                raise ValueError("Matched workflow not found.")
             conn.execute(
-                """UPDATE trajectories SET promoted_workflow_id = %s
+                """UPDATE trajectories SET promoted_workflow_id = %s, matched_workflow_id = %s
                      WHERE project_id = %s AND id = %s""",
-                (workflow_id, project_id, trajectory_id),
+                (workflow_id, workflow_id, project_id, trajectory_id),
             )
             return workflow_id
         if conn.execute(
@@ -396,13 +415,30 @@ def promote_to_workflow(trajectory_id: int, name: str) -> int:
         ).fetchone()
         workflow_id = int(workflow["id"])
         conn.execute(
-            "UPDATE trajectories SET promoted_workflow_id = %s WHERE project_id = %s AND id = %s",
-            (workflow_id, project_id, trajectory_id),
+            """UPDATE trajectories
+                  SET promoted_workflow_id = %s, matched_workflow_id = %s
+                WHERE project_id = %s AND id = %s""",
+            (workflow_id, workflow_id, project_id, trajectory_id),
         )
         return workflow_id
 
     from mari_server.persistence.postgres.database import transaction
     return transaction(promote)
+
+
+def trajectory_for_split(trajectory_id: int) -> dict | None:
+    project_id = access.require_current_access().project_id
+    return q1("""SELECT id, prompt, layer2, macro_intent,
+                        COALESCE(promoted_workflow_id, matched_workflow_id) AS workflow_id
+                   FROM trajectories WHERE project_id = %s AND id = %s""",
+              (project_id, trajectory_id))
+
+
+def split_workflow(trajectory_id: int, name: str) -> int:
+    row = trajectory_for_split(trajectory_id)
+    if not row or not row.get("workflow_id"):
+        raise ValueError("Only an observation already in a workflow can be split.")
+    return promote_to_workflow(trajectory_id, name, force_new=True)
 
 
 def set_workflow_enabled(workflow_id: int, enabled: bool) -> bool:

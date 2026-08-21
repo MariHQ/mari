@@ -221,3 +221,22 @@ def reconcile_stale(limit: int = 50) -> int:
         if reconcile(workflow_id):
             reconciled += 1
     return reconciled
+
+
+def suggest_split_name(trajectory_id: int) -> str:
+    """Name an explicitly requested cluster split from its observed intent."""
+    row = store.trajectory_for_split(trajectory_id)
+    if not row:
+        raise ValueError("Trajectory not found.")
+    result = llm.generate_json(
+        "Name this product-knowledge workflow in 3-8 words. Return JSON with only a name.\n\n"
+        f"User request: {row.get('prompt') or ''}\n"
+        f"Observed intent: {row.get('macro_intent') or row.get('layer2') or ''}",
+        system="You name human-reviewed assistant workflows. Use a concrete verb phrase.",
+        schema={"type": "object", "properties": {"name": {"type": "string"}},
+                "required": ["name"]},
+    )
+    name = str((result or {}).get("name") or "").strip()[:120]
+    if not name:
+        raise RuntimeError(llm.last_error() or "The model did not suggest a workflow name.")
+    return name

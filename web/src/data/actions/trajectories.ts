@@ -55,5 +55,17 @@ export function trajectoriesActions({ replace }: ActionContext): TrajectoriesAct
         deleteAssistantWorkflow(workflowId: $workflowId)
       }`, { workflowId });
     },
+    suggestSplitName: async (trajectoryId) => {
+      const data = await mutate(`mutation($trajectoryId: Int!) {
+        suggestWorkflowSplitName(trajectoryId: $trajectoryId)
+      }`, { trajectoryId });
+      return String(data.suggestWorkflowSplitName);
+    },
+    splitWorkflow: async (trajectoryId, name) => {
+      const data = await mutate(`mutation($trajectoryId: Int!, $name: String!) {
+        splitAssistantWorkflow(trajectoryId: $trajectoryId, name: $name)
+      }`, { trajectoryId, name });
+      return Number(data.splitAssistantWorkflow);
+    },
   };
 }

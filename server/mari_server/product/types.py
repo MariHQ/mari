@@ -640,6 +640,9 @@ class Trajectory:
     steps: list[TrajectoryStep]
     evidence: list[TrajectoryEvidence]
     promoted_workflow_id: int | None
+    promoted_workflow_name: str
+    workflow_root_trajectory_id: int | None
+    workflow_observation_count: int
     promoted_workflow_status: str
     promoted_workflow_cache_policy: str
     promoted_workflow_cache_state: str

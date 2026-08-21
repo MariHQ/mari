@@ -12,6 +12,7 @@ const QUERY = `query Trajectories($limit: Int!, $offset: Int!, $category: String
     steps { ordinal tool actionFamily args summary ok disposition editedArgs }
     evidence { documentId title reason rank relevance note }
     promotedWorkflowId promotedWorkflowStatus promotedWorkflowCachePolicy
+    promotedWorkflowName workflowRootTrajectoryId workflowObservationCount
     promotedWorkflowCacheState promotedWorkflowCacheRefreshedAt promotedWorkflowDependencyCount
   }
   trajectoryTotal(category: $category)
@@ -29,20 +30,36 @@ export const EMPTY: TrajectoriesData = {
 };
 
 export function buildTrajectories(res: Res | null, category: string | null, offset: number): TrajectoriesData {
-  return {
-    rows: (res?.trajectories ?? []).slice(0, PAGE).map((row) => ({
-      ...row,
-      steps: (row.steps ?? []).map((step) => ({
-        ...step, disposition: step.disposition ?? "included", editedArgs: step.editedArgs ?? null,
-      })),
-      evidence: row.evidence ?? [],
-      promotedWorkflowId: row.promotedWorkflowId ?? null,
-      promotedWorkflowStatus: row.promotedWorkflowStatus ?? "",
-      promotedWorkflowCachePolicy: row.promotedWorkflowCachePolicy ?? "none",
-      promotedWorkflowCacheState: row.promotedWorkflowCacheState ?? "disabled",
-      promotedWorkflowCacheRefreshedAt: row.promotedWorkflowCacheRefreshedAt ?? "",
-      promotedWorkflowDependencyCount: row.promotedWorkflowDependencyCount ?? 0,
+  const mapped = (res?.trajectories ?? []).slice(0, PAGE).map((row) => ({
+    ...row,
+    steps: (row.steps ?? []).map((step) => ({
+      ...step, disposition: step.disposition ?? "included", editedArgs: step.editedArgs ?? null,
     })),
+    evidence: row.evidence ?? [],
+    promotedWorkflowId: row.promotedWorkflowId ?? null,
+    promotedWorkflowName: row.promotedWorkflowName ?? "",
+    workflowRootTrajectoryId: row.workflowRootTrajectoryId ?? null,
+    workflowObservationCount: row.workflowObservationCount ?? 1,
+    promotedWorkflowStatus: row.promotedWorkflowStatus ?? "",
+    promotedWorkflowCachePolicy: row.promotedWorkflowCachePolicy ?? "none",
+    promotedWorkflowCacheState: row.promotedWorkflowCacheState ?? "disabled",
+    promotedWorkflowCacheRefreshedAt: row.promotedWorkflowCacheRefreshedAt ?? "",
+    promotedWorkflowDependencyCount: row.promotedWorkflowDependencyCount ?? 0,
+  }));
+  const grouped = new Map<string, TrajectoryRow>();
+  for (const row of mapped) {
+    const key = row.promotedWorkflowId ? `workflow:${row.promotedWorkflowId}` : `observation:${row.id}`;
+    const current = grouped.get(key);
+    if (!current) {
+      grouped.set(key, { ...row, clusterObservations: [row] });
+      continue;
+    }
+    const observations = [...(current.clusterObservations ?? [current]), row];
+    if (row.id === row.workflowRootTrajectoryId) grouped.set(key, { ...row, clusterObservations: observations });
+    else current.clusterObservations = observations;
+  }
+  return {
+    rows: [...grouped.values()],
     total: res?.trajectoryTotal ?? 0,
     categories: res?.trajectoryCategories ?? [],
     category,
