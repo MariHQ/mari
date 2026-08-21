@@ -86,6 +86,7 @@ def select(query: str, available_tools: set[str] | None = None) -> dict | None:
             (str(row.get("name") or ""), 0),
             (str(row.get("trajectory_prompt") or ""), 0),
         ]
+        phrases.extend((str(prompt), 0) for prompt in row.get("cluster_prompts") or [])
         phrases.extend(
             (str((step.get("arguments") or {}).get("query") or ""), index)
             for index, step in enumerate(steps) if isinstance(step.get("arguments"), dict)

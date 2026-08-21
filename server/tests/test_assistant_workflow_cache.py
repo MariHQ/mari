@@ -38,6 +38,16 @@ class AssistantWorkflowCacheTests(unittest.TestCase):
         self.assertEqual(selected["id"], 14)
         embed.assert_not_called()
 
+    def test_reviewed_cluster_member_uses_the_canonical_cache(self):
+        clustered = {**ROW, "cluster_prompts": ["tell me about mari"]}
+        with patch.object(workflows.store, "active_workflows", return_value=[clustered]), \
+             patch.object(workflows.store, "workflow_cache_state", return_value="fresh"), \
+             patch.object(workflows.llm, "embed") as embed:
+            selected = workflows.select("tell me about mari", {"search"})
+        self.assertEqual(selected["id"], 14)
+        self.assertTrue(selected["match"]["exact"])
+        embed.assert_not_called()
+
     def test_cached_agent_response_never_iterates_the_model_loop(self):
         context = AccessContext(1, 1, "default", "Mari", "owner", frozenset())
         runtime = Mock()

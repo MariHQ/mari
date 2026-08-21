@@ -506,7 +506,14 @@ def active_workflows(limit: int = 20) -> list[dict]:
         """SELECT aw.id, aw.trajectory_id, aw.name, aw.description, aw.steps, aw.phases,
                   aw.match_index, aw.embedding_profile, aw.match_threshold, aw.cache_policy,
                   aw.cached_answer, aw.cached_sources, aw.cache_dependencies,
-                  aw.cache_refreshed_at, t.prompt AS trajectory_prompt
+                  aw.cache_refreshed_at, t.prompt AS trajectory_prompt,
+                  ARRAY(
+                    SELECT DISTINCT member.prompt
+                      FROM trajectories member
+                     WHERE member.project_id = aw.project_id
+                       AND COALESCE(member.promoted_workflow_id, member.matched_workflow_id) = aw.id
+                       AND btrim(member.prompt) <> ''
+                  ) AS cluster_prompts
              FROM assistant_workflows aw JOIN trajectories t
                ON t.project_id = aw.project_id AND t.id = aw.trajectory_id
             WHERE aw.project_id = %s AND aw.status = 'active'
