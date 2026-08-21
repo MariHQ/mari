@@ -42,7 +42,7 @@ class WorkflowStepTests(unittest.TestCase):
         self.assertGreaterEqual(flowengine.FLOW_WORKERS, 1)
 
     def test_scan_steps_use_document_ids_selected_by_fetch_step(self) -> None:
-        with patch("mari_server.knowledge.graphql.scan_facts_for", return_value=(3, 2, "")) as scan:
+        with patch("mari_server.knowledge.service.scan_facts_for", return_value=(3, 2, "")) as scan:
             status, _, updates = flowengine._step_scan_facts({}, {"doc_ids": [7, 8]})
         self.assertEqual(status, "passed")
         self.assertEqual(updates["facts"], 3)

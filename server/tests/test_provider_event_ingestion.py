@@ -55,7 +55,8 @@ class GitHubEventTests(unittest.TestCase):
 
     def test_signed_delivery_is_bounded_and_durable_before_ack(self):
         installation = {"id": 7, "project_id": 3, "config": {"webhook_secret": "secret"}}
-        with patch.object(provider_events, "q1", side_effect=[installation, {"id": 41}]), \
+        with patch.object(provider_events.event_store, "github_installation", return_value=installation), \
+             patch.object(provider_events.event_store, "github_source", return_value={"id": 41}), \
              patch.object(provider_events.INBOX, "enqueue", return_value=(12, True)) as enqueue:
             result = asyncio.run(provider_events.github_webhook(request_for(self.payload, self.headers)))
         self.assertEqual(result, {"ok": True, "queued": True, "event_id": 12})
@@ -68,7 +69,7 @@ class GitHubEventTests(unittest.TestCase):
 
     def test_bad_signature_never_enqueues(self):
         headers = {**self.headers, "X-Hub-Signature-256": "sha256=bad"}
-        with patch.object(provider_events, "q1", return_value={
+        with patch.object(provider_events.event_store, "github_installation", return_value={
                 "id": 7, "project_id": 3, "config": {"webhook_secret": "secret"}}), \
              patch.object(provider_events.INBOX, "enqueue") as enqueue:
             with self.assertRaises(HTTPException) as raised:
@@ -78,7 +79,8 @@ class GitHubEventTests(unittest.TestCase):
 
     def test_storage_failure_is_not_acknowledged(self):
         installation = {"id": 7, "project_id": 3, "config": {"webhook_secret": "secret"}}
-        with patch.object(provider_events, "q1", side_effect=[installation, {"id": 41}]), \
+        with patch.object(provider_events.event_store, "github_installation", return_value=installation), \
+             patch.object(provider_events.event_store, "github_source", return_value={"id": 41}), \
              patch.object(provider_events.INBOX, "enqueue", side_effect=OSError("db down")):
             with self.assertRaises(HTTPException) as raised:
                 asyncio.run(provider_events.github_webhook(request_for(self.payload, self.headers)))
@@ -89,7 +91,7 @@ class GitHubEventTests(unittest.TestCase):
                   "config": {"repo": "acme/docs"}}
         row = {"project_id": 3, "payload": {"installation_id": 7, "source_id": 41,
                "hint": {"repository": "acme/docs", "number": 8}}}
-        with patch.object(provider_events, "q1", return_value={"id": 7}), \
+        with patch.object(provider_events.event_store, "installation_active", return_value=True), \
              patch.object(provider_events, "_source", return_value=source), \
              patch.object(provider_events.ingest, "run_sync", return_value={}) as run:
             provider_events.process_github_delivery(row)
@@ -98,7 +100,7 @@ class GitHubEventTests(unittest.TestCase):
     def test_worker_rejects_delivery_after_installation_disconnects(self):
         row = {"project_id": 3, "payload": {"installation_id": 7, "source_id": 41,
                "hint": {"repository": "acme/docs"}}}
-        with patch.object(provider_events, "q1", return_value=None), \
+        with patch.object(provider_events.event_store, "installation_active", return_value=False), \
              patch.object(provider_events.ingest, "run_sync") as run:
             with self.assertRaisesRegex(RuntimeError, "installation is no longer active"):
                 provider_events.process_github_delivery(row)
@@ -117,7 +119,7 @@ class ConfluenceEventTests(unittest.TestCase):
                        "config": {"webhook_secret": "secret", "space_key": "ENG"}}
 
     def test_signed_page_hint_is_enqueued_without_untrusted_content(self):
-        with patch.object(provider_events, "q1", return_value=self.source), \
+        with patch.object(provider_events.event_store, "confluence_source", return_value=self.source), \
              patch.object(provider_events.INBOX, "enqueue", return_value=(17, True)) as enqueue:
             result = asyncio.run(provider_events.confluence_webhook(
                 8, request_for(self.payload, self.headers)))
@@ -131,7 +133,7 @@ class ConfluenceEventTests(unittest.TestCase):
         payload = {"event": "page_updated", "page": {
             "id": "123", "space": {"key": "HR"}}}
         headers = {**self.headers, "X-Mari-Signature-256": signature(payload, "secret")}
-        with patch.object(provider_events, "q1", return_value=self.source), \
+        with patch.object(provider_events.event_store, "confluence_source", return_value=self.source), \
              patch.object(provider_events.INBOX, "enqueue") as enqueue:
             with self.assertRaises(HTTPException) as raised:
                 asyncio.run(provider_events.confluence_webhook(8, request_for(payload, headers)))
@@ -161,14 +163,15 @@ class ConfluenceEventTests(unittest.TestCase):
             "site_url": "https://example.atlassian.net", "email": "a@example.test",
             "api_token": "token", "cursor": "durable-poll-cursor",
             "item_hashes": {"123": "3", "456": "2"}}}
-        conn = _PageSyncConn(document_rows=[{"id": 91}], count=1)
+        conn = MagicMock()
         with patch.object(provider_events, "fetch_confluence_page", return_value=None), \
-             patch.object(provider_events.ingest, "_conn", return_value=_Context(conn)), \
-             patch.object(provider_events.ingest, "_delete_documents") as delete:
+             patch.object(provider_events.document_index, "connection", return_value=_Context(conn)), \
+             patch.object(provider_events.document_repository, "ids_for_source_path", return_value=[91]), \
+             patch.object(provider_events.document_index, "delete_documents") as delete, \
+             patch.object(provider_events.document_repository, "finalize_source") as finalize:
             provider_events._sync_confluence_page(source, "123")
         delete.assert_called_once_with(conn, [91])
-        update = next(args for sql, args in conn.calls if "UPDATE sources SET config" in sql)
-        saved = json.loads(update[0])
+        saved = finalize.call_args.args[3]
         self.assertEqual(saved["cursor"], "durable-poll-cursor")
         self.assertNotIn("123", saved["item_hashes"])
         self.assertEqual(saved["item_hashes"]["456"], "2")
@@ -180,17 +183,17 @@ class ConfluenceEventTests(unittest.TestCase):
         canonical = KnowledgeDocument(
             "123", "Canonical", "Trusted", revision="9", metadata={"space_key": "ENG"},
         )
-        conn = _PageSyncConn(count=1)
+        conn = MagicMock()
         with patch.object(provider_events, "fetch_confluence_page", return_value=canonical), \
-             patch.object(provider_events.ingest, "_conn", return_value=_Context(conn)), \
-             patch.object(provider_events.ingest, "_upsert_document", return_value=(91, True)) as upsert, \
-             patch.object(provider_events.ingest, "_chunk_settings", return_value=(100, 10)), \
-             patch.object(provider_events.ingest, "_sync_chunks") as chunks:
+             patch.object(provider_events.document_index, "connection", return_value=_Context(conn)), \
+             patch.object(provider_events.document_index, "upsert_document", return_value=(91, True)) as upsert, \
+             patch.object(provider_events.document_index, "chunk_settings", return_value=(100, 10)), \
+             patch.object(provider_events.document_index, "sync_chunks") as chunks, \
+             patch.object(provider_events.document_repository, "finalize_source") as finalize:
             provider_events._sync_confluence_page(source, "123")
         self.assertEqual(upsert.call_args.args[3:5], ("Canonical", "Trusted"))
         chunks.assert_called_once_with(conn, 91, "Canonical", "Trusted", 100, 10)
-        update = next(args for sql, args in conn.calls if "UPDATE sources SET config" in sql)
-        saved = json.loads(update[0])
+        saved = finalize.call_args.args[3]
         self.assertEqual(saved["cursor"], "durable-poll-cursor")
         self.assertEqual(saved["item_hashes"]["123"], "9")
 

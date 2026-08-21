@@ -148,11 +148,11 @@ def _document_visible(row: dict, ctx: access.AccessContext) -> bool:
         visibility,
         [str(value) for value in principals],
         ctx.principals,
-        # A public knowledge-chat destination is not a human member, but it is
-        # an authenticated, project-bound principal granted knowledge.read.
-        # Use the capability boundary rather than the implementation detail
-        # that interactive users happen to have non-zero user ids.
-        project_member=ctx.allows("knowledge.read"),
+        # Project-bound readers may use the shared corpus. Slack is the one
+        # external principal whose channel ACL must still be intersected: its
+        # installation is project-bound, but an individual event is not
+        # entitled to another channel's restricted messages.
+        project_member=ctx.principal_type != "slack" and ctx.allows("knowledge.read"),
     )
 
 

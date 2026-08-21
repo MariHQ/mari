@@ -48,8 +48,8 @@ class DriveWebhookTests(unittest.TestCase):
 
     def test_authenticated_notification_is_durable_before_204_and_replay_dedupes(self):
         inbox = MemoryInbox()
-        with patch.object(gdrive_events, "q1", return_value=self.channel()), \
-             patch.object(gdrive_events, "exec_") as execute, \
+        with patch.object(gdrive_events.event_store, "drive_channel", return_value=self.channel()), \
+             patch.object(gdrive_events.event_store, "observe_drive_message") as observe, \
              patch.object(gdrive_events, "DEFAULT_INBOX", inbox):
             first = asyncio.run(gdrive_events.gdrive_webhook(Request()))
             replay = asyncio.run(gdrive_events.gdrive_webhook(Request()))
@@ -58,10 +58,10 @@ class DriveWebhookTests(unittest.TestCase):
         self.assertEqual(replay.headers["x-mari-duplicate"], "true")
         self.assertEqual(inbox.calls[0][0:3], ("gdrive", 9, "channel-1:7"))
         self.assertEqual(inbox.calls[0][4]["coalesce_key"], "source:5")
-        self.assertEqual(execute.call_count, 2)
+        self.assertEqual(observe.call_count, 2)
 
     def test_bad_token_resource_or_message_number_is_rejected(self):
-        with patch.object(gdrive_events, "q1", return_value=self.channel()):
+        with patch.object(gdrive_events.event_store, "drive_channel", return_value=self.channel()):
             self.assertEqual(asyncio.run(gdrive_events.gdrive_webhook(Request(token="wrong"))).status_code, 401)
             self.assertEqual(asyncio.run(gdrive_events.gdrive_webhook(Request(resource_id="wrong"))).status_code, 401)
             self.assertEqual(asyncio.run(gdrive_events.gdrive_webhook(Request(number="nope"))).status_code, 400)
@@ -70,7 +70,7 @@ class DriveWebhookTests(unittest.TestCase):
         class Broken:
             def enqueue(self, *_args, **_kwargs):
                 raise OSError("postgres unavailable")
-        with patch.object(gdrive_events, "q1", return_value=self.channel()), \
+        with patch.object(gdrive_events.event_store, "drive_channel", return_value=self.channel()), \
              patch.object(gdrive_events, "DEFAULT_INBOX", Broken()):
             response = asyncio.run(gdrive_events.gdrive_webhook(Request()))
         self.assertEqual(response.status_code, 503)
@@ -83,16 +83,17 @@ class DriveWatchSetupTests(unittest.TestCase):
 
     def test_watch_persists_route_before_call_and_uses_https_callback(self):
         calls = []
-        def execute(sql, args=()):
-            calls.append((" ".join(sql.split()), args))
         watched = GoogleDriveWatch("channel", "resource-1", 1_800_000_000_000)
         with patch.object(gdrive_events, "_source", return_value=self.source), \
              patch.object(gdrive_events.config, "get", return_value="https://mari.example.test"), \
-             patch.object(gdrive_events, "exec_", side_effect=execute), \
+             patch.object(gdrive_events.event_store, "create_drive_watch",
+                          side_effect=lambda *_args: calls.append("persisted")), \
+             patch.object(gdrive_events.event_store, "activate_drive_watch") as activate, \
              patch.object(gdrive_events, "start_google_drive_watch", return_value=watched) as watch:
             result = gdrive_events.create_watch(gdrive_events.DriveWatchIn(source_id=5), self.context)
         self.assertTrue(result["ok"])
-        self.assertTrue(calls[0][0].startswith("INSERT INTO gdrive_watch_channels"))
+        self.assertEqual(calls, ["persisted"])
+        activate.assert_called_once()
         self.assertEqual(watch.call_args.args[1:3],
                          ("start", "https://mari.example.test/webhooks/google-drive"))
         self.assertNotIn(watch.call_args.args[4], json.dumps(result))
@@ -113,8 +114,7 @@ class DriveWatchSetupTests(unittest.TestCase):
         def renew(body, current):
             seen.append((body.source_id, current.project_id))
             return {"ok": True}
-        with patch.object(gdrive_events, "q", return_value=rows), \
-             patch.object(gdrive_events, "exec_"), \
+        with patch.object(gdrive_events.event_store, "due_drive_watches", return_value=rows), \
              patch.object(gdrive_events, "create_watch", side_effect=renew):
             self.assertEqual(gdrive_events.renew_due_watches(), 1)
         self.assertEqual(seen, [(5, 9)])
@@ -131,25 +131,27 @@ class DriveChangesTests(unittest.TestCase):
                  PollPage(next_cursor="changes:end", snapshot_complete=True)]
         definition = Mock()
         definition.poll.side_effect = lambda _cfg, _request, **_kwargs: iter([pages.pop(0)])
-        with patch.object(gdrive_events, "q1", return_value=channel), \
+        with patch.object(gdrive_events.event_store, "drive_channel", return_value=channel), \
              patch.object(gdrive_events, "connector_definition", return_value=definition), \
              patch.object(gdrive_events, "_apply_poll") as apply_poll, \
-             patch.object(gdrive_events, "exec_"):
+             patch.object(gdrive_events.event_store, "update_drive_cursor") as update_cursor:
             gdrive_events.process_gdrive_delivery({"project_id": 9,
                 "payload": {"channel_id": "channel-1"}})
         self.assertEqual([call.args[1].cursor for call in definition.poll.call_args_list],
                          ["changes:start", "changes:middle"])
         self.assertEqual(apply_poll.call_count, 2)
+        self.assertEqual(update_cursor.call_count, 2)
 
     def test_410_runs_full_poll_reconciliation_and_replaces_cursor(self):
         source = {"id": 5, "source_id": 5, "project_id": 9, "channel_id": "channel-1"}
         refreshed = {"id": 5, "project_id": 9, "config": {"cursor": "changes:fresh"}}
-        with patch.object(gdrive_events, "exec_") as execute, \
+        with patch.object(gdrive_events.event_store, "mark_drive_resync") as mark, \
+             patch.object(gdrive_events.event_store, "restore_drive_cursor") as restore, \
              patch.object(gdrive_events.ingest, "run_sync", return_value={}), \
              patch.object(gdrive_events, "_source", return_value=refreshed):
             gdrive_events._full_reconcile(source, {}, "channel-1")
-        self.assertIn("needs_full_resync", execute.call_args_list[0].args[0])
-        self.assertEqual(execute.call_args_list[-1].args[1], ("fresh", 5))
+        mark.assert_called_once_with("channel-1")
+        restore.assert_called_once_with(5, "fresh")
 
 
 if __name__ == "__main__":

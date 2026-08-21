@@ -14,7 +14,7 @@ from fastapi import HTTPException
 
 from mari_server.identity import access
 from mari_server.destinations import slack as bots
-from mari_server.product import queries
+from mari_server.search import service as search_service
 
 
 class Result:
@@ -27,6 +27,21 @@ class InstallationDatabase:
     def __init__(self):
         self.installation = None
         self.calls = []
+
+    def configure_slack(self, project_id, team_id, config):
+        row = self.installation
+        if row and row["external_team_id"] == team_id and row["project_id"] != project_id:
+            raise ValueError("That Slack workspace is already connected to another project.")
+        if row and row["project_id"] == project_id:
+            row["external_team_id"] = team_id
+            row["config"].update(config)
+            self.calls.append(("update", project_id))
+        else:
+            self.installation = {"id": 5, "project_id": project_id, "provider": "slack",
+                                 "external_team_id": team_id, "config": dict(config),
+                                 "status": "connected"}
+            self.calls.append(("insert", project_id))
+        return self.installation["id"]
 
     def __enter__(self): return self
     def __exit__(self, *_): return False
@@ -139,15 +154,15 @@ class SlackSetupToAnswerTests(unittest.TestCase):
 
     def setUp(self):
         FakeSlackHandler.calls.clear()
-        queries._rank_cache.clear()
-        queries._vec_cache.clear()
+        search_service._rank_cache.clear()
+        search_service._vec_cache.clear()
         self.database = InstallationDatabase()
         self.project = access.AccessContext(
             1, 7, "acme", "Acme", "admin", access.CAPABILITIES, principal_id="1")
 
     def _setup(self):
         with patch.object(bots, "SLACK_API", self.slack_api), \
-             patch.object(bots.auth, "_conn", return_value=self.database):
+             patch.object(bots.bot_store, "configure_slack", side_effect=self.database.configure_slack):
             return bots.slack_setup(bots.SlackSetupIn(
                 bot_token=" xoxb-valid ", signing_secret=" signing-secret "), self.project)
 
@@ -171,7 +186,7 @@ class SlackSetupToAnswerTests(unittest.TestCase):
 
     def test_invalid_auth_test_never_persists_credentials(self):
         with patch.object(bots, "SLACK_API", self.slack_api), \
-             patch.object(bots.auth, "_conn", return_value=self.database), \
+             patch.object(bots.bot_store, "configure_slack", side_effect=self.database.configure_slack), \
              self.assertRaisesRegex(HTTPException, "invalid_auth"):
             bots.slack_setup(bots.SlackSetupIn(
                 bot_token="xoxb-rejected", signing_secret="signing-secret"), self.project)
@@ -183,20 +198,18 @@ class SlackSetupToAnswerTests(unittest.TestCase):
                                       "external_team_id": "T-ACME", "config": {},
                                       "status": "connected"}
         with patch.object(bots, "SLACK_API", self.slack_api), \
-             patch.object(bots.auth, "_conn", return_value=self.database), \
+             patch.object(bots.bot_store, "configure_slack", side_effect=self.database.configure_slack), \
              self.assertRaisesRegex(HTTPException, "another project") as error:
             bots.slack_setup(bots.SlackSetupIn(
                 bot_token="xoxb-valid", signing_secret="signing-secret"), self.project)
         self.assertEqual(error.exception.status_code, 409)
-        self.assertFalse(any(sql.startswith("UPDATE bot_installations") for sql, _ in self.database.calls))
+        self.assertEqual(self.database.calls, [])
 
     def test_resaving_credentials_rotates_the_existing_project_installation(self):
         first = self._setup()
         second = self._setup()
         self.assertEqual(first["installationId"], second["installationId"])
-        statements = [sql for sql, _ in self.database.calls]
-        self.assertEqual(sum(sql.startswith("INSERT INTO bot_installations") for sql in statements), 1)
-        self.assertEqual(sum(sql.startswith("UPDATE bot_installations") for sql in statements), 1)
+        self.assertEqual([action for action, _project in self.database.calls], ["insert", "update"])
 
     def test_setup_routes_mentions_and_dms_to_allowed_project_knowledge_exactly_once(self):
         setup = self._setup()
@@ -223,12 +236,16 @@ class SlackSetupToAnswerTests(unittest.TestCase):
                         "channel": "C-ALLOWED", "ts": "2.0"}}
         inbox = MemoryInbox()
         with patch.object(bots, "SLACK_API", self.slack_api), \
-             patch.object(bots, "q1", return_value=self._installed_row()), \
-             patch.object(bots, "exec_"), patch.object(bots, "pq", return_value=[]), \
+             patch.object(bots.bot_store, "installation_by_team", return_value=self._installed_row()), \
+             patch.object(bots.bot_store, "installation", return_value=self._installed_row()), \
+             patch.object(bots.bot_store, "save_thread"), \
+             patch.object(bots.bot_store, "touch_installation"), \
+             patch.object(bots.bot_store, "verified_facts", return_value=[]), \
+             patch.object(bots.bot_store, "log_usage"), \
              patch.object(bots, "_EVENT_INBOX", inbox), \
              patch.object(bots, "_refresh_slack_aggregate"), \
-             patch.object(queries, "q", return_value=documents), \
-             patch.object(queries.llm, "embed", return_value=None), \
+             patch.object(search_service.search_store, "keyword_candidates", return_value=documents), \
+             patch.object(search_service.llm, "embed", return_value=None), \
              patch.object(bots.llm, "generate_json", side_effect=lambda prompt, **_kwargs: prompts.append(prompt) or {
                  "answer": "Use the runbook [1].", "confidence": 0.9,
                  "evidence": [{"document_id": "document:1", "quote": "Use the allowed deploy process"}],
@@ -263,17 +280,6 @@ class SlackSetupToAnswerTests(unittest.TestCase):
         installation = self._setup()
         row = self._installed_row()
 
-        def lookup(sql, args=()):
-            if "FROM bot_installations" in sql:
-                return row
-            if "FROM slack_bot_threads" in sql:
-                return {"?column?": 1} if (args[0], args[2], args[3]) in joined else None
-            return None
-
-        def execute(sql, args=()):
-            if "INSERT INTO slack_bot_threads" in sql:
-                joined.add((args[0], args[2], args[3]))
-
         mention = {"type": "event_callback", "team_id": "T-ACME", "event_id": "Ev-root",
                    "event": {"type": "app_mention", "text": "<@B> start", "channel": "C1", "ts": "10.0"}}
         early = {"type": "event_callback", "team_id": "T-ACME", "event_id": "Ev-early",
@@ -285,8 +291,11 @@ class SlackSetupToAnswerTests(unittest.TestCase):
         unrelated = {"type": "event_callback", "team_id": "T-ACME", "event_id": "Ev-other",
                      "event": {"type": "message", "text": "private conversation", "channel": "C1",
                                "thread_ts": "99.0", "ts": "99.1"}}
-        with patch.object(bots, "q1", side_effect=lookup), patch.object(bots, "exec_", side_effect=execute), \
-            patch.object(bots, "_EVENT_INBOX", inbox):
+        with patch.object(bots.bot_store, "installation_by_team", return_value=row), \
+             patch.object(bots.bot_store, "thread_exists",
+                          side_effect=lambda installation_id, _project_id, channel, thread:
+                          (installation_id, channel, thread) in joined), \
+             patch.object(bots, "_EVENT_INBOX", inbox):
             self.assertEqual(asyncio.run(bots.slack_webhook(self._request(mention))), {"ok": True})
             self.assertEqual(asyncio.run(bots.slack_webhook(self._request(early))), {"ok": True})
             joined.add((row["id"], "C1", "posted.1"))
@@ -310,10 +319,14 @@ class SlackSetupToAnswerTests(unittest.TestCase):
         }
         installation = self._installed_row()
         answered = []
-        writes = []
+        saved_threads = []
         with patch.object(bots, "SLACK_API", self.slack_api), \
-             patch.object(bots, "q1", return_value=installation), \
-             patch.object(bots, "exec_", side_effect=lambda sql, args=(): writes.append((sql, args))), \
+             patch.object(bots.bot_store, "installation", return_value=installation), \
+             patch.object(bots.bot_store, "thread", return_value=None), \
+             patch.object(bots.bot_store, "save_thread",
+                          side_effect=lambda *args: saved_threads.append(args)), \
+             patch.object(bots.bot_store, "touch_installation"), \
+             patch.object(bots.bot_store, "log_usage"), \
              patch.object(bots, "_refresh_slack_aggregate") as refresh, \
              patch.object(bots, "answer_question",
                           side_effect=lambda question, context: answered.append((question, context)) or "Production is ready [1]."):
@@ -330,8 +343,7 @@ class SlackSetupToAnswerTests(unittest.TestCase):
         self.assertIn("Use the production checklist [3].", answered[0][1])
         self.assertEqual(posts[0]["body"]["thread_ts"], "posted.1")
         refresh.assert_called_once_with(7, "xoxb-valid", "C1", "posted.1")
-        self.assertTrue(any(args[3] == "posted.1" for sql, args in writes
-                            if "INSERT INTO slack_bot_threads" in sql))
+        self.assertTrue(any(args[3] == "posted.1" for args in saved_threads))
 
 
 if __name__ == "__main__":
