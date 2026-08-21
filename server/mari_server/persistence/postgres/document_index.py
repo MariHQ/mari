@@ -116,6 +116,54 @@ def sync_chunks(conn, doc_id: int, title: str, body: str,
     return len(pieces), embedded
 
 
+def sync_chunks_many(conn, documents: list[tuple[int, str, str]],
+                     max_tokens: int, overlap: int) -> tuple[int, int]:
+    """Synchronize derived chunks for several documents with one model batch."""
+    project_id = access.require_current_access().project_id
+    prepared: list[tuple[int, int, str, str]] = []
+    piece_counts: dict[int, int] = {}
+    for doc_id, title, body in documents:
+        pieces = chunk_text(f"{title}\n\n{body}", max_tokens, overlap)
+        piece_counts[doc_id] = len(pieces)
+        existing = {r["idx"]: r["content_hash"] for r in conn.execute(
+            "SELECT idx, content_hash FROM chunks WHERE project_id = %s AND document_id = %s",
+            (project_id, doc_id)).fetchall()}
+        for idx, piece in enumerate(pieces):
+            h = content_hash(piece)
+            if existing.get(idx) != h:
+                prepared.append((doc_id, idx, piece, h))
+
+    vectors = llm.embed_many(row[2] for row in prepared)
+    embedded = 0
+    for (doc_id, idx, piece, h), vec in zip(prepared, vectors, strict=True):
+        if vec:
+            embedded += 1
+        conn.execute("""
+            INSERT INTO chunks (project_id, document_id, idx, content, content_hash, embedding)
+            VALUES (%s, %s, %s, %s, %s, %s::vector)
+            ON CONFLICT (document_id, idx) DO UPDATE SET
+              content = EXCLUDED.content, content_hash = EXCLUDED.content_hash,
+              embedding = EXCLUDED.embedding""",
+            (project_id, doc_id, idx, piece, h, str(vec) if vec else None))
+
+    for doc_id, count in piece_counts.items():
+        conn.execute("DELETE FROM chunks WHERE project_id = %s AND document_id = %s AND idx >= %s",
+                     (project_id, doc_id, count))
+        vecs = [r["embedding"] for r in conn.execute(
+            """SELECT embedding::text AS embedding FROM chunks
+               WHERE project_id = %s AND document_id = %s AND embedding IS NOT NULL""",
+            (project_id, doc_id)).fetchall()]
+        if vecs:
+            parsed = [json.loads(value) for value in vecs]
+            mean = [statistics.fmean(column) for column in zip(*parsed)]
+            conn.execute("UPDATE documents SET embedding = %s::vector WHERE id = %s AND project_id = %s",
+                         (str(mean), doc_id, project_id))
+    conn.commit()
+    if embedded:
+        retrieval.schedule_rebuild()
+    return sum(piece_counts.values()), embedded
+
+
 def delete_documents(conn, doc_ids: list[int]) -> None:
     if not doc_ids:
         return

@@ -523,6 +523,39 @@ def embed(text: str) -> list[float] | None:
     return vec
 
 
+def embed_many(texts: t.Iterable[str]) -> list[list[float] | None]:
+    """Embed a batch while preserving input order."""
+    values = list(texts)
+    if not values:
+        return []
+    provider, model = embedding_model()
+    if provider != "sentence-transformers":
+        return [embed(value) for value in values]
+    if not model:
+        _fail("embedding provider and model must both be configured")
+        return [None] * len(values)
+    try:
+        encoded = _sentence_model(model).encode(
+            [value[:4000] for value in values], batch_size=32,
+            normalize_embeddings=True, convert_to_numpy=True,
+        )
+        rows = encoded.tolist() if hasattr(encoded, "tolist") else list(encoded)
+    except Exception as exc:  # noqa: BLE001 — model/cache/runtime boundary
+        _fail(f"sentence-transformers model {model!r} failed ({type(exc).__name__})")
+        return [None] * len(values)
+    result: list[list[float] | None] = []
+    for vector in rows:
+        if len(vector) != EMBED_DIMS:
+            _fail(f"model {model!r} returned a {len(vector)}-dimension vector; this index "
+                  f"stores {EMBED_DIMS} (change the model, or migrate the column)")
+            result.append(None)
+        else:
+            result.append(vector)
+    if all(result):
+        _ok()
+    return result
+
+
 # ————————————————— generation —————————————————
 
 

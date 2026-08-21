@@ -171,6 +171,7 @@ def sync_source(source_id: int, full: bool, *, update_status, fire_document_trig
             inserted_ids: list[int] = []
             updated_ids: list[int] = []
             page_chunks = page_embeddings = 0
+            documents_to_embed: list[tuple[int, str, str]] = []
             with document_index.connection() as conn:
                 for document in plan.upserts:
                     path = document.external_id
@@ -193,15 +194,18 @@ def sync_source(source_id: int, full: bool, *, update_status, fire_document_trig
                     (inserted_ids if inserted else updated_ids).append(doc_id)
                     update_status(source_id, phase="embedding")
                     if body.strip():
-                        chunks, embedded = document_index.sync_chunks(
-                            conn, doc_id, title, body, max_tokens, overlap,
-                        )
+                        documents_to_embed.append((doc_id, title, body))
                     else:
                         conn.execute("DELETE FROM chunks WHERE document_id = %s", (doc_id,))
                         conn.execute("UPDATE documents SET embedding = NULL WHERE id = %s", (doc_id,))
                         chunks, embedded = 0, 0
-                    page_chunks += chunks
-                    page_embeddings += embedded
+                        page_chunks += chunks
+                        page_embeddings += embedded
+
+                if documents_to_embed:
+                    page_chunks, page_embeddings = document_index.sync_chunks_many(
+                        conn, documents_to_embed, max_tokens, overlap,
+                    )
 
                 done += len(plan.unchanged) + len(plan.deletes)
                 tombstones = {item.external_id for item in plan.deletes}
