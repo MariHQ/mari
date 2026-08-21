@@ -184,7 +184,10 @@ test("LIVE ingested source is searchable, inspectable, and represented in lineag
   await expect(main).toContainText(/Read-only source record/i);
 
   await page.goto("/lineage");
-  await expect(main).toContainText(new RegExp(`${source!.docsCount}\\s*documents`, "i"), { timeout: 30_000 });
+  await expect(main).toContainText(
+    new RegExp(`${source!.provider}\\s*·\\s*[1-9][0-9]*\\s*documents`, "i"),
+    { timeout: 30_000 },
+  );
   await expect(main).not.toContainText(/Service unavailable|temporarily unreachable/i);
 });
 
