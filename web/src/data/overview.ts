@@ -19,7 +19,7 @@ import type { DigestTopic } from "@mari-design/components/features/OverviewDiges
 import type { DateRange } from "@mari-design/components/data-display/DateRangePicker";
 import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { useQuery } from "../lib/api";
+import { projectHeaders, useQuery } from "../lib/api";
 import { useAuth } from "../lib/auth";
 import { rangeFromParams, rangeVars } from "./range";
 import type { PageData } from "./types";
@@ -72,7 +72,7 @@ type Res = {
    separately), and rendering an unknown kind blanks the node. Drop it instead. */
 const STEP_KINDS = new Set([
   "trigger", "fetch_docs", "refine", "fact_check", "condition", "tag",
-  "derive_links", "create_task", "approval", "deploy_site", "notify",
+  "derive_links", "create_task", "approval", "notify",
   "summarize", "sync_source", "refresh_digest",
 ]);
 
@@ -191,7 +191,7 @@ function useTimeZone(signedIn: boolean): string {
     let live = true;
     void (async () => {
       try {
-        const res = await fetch("/auth/preferences");
+        const res = await fetch("/auth/preferences", { headers: projectHeaders() });
         if (!res.ok) return;
         const body = (await res.json()) as { timezone?: string };
         if (live) setZone(String(body.timezone ?? ""));

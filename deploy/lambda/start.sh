@@ -6,7 +6,7 @@ PGSOCKET=/tmp/mari-pg
 FIRST_START=0
 export LD_PRELOAD=/usr/local/lib/lambda-prctl-shim.so
 
-mkdir -p "$PGDATA" "$PGSOCKET" "${MARI_BUILDS_DIR:-/tmp/mari/builds}"
+mkdir -p "$PGDATA" "$PGSOCKET"
 chmod 700 "$PGDATA"
 
 if [[ ! -s "$PGDATA/PG_VERSION" ]]; then
@@ -93,6 +93,6 @@ shutdown() {
 }
 trap shutdown TERM INT EXIT
 
-uvicorn app:app --host 0.0.0.0 --port 8080 &
+uvicorn mari_server.app:app --host 0.0.0.0 --port 8080 &
 API_PID=$!
 wait "$API_PID"

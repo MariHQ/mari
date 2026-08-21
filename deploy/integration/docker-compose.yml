@@ -1,0 +1,111 @@
+services:
+  db:
+    # The integration runner reaches Postgres through Compose networking. Do
+    # not inherit the developer-facing 5432 binding from the base stack: CI
+    # runners and developer machines commonly already have Postgres there.
+    ports: !reset []
+
+  integration-seed:
+    image: pgvector/pgvector:pg16
+    depends_on:
+      db-init:
+        condition: service_completed_successfully
+    environment:
+      PGPASSWORD: mari
+    volumes:
+      - ./deploy/integration/seed.sql:/sql/seed.sql:ro
+    entrypoint: ["psql", "-h", "db", "-U", "mari", "-d", "mari_cloud", "-v", "ON_ERROR_STOP=1", "-f", "/sql/seed.sql"]
+    restart: "no"
+
+  minio:
+    image: minio/minio:RELEASE.2025-07-23T15-54-02Z
+    command: server /data --console-address :9001
+    environment:
+      MINIO_ROOT_USER: mari-ci
+      MINIO_ROOT_PASSWORD: mari-ci-secret
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    volumes:
+      - integration-minio:/data
+
+  minio-init:
+    image: minio/mc:RELEASE.2025-07-21T05-28-08Z
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        mc alias set local http://minio:9000 mari-ci mari-ci-secret &&
+        mc mb --ignore-existing local/mari-ci &&
+        mc version enable local/mari-ci
+    restart: "no"
+
+  ollama:
+    image: ollama/ollama:0.11.4
+    environment:
+      OLLAMA_KEEP_ALIVE: 10m
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    volumes:
+      - integration-ollama:/root/.ollama
+
+  ollama-init:
+    image: ollama/ollama:0.11.4
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        ollama pull nomic-embed-text &&
+        ollama pull qwen2.5:0.5b
+    restart: "no"
+
+  api:
+    env_file: !reset []
+    depends_on:
+      integration-seed:
+        condition: service_completed_successfully
+      minio-init:
+        condition: service_completed_successfully
+      ollama-init:
+        condition: service_completed_successfully
+    environment:
+      MARI_AUTH_BYPASS: "true"
+      MARI_AUTH_BYPASS_DEV_MODE: "true"
+      MARI_OLLAMA_HOST: http://ollama:11434
+      MARI_OLLAMA_EMBED_MODEL: nomic-embed-text
+      MARI_OLLAMA_GEN_MODEL: qwen2.5:0.5b
+      MARI_EMBEDDING_PROVIDER: ollama
+      MARI_EMBEDDING_MODEL: nomic-embed-text
+      MARI_LLM_PROVIDER: ollama
+      MARI_LLM_MODEL: qwen2.5:0.5b
+      MARI_DATA_DIR: /app/data
+      MARI_ICEBERG_WAREHOUSE: /app/data/iceberg
+      MARI_VECTOR_URI: s3://mari-ci/vectors
+      MARI_VECTOR_CACHE: /app/data/vector-cache
+      MARI_VECTOR_FLUSH_SECONDS: "0"
+      MARI_S3_BUCKET: mari-ci
+      MARI_S3_ENDPOINT_URL: http://minio:9000
+      AWS_ACCESS_KEY_ID: mari-ci
+      AWS_SECRET_ACCESS_KEY: mari-ci-secret
+      AWS_DEFAULT_REGION: us-east-1
+      # An empty AWS_PROFILE still tells botocore to load a named profile and
+      # fails with ProfileNotFound. MinIO uses the explicit keys above.
+      AWS_PROFILE: null
+    volumes: !override
+      - integration-api-data:/app/data
+
+volumes:
+  integration-minio:
+  integration-ollama:
+  integration-api-data:

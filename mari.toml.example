@@ -16,14 +16,43 @@ host = "http://localhost:11434"
 embed_model = "nomic-embed-text"
 gen_model = "gemma3:4b"
 
+[models]
+# Deployment overrides. Leave blank to use Settings → Models.
+generation_provider = ""
+generation_model = ""
+embedding_provider = "sentence-transformers"
+embedding_model = "sentence-transformers/all-mpnet-base-v2"
+
+[sentence_transformers]
+cache_dir = ".mari/sentence-transformers"
+
+[llm_gateway]
+base_url = ""
+token = ""
+compatibility = "openai" # use "deepseek" with https://api.deepseek.com
+max_retries = 2
+
 [auth]
 session_days = 14
+# Demo bypass needs both flags and exactly one active project.
+bypass_enabled = false
+bypass_dev_mode = false
 # OAuth apps are optional; the buttons stay disabled (with a hint) until set.
 github_client_id = ""
 github_client_secret = ""
 google_client_id = ""
 google_client_secret = ""
 oauth_redirect_base = "http://localhost:8000"
+app_url = "http://localhost:5173"
+# Enterprise OIDC discovery + PKCE. Keep secrets outside source control.
+oidc_issuer = ""
+oidc_client_id = ""
+oidc_client_secret = ""
+oidc_scopes = "openid email profile groups"
+# Group claim → project slug and least-privilege project role.
+oidc_group_role_map = { }
+# Long random bearer used only by /scim/v2; never returned by an API.
+scim_bearer_token = ""
 
 [s3]
 # Leave empty for local builds; set to really deploy doc sites.

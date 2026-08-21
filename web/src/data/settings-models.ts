@@ -6,7 +6,7 @@
  * keys come back masked ("••••…last4"); the console never holds the secret. */
 
 import type { SettingsModelsData } from "@mari-design/components/pages/SettingsModelsPage";
-import type { ChunkRow, ProviderKeys } from "@mari-design/components/features/SettingsModelsConfig";
+import type { ChunkRow, GatewaySettings, ProviderKeys } from "@mari-design/components/features/SettingsModelsConfig";
 import type { PropertyItem } from "@mari-design/components";
 import { useMemo } from "react";
 import { useQuery } from "../lib/api";
@@ -17,17 +17,20 @@ import type { PageData } from "./types";
 const QUERY = `{
   settings { key value }
   indexStats
+  modelCatalog
   sourcePulse { provider name }
 }`;
 
 type Res = {
   settings: { key: string; value: unknown }[];
   indexStats: { docs: number; chunks: number; embedded: number } | null;
+  modelCatalog?: { embedding?: string[]; generation?: string[]; errors?: Record<string, string> };
   sourcePulse: { provider: string; name: string }[];
 };
 
 type EmbeddingRow = { provider?: string; model?: string; dims?: number; options?: string[] };
-type LlmRow = { provider?: string; model?: string; options?: string[]; keys?: { openai?: string; anthropic?: string } };
+type GatewayRow = { base_url?: string; token?: string; compatibility?: "openai" | "deepseek"; headers?: Record<string, string>; metadata?: Record<string, unknown>; model_header?: string; max_retries?: number };
+type LlmRow = { provider?: string; model?: string; options?: string[]; keys?: { openai?: string; anthropic?: string }; gateway?: GatewayRow };
 type ChunkSpec = { strategy?: string; max_tokens?: number; overlap?: number };
 
 /* ── mapping helpers ────────────────────────────────────────────────────── */
@@ -58,13 +61,23 @@ export function mapChunking(res: Res): ChunkRow[] {
 }
 
 const NO_KEYS: ProviderKeys = { openai: "", anthropic: "" };
-
+const gatewayOf = (llm: LlmRow): GatewaySettings => ({
+  baseUrl: llm.gateway?.base_url ?? "",
+  token: llm.gateway?.token ?? "",
+  generationModel: llm.provider === "gateway" ? (llm.model ?? "") : "",
+  compatibility: llm.gateway?.compatibility === "deepseek" ? "deepseek" : "openai",
+  headersJson: JSON.stringify(llm.gateway?.headers ?? {}, null, 2),
+  metadataJson: JSON.stringify(llm.gateway?.metadata ?? {}, null, 2),
+  modelHeader: llm.gateway?.model_header ?? "",
+  maxRetries: llm.gateway?.max_retries ?? 2,
+});
 /* ── mapper ─────────────────────────────────────────────────────────────── */
 
 export const EMPTY: SettingsModelsData = {
   phase: "config",
   embedding: "", llm: "", dims: 0,
   embeddingOptions: [], llmOptions: [], chunking: [], keys: NO_KEYS,
+  gateway: gatewayOf({}),
   indexSummary: "", testOk: "", testError: "", summary: [],
 };
 
@@ -84,12 +97,13 @@ export function buildSettingsModels(res: Res | null): SettingsModelsData {
     embedding: qualified(embedding),
     llm: qualified(llm),
     dims: embedding.dims ?? 0,
-    embeddingOptions: embedding.options ?? [],
-    llmOptions: llm.options ?? [],
+    embeddingOptions: Array.from(new Set(res.modelCatalog?.embedding ?? [])),
+    llmOptions: Array.from(new Set(res.modelCatalog?.generation ?? [])),
     chunking: mapChunking(res),
     // Masked by the server (queries.py `_mask_setting`); "" means no key set,
     // which is what the field should read as.
     keys: { openai: llm.keys?.openai ?? "", anthropic: llm.keys?.anthropic ?? "" },
+    gateway: gatewayOf(llm),
     indexSummary,
     // Connection tests run against a provider and produce their result then.
     // Nothing has been tested on a plain page load, so there is no outcome to

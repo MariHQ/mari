@@ -7,6 +7,7 @@
  */
 
 import { useCallback, useEffect, useState } from "react";
+import { authenticatedFetch, projectHeaders } from "../lib/api";
 import type { PreferencesData, AuthProvider } from "@mari-design/components/pages/PreferencesPage";
 import type { PropertyItem } from "@mari-design/components/data-display/PropertyList";
 import { fmtDate } from "@mari-design/components/tokens/format";
@@ -76,20 +77,27 @@ export function usePreferences(): PageData<PreferencesData> {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (signal?: AbortSignal) => {
     try {
-      const res = await fetch("/auth/preferences");
+      const res = await authenticatedFetch("/auth/preferences", { headers: projectHeaders(), signal });
       if (!res.ok) throw new Error(`The API answered ${res.status}.`);
-      setData(buildPreferences(await res.json()));
-      setError(null);
+      const next = buildPreferences(await res.json());
+      if (!signal?.aborted) {
+        setData(next);
+        setError(null);
+      }
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not reach the API.");
+      if (!signal?.aborted) setError(e instanceof Error ? e.message : "Could not reach the API.");
     } finally {
-      setLoading(false);
+      if (!signal?.aborted) setLoading(false);
     }
   }, []);
 
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    const controller = new AbortController();
+    void load(controller.signal);
+    return () => controller.abort();
+  }, [load]);
 
   return { data, loading, error };
 }

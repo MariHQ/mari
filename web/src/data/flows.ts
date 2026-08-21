@@ -12,9 +12,7 @@ import { useSearchParams } from "react-router-dom";
 
 import type { FlowsData, FlowsEditor } from "@mari-design/components/pages/FlowsPage";
 import type { Flow, SourceRef } from "@mari-design/components/features/FlowsList";
-import {
-  STEP_KINDS, type EditorStep, type SiteRef, type StepKind,
-} from "@mari-design/components/features/FlowsPipelineEditor";
+import { STEP_KINDS, type EditorStep, type StepKind } from "@mari-design/components/features/FlowsPipelineEditor";
 import type { RunStat, RunStepRow, RunStatus, WorkflowRun } from "@mari-design/components/workflow/RunHistory";
 import { useQuery } from "../lib/api";
 import type { PageData } from "./types";
@@ -29,7 +27,6 @@ const QUERY = `{
   workflowRuns { id workflowId workflowName number status started duration stats rows triggeredBy }
   sourcePulse { id name }
   members { name }
-  sites { id name }
   tagDefs { tag }
 }`;
 
@@ -55,7 +52,6 @@ type Res = {
   }[];
   sourcePulse: { id: number; name: string }[];
   members: { name: string }[];
-  sites: { id: number; name: string }[];
   tagDefs: { tag: string }[];
 };
 
@@ -212,7 +208,6 @@ export function buildEditor(res: Res, flowId: number | null, runs: WorkflowRun[]
     steps: mapSteps(w.nodes),
     runs: runs.filter((r) => mine.has(r.id)),
     members: (res.members ?? []).map((m) => m.name).filter(Boolean),
-    sites: (res.sites ?? []).map<SiteRef>((s) => ({ id: s.id, name: s.name })),
     tags: (res.tagDefs ?? []).map((t) => t.tag).filter(Boolean),
   };
 }

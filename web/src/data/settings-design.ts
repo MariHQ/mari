@@ -1,8 +1,7 @@
 /* Settings → Design & brand adapter.
  *
  * The brand lives in the `settings` table under the `branding` key, which is
- * the same place `updateSetting` writes and the site builder reads — so what
- * you save here is what a published doc site picks up.
+ * the same place `updateSetting` writes. It controls workspace-owned surfaces.
  */
 
 import type { SettingsDesignData } from "@mari-design/components/pages/SettingsDesignPage";
@@ -14,13 +13,11 @@ import type { PageData } from "./types";
 
 const QUERY = `query SettingsDesign {
   settings { key value }
-  sites { id status }
   overviewStats
 }`;
 
 type Res = {
   settings: { key: string; value: any }[];
-  sites: { id: number; status: string }[];
   overviewStats: Record<string, number> | null;
 };
 
@@ -42,20 +39,19 @@ export function buildSettingsDesign(res: Res | null): SettingsDesignData {
   const value = typeof raw === "string" ? safeParse(raw) : raw;
   const branding: Branding = value && typeof value === "object" ? value : {};
 
-  const live = (res?.sites ?? []).filter((s) => s.status === "live").length;
   const docs = res?.overviewStats?.documents ?? 0;
 
   // The preview shows off THIS workspace, so its figures come from the same
   // counts the rest of the console uses rather than invented numbers.
   const previewStats: BrandPreviewStat[] = [
     { value: docs ? docs.toLocaleString() : "0", label: "documents" },
-    { value: String((res?.sites ?? []).length), label: "doc sites" },
-    { value: String(live), label: "live" },
+    { value: "1", label: "workspace" },
+    { value: "Live", label: "console theme" },
   ];
 
   const summary: PropertyItem[] = [
-    { label: "Doc sites", value: live ? `${live} live` : "None live yet" },
-    { label: "Applies to", value: "Published doc sites and exports" },
+    { label: "Workspace console", value: "Applied" },
+    { label: "Knowledge chat", value: "Uses workspace identity" },
   ];
 
   return { branding, harvest: NO_HARVEST, previewStats, summary };

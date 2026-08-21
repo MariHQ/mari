@@ -7,7 +7,6 @@
  * VALUES never leave the server (CONNECTORS-CONTRACT.md). */
 
 import type { CField, Repo, Tile, UploadedFile, WelcomeData } from "@mari-design/components/pages/WelcomePage";
-import type { GuidePack } from "@mari-design/components/features/WelcomeGuideStep";
 import type { Candidate } from "@mari-design/components/features/WelcomeGlossaryStep";
 import type { SyncRow } from "@mari-design/components/features/WelcomeSyncPanel";
 import { useEffect } from "react";
@@ -22,8 +21,6 @@ const QUERY = `{
   glossaryCandidates { id term variants definition evidence }
   sourcePulse { id provider name status docsCount health kind lastSyncAt }
   uploadManifest { summary files { name detail } }
-  styleGuides { key name description rules }
-  defaultStylePack
 }`;
 
 type Res = {
@@ -33,14 +30,12 @@ type Res = {
     fields: { key: string; label: string; secret?: boolean; placeholder?: string; help?: string; multiline?: boolean; required?: boolean }[];
   }[];
   githubRepos: { fullName: string; description: string; private: boolean; defaultBranch: string; connected: boolean }[];
-  glossaryCandidates: { id: number; term: string; variants: string; definition: string; evidence: string }[];
+  glossaryCandidates: { id: number; term: string; variants: string; definition: string; evidence: string; evidenceDocId?: number }[];
   sourcePulse: {
     id: number; provider: string; name: string; status: string;
     docsCount: number; health: string; kind: string; lastSyncAt: string;
   }[];
   uploadManifest: { summary: string; files: { name: string; detail: string }[] } | null;
-  styleGuides: { key: string; name: string; description: string; rules: number }[];
-  defaultStylePack: string;
 };
 
 /* ── mapping helpers ────────────────────────────────────────────────────── */
@@ -87,15 +82,6 @@ export function mapSyncRows(res: Res): SyncRow[] {
   }));
 }
 
-/** The style packs the guide step offers, straight off `style_guides`. The
- *  rule count beside each one is read off `style_rules`, so a pack cannot
- *  advertise a rule it does not contain. */
-export function mapPacks(res: Res): GuidePack[] {
-  return (res.styleGuides ?? []).map<GuidePack>((g) => ({
-    id: g.key, name: g.name, description: g.description, rules: g.rules,
-  }));
-}
-
 /** What the Upload connector actually ingested, per file: the chunk/embedded
  *  breakdown the server counts off `chunks` at read time. */
 export function mapUploadFiles(res: Res): UploadedFile[] {
@@ -117,8 +103,8 @@ export const EMPTY: WelcomeData = {
   slackFields: [], notionFields: [], gdriveFields: [],
   uploadSummary: "", uploadFiles: [],
   connectSync: NO_CONNECT_SYNC,
-  packs: [], glossaryCandidates: [], syncRows: [],
-  doneSummary: { sourcesSynced: 0, guide: "", glossaryTerms: 0 },
+  glossaryCandidates: [], syncRows: [],
+  doneSummary: { sourcesSynced: 0, glossaryTerms: 0 },
 };
 
 /** Pure: the whole response → everything the wizard renders. */
@@ -128,11 +114,6 @@ export function buildWelcome(res: Res | null): WelcomeData {
   const syncRows = mapSyncRows(res);
   const synced = syncRows.filter((r) => r.state === "done").length;
   const terms = (res.glossaryCandidates ?? []).length;
-  const packs = mapPacks(res);
-  // The closing line names the pack the workspace adopted, by the name the
-  // guide step showed it under. An adopted key nothing defines any more, or no
-  // adopted key at all, leaves it blank rather than echoing a bare key.
-  const adopted = packs.find((p) => p.id === (res.defaultStylePack ?? ""));
 
   return {
     // The wizard opens where it opens; stepping through it is routing this app
@@ -159,18 +140,19 @@ export function buildWelcome(res: Res | null): WelcomeData {
     uploadSummary: res.uploadManifest?.summary ?? "",
     uploadFiles: mapUploadFiles(res),
     connectSync: NO_CONNECT_SYNC,
-    packs,
     glossaryCandidates: (res.glossaryCandidates ?? []).map<Candidate>((c) => ({
+      id: c.id,
       term: c.term,
       definition: c.definition,
       // The document the harvester found the term in. "" for a term someone
       // typed in by hand, which was never mined from a document.
       evidence: c.evidence ?? "",
+      evidenceDocId: c.evidenceDocId || undefined,
     })),
     syncRows,
     // Counted off the rows above, so the closing line cannot claim more than
     // the table shows.
-    doneSummary: { sourcesSynced: synced, guide: adopted?.name ?? "", glossaryTerms: terms },
+    doneSummary: { sourcesSynced: synced, glossaryTerms: terms },
   };
 }
 

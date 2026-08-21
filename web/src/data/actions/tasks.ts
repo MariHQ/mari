@@ -6,8 +6,8 @@
  * defaulting to the signed-in account.
  */
 
-import type { TasksActions } from "@mari-design/components/pages/TasksPage";
-import { mutate } from "../actions";
+import type { TaskSubject, TasksActions } from "@mari-design/components/pages/TasksPage";
+import { mutate, type ActionContext } from "../actions";
 
 const SET_DONE = `mutation SetTaskDone($id: Int!, $done: Boolean!) {
   setTaskDone(id: $id, done: $done)
@@ -26,8 +26,11 @@ const CREATE_ASSIGNED = `mutation CreateTask($title: String!, $kind: String!, $k
 }`;
 
 const CLEAR_DONE = `mutation ClearDoneTasks { clearDoneTasks }`;
+const EVALUATE = `mutation EvaluateReview($reviewId: String!, $dryRun: Boolean!) {
+  evaluateReviewItem(reviewId: $reviewId, dryRun: $dryRun) { reviewId outcome explanation replayed dryRun }
+}`;
 
-export function tasksActions(): TasksActions {
+export function tasksActions({ navigate }: ActionContext): TasksActions {
   return {
     setDone: async ({ id, done }) => { await mutate(SET_DONE, { id, done }); },
 
@@ -51,7 +54,17 @@ export function tasksActions(): TasksActions {
 
     clearDone: async () => { await mutate(CLEAR_DONE); },
 
-    // No `openDoc`: no task row records a document, so none carries one to
-    // open. The link is not drawn rather than drawn over nothing.
+    evaluate: async ({ id, dryRun = false }) => {
+      const data = await mutate(EVALUATE, { reviewId: id, dryRun });
+      return data.evaluateReviewItem;
+    },
+
+    // New rows carry their own stable in-app address. `openDoc` remains for
+    // rows produced before typed subjects existed and for older API servers.
+    openSubject: (subject: TaskSubject) => {
+      if (subject.href) navigate(subject.href);
+      else if (subject.type === "document") navigate(`/knowledge/doc?id=${encodeURIComponent(subject.id)}`);
+    },
+    openDoc: (docId: string) => navigate(`/knowledge/doc?id=${encodeURIComponent(docId)}`),
   };
 }

@@ -31,8 +31,14 @@ type ImpactRes = {
 
 const START_SCAN = `mutation { startDecisionScan }`;
 
-const CREATE_TASK = `mutation CreateTask($title: String!, $kind: String!, $kindLabel: String!) {
-  createTask(title: $title, kind: $kind, kindLabel: $kindLabel)
+const CREATE_TASK = `mutation CreateTask(
+  $title: String!, $kind: String!, $kindLabel: String!,
+  $subjectType: String!, $subjectId: String!, $subjectTitle: String!, $subjectHref: String!
+) {
+  createTask(
+    title: $title, kind: $kind, kindLabel: $kindLabel,
+    subjectType: $subjectType, subjectId: $subjectId, subjectTitle: $subjectTitle, subjectHref: $subjectHref
+  )
 }`;
 
 const RUN_QUERY = `query($id: Int!) {
@@ -51,6 +57,14 @@ type RunRes = {
    unknown word reads as still running rather than as a state never reported. */
 const RUN_STATUS = new Set<RunStatus>(["passed", "running", "waiting", "failed", "skipped", "pending"]);
 const asStatus = (s: string): RunStatus => (RUN_STATUS.has(s as RunStatus) ? (s as RunStatus) : "running");
+const invalidatedRuns = new Set<string>();
+
+function invalidateDecisionsOnce(id: string, status: RunStatus) {
+  if ((status === "running" || status === "pending") || invalidatedRuns.has(id)) return;
+  invalidatedRuns.add(id);
+  decisionsChanged();
+  if (invalidatedRuns.size > 200) invalidatedRuns.delete(invalidatedRuns.values().next().value!);
+}
 
 async function readRun(id: string): Promise<ScanRun> {
   const r = await gqlResult<RunRes>(RUN_QUERY, { id: Number(id) });
@@ -60,7 +74,7 @@ async function readRun(id: string): Promise<ScanRun> {
   const status = asStatus(run.status);
   // A stopped run has landed whatever it was going to land, so the ledger
   // under the page re-reads instead of showing the rows from before it.
-  if (status !== "running" && status !== "pending") decisionsChanged();
+  invalidateDecisionsOnce(id, status);
   return {
     id,
     label: `${run.workflowName} · run #${run.number}`,
@@ -117,6 +131,10 @@ export function decisionsActions(): DecisionsActions {
           title: `${doc.title}: ${doc.reason || `affected by "${statement}"`}`,
           kind: "approval",
           kindLabel: "Approval",
+          subjectType: "decision",
+          subjectId: String(id),
+          subjectTitle: statement,
+          subjectHref: `/decisions?decision=${id}`,
         });
       }
       // The board and the ledger both moved.

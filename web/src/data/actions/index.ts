@@ -15,7 +15,7 @@
  * and returns that page's actions object.
  */
 
-import { gqlResult, clearQueryCache } from "../../lib/api";
+import { gqlResult, invalidateQueries } from "../../lib/api";
 
 import { answersActions } from "./answers";
 import { auditActions } from "./audit";
@@ -40,6 +40,7 @@ import { settingsModelsActions } from "./settings-models";
 import { setupActions } from "./setup";
 import { sourcesActions } from "./sources";
 import { tasksActions } from "./tasks";
+import { trajectoriesActions } from "./trajectories";
 import { welcomeActions } from "./welcome";
 
 /** Run a mutation, surface the real server message, then invalidate reads so
@@ -47,7 +48,7 @@ import { welcomeActions } from "./welcome";
 export async function mutate(query: string, variables?: Record<string, unknown>): Promise<any> {
   const r = await gqlResult(query, variables);
   if (!r.ok) throw new Error(r.error);
-  clearQueryCache();
+  invalidateQueries();
   return r.data;
 }
 
@@ -55,6 +56,8 @@ export async function mutate(query: string, variables?: Record<string, unknown>)
     positional args: the library keeps emitting intents ("go to /sources") and
     this is where they become real routing, so this list will grow. */
 export type ActionContext = {
+  /** Last confirmed signed-in display name, for ownership defaults. */
+  currentUserName: string;
   /** Re-read /auth/me; the auth screens route off the result. */
   refresh: () => Promise<void> | void;
   /** Follow an in-app href. The library must never navigate itself — a
@@ -92,5 +95,6 @@ export const ACTION_FACTORIES: Record<string, (ctx: ActionContext) => unknown> =
   setup: setupActions,
   sources: sourcesActions,
   tasks: tasksActions,
+  trajectories: trajectoriesActions,
   welcome: welcomeActions,
 };

@@ -74,7 +74,7 @@ fi
 trap 'kill 0' EXIT INT TERM
 
 echo "==> API  (uvicorn --reload)"
-( cd server && MARI_DB="$DB_URL" ./.venv/bin/python -m uvicorn app:app --reload --port 8000 ) &
+( cd server && MARI_DB="$DB_URL" ./.venv/bin/python -m uvicorn mari_server.app:app --reload --port 8000 ) &
 
 echo "==> Web  (vite)"
 ( cd web && npm run dev ) &

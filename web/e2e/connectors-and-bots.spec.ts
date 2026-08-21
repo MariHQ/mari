@@ -1,0 +1,140 @@
+import { expect, test } from "@playwright/test";
+import { installMockApi, type MockApi } from "./fixtures/mock-api";
+
+let api: MockApi;
+test.beforeEach(async ({ page }) => {
+  api = await installMockApi(page);
+});
+
+test("Sources exposes connector ingestion without the removed upload workflow", async ({ page }) => {
+  await page.goto("/sources");
+  await expect(page.getByText("Upload files", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Add source" })).toBeVisible();
+});
+
+async function openSources(page: import("@playwright/test").Page) {
+  await page.goto("/sources");
+  await expect(page.getByRole("heading", { name: "Sources" })).toBeVisible();
+}
+
+async function openBotsDestination(page: import("@playwright/test").Page) {
+  await page.goto("/publish?tab=bots");
+  await expect(page.getByRole("heading", { name: "Destinations" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Bots", exact: true })).toHaveAttribute("aria-pressed", "true");
+}
+
+const connectors = [
+  { name: "Confluence", fields: { "Site URL": "https://acme.atlassian.test", "Atlassian account email": "docs@example.test", "API token": "atl-secret" } },
+  { name: "Slack", fields: { "Bot token": "xoxb-browser-test", "Channels": "engineering" } },
+  { name: "Google Drive", fields: { "OAuth2 access token": "ya29.browser-test", "Folder ID": "folder-1" } },
+  { name: "GitHub", fields: { "Personal access token": "github_pat_browser", "Repository": "acme/handbook" } },
+] as const;
+
+for (const connector of connectors) {
+  test(`${connector.name} credentials validate and start polling from the browser`, async ({ page }) => {
+    await openSources(page);
+    await page.getByRole("button", { name: "Add source" }).click();
+    const dialog = page.getByRole("dialog", { name: /Connect/ });
+    await dialog.getByRole("button", { name: new RegExp(connector.name) }).click();
+    await dialog.getByRole("button", { name: "Next" }).click();
+    for (const [label, value] of Object.entries(connector.fields)) {
+      await dialog.getByLabel(label).fill(value);
+    }
+    const secret = dialog.locator('input[type="password"]');
+    await expect(secret.first()).toHaveAttribute("type", "password");
+    await dialog.getByRole("button", { name: "Test connection" }).click();
+    await expect(dialog.getByText(/Connection OK/)).toBeVisible();
+    await dialog.getByRole("button", { name: "Connect & sync" }).click();
+    await expect(dialog.getByText(/initial sync runs on the server/i)).toBeVisible();
+
+    expect(api.restCalls.some((c) => c.path === "/connectors/validate" && c.body.provider === connector.name.toLowerCase().replace("google drive", "gdrive"))).toBeTruthy();
+    expect(api.restCalls.some((c) => c.path === "/connectors/connect"
+      && c.body.provider === connector.name.toLowerCase().replace("google drive", "gdrive"))).toBeTruthy();
+  });
+}
+
+test("connected sources can request incremental and full polls", async ({ page }) => {
+  await openSources(page);
+  await page.getByRole("button", { name: "Actions for acme/handbook" }).click();
+  await page.getByRole("menuitem", { name: "Sync now" }).click();
+  await expect.poll(() => api.calls.some((c) => c.query.includes("syncSource"))).toBeTruthy();
+  await page.getByRole("button", { name: "Actions for Confluence — ENG" }).click();
+  await page.getByRole("menuitem", { name: "Full resync" }).click();
+  await expect.poll(() => api.calls.some((c) => c.query.includes("resyncSource"))).toBeTruthy();
+});
+
+test("Sources renders the scheduler's ten-minute connector cadence", async ({ page }) => {
+  await openSources(page);
+  const schedule = page.getByRole("combobox", { name: "Sync schedule for acme/handbook" });
+  await expect(schedule).toHaveValue("10");
+  await expect(schedule.getByRole("option", { name: "Every 10 minutes" })).toHaveCount(1);
+});
+
+test("pausing a source is labelled as a pause, not a destructive disconnect", async ({ page }) => {
+  await openSources(page);
+  await expect(page.getByRole("button", { name: "Disconnect", exact: true })).toHaveCount(0);
+  const pause = page.getByRole("button", { name: "Pause", exact: true }).first();
+  await pause.click();
+  await page.getByRole("button", { name: "Pause this source?", exact: true }).click();
+  await expect.poll(() => api.calls.some((c) => c.query.includes("disconnectSource"))).toBeTruthy();
+});
+
+test("Sources exposes connector ingestion without a Bots tab", async ({ page }) => {
+  await openSources(page);
+  await expect(page.getByRole("button", { name: "Add source" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Bots", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Connectors", exact: true })).toHaveCount(0);
+});
+
+test("Slack bot setup persists the verified project installation, calls auth.test, and never renders the token", async ({ page }) => {
+  api.setData("botsStatus", {
+    slack: { configured: false, teamName: "", lastEventAt: null, lastError: null },
+    github: { webhookConfigured: true, lastDeliveryAt: null, sources: [{ id: 1, repo: "acme/handbook" }] },
+  });
+  await openBotsDestination(page);
+  await page.getByRole("button", { name: "Set up Slack bot" }).click();
+  const drawer = page.getByRole("dialog", { name: "Set up Slack bot" });
+  await expect(drawer.getByText("https://mari.example.test/webhooks/slack", { exact: false })).toBeVisible();
+  await expect(drawer).toContainText("channels:history");
+  await expect(drawer).toContainText("im:write");
+  await expect(drawer).toContainText("message.channels");
+  await expect(drawer).toContainText("messages_tab_enabled: true");
+  await expect(drawer).toContainText("messages_tab_read_only_enabled: false");
+  expect(api.restCalls.some((call) => call.path === "/bots/slack/manifest")).toBeTruthy();
+  await drawer.getByRole("button", { name: "Next" }).click();
+  await drawer.getByRole("textbox", { name: "Bot token" }).fill("xoxb-browser-secret  ");
+  await drawer.getByRole("textbox", { name: "Signing secret" }).fill("signing-browser-secret");
+  await drawer.getByRole("button", { name: "Save credentials" }).click();
+  await expect(drawer.getByText("Saved", { exact: true })).toBeVisible();
+  await drawer.getByRole("button", { name: "Next" }).click();
+  await drawer.getByRole("button", { name: "Test connection" }).click();
+  await expect(drawer.getByText(/Connected in Acme/)).toBeVisible();
+  await drawer.getByRole("button", { name: "Next" }).click();
+  await expect(drawer.getByText("Waiting for first event", { exact: true })).toBeVisible();
+  await expect(drawer).toContainText("App Home → Messages Tab");
+  await drawer.getByRole("button", { name: "Done" }).click();
+  const waiting = page.getByText("Waiting for first event", { exact: true });
+  await expect(waiting).toHaveCount(2);
+  await expect(waiting.first()).toBeVisible();
+  await expect(page.getByText("Acme", { exact: true }).first()).toBeVisible();
+  await expect(page.getByText("xoxb-browser-secret", { exact: true })).toHaveCount(0);
+  const setup = api.restCalls.find((c) => c.path === "/bots/slack/setup");
+  expect(setup?.body).toEqual({ bot_token: "xoxb-browser-secret", signing_secret: "signing-browser-secret" });
+  expect(api.calls.some((c) => c.query.includes("updateSetting") && c.variables.key === "slack_bot")).toBeFalsy();
+  expect(api.restCalls.some((c) => c.path === "/bots/slack/test")).toBeTruthy();
+});
+
+test("GitHub webhook setup persists a generated signing secret and observes delivery", async ({ page }) => {
+  await openBotsDestination(page);
+  await page.getByRole("button", { name: "Manage setup" }).nth(1).click();
+  const drawer = page.getByRole("dialog", { name: "Set up GitHub webhook" });
+  await expect(drawer.getByText(/webhooks\/github/)).toBeVisible();
+  await expect(drawer.getByText("Pushes, issues, pull requests, and comments")).toBeVisible();
+  await drawer.getByRole("button", { name: "Next" }).click();
+  await drawer.getByRole("button", { name: "Generate" }).click();
+  await drawer.getByRole("button", { name: "Save secret" }).click();
+  await expect(drawer.getByText("Saved", { exact: true })).toBeVisible();
+  await drawer.getByRole("button", { name: "Next" }).click();
+  await expect(drawer.getByText(/Delivery received/)).toBeVisible();
+  expect(api.calls.some((c) => c.query.includes("updateSetting") && c.variables.key === "github_bot")).toBeTruthy();
+});

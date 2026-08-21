@@ -9,7 +9,7 @@ services:
     # locally. Running the API on the host is how you reach an Ollama that is
     # also on the host: from inside a container, "localhost" is the container.
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     environment:
       POSTGRES_USER: mari
       POSTGRES_PASSWORD: mari
@@ -21,33 +21,26 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+    restart: unless-stopped
 
-  # One-shot schema load. The SQL files are idempotent, so re-running
-  # `docker compose up` is safe.
+  # One-shot, lock-serialized schema migration using the production API image.
+  # The API repeats the same check at startup so non-Compose deployments are
+  # safe too; the checksum ledger turns that repeat into a no-op.
   db-init:
-    image: pgvector/pgvector:pg16
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    image: mari-cloud-api:latest
     depends_on:
       db:
         condition: service_healthy
     environment:
-      PGPASSWORD: mari
-    volumes:
-      - ./server/init.sql:/sql/init.sql:ro
-    entrypoint:
-      - psql
-      - -h
-      - db
-      - -U
-      - mari
-      - -d
-      - mari_cloud
-      - -v
-      - ON_ERROR_STOP=1
-      - -f
-      - /sql/init.sql
+      MARI_DB: postgresql://mari:mari@db:5432/mari_cloud
+    command: ["python", "-m", "mari_server.persistence.postgres.schema"]
     restart: "no"
 
   api:
+    image: mari-cloud-api:latest
     build:
       context: .
       dockerfile: server/Dockerfile
@@ -67,12 +60,8 @@ services:
       # MARI_GITHUB_CLIENT_ID / MARI_GITHUB_CLIENT_SECRET
       # MARI_GOOGLE_CLIENT_ID / MARI_GOOGLE_CLIENT_SECRET
       #
-      # Publishing. With a bucket set, Publish uploads the build and the site is
-      # live; without one it builds locally and says so. The distribution is
-      # what makes a deploy visible: skip it and readers keep being served the
-      # previous build from the CDN, which looks like a deploy that failed.
+      # Object storage for backups and rebuildable artifacts.
       MARI_S3_BUCKET: ${MARI_S3_BUCKET:-}
-      MARI_CLOUDFRONT_DISTRIBUTION_ID: ${MARI_CLOUDFRONT_DISTRIBUTION_ID:-}
       # Credentials come from the standard AWS chain. In production that is the
       # task or instance role and none of this applies. Locally it is the ~/.aws
       # mount below, which needs a profile named to pick from it.
@@ -82,10 +71,17 @@ services:
       # Local only, read-only: carries the SSO cache boto3 needs to mint
       # credentials. Nothing is written back, and in production the role
       # supplies credentials so this mount is unused.
-      - ${HOME}/.aws:/root/.aws:ro
+      - ${HOME}/.aws:/app/.aws:ro
     extra_hosts:
       # Makes host.docker.internal resolve on Linux (no-op on Docker Desktop).
       - host.docker.internal:host-gateway
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+    restart: unless-stopped
 
   web:
     # Context is the repo root, not web/: the app compiles against the
@@ -94,9 +90,11 @@ services:
       context: .
       dockerfile: web/Dockerfile
     ports:
-      - "8080:80"
+      - "8080:8080"
     depends_on:
-      - api
+      api:
+        condition: service_healthy
+    restart: unless-stopped
 
   # Optional: run ollama inside compose instead of on the host.
   # Uncomment this service, set MARI_OLLAMA_HOST=http://ollama:11434 in .env,

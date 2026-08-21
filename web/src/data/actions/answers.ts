@@ -25,10 +25,6 @@ const SCAN = `mutation ScanAnswerCandidates($sources: [String!]!) {
   scanAnswerCandidates(sources: $sources) { question draftAnswer sourceLabel confidence }
 }`;
 
-/** The wizard's source keys, in the server's vocabulary. "history" is the
-    console's name for what the API calls the chat log. */
-const SOURCE_KEY: Record<string, string> = { slack: "slack", docs: "docs", history: "chat" };
-
 /** The API grades a candidate high/medium/low; the wizard shows a percentage
     and auto-accepts at 75. These are the midpoints of those three bands, not a
     measurement — the model does not produce one, and inventing more precision
@@ -45,7 +41,7 @@ export function answersActions(): AnswersActions {
     setChannels: async ({ id, channels }) => { await mutate(SET_CHANNELS, { id, channels }); },
 
     harvest: async (sources) => {
-      const data = await mutate(SCAN, { sources: sources.map((s) => SOURCE_KEY[s] ?? s) });
+      const data = await mutate(SCAN, { sources });
       const rows: { question: string; draftAnswer: string; sourceLabel: string; confidence: string }[] =
         data?.scanAnswerCandidates ?? [];
       return rows.map((r) => ({

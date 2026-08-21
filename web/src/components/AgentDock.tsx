@@ -6,7 +6,7 @@
 // Mounted once inside Routed() (it needs the router), rendered only for a
 // signed-in user. The transcript lives for the life of the mount; the
 // server persists sessions and threads multi-turn context via session_id.
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Sparkles, X } from "lucide-react";
 import { ChatDock } from "@mari-design/components";
@@ -18,8 +18,8 @@ const OFFLINE_MSG = "I can't reach the Mari API right now — start the server a
 
 const SUGGESTIONS = [
   "What sources are connected?",
-  "Find docs about connecting a source",
-  "Take me to the repository audit",
+  "Help me set up MCP",
+  "Which review tasks are open?",
 ];
 
 export function AgentDock() {
@@ -30,7 +30,19 @@ export function AgentDock() {
   const [streaming, setStreaming] = useState(false);
   const sessionRef = useRef<number | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const inFlightRef = useRef(false);
   const idRef = useRef(0);
+
+  useEffect(() => () => {
+    inFlightRef.current = false;
+    abortRef.current?.abort();
+  }, []);
+  useEffect(() => {
+    if (user) return;
+    inFlightRef.current = false;
+    abortRef.current?.abort();
+    abortRef.current = null;
+  }, [user]);
 
   if (!user) return null;
 
@@ -45,7 +57,8 @@ export function AgentDock() {
     setMessages((ms) => ms.map((m, i) => (i === ms.length - 1 ? fn(m) : m)));
 
   const send = async (text: string) => {
-    if (streaming || !text.trim()) return;
+    if (inFlightRef.current || !text.trim()) return;
+    inFlightRef.current = true;
     const uid = () => `m${++idRef.current}`;
     setMessages((ms) => [
       ...ms,
@@ -86,8 +99,9 @@ export function AgentDock() {
     patchLast((m) => ({
       ...m,
       streaming: false,
-      content: ok ? m.content : OFFLINE_MSG,
+      content: ok ? m.content : (m.content ? `${m.content}\n\n${OFFLINE_MSG}` : OFFLINE_MSG),
     }));
+    inFlightRef.current = false;
     setStreaming(false);
     abortRef.current = null;
   };
@@ -115,7 +129,7 @@ export function AgentDock() {
         onSend={send}
         onStop={() => abortRef.current?.abort()}
         suggestions={messages.length === 0 ? SUGGESTIONS : undefined}
-        hint="The agent can search, read and edit documents, tag, sync, and navigate. Every action lands in the audit trail."
+        hint="The agent can search and read knowledge, explain product workflows, and take you to the right screen. Governed changes happen in Review and Automations."
         placeholder="Ask Mari…"
         headerActions={
           <button

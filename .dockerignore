@@ -1,7 +1,13 @@
 # Scoped for the api image build (context = repo root, server/Dockerfile).
 
 # Not needed by the server image
+.git/
+.github/
+desktop/
 output/
+artifacts/
+.artifacts/
+var/
 DESIGN.md
 FLOWS-DESIGN.md
 README.md
@@ -16,6 +22,13 @@ docker-compose.yml
 server/.venv/
 **/node_modules/
 **/dist/
+
+# The Fly image only consumes the design-system components copied by its
+# Dockerfile. Excluding the rest keeps remote deployment builds small.
+vendor/mari-design/.git/
+vendor/mari-design/.preview/
+vendor/mari-design/node_modules/
+vendor/mari-design/output/
 
 # Runtime output (recreated at startup)
 server/builds/

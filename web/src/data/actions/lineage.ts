@@ -13,7 +13,7 @@ import { mutate, type ActionContext } from "../actions";
  *  than an uncolored chip with no bucket. */
 const SEVERITIES = new Set(["update-required", "review", "minor"]);
 
-export function lineageActions({ navigate }: ActionContext): LineageActions {
+export function lineageActions({ navigate, currentUserName }: ActionContext): LineageActions {
   return {
     // The graph's nodes ARE documents; the drawers offered "Open document" and
     // linked to "#". The library names the destination, the app follows it.
@@ -21,6 +21,12 @@ export function lineageActions({ navigate }: ActionContext): LineageActions {
     setFocalNode: (nodeId: string) => {
       const params = new URLSearchParams(window.location.search);
       params.set("focal", nodeId);
+      navigate(`/lineage?${params.toString()}`);
+    },
+    setMode: (mode, focalId) => {
+      const params = new URLSearchParams(window.location.search);
+      params.set("mode", mode);
+      if (focalId) params.set("focal", focalId);
       navigate(`/lineage?${params.toString()}`);
     },
     // x/y are 0..1 fractions of the canvas, which is exactly what `documents.
@@ -52,7 +58,7 @@ export function lineageActions({ navigate }: ActionContext): LineageActions {
     createReviewTask: async ({ title, assignee }) => {
       await mutate(
         "mutation($title: String!, $kind: String!, $kindLabel: String!, $assignee: String!) { createTask(title: $title, kind: $kind, kindLabel: $kindLabel, assignee: $assignee) }",
-        { title, kind: "review", kindLabel: "Review", assignee: assignee || "Daniel H." },
+        { title, kind: "review", kindLabel: "Review", assignee: assignee || currentUserName },
       );
     },
     deriveLinks: async () => {

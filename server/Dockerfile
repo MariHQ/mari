@@ -10,17 +10,27 @@ RUN apt-get update \
 
 WORKDIR /app/server
 
-# Dependencies first for layer caching. psycopg[binary] ships a prebuilt
-# libpq, and markdown is imported by the site builder; neither is in
-# requirements.txt (the local dev flow installs them separately).
+# Install the reusable product-knowledge packages from this repository before
+# the application dependencies so local, CI, and container builds use the same
+# source tree.
+COPY mari-components/ /app/mari-components/
+RUN pip install --no-cache-dir /app/mari-components/packages/*
+
+# Dependencies first for layer caching. Every runtime dependency is declared
+# in requirements.txt so local and container installs resolve the same set.
 COPY server/requirements.txt ./requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt "psycopg[binary]>=3.2" markdown
+RUN pip install --no-cache-dir -r requirements.txt
 
 COPY server/ /app/server/
 
 # app.py mkdirs builds/ at startup, but create it here too so the image
 # works read-only-ish out of the box.
-RUN mkdir -p /app/server/builds
+RUN addgroup --system mari \
+    && adduser --system --ingroup mari --home /app mari \
+    && mkdir -p /app/server/builds /app/data \
+    && chown -R mari:mari /app
+
+USER mari
 
 EXPOSE 8000
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "mari_server.app:app", "--host", "0.0.0.0", "--port", "8000"]

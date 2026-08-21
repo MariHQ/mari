@@ -7,7 +7,7 @@
 import { useMemo } from "react";
 import { useSearchParams } from "react-router-dom";
 import type { LineageData, LineageDrawer } from "@mari-design/components/pages/LineagePage";
-import type { LEdge, LNode, Lens, LayoutMode } from "@mari-design/components/features/LineageDataModel";
+import type { LEdge, LNode, Lens, LayoutMode, LineageMode } from "@mari-design/components/features/LineageDataModel";
 import { useQuery } from "../lib/api";
 import type { PageData } from "./types";
 
@@ -21,6 +21,7 @@ const QUERY = `{
   lineageEdges { id fromId toId kind date meta }
   graphStats { activity { date count } }
   graphViews { id name state }
+  settings { key value }
 }`;
 
 type Res = {
@@ -32,10 +33,11 @@ type Res = {
   }[];
   lineageEdges: {
     id: number; fromId: string; toId: string; kind: string; date: string;
-    meta: { derived?: string; note?: string; evidence?: string; status?: string } | null;
+    meta: { derived?: string; confidence?: number; note?: string; evidence?: string; status?: string } | null;
   }[];
   graphStats: { activity: { date: string; count: number }[] } | null;
   graphViews: { id: number; name: string; state: string }[];
+  settings: { key: string; value: unknown }[];
 };
 
 /* ── view state, read from the URL ───────────────────────────────────────── */
@@ -52,6 +54,7 @@ type Res = {
 export type LineageView = {
   lens: Lens;
   layout: LayoutMode;
+  mode: LineageMode;
   focalId: string | null;
   trace: { originId: string; direction: "down" | "up" } | null;
   asOf: string | null;
@@ -63,14 +66,17 @@ export type LineageView = {
 
 const LENSES = new Set<Lens>(["source", "stale", "owner", "health"]);
 const LAYOUTS = new Set<LayoutMode>(["flow", "timeline"]);
+const MODES = new Set<LineageMode>(["overview", "provenance", "impact"]);
 
 export function readView(params: URLSearchParams): LineageView {
   const lens = params.get("lens") as Lens | null;
   const layout = params.get("layout") as LayoutMode | null;
   const trace = params.get("trace");
+  const mode = params.get("mode") as LineageMode | null;
   return {
     lens: lens && LENSES.has(lens) ? lens : "source",
     layout: layout && LAYOUTS.has(layout) ? layout : "flow",
+    mode: mode && MODES.has(mode) ? mode : "overview",
     focalId: params.get("focal") || null,
     // Direction is part of what a trace IS (upstream provenance vs downstream
     // impact), so a trace with no readable direction traces downstream rather
@@ -196,14 +202,14 @@ export function mapEdges(res: Res, nodes: LNode[]): LEdge[] {
 /** A workspace with no graph at all. Every drawer closed, the scrubber live. */
 export const EMPTY: LineageData = {
   nodes: [], edges: [], dates: [], activity: [], views: [],
-  lens: "source", layout: "flow",
+  lens: "source", layout: "flow", mode: "overview", tuning: { maxNodes: 16, hopDepth: 1, minConfidence: 0.8 },
   focalId: null, trace: null, asOf: null, search: null, drawer: null,
   crumbs: null, extras: null, action: null,
 };
 
 /** The default view: a freshly opened graph, live, whole, nothing selected. */
 const LIVE: LineageView = {
-  lens: "source", layout: "flow", focalId: null, trace: null,
+  lens: "source", layout: "flow", mode: "overview", focalId: null, trace: null,
   asOf: null, query: null, node: null, edge: null, group: null,
 };
 
@@ -219,6 +225,11 @@ export function buildLineage(res: Res | null, view: LineageView = LIVE): Lineage
   // nothing and render an empty canvas.
   const focal = view.focalId ? nodes.find((n) => n.id === view.focalId) ?? null : null;
   const traced = view.trace && nodes.some((n) => n.id === view.trace!.originId) ? view.trace : null;
+  const tuningRow = (res.settings ?? []).find((setting) => setting.key === "lineage")?.value;
+  const tuning = tuningRow && typeof tuningRow === "object" ? tuningRow as Record<string, unknown> : {};
+  const maxNodes = Math.round(Math.max(8, Math.min(35, Number(tuning.max_nodes) || 16)));
+  const hopDepth = Math.round(Math.max(1, Math.min(3, Number(tuning.hop_depth) || 1)));
+  const minConfidence = Math.max(0.5, Math.min(1, Number(tuning.min_confidence) || 0.8));
   return {
     nodes,
     edges,
@@ -229,6 +240,8 @@ export function buildLineage(res: Res | null, view: LineageView = LIVE): Lineage
     views: (res.graphViews ?? []).map((v) => ({ id: v.id, name: v.name, state: v.state })),
     lens: view.lens,
     layout: view.layout,
+    mode: view.mode,
+    tuning: { maxNodes, hopDepth, minConfidence },
     focalId: focal?.id ?? null,
     trace: traced,
     asOf: asOfIndex(dates, view.asOf),

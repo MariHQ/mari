@@ -48,7 +48,7 @@ const API = "http://localhost:8000";
 /** Everything the FastAPI server owns; the rest is this SPA. Mirrors nginx.conf. */
 const API_ROUTES = [
   "/graphql", "/chat", "/agent", "/healthz", "/sites",
-  "/auth", "/bots", "/webhooks", "/onboard", "/connectors",
+  "/auth", "/bots", "/webhooks", "/onboard", "/connectors", "/knowledge-chat-api",
 ];
 
 export default defineConfig({

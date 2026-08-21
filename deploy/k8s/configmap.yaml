@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mari-config
+  namespace: mari
+data:
+  MARI_LOG_LEVEL: INFO
+  MARI_CORS_ORIGINS: https://mari.example.com
+  MARI_OLLAMA_HOST: http://ollama.mari.svc.cluster.local:11434
+  # Leave blank to keep Ollama/default provider behavior.
+  MARI_LLM_GATEWAY_URL: ""
+  MARI_LLM_GATEWAY_RETRIES: "2"
+  MARI_LLM_GATEWAY_HEADERS: '{}'
+  MARI_LLM_GATEWAY_METADATA: '{"application":"mari"}'
+  MARI_ICEBERG_WAREHOUSE: s3://replace-me/mari/iceberg
+  MARI_VECTOR_URI: s3://replace-me/mari/vectors
+  MARI_VECTOR_FLUSH_SECONDS: "30"
+  MARI_AUTH_BYPASS: "false"
+  MARI_AUTH_REGISTRATION: "false"

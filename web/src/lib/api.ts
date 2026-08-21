@@ -4,6 +4,18 @@
 
 import { useCallback, useEffect, useState } from "react";
 
+let activeProject = "";
+
+/** Project scope is an explicit request header, never mutable session state. */
+export function setActiveProject(project: string | number | null) {
+  activeProject = project == null ? "" : String(project);
+  clearQueryCache();
+}
+
+export function projectHeaders(): Record<string, string> {
+  return activeProject ? { "X-Mari-Project": activeProject } : {};
+}
+
 type GqlResult<T> = { ok: true; data: T } | { ok: false; error: string };
 
 /* ── session recovery ─────────────────────────────────────────────────────
@@ -54,13 +66,22 @@ function recoverSession(): Promise<boolean> {
   return recoveryInFlight;
 }
 
+/** REST companion to gqlResult's session recovery. It retries one rejected
+ * request after AuthProvider re-checks the cookie; network/5xx responses pass
+ * through untouched so callers can render their real failure. */
+export async function authenticatedFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  const response = await fetch(input, init);
+  if (response.status !== 401 || !await recoverSession()) return response;
+  return fetch(input, init);
+}
+
 /** Like gql(), but keeps the real failure: network error, HTTP status, or the
  *  first GraphQL error message. Use it wherever the UI must say *why*. */
 export async function gqlResult<T = any>(query: string, variables?: Record<string, unknown>): Promise<GqlResult<T>> {
   try {
     const res = await fetch("/graphql", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...projectHeaders() },
       body: JSON.stringify({ query, variables }),
     });
     // Rejected session: re-establish it once and ask again. If that is not
@@ -89,10 +110,31 @@ export async function gql<T = any>(query: string, variables?: Record<string, unk
 type QueryState<T> = { data: T | null; loading: boolean; error: boolean; errorText?: string };
 export type QueryResult<T> = QueryState<T> & { refetch: () => void };
 
-// Session-lived cache of mapped results, keyed by query+variables. Holding
-// mapped values (not raw payloads) keeps revisits O(1) and referentially
-// stable enough for memo'd children.
+// Cache raw GraphQL payloads, not mapper-specific views. Two adapters may ask
+// the same query with different mappers; caching either mapped value under the
+// shared request key hands the other adapter the wrong runtime shape.
 const queryCache = new Map<string, unknown>();
+const MAX_QUERY_CACHE = 200;
+const querySubscribers = new Set<() => void>();
+
+function cacheGet(key: string): unknown | undefined {
+  if (!queryCache.has(key)) return undefined;
+  const value = queryCache.get(key);
+  // Refresh insertion order so eviction is least-recently-used.
+  queryCache.delete(key);
+  queryCache.set(key, value);
+  return value;
+}
+
+function cacheSet(key: string, value: unknown): void {
+  queryCache.delete(key);
+  queryCache.set(key, value);
+  while (queryCache.size > MAX_QUERY_CACHE) {
+    const oldest = queryCache.keys().next().value as string | undefined;
+    if (oldest === undefined) break;
+    queryCache.delete(oldest);
+  }
+}
 
 /** Canonical read hook. First visit: { loading: true } until the API answers
  *  (render a Spinner/EmptyState — never canned data). Revisits: cached real
@@ -104,10 +146,16 @@ export function useQuery<T>(
    *  the idle state and no network call. It used to have to invent a harmless
    *  query instead, which still hit /graphql and still needed a session. */
   query: string | null,
-  opts?: { variables?: Record<string, unknown>; map?: (data: any) => T },
+  opts?: { variables?: Record<string, unknown>; map?: (data: any) => T; cacheKey?: string },
 ): QueryResult<T> {
-  const key = query ? query + (opts?.variables ? "::" + JSON.stringify(opts.variables) : "") : "";
-  const cached = key ? (queryCache.get(key) as T | undefined) : undefined;
+  const key = query
+    ? query + (opts?.variables ? "::" + JSON.stringify(opts.variables) : "")
+      + (opts?.cacheKey ? "::view=" + opts.cacheKey : "")
+    : "";
+  const cachedRaw = key ? cacheGet(key) : undefined;
+  const cached = cachedRaw === undefined
+    ? undefined
+    : opts?.map ? opts.map(cachedRaw) : (cachedRaw as T);
   const [state, setState] = useState<QueryState<T>>(
     !query
       ? { data: null, loading: false, error: false }
@@ -118,12 +166,19 @@ export function useQuery<T>(
   const [nonce, setNonce] = useState(0);
   const refetch = useCallback(() => setNonce((n) => n + 1), []);
 
+  useEffect(() => {
+    if (!query) return;
+    querySubscribers.add(refetch);
+    return () => { querySubscribers.delete(refetch); };
+  }, [query, refetch]);
+
   // Key changed (new query/variables): swap to that key's cache entry — or a
   // fresh loading state — synchronously during render, before the refetch.
   const [prevKey, setPrevKey] = useState(key);
   if (prevKey !== key) {
     setPrevKey(key);
-    const hit = key ? (queryCache.get(key) as T | undefined) : undefined;
+    const raw = key ? cacheGet(key) : undefined;
+    const hit = raw === undefined ? undefined : opts?.map ? opts.map(raw) : (raw as T);
     setState(hit !== undefined
       ? { data: hit, loading: false, error: false }
       : { data: null, loading: !!query, error: false });
@@ -141,7 +196,7 @@ export function useQuery<T>(
         return;
       }
       const mapped = opts?.map ? opts.map(r.data) : (r.data as T);
-      queryCache.set(key, mapped);
+      cacheSet(key, r.data);
       setState({ data: mapped, loading: false, error: false });
     });
     return () => { alive = false; };
@@ -154,6 +209,14 @@ export function useQuery<T>(
 /** Drop every cached query result (e.g. after logout). */
 export function clearQueryCache() {
   queryCache.clear();
+}
+
+/** Invalidate mounted reads after a successful write. Clearing the cache alone
+ * only affects a future mount; subscribers make the screen that initiated the
+ * write converge on server truth immediately. */
+export function invalidateQueries() {
+  clearQueryCache();
+  for (const refetch of querySubscribers) refetch();
 }
 
 // (The old /chat page-stream helper lived here; the Mari agent dock's SSE

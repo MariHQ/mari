@@ -10,6 +10,7 @@ import { page as facts } from "@mari-design/components/pages/FactsPage";
 import { page as decisions } from "@mari-design/components/pages/DecisionsPage";
 import { page as knowledge } from "@mari-design/components/pages/KnowledgePage";
 import { page as insights } from "@mari-design/components/pages/InsightsPage";
+import { page as trajectories } from "@mari-design/components/pages/TrajectoriesPage";
 import { page as audit } from "@mari-design/components/pages/AuditPage";
 import { page as members } from "@mari-design/components/pages/SettingsMembersPage";
 import { page as apiKeys } from "@mari-design/components/pages/SettingsApiKeysPage";
@@ -31,7 +32,7 @@ import { buildAnswers, EMPTY as ANSWERS_EMPTY, mapAnswers, mapHarvestSources } f
 import { buildFlows, EMPTY as FLOWS_EMPTY } from "../src/data/flows";
 import { buildLibrary, EMPTY as LIBRARY_EMPTY } from "../src/data/library";
 import { buildLineage, EMPTY as LINEAGE_EMPTY } from "../src/data/lineage";
-import { buildPublish, pickSiteRow, EMPTY as PUBLISH_EMPTY } from "../src/data/publish";
+import { buildPublish, EMPTY as PUBLISH_EMPTY } from "../src/data/publish";
 import { RULE_COUNT } from "@mari-design/components/features/LibraryRulesPanel";
 import { buildSettingsGeneral, EMPTY as GENERAL_EMPTY } from "../src/data/settings-general";
 import { buildSettingsModels, EMPTY as MODELS_EMPTY } from "../src/data/settings-models";
@@ -47,6 +48,8 @@ import { mapFreshness, mapWidgets } from "../src/data/insights";
 import { EMPTY, mapOverview } from "../src/data/overview";
 import { buildApiKeys, buildMembers, mapApiKeys, mapGithubTeam, mapMembers } from "../src/data/settings";
 import { buildTasks, mapAssignees, mapStrip, mapTasks } from "../src/data/tasks";
+import { buildTrajectories, EMPTY as TRAJECTORIES_EMPTY } from "../src/data/trajectories";
+import { buildFocusedGraph, buildOverviewGraph } from "@mari-design/components/features/LineageDataModel";
 
 /* This file used to install a DOM shim so `DocReviewOutlinePanel` could be
    server-rendered: it derived its outline through `document.createElement`
@@ -136,11 +139,10 @@ states(overview, EMPTY);
 
 console.log("tasks");
 const TASKS_RES: any = {
-  tasks: [
-    { id: 1, title: "Verify the proration rule", assigneeInitials: "DR", kind: "factcheck", kindLabel: "Fact check", done: false, due: "2026-07-18", overdue: true },
-    { id: 2, title: "Approve the SSO guide", assigneeInitials: "MG", kind: "approval", kindLabel: "Approval", done: true, due: "", overdue: false },
-  ],
-  tasksSummary: { title: "Review queue", tags: ["Fact check", "Approval"], people: ["DR"], statValue: "1", statLabel: "overdue" },
+  reviewItems: { items: [
+    { id: "task:1", title: "Verify the proration rule", assignee: "Dana Rodriguez", kind: "task", status: "pending", source: "Manual", due: "2026-07-18" },
+    { id: "task:2", title: "Approve the SSO guide", assignee: "Morgan Green", kind: "task", status: "done", source: "Manual", due: "" },
+  ], totalCount: 2, pageInfo: { endCursor: "2", hasNextPage: false } },
   /* Who a task can be filed to. Without this the composer draws no owner
      picker and every task silently files to whoever is signed in. */
   members: [
@@ -154,9 +156,9 @@ check("tasks: a task with no deadline carries none", taskRows[1].due === undefin
 check("tasks: overdue comes off the server, not off a clock here", taskRows[0].overdue === true);
 const taskStrip = mapStrip(TASKS_RES)!;
 check("tasks: the strip is the server's rollup of the same rows",
-  taskStrip.statValue === "1" && taskStrip.statLabel === "overdue" && taskStrip.people.join() === "DR");
+  taskStrip.statValue === "2" && taskStrip.statLabel === "open" && taskStrip.people.includes("DR"));
 check("tasks: an empty inbox has nothing to summarise",
-  mapStrip({ tasks: [], tasksSummary: null } as any) === null);
+  mapStrip({ reviewItems: { items: [], totalCount: 0, pageInfo: { endCursor: "", hasNextPage: false } } } as any) === null);
 const taskAssignees = mapAssignees(TASKS_RES);
 check("tasks: a task cannot be filed to someone who has never signed in",
   taskAssignees.length === 1 && taskAssignees[0].name === "Dana Rodriguez");
@@ -288,6 +290,23 @@ check("insights: renders", insightsHtml.length > 500);
 check("insights: the chart names the source the workspace named",
   insightsHtml.includes("GitHub · acme/handbook"));
 states(insights, { widgets: null, freshness: null, extras: null });
+
+/* ── Agent trajectories ────────────────────────────────────────────────── */
+
+console.log("trajectories");
+const trajectoryData = buildTrajectories({
+  trajectories: [{
+    id: 1, sessionId: 1, prompt: "Fix docs", status: "ready", model: "ollama:gemma3:4b",
+    layer1: "Searched and updated one document.", layer2: "Updated documentation.",
+    category: "Documentation", macroIntent: "Repair docs", phases: [], stepCount: 2,
+    failureCount: 0, reworkCount: 0, startedAt: "2026-08-19T12:00:00Z",
+    completedAt: "2026-08-19T12:00:01Z", steps: [],
+  }], trajectoryTotal: 1, trajectoryCategories: ["Documentation"],
+}, null, 0);
+const trajectoryHtml = render(trajectories, { data: trajectoryData, loading: false, error: null });
+check("trajectories: renders inferred macro intent", trajectoryHtml.includes("Repair docs"));
+check("trajectories: renders bounded count", trajectoryHtml.includes("Showing 1-1 of 1"));
+states(trajectories, TRAJECTORIES_EMPTY);
 
 /* ── Audit ──────────────────────────────────────────────────────────────── */
 
@@ -476,7 +495,10 @@ const ANSWERS_RES: any = {
   ],
   answerCoverageGaps: ["how do i rotate my api key?"],
   // Nothing indexed from chat, so that source has nothing to scan.
-  answerHarvestSources: { slack: 412, docs: 1284, chat: 0 },
+  answerHarvestSources: [
+    { key: "slack", label: "Slack", count: 412 },
+    { key: "github", label: "GitHub", count: 1284 },
+  ],
 };
 const answerRows = mapAnswers(ANSWERS_RES);
 check("answers: a status this build cannot draw is dropped", answerRows.length === 2);
@@ -486,7 +508,7 @@ check("answers: an unknown channel has no toggle, so it is dropped",
    button without it, and offers only the sources this workspace can scan. */
 const harvestSources = mapHarvestSources(ANSWERS_RES);
 check("answers: a source with nothing in it is not offered",
-  harvestSources.length === 2 && harvestSources.every((s) => s.key !== "history"));
+  harvestSources.length === 2 && harvestSources.every((s) => s.key !== "chat"));
 const answersData = buildAnswers(answerRows, ANSWERS_RES.answerCoverageGaps, "all", harvestSources);
 check("answers: the stat strip counts the answers under it",
   answersData.stats[0].value === "1" && answersData.stats[2].value === "1,284");
@@ -516,7 +538,7 @@ const LINEAGE_RES: any = {
       staleDays: 0, orphan: true, inbound: 0, outbound: 0, docKind: "wormhole", group: "" },
   ],
   lineageEdges: [
-    { id: 1, fromId: "gh:c1", toId: "doc:pricing", kind: "references", date: "2026-07-19", meta: { derived: "llm" } },
+    { id: 1, fromId: "gh:c1", toId: "doc:pricing", kind: "references", date: "2026-07-19", meta: { derived: "llm", confidence: 0.9 } },
     { id: 2, fromId: "gh:c1", toId: "doc:pricing", kind: "similar", date: "2026-07-19", meta: null },
     { id: 3, fromId: "gh:c1", toId: "gone", kind: "references", date: "2026-07-19", meta: null },
     { id: 4, fromId: "doc:pricing", toId: "gh:c1", kind: "from_a_newer_linker", date: "2026-07-19", meta: null },
@@ -538,11 +560,20 @@ check("lineage: the scrubber snaps to the dates things happened on",
   lineageData.dates.join() === "2026-07-19,2026-07-20");
 check("lineage: a saved view is read back, not just written",
   lineageData.views?.length === 1 && lineageData.views?.[0].name === "Canonical only");
+const lineageOverview = buildOverviewGraph(lineageData.nodes, lineageData.edges);
+check("lineage: overview rolls documents up before drawing",
+  lineageOverview.nodes.length === 2 && lineageOverview.nodes.every((node) => node.macro));
+check("lineage: overview omits similarity noise",
+  lineageOverview.edges.every((edge) => edge.rel !== "similar"));
+check("lineage: provenance follows dependent to source and ignores similarity",
+  buildFocusedGraph(lineageData.nodes, lineageData.edges, "gh:c1", "provenance", 1).nodes.length === 2);
+check("lineage: impact walks dependencies in reverse",
+  buildFocusedGraph(lineageData.nodes, lineageData.edges, "doc:pricing", "impact", 1).nodes.some((node) => node.id === "gh:c1"));
 /* The Views menu itself is a closed dropdown at render time (its content is
    unmounted until it is opened), so the assertion that it can list the view is
    that the view reached the page at all. */
 check("lineage: renders the graph",
-  render(lineage, { data: lineageData, loading: false, error: null }).includes("Pricing FAQ"));
+  render(lineage, { data: lineageData, loading: false, error: null }).includes("Notion · 1 document"));
 states(lineage, LINEAGE_EMPTY);
 
 /* ── Flows ──────────────────────────────────────────────────────────────── */
@@ -652,62 +683,26 @@ states(library, LIBRARY_EMPTY);
 
 console.log("publish");
 const PUBLISH_RES: any = {
-  sites: [{ id: 1, name: "Acme Docs", domain: "docs.acme.com", status: "live",
-    theme: { theme: "Mari Editorial", accent: "#b04e2c" }, sources: ["customer-facing", "canonical"],
-    nav: [{ label: "Guides", docs: 74 }, { docs: 3 }],
-    gates: [{ gate: "Fact check", status: "pass" }, { gate: "Glossary coverage", status: "fail" }],
-    docs: 148, warnings: 2 }],
-  releases: [
-    { id: 9, siteId: 1, version: "v14", status: "live", deployed: "Jul 20", docs: 148, notes: "Deployed to S3" },
-    { id: 8, siteId: 1, version: "v13", status: "previous", deployed: "Jul 13", docs: 140, notes: "" },
-    { id: 7, siteId: 2, version: "v1", status: "live", deployed: "Jul 01", docs: 3, notes: "" },
-  ],
   mcpServers: [
     { id: 1, name: "support-kb", url: "https://mcp/1", scope: "product", status: "connected", tools: 7,
       config: { capabilities: ["search", "facts"] } },
     { id: 2, name: "from-a-newer-build", url: "https://mcp/2", scope: "galaxy", status: "idle", tools: 1, config: null },
   ],
-  siteThemePresets: [
-    { key: "editorial", name: "Mari Editorial", accent: "#b04e2c", bg: "#faf7f2" },
-    { key: "slate", name: "Slate", accent: "#3d5a80", bg: "#f4f6f8" },
-  ],
-  settings: [{ key: "deploy", value: { bucket: "acme-docs-prod", region: "us-east-1" } }],
+  knowledgeChatDestinations: [{ id: 3, name: "Company knowledge", slug: "company",
+    title: "Ask Acme", welcome: "How can I help?", status: "live", url: "/knowledge-chat/acme/company" }],
+  botsStatus: {
+    slack: { configured: true, teamName: "Acme", lastEventAt: "2026-07-21T13:00:00", lastError: null },
+    github: { webhookConfigured: false, lastDeliveryAt: null, sources: [{ id: 1, repo: "acme/handbook" }] },
+  },
 };
-const PUBLISH_FEATURES: any[] = [
-  { key: "search", label: "Search", hint: "Client-side index.", on: true },
-  { key: "feedback", label: "Was this helpful?", hint: "Per-page rating.", on: false },
-];
-// `?site=1` is the editor route; the list is what the same response
-// renders without one.
-const publishData = buildPublish(PUBLISH_RES, 1, false, PUBLISH_FEATURES);
-check("publish: the theme catalog is what the generator can render",
-  publishData.site?.themes.length === 2 && publishData.site?.themes[0].accent === "#b04e2c");
-check("publish: the feature switches carry the site's resolved state",
-  publishData.site?.features.length === 2
-  && publishData.site?.features[0].on === true && publishData.site?.features[1].on === false);
-check("publish: features asked for by the routed site's id", pickSiteRow(PUBLISH_RES, 1)?.id === 1);
-check("publish: no ?site= opens the list, not an editor", buildPublish(PUBLISH_RES).view === "site-list");
-check("publish: the list carries every site", buildPublish(PUBLISH_RES).sites.length === 1);
-check("publish: a site whose switches have not arrived shows none, not defaults",
-  buildPublish(PUBLISH_RES, 1).site?.features.length === 0);
+const publishData = buildPublish(PUBLISH_RES);
+check("publish: defaults to interactive knowledge chat", publishData.view === "chat");
+check("publish: carries live knowledge chat destinations", publishData.chats[0]?.status === "live");
 check("publish: a scope this build cannot label is dropped", publishData.servers.length === 1);
-check("publish: releases are scoped to the site", publishData.site?.releases.length === 2);
-check("publish: the version is the newest release", publishData.site?.version === "v14");
-check("publish: a nav section with no label is dropped", publishData.site?.nav.length === 1);
-check("publish: gates carry their real outcome",
-  publishData.site?.gates[0].ok === true && publishData.site?.gates[1].ok === false);
-check("publish: the deploy target comes off the settings row",
-  publishData.site?.bucket === "acme-docs-prod");
-check("publish: a live site is published, not a draft", publishData.phase === "published");
-check("publish: no sites means nothing to publish", buildPublish({
-  sites: [], releases: [], mcpServers: [], siteThemePresets: [], settings: [],
-} as any, 1).site === null);
+check("publish: bot destinations report the repositories their webhook covers",
+  publishData.github.repos.join() === "acme/handbook");
 const publishHtml = render(publish, { data: publishData, loading: false, error: null });
-check("publish: renders the site", publishHtml.includes("docs.acme.com"));
-// The preset list lives on the editor's Theme tab, not its Content tab.
-check("publish: renders the theme catalog",
-  render(publish, { data: { ...publishData, editorTab: "theme" }, loading: false, error: null }).includes("Slate"));
-check("publish: renders the feature switches", publishHtml.includes("Was this helpful?"));
+check("publish: renders the knowledge chat", publishHtml.includes("Company knowledge"));
 states(publish, PUBLISH_EMPTY);
 
 /* ── Sources ────────────────────────────────────────────────────────────── */
@@ -752,8 +747,6 @@ check("sources: a schedule is reported only where a sync flow owns the source",
   && sourcesData.sources[2].syncIntervalMinutes === undefined);
 check("sources: the catalog carries specs, never values",
   sourcesData.catalog[1].fields[0].secret === true);
-check("sources: the bots tab reads the repos the webhook covers",
-  sourcesData.github.repos.join() === "acme/handbook");
 check("sources: rail counts come off the grid",
   sourcesData.summary.find((s) => s.label === "Failing")?.value === "1");
 check("sources: renders the grid",
@@ -801,6 +794,11 @@ const MODELS_RES: any = {
     { key: "chunking", value: { default: { strategy: "heading", max_tokens: 512, overlap: 64 }, slack: { strategy: "thread", max_tokens: 768, overlap: 0 } } },
   ],
   indexStats: { docs: 12480, chunks: 90210, embedded: 90000 },
+  modelCatalog: {
+    embedding: ["openai:text-embedding-3-small", "ollama:nomic-embed-text"],
+    generation: ["anthropic:claude-sonnet-5"],
+    errors: {},
+  },
   sourcePulse: [{ provider: "slack", name: "Slack · #engineering" }],
 };
 const modelsData = buildSettingsModels(MODELS_RES);
@@ -845,19 +843,8 @@ const WELCOME_RES: any = {
       { name: "pricing.md", detail: "12 chunks · 12 embedded" },
     ],
   },
-  styleGuides: [
-    { key: "plain", name: "Plain language", description: "Short words, active voice.", rules: 12 },
-    { key: "house", name: "Northwind house style", description: "Ours.", rules: 3 },
-  ],
-  defaultStylePack: "plain",
 };
 const welcomeData = buildWelcome(WELCOME_RES);
-check("welcome: the style packs are the stored ones, with real rule counts",
-  welcomeData.packs.length === 2 && welcomeData.packs[0].rules === 12);
-check("welcome: the closing line names the pack that was adopted",
-  welcomeData.doneSummary.guide === "Plain language");
-check("welcome: an adopted key nothing defines any more names no pack",
-  buildWelcome({ ...WELCOME_RES, defaultStylePack: "gone" }).doneSummary.guide === "");
 check("welcome: the upload receipt is the manifest, counted off chunks",
   welcomeData.uploadFiles.length === 2 && welcomeData.uploadFiles[0].detail === "29 chunks · 29 embedded");
 check("welcome: the upload summary is the server's own line",
@@ -890,14 +877,15 @@ const loginData = buildLogin({ github: true, google: false }, "credentials", fal
 check("login: only providers with credentials are offered", loginData.providers.join() === "github");
 check("login: a server with no OAuth configured offers none",
   buildLogin({}, "credentials", false).providers.length === 0);
+check("login: invite-only workspaces do not offer open registration", !loginData.allowRegister);
 check("login: renders the form",
   render(login, { data: loginData, loading: false, error: null }).length > 500);
 states(login, buildLogin({}, "credentials", false));
 
 console.log("setup");
-check("setup: an unclaimed install opens on the token step", buildSetup(true).step === "token");
+check("setup: an unclaimed install opens on the owner form", buildSetup(true).step === "admin");
 check("setup: a claimed install is done", buildSetup(false).step === "done");
-check("setup: renders the token step",
+check("setup: renders the owner form",
   render(setup, { data: buildSetup(true), loading: false, error: null }).length > 500);
 states(setup, buildSetup(false), { errorIgnored: true });
 

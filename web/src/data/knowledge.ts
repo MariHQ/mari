@@ -60,8 +60,13 @@ export function mapKnowledge(res: Res): KnowledgeResult[] {
     author: d.author,
     date: d.date,
     tags: d.tags ?? [],
-    // status, messageCount and participantCount are optional and have no
-    // backing column. Omitted, so the row simply does not draw them.
+    // Document review states are represented by tags in the current schema.
+    // Feeding the recognized tag into the browser makes its Status facet a
+    // real filter instead of four controls whose counts were always zero.
+    status: (d.tags ?? []).find((tag) =>
+      ["canonical", "verified", "needs-review", "stale"].includes(tag)),
+    // messageCount and participantCount are optional and have no backing
+    // column. Omitted, so the row simply does not draw invented counts.
   }));
 }
 

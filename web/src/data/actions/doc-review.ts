@@ -21,28 +21,18 @@ function docId(): number {
   return Number.isInteger(id) && id > 0 ? id : 0;
 }
 
-const SAVE = `mutation UpdateDocument($id: Int!, $body: String!) {
-  updateDocument(id: $id, body: $body)
-}`;
-
-const SET_CHANGE = `mutation SetChangeStatus($id: Int!, $status: String!) {
-  setChangeStatus(id: $id, status: $status)
-}`;
-
-const ACCEPT_ALL = `mutation AcceptAllChanges($documentId: Int!) {
-  acceptAllChanges(documentId: $documentId)
-}`;
-
-const REFINE = `mutation RunRefinement($documentId: Int!, $skill: String!) {
-  runRefinement(documentId: $documentId, skill: $skill)
-}`;
-
 const FACT_CHECK = `mutation FactCheck($documentId: Int!) { factCheck(documentId: $documentId) }`;
 
 const TOGGLE_WATCH = `mutation ToggleWatch($documentId: Int!) { toggleWatch(documentId: $documentId) }`;
 
-const CREATE_TASK = `mutation CreateTask($title: String!, $assignee: String!, $due: String) {
-  createTask(title: $title, kind: "factcheck", kindLabel: "Fact check", assignee: $assignee, due: $due)
+const CREATE_TASK = `mutation CreateTask(
+  $title: String!, $assignee: String!, $due: String,
+  $subjectType: String!, $subjectId: String!, $subjectTitle: String!, $subjectHref: String!
+) {
+  createTask(
+    title: $title, kind: "factcheck", kindLabel: "Fact check", assignee: $assignee, due: $due,
+    subjectType: $subjectType, subjectId: $subjectId, subjectTitle: $subjectTitle, subjectHref: $subjectHref
+  )
 }`;
 
 /** Hand this document's URL to whoever is being shared with. */
@@ -65,7 +55,6 @@ async function share(): Promise<void> {
 
 export function docReviewActions({ navigate }: ActionContext): DocReviewActions {
   return {
-    save: async ({ body }) => { await mutate(SAVE, { id: docId(), body }); },
     share,
 
     // "Back to the library" is a route, and the route belongs to the app: the
@@ -73,16 +62,6 @@ export function docReviewActions({ navigate }: ActionContext): DocReviewActions 
     // reloads the console instead of moving inside it.
     openLibrary: () => navigate("/knowledge"),
 
-    acceptChange: async ({ id }) => { await mutate(SET_CHANGE, { id, status: "accepted" }); },
-    rejectChange: async ({ id }) => { await mutate(SET_CHANGE, { id, status: "rejected" }); },
-    acceptAll: async () => { await mutate(ACCEPT_ALL, { documentId: docId() }); },
-
-    // Both of these answer with a count, and both panels report it: a run that
-    // proposed nothing has to say so, or it reads as a run that failed.
-    run: async ({ skill }) => {
-      const d: { runRefinement: number } = await mutate(REFINE, { documentId: docId(), skill });
-      return d.runRefinement;
-    },
     runFactCheck: async () => {
       const d: { factCheck: number } = await mutate(FACT_CHECK, { documentId: docId() });
       return d.factCheck;
@@ -96,8 +75,14 @@ export function docReviewActions({ navigate }: ActionContext): DocReviewActions 
     // The task the fact-check panel opens is about THIS document, so its title
     // names it. `due` is the ISO date the picker carries, never its label.
     createReviewTask: async ({ assignee, due }) => {
-      const title = `Review fact check on document #${docId()}`;
-      await mutate(CREATE_TASK, { title, assignee, due });
+      const id = docId();
+      const subjectTitle = `Document #${id}`;
+      const title = `Review fact check on document #${id}`;
+      await mutate(CREATE_TASK, {
+        title, assignee, due,
+        subjectType: "document", subjectId: String(id), subjectTitle,
+        subjectHref: `/knowledge/doc?id=${id}`,
+      });
     },
   };
 }

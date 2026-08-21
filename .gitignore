@@ -1,4 +1,7 @@
 node_modules/
+.artifacts/
+.mari/
+/var/
 dist/
 desktop/release/
 desktop/vendor/
@@ -8,7 +11,9 @@ __pycache__/
 .venv/
 .idea/
 .env
+.env.live
 mari.toml
 server/builds/
 deploy/lambda/mari_cloud.dump
 docker-compose.override.yml
+CODE-AUDIT.md

@@ -1,5 +1,5 @@
-import { useMemo } from "react";
-import { BrowserRouter, Navigate, Route, Routes, useNavigate } from "react-router-dom";
+import { useEffect, useMemo, useRef } from "react";
+import { BrowserRouter, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { PAGES, type PageModule } from "@mari-design/components/pages";
 import { landingPageFor, type ShellChrome } from "@mari-design/components/pages/PageFrame";
 import { NavProvider } from "@mari-design/components/navigation/Link";
@@ -10,6 +10,7 @@ import { SEARCH_SCOPES, globalSearch } from "./data/search";
 import { ACTION_FACTORIES } from "./data/actions";
 import { AuthProvider, useAuth } from "./lib/auth";
 import { AgentDock } from "./components/AgentDock";
+import { KnowledgeChatDestination } from "./components/KnowledgeChatDestination";
 import { useIsMobile } from "./lib/mobile";
 
 /* The whole console, routed off the component library's own page registry.
@@ -44,7 +45,7 @@ const APP_PAGES = PAGES.filter((p) => !LIBRARY_ONLY.has(p.id));
  *  search, notifications. One hook, so the not-found page below is framed by
  *  the same console as everything else rather than a bare white box. */
 function useShellChrome(): ShellChrome {
-  const { user, logout } = useAuth();
+  const { user, logout, projects, activeProject, selectProject } = useAuth();
   const navigate = useNavigate();
   // The bell and the search overlay are the same on every page, so they are
   // fetched here rather than by 25 page adapters.
@@ -56,6 +57,12 @@ function useShellChrome(): ShellChrome {
       ? { name: user.name, initials: user.initials, detail: user.role === "admin" ? "Admin" : user.role }
       : undefined,
     onSignOut: logout,
+    projects: projects.map((project) => ({ id: project.id, name: project.name, detail: project.role })),
+    activeProjectId: activeProject?.id,
+    onSelectProject: (project) => {
+      const selected = projects.find((candidate) => String(candidate.id) === String(project.id));
+      if (selected) void selectProject(selected);
+    },
     // The sidebar emits a NAV id, which is not always a page id: five
     // Settings pages share the "settings" nav item, so looking the nav id up
     // directly found nothing and Settings went nowhere. The library resolves
@@ -77,7 +84,7 @@ function useShellChrome(): ShellChrome {
     // page and the search overlay's "recent" list permanently empty.
     notifications,
     recentSearches,
-  }), [user, logout, navigate, notifications, recentSearches]);
+  }), [user, logout, projects, activeProject, selectProject, navigate, notifications, recentSearches]);
 }
 
 
@@ -90,7 +97,7 @@ function routeFor(page: PageModule<any, any>) {
 
   return function PageRoute() {
     const { data, loading, error } = useData();
-    const { refresh } = useAuth();
+    const { refresh, user } = useAuth();
     const navigate = useNavigate();
     const chrome = useShellChrome();
     // Rebuilt only when `refresh` changes, so a page never sees a new actions
@@ -98,10 +105,11 @@ function routeFor(page: PageModule<any, any>) {
     const actions = useMemo(
       () => makeActions?.({
         refresh,
+        currentUserName: user?.name ?? "",
         navigate: (href: string) => navigate(href),
         replace: (href: string) => navigate(href, { replace: true }),
       }),
-      [refresh, navigate],
+      [refresh, user?.name, navigate],
     );
     return (
       <Page
@@ -154,7 +162,9 @@ function Routed() {
   const navigate = useNavigate();
   return (
     <NavProvider navigate={navigate}>
+      <RouteFocus />
       <Routes>
+          <Route path="/knowledge-chat/:project/:slug" element={<KnowledgeChatDestination />} />
           {ROUTES.map(({ page, Element }) => (
             <Route
               key={page.id}
@@ -173,9 +183,27 @@ function Routed() {
           changes — which is the point: the agent's navigate events move the
           SPA underneath it while the conversation stays open. Renders nothing
           until there is a session. */}
-      <AgentDock />
+      <RouteAgentDock />
     </NavProvider>
   );
+}
+
+function RouteAgentDock() {
+  const { pathname } = useLocation();
+  return pathname.startsWith("/knowledge-chat/") ? null : <AgentDock />;
+}
+
+/** Move keyboard/screen-reader context after an SPA page navigation. Skip the
+ * first render so a direct load keeps the browser's normal starting point. */
+function RouteFocus() {
+  const { pathname } = useLocation();
+  const first = useRef(true);
+  useEffect(() => {
+    if (first.current) { first.current = false; return; }
+    const frame = requestAnimationFrame(() => document.getElementById("main-content")?.focus());
+    return () => cancelAnimationFrame(frame);
+  }, [pathname]);
+  return null;
 }
 
 export default function App() {

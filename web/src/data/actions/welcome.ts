@@ -69,17 +69,13 @@ export function welcomeActions({ navigate }: { navigate: (href: string) => void 
     },
 
     connectGithubRepo: ({ repo, paths }) =>
-      mutate(`mutation($repo: String!, $paths: String) { connectGithubRepo(repo: $repo, paths: $paths) }`,
-        { repo: repo.trim(), paths: paths.trim() || null }),
+      connectAny("github", { repo: repo.trim(), paths: paths.trim() }),
 
     testConnection: ({ provider, config }) => testAny(provider, config),
 
     connectSource: ({ provider, config }) => connectAny(provider, config),
 
     uploadFiles: uploadDocuments,
-
-    chooseGuide: (id) =>
-      mutate(`mutation($key: String!) { setDefaultStylePack(key: $key) }`, { key: id }),
 
     harvestGlossary: async () => {
       await mutate(`mutation { harvestGlossary }`);
