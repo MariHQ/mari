@@ -7,6 +7,7 @@ import json
 import strawberry
 from strawberry.scalars import JSON
 
+from mari_server import settings as config
 from mari_server.identity import access
 from mari_server.identity import routes as auth
 from mari_server.automations import runtime as flowengine
@@ -19,7 +20,8 @@ from mari_server.persistence.postgres import admin as admin_store
 from mari_server.persistence.postgres import sources as source_store
 from mari_server.persistence.postgres.database import audit
 from mari_server.persistence.postgres import substrate_references
-from mari_server.substrates.service import configured_substrate
+from mari_server.substrates.onyx import OnyxSubstrate
+from mari_server.substrates.service import configured_substrate, reset_configured_substrate
 
 # ————— the authorization rule —————
 #
@@ -204,6 +206,30 @@ class MutAdmin:
                 except json.JSONDecodeError:
                     existing = {}
             value = llm.preserve_masked(existing, value)
+        if key == "knowledge_substrate" and isinstance(value, dict):
+            existing = admin_store.setting(key)
+            existing = existing if isinstance(existing, dict) else {}
+            provider = str(value.get("provider") or "native").strip().lower()
+            if provider not in {"native", "onyx"}:
+                raise ValueError("Knowledge substrate must be native or onyx.")
+            api_key = str(value.get("api_key") or "").strip()
+            if not api_key or "•" in api_key:
+                api_key = str(existing.get("api_key") or config.get(
+                    "knowledge_substrate", "api_key", ""))
+            value = {
+                "provider": provider,
+                "url": str(value.get("url") or "").strip().rstrip("/"),
+                "api_key": api_key,
+                "timeout_seconds": max(1, min(120, int(value.get("timeout_seconds") or 30))),
+                "search_mode": str(value.get("search_mode") or "keyword").strip().lower(),
+            }
+            if provider == "onyx":
+                if not value["url"].startswith(("http://", "https://")):
+                    raise ValueError("Onyx URL must start with http:// or https://.")
+                if not api_key:
+                    raise ValueError("Onyx API key is required.")
+                if value["search_mode"] not in {"keyword", "agentic"}:
+                    raise ValueError("Onyx search mode must be keyword or agentic.")
         admin_store.save_setting(key, value)
         audit("updated setting", key, actor["name"],
               [("Setting", key), ("Fields", ", ".join(sorted(value)) if isinstance(value, dict) else "value")])
@@ -212,7 +238,33 @@ class MutAdmin:
         # the old provider — the page was decorative for half a minute.
         if key in ("llm", "embedding"):
             llm.reload_settings()
+        if key == "knowledge_substrate":
+            reset_configured_substrate()
         return True
+
+    @strawberry.mutation
+    def test_knowledge_substrate(self, info: strawberry.Info, value: JSON) -> JSON:
+        _require_admin(info)
+        if not isinstance(value, dict):
+            raise ValueError("Knowledge substrate configuration is required.")
+        provider = str(value.get("provider") or "native").strip().lower()
+        if provider == "native":
+            return {"healthy": True, "provider": "native", "detail": "Postgres knowledge store"}
+        if provider != "onyx":
+            raise ValueError("Knowledge substrate must be native or onyx.")
+        existing = admin_store.setting("knowledge_substrate")
+        existing = existing if isinstance(existing, dict) else {}
+        api_key = str(value.get("api_key") or "").strip()
+        if not api_key or "•" in api_key:
+            api_key = str(existing.get("api_key") or config.get("knowledge_substrate", "api_key", ""))
+        adapter = OnyxSubstrate(
+            str(value.get("url") or ""), api_key,
+            timeout=float(value.get("timeout_seconds") or 30),
+            search_mode=str(value.get("search_mode") or "keyword"),
+        )
+        result = adapter.info()
+        return {"healthy": result.healthy, "provider": result.provider,
+                "version": result.version, "detail": result.detail}
 
     @strawberry.mutation
     def test_llm_gateway(self, info: strawberry.Info) -> JSON:

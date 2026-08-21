@@ -54,6 +54,10 @@ export const EMPTY: SettingsGeneralData = {
   name: "", slug: "", plan: "", timezone: "", language: "",
   save: "clean", slugError: null, summary: [], danger: false,
   lineage: { maxNodes: 16, hopDepth: 1, minConfidence: 0.8 },
+  knowledgeSubstrate: {
+    provider: "native", url: "", apiKeySet: false, apiKeyHint: "",
+    timeoutSeconds: 30, searchMode: "keyword",
+  },
 };
 
 /** Pure: the whole response → everything the page renders. */
@@ -70,6 +74,8 @@ export function buildSettingsGeneral(res: Res | null): SettingsGeneralData {
   const prov = res.provisioning;
   const lineageRow = (res.settings ?? []).find((row) => row.key === "lineage")?.value;
   const lineage = lineageRow && typeof lineageRow === "object" ? lineageRow as Record<string, unknown> : {};
+  const substrateRow = (res.settings ?? []).find((row) => row.key === "knowledge_substrate")?.value;
+  const substrate = substrateRow && typeof substrateRow === "object" ? substrateRow as Record<string, unknown> : {};
   const summary: PropertyItem[] = [
     ...(ws.plan ? [{ label: "Plan", value: ws.plan }] : []),
     ...(members.length ? [{ label: "Members", value: `${active} active, ${invited} invited` }] : []),
@@ -112,6 +118,14 @@ export function buildSettingsGeneral(res: Res | null): SettingsGeneralData {
       maxNodes: Math.round(Math.max(8, Math.min(35, Number(lineage.max_nodes) || 16))),
       hopDepth: Math.round(Math.max(1, Math.min(3, Number(lineage.hop_depth) || 1))),
       minConfidence: Math.max(0.5, Math.min(1, Number(lineage.min_confidence) || 0.8)),
+    },
+    knowledgeSubstrate: {
+      provider: substrate.provider === "onyx" ? "onyx" : "native",
+      url: String(substrate.url || ""),
+      apiKeySet: Boolean(substrate.api_key_set),
+      apiKeyHint: String(substrate.api_key_hint || ""),
+      timeoutSeconds: Math.max(1, Math.min(120, Number(substrate.timeout_seconds) || 30)),
+      searchMode: substrate.search_mode === "agentic" ? "agentic" : "keyword",
     },
   };
 }

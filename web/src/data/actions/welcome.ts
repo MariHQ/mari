@@ -11,6 +11,7 @@
  */
 
 import type { WelcomeActions } from "@mari-design/components/pages/WelcomePage";
+import type { KnowledgeSubstrateSettings } from "@mari-design/components/features/KnowledgeSubstrateForm";
 import type { Candidate } from "@mari-design/components/features/WelcomeGlossaryStep";
 import { clearQueryCache, gqlResult } from "../../lib/api";
 import { mutate } from "./index";
@@ -58,6 +59,13 @@ function loadDocsUrls(): void {
 
 export function welcomeActions({ navigate }: { navigate: (href: string) => void }): WelcomeActions {
   loadDocsUrls();
+  const substrateValue = (value: KnowledgeSubstrateSettings & { apiKey: string }) => ({
+    provider: value.provider,
+    url: value.url,
+    api_key: value.apiKey || value.apiKeyHint,
+    timeout_seconds: value.timeoutSeconds,
+    search_mode: value.searchMode,
+  });
   return {
     navigate,
 
@@ -74,6 +82,23 @@ export function welcomeActions({ navigate }: { navigate: (href: string) => void 
     testConnection: ({ provider, config }) => testAny(provider, config),
 
     connectSource: ({ provider, config }) => connectAny(provider, config),
+
+    saveKnowledgeSubstrate: async (value) => {
+      await mutate(
+        `mutation($key: String!, $value: JSON!) { updateSetting(key: $key, value: $value) }`,
+        { key: "knowledge_substrate", value: substrateValue(value) },
+      );
+      clearQueryCache();
+    },
+
+    testKnowledgeSubstrate: async (value) => {
+      const result = await gqlResult<{ testKnowledgeSubstrate: { healthy: boolean; detail?: string } }>(
+        `mutation($value: JSON!) { testKnowledgeSubstrate(value: $value) }`,
+        { value: substrateValue(value) },
+      );
+      if (!result.ok) throw new Error(result.error);
+      return result.data.testKnowledgeSubstrate;
+    },
 
     uploadFiles: uploadDocuments,
 

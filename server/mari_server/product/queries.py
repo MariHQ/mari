@@ -35,7 +35,7 @@ from mari_server.persistence.postgres import settings as settings_store, analyti
 from mari_server.persistence.postgres import chat as chat_store
 from mari_server.persistence.postgres import substrate_references
 from mari_server.persistence.postgres.database import actor_name, jload
-from mari_server.substrates.service import configured_substrate
+from mari_server.substrates.service import configured_substrate, effective_configuration
 from mari_server.substrates import query as substrate_query
 from mari_components.knowledge.excerpt import excerpt
 from mari_server.product.types import (
@@ -245,6 +245,7 @@ def detect_contradictions(rows: list[dict]) -> list[tuple[dict, dict, str, str]]
 _SECRET_SETTING_FIELDS = {
     "slack_bot": ("bot_token", "signing_secret"),
     "github_bot": ("webhook_secret",),
+    "knowledge_substrate": ("api_key",),
 }
 
 
@@ -1029,9 +1030,13 @@ class Query:
 
     @strawberry.field
     def settings(self) -> list[Setting]:
+        rows = settings_store.all_settings()
+        if not any(row["key"] == "knowledge_substrate" for row in rows):
+            rows = [*rows, {"key": "knowledge_substrate",
+                            "value": effective_configuration()}]
         return [Setting(key=r["key"], value=_mask_setting(
                     r["key"], _effective_model_setting(r["key"], jload(r["value"]))))
-                for r in settings_store.all_settings()]
+                for r in rows]
 
     @strawberry.field
     def approved_answers(self) -> list[ApprovedAnswer]:

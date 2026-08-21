@@ -18,6 +18,7 @@ from __future__ import annotations
 import datetime
 import hashlib
 import json
+import time
 import urllib.error
 import urllib.request
 import uuid
@@ -45,6 +46,7 @@ from mari_components.knowledge import answer_question as component_answer_questi
 from mari_server.persistence.postgres.event_inbox import DEFAULT_INBOX, EventDispatcher
 from mari_server.persistence.postgres import bots as bot_store
 from mari_server.substrates import query as substrate_query
+from mari_server.substrates.errors import SubstrateRequestError
 
 router = APIRouter()
 
@@ -157,6 +159,53 @@ def answer_question(question: str, supplemental_context: str = "") -> str:
     suffix = "\n\nSources: " + " · ".join(
         f"[{index + 1}] {title}" for index, title in enumerate(cited)) if cited else ""
     return result.answer + suffix
+
+
+def stream_answer_question(question: str, supplemental_context: str = ""):
+    """Yield a grounded Slack answer as the model produces it."""
+    qvec = llm.embed(question)
+    if qvec:
+        approved = bot_store.approved_answer(qvec)
+        if approved and approved["sim"] >= 0.62:
+            yield f"{approved['answer']}\n\n_Approved answer · served verbatim_"
+            return
+
+    retrieval_error = False
+    try:
+        docs = substrate_query.search(answer_search_query(question), 8)[:4]
+    except SubstrateRequestError:
+        docs = []
+        retrieval_error = True
+    facts = bot_store.verified_facts()
+    if not docs and not facts:
+        if retrieval_error:
+            yield "Knowledge search is temporarily unavailable. Please try again shortly."
+        else:
+            yield "I couldn't find enough product knowledge to answer that yet."
+        return
+
+    sections = [
+        f"[{index}] {row['title']} ({row['source']})\n{row['body'] or row['snippet']}"
+        for index, row in enumerate(docs, 1)
+    ]
+    if facts:
+        sections.append("Verified facts:\n" + "\n".join(f"- {claim}" for claim in facts))
+    if supplemental_context:
+        sections.append("Slack conversation so far:\n" + supplemental_context)
+    prompt = "Context:\n" + "\n\n".join(sections) + f"\n\nQuestion: {question}"
+
+    emitted = False
+    for token in llm.chat_stream([{"role": "user", "content": prompt}], BOT_SYSTEM):
+        if token:
+            emitted = True
+            yield token
+    if not emitted:
+        yield "The language model is temporarily unavailable. Please try again shortly."
+        return
+    if docs:
+        yield "\n\nSources: " + " · ".join(
+            f"[{index}] {row['title']}" for index, row in enumerate(docs, 1)
+        )
 
 
 # ————————————————— GET /bots/slack/manifest —————————————————
@@ -366,6 +415,19 @@ def _process_slack_delivery(row: dict) -> None:
         frozenset({f"channel:{channel}"}),
     )
     question = _strip_mentions((event.get("text") or "").strip()) or "What can you help with?"
+    client_msg_id = str(uuid.uuid5(uuid.NAMESPACE_URL,
+                                   f"mari:slack:{row['project_id']}:{row['delivery_id']}"))
+    pending = {"channel": channel, "text": "Searching product knowledge…",
+               "client_msg_id": client_msg_id}
+    if thread_ts:
+        pending["thread_ts"] = root_ts
+    posted = slack_call("chat.postMessage", token, pending)
+    if not posted.get("ok"):
+        raise RuntimeError(f"chat.postMessage: {posted.get('error', 'unknown error')}")
+    bot_message_ts = str(posted.get("ts") or "")
+    if not bot_message_ts:
+        raise RuntimeError("chat.postMessage returned no message timestamp")
+
     turns: list[dict[str, str]] = []
     if thread_ts:
         thread = bot_store.thread(installation_id, installation["project_id"], channel, thread_ts) or {}
@@ -379,20 +441,30 @@ def _process_slack_delivery(row: dict) -> None:
                 turns = _with_turn(turns, "assistant", root_text, thread_ts)
     turns = _with_turn(turns, "user", question, event_ts)
     context = _conversation_context(turns)
+    parts: list[str] = []
+    visible = ""
+    last_update = time.monotonic()
     with access.use_access(project_access):
-        answer = answer_question(question, context)
+        for piece in stream_answer_question(question, context):
+            parts.append(str(piece))
+            answer_so_far = "".join(parts)[:4000]
+            now = time.monotonic()
+            if len(answer_so_far) - len(visible) >= 160 or now - last_update >= 0.75:
+                updated = slack_call("chat.update", token, {
+                    "channel": channel, "ts": bot_message_ts, "text": answer_so_far,
+                })
+                if not updated.get("ok"):
+                    raise RuntimeError(f"chat.update: {updated.get('error', 'unknown error')}")
+                visible = answer_so_far
+                last_update = now
+    answer = "".join(parts)[:4000]
+    if answer != visible:
+        updated = slack_call("chat.update", token, {
+            "channel": channel, "ts": bot_message_ts, "text": answer,
+        })
+        if not updated.get("ok"):
+            raise RuntimeError(f"chat.update: {updated.get('error', 'unknown error')}")
     _log_usage("chat_answer", "slack")
-    client_msg_id = str(uuid.uuid5(uuid.NAMESPACE_URL,
-                                   f"mari:slack:{row['project_id']}:{row['delivery_id']}"))
-    post = {"channel": channel, "text": answer, "client_msg_id": client_msg_id}
-    # Root mentions and DMs get a normal visible reply. If a user starts a
-    # thread from Mari's response, subsequent turns stay in that thread.
-    if thread_ts:
-        post["thread_ts"] = root_ts
-    out = slack_call("chat.postMessage", token, post)
-    if not out.get("ok"):
-        raise RuntimeError(f"chat.postMessage: {out.get('error', 'unknown error')}")
-    bot_message_ts = str(out.get("ts") or "")
     participation_ts = thread_ts or bot_message_ts
     turns = _with_turn(turns, "assistant", answer, bot_message_ts)
     bot_store.save_thread(installation_id, installation["project_id"], channel,

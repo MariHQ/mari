@@ -21,6 +21,7 @@ const QUERY = `{
   glossaryCandidates { id term variants definition evidence }
   sourcePulse { id provider name status docsCount health kind lastSyncAt }
   uploadManifest { summary files { name detail } }
+  settings { key value }
 }`;
 
 type Res = {
@@ -36,6 +37,7 @@ type Res = {
     docsCount: number; health: string; kind: string; lastSyncAt: string;
   }[];
   uploadManifest: { summary: string; files: { name: string; detail: string }[] } | null;
+  settings: { key: string; value: unknown }[];
 };
 
 /* ── mapping helpers ────────────────────────────────────────────────────── */
@@ -98,6 +100,10 @@ const NO_CONNECT_SYNC: SyncRow = { id: "", provider: "", name: "", state: "queue
 
 export const EMPTY: WelcomeData = {
   step: "hero",
+  knowledgeSubstrate: {
+    provider: "native", url: "", apiKeySet: false, apiKeyHint: "",
+    timeoutSeconds: 30, searchMode: "keyword",
+  },
   tiles: [], connectorCount: 0,
   repos: [], selectedRepo: "", pathsGlob: "",
   slackFields: [], notionFields: [], gdriveFields: [],
@@ -114,11 +120,21 @@ export function buildWelcome(res: Res | null): WelcomeData {
   const syncRows = mapSyncRows(res);
   const synced = syncRows.filter((r) => r.state === "done").length;
   const terms = (res.glossaryCandidates ?? []).length;
+  const substrateRow = (res.settings ?? []).find((row) => row.key === "knowledge_substrate")?.value;
+  const substrate = substrateRow && typeof substrateRow === "object" ? substrateRow as Record<string, unknown> : {};
 
   return {
     // The wizard opens where it opens; stepping through it is routing this app
     // does not have yet.
     step: "hero",
+    knowledgeSubstrate: {
+      provider: substrate.provider === "onyx" ? "onyx" : "native",
+      url: String(substrate.url || ""),
+      apiKeySet: Boolean(substrate.api_key_set),
+      apiKeyHint: String(substrate.api_key_hint || ""),
+      timeoutSeconds: Math.max(1, Math.min(120, Number(substrate.timeout_seconds) || 30)),
+      searchMode: substrate.search_mode === "agentic" ? "agentic" : "keyword",
+    },
     tiles: catalog.map<Tile>((p) => ({
       key: p.key, name: p.name, blurb: p.blurb, connected: p.connected,
       docsUrl: p.docsUrl || undefined,

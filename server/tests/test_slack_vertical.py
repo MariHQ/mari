@@ -87,6 +87,8 @@ class FakeSlackHandler(BaseHTTPRequestHandler):
                        else {"ok": False, "error": "invalid_auth"})
         elif self.path == "/api/chat.postMessage":
             payload = {"ok": True, "ts": "posted.1"}
+        elif self.path == "/api/chat.update":
+            payload = {"ok": True, "ts": body["ts"], "text": body["text"]}
         elif self.path == "/api/conversations.replies":
             payload = {"ok": True, "messages": [
                 {"type": "message", "user": "U1", "text": "deploy?", "ts": body["ts"]},
@@ -246,10 +248,8 @@ class SlackSetupToAnswerTests(unittest.TestCase):
              patch.object(bots, "_refresh_slack_aggregate"), \
              patch.object(search_service.search_store, "keyword_candidates", return_value=documents), \
              patch.object(search_service.llm, "embed", return_value=None), \
-             patch.object(bots.llm, "generate_json", side_effect=lambda prompt, **_kwargs: prompts.append(prompt) or {
-                 "answer": "Use the runbook [1].", "confidence": 0.9,
-                 "evidence": [{"document_id": "document:1", "quote": "Use the allowed deploy process"}],
-             }):
+             patch.object(bots.llm, "chat_stream",
+                          side_effect=lambda messages, _system: prompts.append(messages[-1]["content"]) or iter(["Use the runbook [1]."])):
             self.assertEqual(asyncio.run(bots.slack_webhook(self._request(mention))), {"ok": True})
             self.assertEqual(asyncio.run(bots.slack_webhook(self._request(dm))), {"ok": True})
             self.assertEqual(asyncio.run(bots.slack_webhook(self._request(mention))),
@@ -328,8 +328,8 @@ class SlackSetupToAnswerTests(unittest.TestCase):
              patch.object(bots.bot_store, "touch_installation"), \
              patch.object(bots.bot_store, "log_usage"), \
              patch.object(bots, "_refresh_slack_aggregate") as refresh, \
-             patch.object(bots, "answer_question",
-                          side_effect=lambda question, context: answered.append((question, context)) or "Production is ready [1]."):
+             patch.object(bots, "stream_answer_question",
+                          side_effect=lambda question, context: answered.append((question, context)) or iter(["Production is ready [1]."])):
             bots._process_slack_delivery(row)
 
         history = [call for call in FakeSlackHandler.calls
