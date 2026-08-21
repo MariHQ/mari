@@ -31,6 +31,7 @@ from mari_components.connectors import connector_definition, connector_definitio
 from mari_components.substrates import SourceRegistration
 from mari_server.substrates.service import configured_substrate
 from mari_server.persistence.postgres import substrate_references
+from mari_server.persistence.postgres import knowledge as knowledge_store
 
 router = APIRouter(prefix="/connectors")
 
@@ -205,6 +206,11 @@ def connect(body: ProviderIn) -> dict:
         if not row:
             return {"error": "The substrate created the source but did not return it in its catalog."}
         substrate.run_source(remote.source_id, full=True)
+        knowledge_store.create_task(
+            title=f"Review newly connected source: {display}", assignee="", initials="",
+            kind="approval", kind_label="Source review", due_date=None,
+            subject=("source", str(row["id"]), display, "/sources"),
+        )
         audit("connected source", display)
         return {"sourceId": int(row["id"])}
     cfg = dict(body.config or {})

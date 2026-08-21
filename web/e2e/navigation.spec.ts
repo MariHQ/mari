@@ -6,7 +6,7 @@ const ROUTES = [
   ["/decisions", "Decisions", "Knowledge"], ["/knowledge", "Knowledge", "Knowledge"],
   ["/knowledge/doc?id=1", "Retention runbook", "Knowledge"], ["/answers", "Approved answers", "Knowledge"],
   ["/insights", "Insights", "Analytics"], ["/audit", "Repository audit", "Review"], ["/lineage", "Lineage", "Lineage"],
-  ["/flows", "Automations", "Automations"], ["/library", "Library", "Knowledge"], ["/publish", "Destinations", "Destinations"],
+  ["/flows", "Automations", null], ["/library", "Library", "Knowledge"], ["/publish", "Destinations", "Destinations"],
   ["/trajectories", "Agent trajectories", "Analytics"],
   ["/sources", "Sources", "Sources"], ["/settings/general", "General", "Settings"],
   ["/settings/models", "Models", "Settings"], ["/settings/design", "Design & brand", "Settings"],
@@ -15,12 +15,12 @@ const ROUTES = [
 ] as const;
 
 const PRIMARY_DESTINATIONS = [
-  "Home", "Knowledge", "Lineage", "Review", "Automations", "Destinations", "Analytics", "Sources", "Settings",
+  "Home", "Knowledge", "Lineage", "Review", "Destinations", "Analytics", "Sources", "Settings",
 ] as const;
 
 const LEGACY_PRIMARY_LABELS = [
   "Overview", "Tasks", "Answers", "Decisions", "Library", "Facts",
-  "Repository audit", "Flows", "Publish", "Insights", "Agent trajectories",
+  "Repository audit", "Flows", "Automations", "Publish", "Insights", "Agent trajectories",
 ] as const;
 
 async function primaryNavigation(page: import("@playwright/test").Page) {

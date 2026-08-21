@@ -40,6 +40,7 @@ from mari_components.connectors.events import (
     verify_slack_signature as component_verify_slack_signature,
 )
 from mari_components import KnowledgeDocument
+from mari_components.destinations.chat import answer_search_query
 from mari_components.knowledge import answer_question as component_answer_question
 from mari_server.persistence.postgres.event_inbox import DEFAULT_INBOX, EventDispatcher
 from mari_server.persistence.postgres import bots as bot_store
@@ -120,7 +121,7 @@ def answer_question(question: str, supplemental_context: str = "") -> str:
         if approved and approved["sim"] >= 0.62:
             return f"{approved['answer']}\n\n_Approved answer · served verbatim_"
 
-    docs = substrate_query.search(question, 4)
+    docs = substrate_query.search(answer_search_query(question), 8)[:4]
     knowledge = [
         KnowledgeDocument(
             f"document:{d.get('id') or d.get('external_id') or index}",

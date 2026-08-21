@@ -5,11 +5,11 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
-import urllib.error
 import urllib.parse
-import urllib.request
 from collections.abc import Callable, Mapping
 from typing import Any
+
+import httpx
 
 from mari_components.substrates import (
     Capability,
@@ -63,34 +63,28 @@ class OnyxSubstrate:
         if self.search_mode not in {"keyword", "agentic"}:
             raise SubstrateConfigurationError("Onyx search mode must be 'keyword' or 'agentic'.")
         self._transport = transport or self._request
+        self._client = None if transport else httpx.Client(
+            base_url=self.base_url,
+            headers={"Accept": "application/json", "Authorization": f"Bearer {self.api_key}"},
+            timeout=self.timeout,
+        )
 
     def _request(self, method: str, path: str, body: Mapping[str, Any] | None = None) -> Any:
-        url = f"{self.base_url}{path}"
-        payload = json.dumps(body).encode() if body is not None else None
-        request = urllib.request.Request(
-            url,
-            data=payload,
-            method=method,
-            headers={
-                "Accept": "application/json",
-                "Authorization": f"Bearer {self.api_key}",
-                **({"Content-Type": "application/json"} if payload is not None else {}),
-            },
-        )
+        assert self._client is not None
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                raw = response.read()
-        except urllib.error.HTTPError as error:
+            response = self._client.request(method, path, json=dict(body) if body is not None else None)
+            response.raise_for_status()
+        except httpx.HTTPStatusError as error:
             # Never reflect a vendor body: it can contain internal data and the
             # configured bearer must never appear in application errors.
-            raise SubstrateRequestError(error.code, f"{method} {path}") from None
-        except (urllib.error.URLError, TimeoutError, OSError):
+            raise SubstrateRequestError(error.response.status_code, f"{method} {path}") from None
+        except httpx.HTTPError:
             raise SubstrateRequestError(503, f"{method} {path}") from None
-        if not raw:
+        if not response.content:
             return None
         try:
-            return json.loads(raw)
-        except json.JSONDecodeError:
+            return response.json()
+        except ValueError:
             raise SubstrateRequestError(502, f"{method} {path}") from None
 
     def info(self) -> SubstrateInfo:

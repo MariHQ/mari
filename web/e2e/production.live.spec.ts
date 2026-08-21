@@ -240,10 +240,11 @@ test("LIVE deployed knowledge chat answers from indexed sources", async ({ page 
   const destination = data.knowledgeChatDestinations.find((row) => row.status === "live" && row.url);
   test.skip(!destination, "No deployed knowledge chat destination exists in this workspace.");
   await page.goto(destination!.url);
-  await page.getByLabel("Ask a question").fill("What is Mari?");
+  await page.getByLabel("Ask a question").fill("mari");
   await page.getByRole("button", { name: "Ask", exact: true }).click();
   await expect(page.getByRole("button", { name: "Answering…" })).toHaveCount(0, { timeout: 90_000 });
   await expect(page.locator("article").last()).not.toBeEmpty();
+  await expect(page.locator("article").last()).not.toContainText(/no information about|no context available/i);
   await expect(page.getByRole("list", { name: "Sources" })).toBeVisible();
 });
 

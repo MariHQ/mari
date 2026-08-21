@@ -13,9 +13,10 @@ from mari_server.search.service import hybrid_count, hybrid_search
 
 from .service import configured_substrate
 
-_CACHE_TTL_SECONDS = 15.0
+_CACHE_TTL_SECONDS = 120.0
 _CACHE_LIMIT = 128
 _cache: dict[tuple[int, str, str], tuple[float, list]] = {}
+_key_locks: dict[tuple[int, str, str], threading.Lock] = {}
 _cache_lock = threading.Lock()
 
 
@@ -27,13 +28,23 @@ def _external_hits(project_id: int, provider: str, query: str) -> list:
         cached = _cache.get(key)
         if cached and now - cached[0] < _CACHE_TTL_SECONDS:
             return cached[1]
-    hits = configured_substrate().search(SearchRequest(query, 100, 0))
-    with _cache_lock:
-        _cache[key] = (now, hits)
-        if len(_cache) > _CACHE_LIMIT:
-            oldest = min(_cache, key=lambda value: _cache[value][0])
-            _cache.pop(oldest, None)
-    return hits
+        key_lock = _key_locks.setdefault(key, threading.Lock())
+    with key_lock:
+        with _cache_lock:
+            cached = _cache.get(key)
+            if cached and time.monotonic() - cached[0] < _CACHE_TTL_SECONDS:
+                return cached[1]
+        try:
+            hits = configured_substrate().search(SearchRequest(query, 100, 0))
+            with _cache_lock:
+                _cache[key] = (time.monotonic(), hits)
+                if len(_cache) > _CACHE_LIMIT:
+                    oldest = min(_cache, key=lambda value: _cache[value][0])
+                    _cache.pop(oldest, None)
+            return hits
+        finally:
+            with _cache_lock:
+                _key_locks.pop(key, None)
 
 
 def _row(value: dict) -> dict:
