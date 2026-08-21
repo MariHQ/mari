@@ -46,7 +46,12 @@ def build_tool_bindings(deps: ToolDependencies) -> dict[str, ToolBinding]:
             "id": row["id"], "title": row["title"],
             "snippet": str(row.get("snippet") or "")[:160],
         } for row in rows]
-        return ToolOutcome(True, f'{len(hits)} hits for "{text[:60]}"', hits)
+        evidence = tuple({
+            "document_id": int(row["id"]), "title": str(row["title"]),
+            "reason": "retrieved by knowledge search", "rank": index + 1,
+        } for index, row in enumerate(rows))
+        return ToolOutcome(True, f'{len(hits)} hits for "{text[:60]}"', hits,
+                           evidence=evidence)
 
     def read_document(arguments: Mapping[str, Any]) -> ToolOutcome:
         try:
@@ -68,7 +73,10 @@ def build_tool_bindings(deps: ToolDependencies) -> dict[str, ToolBinding]:
         }
         summary = (f'read "{document["title"]}" ({len(raw_body)} chars, '
                    f'tags: {", ".join(names) or "none"})')
-        return ToolOutcome(True, summary, detail)
+        return ToolOutcome(True, summary, detail, evidence=({
+            "document_id": document_id, "title": str(document["title"]),
+            "reason": "read to answer the user", "rank": 1,
+        },))
 
     def list_product_surfaces(_arguments: Mapping[str, Any]) -> ToolOutcome:
         detail = [{"path": surface.path, "label": surface.label} for surface in PRODUCT_SURFACES]

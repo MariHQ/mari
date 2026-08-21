@@ -29,6 +29,7 @@ from mari_server import settings as config
 from mari_server.conversations import routes as agent_api
 from mari_server.destinations import chat as chat_api
 from mari_server.destinations.graphql import DestinationMutations
+from mari_server.conversations.graphql import TrajectoryMutations
 from mari_server.automations.graphql import WorkflowMutations
 from mari_server.identity import access as access_module
 from mari_server.identity import routes as auth_module
@@ -50,7 +51,7 @@ from mari_server.search import routes as search_routes
 
 
 @strawberry.type
-class Mutation(MutKnowledge, WorkflowMutations, DestinationMutations, MutAdmin):
+class Mutation(MutKnowledge, WorkflowMutations, DestinationMutations, TrajectoryMutations, MutAdmin):
     pass
 
 

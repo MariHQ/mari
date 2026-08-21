@@ -83,9 +83,17 @@ class ProductionAgentRuntime:
         decision_schema = {
             "type": "object",
             "properties": {
-                "action": {"type": "string", "enum": ["tool", "answer"]},
+                "action": {"type": "string", "enum": ["tool", "tools", "answer"]},
                 "tool": {"type": "string", "enum": sorted(bindings)},
                 "arguments": {"type": "object"},
+                "calls": {"type": "array", "maxItems": 4, "items": {
+                    "type": "object",
+                    "properties": {
+                        "tool": {"type": "string", "enum": sorted(bindings)},
+                        "arguments": {"type": "object"},
+                    },
+                    "required": ["tool", "arguments"],
+                }},
             },
             "required": ["action"],
         }

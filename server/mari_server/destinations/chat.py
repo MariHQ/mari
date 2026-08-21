@@ -22,10 +22,11 @@ class ChatIn(BaseModel):
     message: str
 
 
-def _sse(project_access: access.AccessContext, body: ChatIn, usage: str):
+def _sse(project_access: access.AccessContext, body: ChatIn, usage: str,
+         enabled_tools: frozenset[str]):
     try:
         events = stream_answer(body.session_id, body.message,
-                               ports=ports(project_access, usage))
+                               ports=ports(project_access, usage, enabled_tools))
     except LookupError as error:
         raise HTTPException(404, str(error)) from error
 
@@ -43,7 +44,7 @@ def _sse(project_access: access.AccessContext, body: ChatIn, usage: str):
 
 @router.post("/chat")
 def private_chat(body: ChatIn, project_access: access.AccessContext = Depends(access.require_project)):
-    return _sse(project_access, body, "web")
+    return _sse(project_access, body, "web", frozenset({"search", "facts", "answers"}))
 
 
 def _live(project_slug: str, destination_slug: str) -> dict[str, t.Any]:
@@ -67,4 +68,8 @@ def public_chat(project_slug: str, destination_slug: str, body: ChatIn):
         row["project_id"], row["project_slug"], row["project_name"],
         "knowledge_chat", str(row["id"]), frozenset({"knowledge.read"}),
     )
-    return _sse(project_access, body, f"knowledge_chat:{row['id']}")
+    configured = row.get("tools") or []
+    if isinstance(configured, str):
+        configured = json.loads(configured)
+    return _sse(project_access, body, f"knowledge_chat:{row['id']}",
+                frozenset(str(tool) for tool in configured))

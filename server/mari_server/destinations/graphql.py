@@ -23,16 +23,16 @@ def _project(info: strawberry.Info):
 class DestinationMutations:
     @strawberry.mutation
     def create_knowledge_chat_destination(self, info: strawberry.Info, name: str, slug: str,
-                                          title: str, welcome: str = "") -> int:
+                                          title: str, tools: list[str], welcome: str = "") -> int:
         _require_admin(info)
-        return knowledge_chat.create(_project(info).project_id, name, slug, title, welcome,
+        return knowledge_chat.create(_project(info).project_id, name, slug, title, welcome, tools,
                                      ports=knowledge_chat_repository.ports())
 
     @strawberry.mutation
     def update_knowledge_chat_destination(self, info: strawberry.Info, id: int, name: str,
-                                          title: str, welcome: str) -> bool:
+                                          title: str, welcome: str, tools: list[str]) -> bool:
         _require_admin(info)
-        return knowledge_chat.update(_project(info).project_id, id, name, title, welcome,
+        return knowledge_chat.update(_project(info).project_id, id, name, title, welcome, tools,
                                      ports=knowledge_chat_repository.ports())
 
     @strawberry.mutation

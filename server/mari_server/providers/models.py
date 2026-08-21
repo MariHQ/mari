@@ -650,8 +650,20 @@ def generate_json(prompt: str, system: str = "", timeout: float = 120.0,
     if raw.startswith("```"):
         raw = raw.split("```")[1]
         raw = raw[4:] if raw.startswith("json") else raw
-    for opener, closer in (("[", "]"), ("{", "}")):
-        i, j = raw.find(opener), raw.rfind(closer)
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        pass
+    # Provider prose may precede a JSON value. Preserve the OUTERMOST value:
+    # checking '[' first turned {"facts":[...]} into the inner list and broke
+    # every object-shaped recipe that happened to contain an array.
+    candidates = sorted(
+        (index, opener, closer)
+        for opener, closer in (("{", "}"), ("[", "]"))
+        if (index := raw.find(opener)) >= 0
+    )
+    for i, opener, closer in candidates:
+        j = raw.rfind(closer)
         if i != -1 and j > i:
             try:
                 return json.loads(raw[i : j + 1])

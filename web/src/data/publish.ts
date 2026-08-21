@@ -12,7 +12,7 @@ import { EMPTY_BOTS, mapBots, type BotsStatusResponse } from "./bots";
 
 const QUERY = `{
   mcpServers { id name url scope status tools config }
-  knowledgeChatDestinations { id name slug title welcome status url }
+  knowledgeChatDestinations { id name slug title welcome status url tools }
   botsStatus
 }`;
 

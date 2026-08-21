@@ -132,10 +132,12 @@ function initialData() {
       ],
       stepCount: 3, failureCount: 0, reworkCount: 0, startedAt: now, completedAt: now,
       steps: [
-        { ordinal: 0, tool: "search", actionFamily: "discover", args: { query: "retention" }, summary: "3 hits", ok: true },
-        { ordinal: 1, tool: "read_document", actionFamily: "inspect", args: { id: 1 }, summary: "read Retention runbook", ok: true },
-        { ordinal: 2, tool: "create_task", actionFamily: "change", args: { kind: "review" }, summary: "opened review for Retention runbook", ok: true },
+        { ordinal: 0, tool: "search", actionFamily: "discover", args: { query: "retention" }, summary: "3 hits", ok: true, disposition: "included", editedArgs: null },
+        { ordinal: 1, tool: "read_document", actionFamily: "inspect", args: { id: 1 }, summary: "read Retention runbook", ok: true, disposition: "included", editedArgs: null },
+        { ordinal: 2, tool: "create_task", actionFamily: "change", args: { kind: "review" }, summary: "opened review for Retention runbook", ok: true, disposition: "included", editedArgs: null },
       ],
+      evidence: [{ documentId: 1, title: "Retention runbook", reason: "used as answer context", rank: 1, relevance: "observed", note: "" }],
+      promotedWorkflowId: null,
     }],
     trajectoryTotal: 1,
     trajectoryCategories: ["Documentation maintenance"],
@@ -230,6 +232,12 @@ export async function installMockApi(page: Page, options: {
       data = { addFact: true };
     } else if (/startFactScan/.test(query)) {
       data = { startFactScan: 99 };
+    } else if (/tuneTrajectoryStep/.test(query)) {
+      data = { tuneTrajectoryStep: true };
+    } else if (/tuneTrajectoryEvidence/.test(query)) {
+      data = { tuneTrajectoryEvidence: true };
+    } else if (/promoteTrajectoryToWorkflow/.test(query)) {
+      data = { promoteTrajectoryToWorkflow: 44 };
     } else if (/workflowRun\(/.test(query)) {
       data = { workflowRun: { id: 99, number: 1900, workflowName: "Fact scan", status: "passed", progress: 100, stats: { facts: 2 }, rows: [{ step: "Scan facts", status: "passed", detail: "2 claims", duration: "00:00:01" }] } };
     } else if (/approveRun/.test(query)) {

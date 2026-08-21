@@ -8,7 +8,7 @@ from mari_server.persistence.postgres.search import like_pattern
 def live_destination(project_slug: str, destination_slug: str):
     with db.connect() as conn:
         return conn.execute(
-            """SELECT d.id, d.project_id, d.name, d.slug, d.title, d.welcome,
+            """SELECT d.id, d.project_id, d.name, d.slug, d.title, d.welcome, d.tools,
                       p.slug AS project_slug, p.name AS project_name
                  FROM knowledge_chat_destinations d JOIN projects p ON p.id = d.project_id
                 WHERE p.slug = %s AND p.status = 'active'

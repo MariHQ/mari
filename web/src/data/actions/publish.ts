@@ -14,11 +14,11 @@ const UPDATE_SERVER = `mutation($id: Int!, $scope: String, $capabilities: JSON!)
 }`;
 const DELETE_SERVER = `mutation($id: Int!) { deleteMcpServer(id: $id) }`;
 const TEST_SERVER = `mutation($id: Int!) { testMcpServer(id: $id) }`;
-const CREATE_CHAT = `mutation($name: String!, $slug: String!, $title: String!, $welcome: String!) {
-  createKnowledgeChatDestination(name: $name, slug: $slug, title: $title, welcome: $welcome)
+const CREATE_CHAT = `mutation($name: String!, $slug: String!, $title: String!, $welcome: String!, $tools: [String!]!) {
+  createKnowledgeChatDestination(name: $name, slug: $slug, title: $title, welcome: $welcome, tools: $tools)
 }`;
-const UPDATE_CHAT = `mutation($id: Int!, $name: String!, $title: String!, $welcome: String!) {
-  updateKnowledgeChatDestination(id: $id, name: $name, title: $title, welcome: $welcome)
+const UPDATE_CHAT = `mutation($id: Int!, $name: String!, $title: String!, $welcome: String!, $tools: [String!]!) {
+  updateKnowledgeChatDestination(id: $id, name: $name, title: $title, welcome: $welcome, tools: $tools)
 }`;
 const DEPLOY_CHAT = `mutation($id: Int!) { deployKnowledgeChatDestination(id: $id) }`;
 

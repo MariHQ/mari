@@ -532,6 +532,7 @@ class KnowledgeChatDestination:
     welcome: str
     status: str
     url: str
+    tools: JSON
 
 
 @strawberry.type
@@ -605,6 +606,18 @@ class TrajectoryStep:
     args: JSON
     summary: str
     ok: bool
+    disposition: str
+    edited_args: JSON | None
+
+
+@strawberry.type
+class TrajectoryEvidence:
+    document_id: int
+    title: str
+    reason: str
+    rank: int
+    relevance: str
+    note: str
 
 
 @strawberry.type
@@ -625,6 +638,8 @@ class Trajectory:
     started_at: str
     completed_at: str
     steps: list[TrajectoryStep]
+    evidence: list[TrajectoryEvidence]
+    promoted_workflow_id: int | None
 
 
 @strawberry.type

@@ -46,7 +46,7 @@ from mari_server.product.types import (
     KnowledgeChatDestination, SourcePulse, StyleGuide, StyleRule, SyncEvent,
     SyncStatus, TagDef, Task, TaskSummary, ReviewConnection, ReviewItem, ReviewPageInfo,
     TopCited, UploadFile, UploadManifest,
-    Trajectory, TrajectoryStep, VoiceLayer, Workflow, WorkflowRun, Workspace,
+    Trajectory, TrajectoryEvidence, TrajectoryStep, VoiceLayer, Workflow, WorkflowRun, Workspace,
 )
 
 # ————————————————— lineage layout (LINEAGE-DESIGN.md §3.3) —————————————————
@@ -316,14 +316,26 @@ class Query:
                      category: str | None = None) -> list[Trajectory]:
         """Newest harvested agent workflows, bounded for progressive rendering."""
         cap, start = max(1, min(int(limit), 100)), max(0, int(offset))
-        rows, steps = trajectory_store.list_trajectories(cap, start, (category or "").strip() or None)
+        rows, steps, evidence = trajectory_store.list_trajectories(
+            cap, start, (category or "").strip() or None,
+        )
         if not rows:
             return []
         by_id: dict[int, list[TrajectoryStep]] = {int(row["id"]): [] for row in rows}
         for step in steps:
             by_id[int(step["trajectory_id"])].append(TrajectoryStep(
                 ordinal=int(step["ordinal"]), tool=step["tool"], action_family=step["action_family"],
-                args=jload(step["args"]) or {}, summary=step["summary"], ok=bool(step["ok"])))
+                args=jload(step["args"]) or {}, summary=step["summary"], ok=bool(step["ok"]),
+                disposition=step["disposition"], edited_args=jload(step.get("edited_args"))))
+        evidence_by_id: dict[int, list[TrajectoryEvidence]] = {
+            int(row["id"]): [] for row in rows
+        }
+        for reference in evidence:
+            evidence_by_id[int(reference["trajectory_id"])].append(TrajectoryEvidence(
+                document_id=int(reference["document_id"]), title=reference["title"],
+                reason=reference["reason"], rank=int(reference["rank"]),
+                relevance=reference["relevance"], note=reference["note"],
+            ))
         return [Trajectory(
             id=int(row["id"]), session_id=row.get("session_id"), prompt=row["prompt"],
             status=row["status"], model=row["model"], layer1=row["layer1"], layer2=row["layer2"],
@@ -331,7 +343,8 @@ class Query:
             step_count=int(row["step_count"]), failure_count=int(row["failure_count"]),
             rework_count=int(row["rework_count"]), started_at=row["started_at"].isoformat(),
             completed_at=row["completed_at"].isoformat() if row.get("completed_at") else "",
-            steps=by_id[int(row["id"])]) for row in rows]
+            steps=by_id[int(row["id"])], evidence=evidence_by_id[int(row["id"])],
+            promoted_workflow_id=row.get("promoted_workflow_id")) for row in rows]
 
     @strawberry.field
     def trajectory_total(self, category: str | None = None) -> int:
@@ -895,7 +908,8 @@ class Query:
         return [KnowledgeChatDestination(
                     id=r["id"], name=r["name"], slug=r["slug"], title=r["title"],
                     welcome=r["welcome"], status=r["status"],
-                    url=f"/knowledge-chat/{project_slug}/{r['slug']}")
+                    url=f"/knowledge-chat/{project_slug}/{r['slug']}",
+                    tools=jload(r.get("tools")) or [])
                 for r in rows]
 
     @strawberry.field

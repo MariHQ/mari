@@ -71,15 +71,37 @@ export function AgentDock() {
 
     const ok = await agentChatStream(text, sessionRef.current, {
       onMeta: (sid) => { sessionRef.current = sid; },
+      onToolProposal: ({ name, args }) =>
+        patchLast((m) => ({ ...m, tools: [...(m.tools ?? []), { name, args, ok: null, state: "proposed" } as ToolCallData] })),
       onToolStart: ({ name, args }) =>
-        patchLast((m) => ({ ...m, tools: [...(m.tools ?? []), { name, args, ok: null } as ToolCallData] })),
+        patchLast((m) => {
+          const tools = [...(m.tools ?? [])];
+          let proposed = -1;
+          for (let i = tools.length - 1; i >= 0; i--) {
+            if (tools[i].name === name && tools[i].state === "proposed") { proposed = i; break; }
+          }
+          if (proposed >= 0) tools[proposed] = { ...tools[proposed], state: "running" };
+          else tools.push({ name, args, ok: null, state: "running" });
+          return { ...m, tools };
+        }),
       onToolResult: ({ name, summary, ok: toolOk }) =>
         patchLast((m) => {
           const tools = [...(m.tools ?? [])];
           // Resolve the most recent still-running call of this tool.
           for (let i = tools.length - 1; i >= 0; i--) {
             if (tools[i].name === name && tools[i].ok == null) {
-              tools[i] = { ...tools[i], summary, ok: toolOk };
+              tools[i] = { ...tools[i], summary, ok: toolOk, state: "complete" };
+              break;
+            }
+          }
+          return { ...m, tools };
+        }),
+      onAuthRequired: ({ name, provider, kind, scopes, setupUrl }) =>
+        patchLast((m) => {
+          const tools = [...(m.tools ?? [])];
+          for (let i = tools.length - 1; i >= 0; i--) {
+            if (tools[i].name === name && tools[i].ok == null) {
+              tools[i] = { ...tools[i], ok: false, state: "auth_required", summary: `Authorization required: ${provider}`, auth: { provider, kind, scopes, setupUrl } };
               break;
             }
           }

@@ -67,6 +67,22 @@ SCAN_WORKERS = 4         # concurrent model calls; the pool is bounded on purpos
 SCAN_CALL_TIMEOUT = 60.0  # per model call
 SCAN_DEADLINE = 180.0    # wall clock for the whole scan, however many documents
 
+_EVIDENCE_SCHEMA = {
+    "type": "array", "items": {"type": "object", "properties": {
+        "document_id": {"type": "string"}, "quote": {"type": "string"},
+    }, "required": ["document_id", "quote"]},
+}
+_FACT_SCHEMA = {"type": "object", "properties": {"facts": {
+    "type": "array", "items": {"type": "object", "properties": {
+        "claim": {"type": "string"}, "evidence": _EVIDENCE_SCHEMA,
+    }, "required": ["claim", "evidence"]},
+}}, "required": ["facts"]}
+_DECISION_SCHEMA = {"type": "object", "properties": {"decisions": {
+    "type": "array", "items": {"type": "object", "properties": {
+        "statement": {"type": "string"}, "evidence": _EVIDENCE_SCHEMA,
+    }, "required": ["statement", "evidence"]},
+}}, "required": ["decisions"]}
+
 
 def _scan_batch(kind: str, doc_ids: list[int] | None, limit: int) -> list[dict]:
     """The documents this scan should read.
@@ -84,17 +100,21 @@ def _mark_scanned(kind: str, doc_ids: list[int]) -> None:
     knowledge_store.mark_scanned(kind, doc_ids)
 
 
-def _scan_concurrently(docs: list[dict], operation) -> tuple[list[tuple[dict, t.Any]], int]:
+def _scan_concurrently(
+    docs: list[dict], operation,
+) -> tuple[list[tuple[dict, t.Any]], int, int]:
     """Run one model call per document, at most SCAN_WORKERS at a time, and
     stop accepting new work once SCAN_DEADLINE has passed.
 
-    Returns (results, unread) — `unread` is how many documents the deadline cut
-    off. The caller reports it. A scan that ran out of time and said so is a
+    Returns (successful results, unread, failed). `unread` is how many documents
+    the deadline cut off and `failed` is how many completed model calls raised.
+    The caller reports both. A scan that ran out of time and said so is a
     scan someone can re-run; a scan that ran out of time and returned a smaller
     number is indistinguishable from a corpus with less in it."""
     if not docs:
-        return [], 0
+        return [], 0, 0
     results: list[tuple[dict, t.Any]] = []
+    failed = 0
     pool = cf.ThreadPoolExecutor(max_workers=min(SCAN_WORKERS, len(docs)),
                                  thread_name_prefix="mari-scan")
     futures = {
@@ -107,11 +127,25 @@ def _scan_concurrently(docs: list[dict], operation) -> tuple[list[tuple[dict, t.
         try:
             results.append((document, future.result()))
         except Exception:  # noqa: BLE001 — one bad document must not end the scan
-            results.append((document, None))
+            failed += 1
     for future in pending:
         future.cancel()
     pool.shutdown(wait=False, cancel_futures=True)
-    return results, len(docs) - len(results)
+    return results, len(pending), failed
+
+
+def _scan_note(unread: int, failed: int) -> str:
+    parts: list[str] = []
+    if failed:
+        parts.append(
+            f"{failed} document{'' if failed == 1 else 's'} failed model extraction and will be retried"
+        )
+    if unread:
+        parts.append(
+            f"{unread} document{'' if unread == 1 else 's'} not read because the scan hit its "
+            f"{int(SCAN_DEADLINE)}s budget"
+        )
+    return "; ".join(parts)
 
 
 def _component_document(doc: dict) -> KnowledgeDocument:
@@ -119,6 +153,36 @@ def _component_document(doc: dict) -> KnowledgeDocument:
         str(doc["id"]), str(doc["title"]), str(doc.get("body") or doc.get("snippet") or ""),
         revision=str(doc.get("updated_src") or ""), metadata={"source": str(doc.get("source") or "")},
     )
+
+
+def _ground_extraction_payload(value: t.Any, document: KnowledgeDocument,
+                               collection: str, text_field: str) -> t.Any:
+    """Keep only candidates whose evidence can be proven from this document.
+
+    Small local models often paraphrase the quote even when their claim is an
+    exact sentence. In that case the exact claim is the stronger quote. If
+    neither string occurs, the candidate is discarded; fabricated evidence is
+    never repaired with a fuzzy or model-derived guess.
+    """
+    if not isinstance(value, dict) or not isinstance(value.get(collection), list):
+        return value
+    grounded: list[dict] = []
+    for raw in value[collection]:
+        if not isinstance(raw, dict):
+            continue
+        exact_text = str(raw.get(text_field) or "").strip()
+        evidence: list[dict] = []
+        for reference in raw.get("evidence") or ():
+            if not isinstance(reference, dict) or str(reference.get("document_id") or "") != document.external_id:
+                continue
+            quote = str(reference.get("quote") or "").strip()
+            if quote and quote in document.body:
+                evidence.append({"document_id": document.external_id, "quote": quote})
+            elif exact_text and exact_text in document.body:
+                evidence.append({"document_id": document.external_id, "quote": exact_text})
+        if exact_text and evidence:
+            grounded.append({**raw, "evidence": evidence})
+    return {collection: grounded}
 
 
 # ————————————————— LLM helpers for mutations —————————————————
@@ -162,14 +226,21 @@ def scan_decisions_for(doc_ids: list[int] | None = None,
     existing = knowledge_store.decision_statements()
 
     def extract(doc: dict):
+        document = _component_document(doc)
         return component_extract_decisions(
-            [_component_document(doc)],
-            generate_json=lambda prompt, _version: llm.generate_json(
-                prompt, "You mine team knowledge for decisions worth ratifying.", SCAN_CALL_TIMEOUT),
+            [document],
+            generate_json=lambda prompt, _version: _ground_extraction_payload(
+                llm.generate_json(
+                    prompt, "You mine team knowledge for decisions worth ratifying.", SCAN_CALL_TIMEOUT,
+                    schema=_DECISION_SCHEMA),
+                document, "decisions", "statement",
+            ),
             maximum_documents=1, maximum_characters=1500,
         )
 
-    results, unread = _scan_concurrently(docs, extract)
+    results, unread, failed = _scan_concurrently(docs, extract)
+    if not results and failed:
+        raise RuntimeError(f"Model extraction failed for all {failed} completed documents")
 
     added = 0
     for doc, out in results:
@@ -188,8 +259,7 @@ def scan_decisions_for(doc_ids: list[int] | None = None,
                 added += 1
 
     _mark_scanned("decisions", [doc["id"] for doc, _ in results])
-    note = (f"{unread} document{'' if unread == 1 else 's'} not read — the scan hit its "
-            f"{int(SCAN_DEADLINE)}s budget; run it again to continue") if unread else ""
+    note = _scan_note(unread, failed)
     audit("scanned for decisions", f"{added} candidates from {len(results)} documents"
                                    + (f" ({note})" if note else ""))
     return added, len(results), note
@@ -215,14 +285,21 @@ def scan_facts_for(doc_ids: list[int] | None = None,
     existing = knowledge_store.fact_claims()
 
     def extract(doc: dict):
+        document = _component_document(doc)
         return component_extract_facts(
-            [_component_document(doc)],
-            generate_json=lambda prompt, _version: llm.generate_json(
-                prompt, "You extract verifiable facts from documentation.", SCAN_CALL_TIMEOUT),
+            [document],
+            generate_json=lambda prompt, _version: _ground_extraction_payload(
+                llm.generate_json(
+                    prompt, "You extract verifiable facts from documentation.", SCAN_CALL_TIMEOUT,
+                    schema=_FACT_SCHEMA),
+                document, "facts", "claim",
+            ),
             maximum_documents=1, maximum_characters=1500,
         )
 
-    results, unread = _scan_concurrently(docs, extract)
+    results, unread, failed = _scan_concurrently(docs, extract)
+    if not results and failed:
+        raise RuntimeError(f"Model extraction failed for all {failed} completed documents")
 
     # The ceiling is per document (FACT-2). A shared budget meant the first
     # document's claims displaced the fifth document's, and the fifth
@@ -244,8 +321,7 @@ def scan_facts_for(doc_ids: list[int] | None = None,
                 added += 1
 
     _mark_scanned("facts", [doc["id"] for doc, _ in results])
-    note = (f"{unread} document{'' if unread == 1 else 's'} not read — the scan hit its "
-            f"{int(SCAN_DEADLINE)}s budget; run it again to continue") if unread else ""
+    note = _scan_note(unread, failed)
     audit("scanned for facts", f"{added} candidates from {len(results)} documents"
                                + (f" ({note})" if note else ""))
     return added, len(results), note

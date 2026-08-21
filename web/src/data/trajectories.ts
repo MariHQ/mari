@@ -9,7 +9,9 @@ const QUERY = `query Trajectories($limit: Int!, $offset: Int!, $category: String
   trajectories(limit: $limit, offset: $offset, category: $category) {
     id sessionId prompt status model layer1 layer2 category macroIntent phases
     stepCount failureCount reworkCount startedAt completedAt
-    steps { ordinal tool actionFamily args summary ok }
+    steps { ordinal tool actionFamily args summary ok disposition editedArgs }
+    evidence { documentId title reason rank relevance note }
+    promotedWorkflowId
   }
   trajectoryTotal(category: $category)
   trajectoryCategories
@@ -27,7 +29,14 @@ export const EMPTY: TrajectoriesData = {
 
 export function buildTrajectories(res: Res | null, category: string | null, offset: number): TrajectoriesData {
   return {
-    rows: (res?.trajectories ?? []).slice(0, PAGE),
+    rows: (res?.trajectories ?? []).slice(0, PAGE).map((row) => ({
+      ...row,
+      steps: (row.steps ?? []).map((step) => ({
+        ...step, disposition: step.disposition ?? "included", editedArgs: step.editedArgs ?? null,
+      })),
+      evidence: row.evidence ?? [],
+      promotedWorkflowId: row.promotedWorkflowId ?? null,
+    })),
     total: res?.trajectoryTotal ?? 0,
     categories: res?.trajectoryCategories ?? [],
     category,

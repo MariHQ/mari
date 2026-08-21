@@ -300,7 +300,7 @@ const trajectoryData = buildTrajectories({
     layer1: "Searched and updated one document.", layer2: "Updated documentation.",
     category: "Documentation", macroIntent: "Repair docs", phases: [], stepCount: 2,
     failureCount: 0, reworkCount: 0, startedAt: "2026-08-19T12:00:00Z",
-    completedAt: "2026-08-19T12:00:01Z", steps: [],
+    completedAt: "2026-08-19T12:00:01Z", steps: [], evidence: [], promotedWorkflowId: null,
   }], trajectoryTotal: 1, trajectoryCategories: ["Documentation"],
 }, null, 0);
 const trajectoryHtml = render(trajectories, { data: trajectoryData, loading: false, error: null });
@@ -573,7 +573,7 @@ check("lineage: impact walks dependencies in reverse",
    unmounted until it is opened), so the assertion that it can list the view is
    that the view reached the page at all. */
 check("lineage: renders the graph",
-  render(lineage, { data: lineageData, loading: false, error: null }).includes("Notion · 1 document"));
+  render(lineage, { data: lineageData, loading: false, error: null }).includes("Pricing FAQ"));
 states(lineage, LINEAGE_EMPTY);
 
 /* ── Flows ──────────────────────────────────────────────────────────────── */

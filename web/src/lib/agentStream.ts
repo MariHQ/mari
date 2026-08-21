@@ -8,11 +8,14 @@ import { projectHeaders } from "./api";
 
 type AgentToolStart = { name: string; args: Record<string, unknown> };
 type AgentToolResult = { name: string; summary: string; ok: boolean };
+type AgentAuthRequest = { name: string; provider: string; kind: string; scopes: string[]; setupUrl: string };
 
 export type AgentStreamHandlers = {
   onMeta?: (sessionId: number) => void;
   onToolStart?: (ev: AgentToolStart) => void;
+  onToolProposal?: (ev: AgentToolStart) => void;
   onToolResult?: (ev: AgentToolResult) => void;
+  onAuthRequired?: (ev: AgentAuthRequest) => void;
   onNavigate?: (path: string) => void;
   onWarning?: (message: string) => void;
   onToken?: (token: string) => void;
@@ -49,8 +52,10 @@ export async function agentChatStream(
       try { data = JSON.parse(dataText); } catch { return; }
       switch (event) {
         case "meta": handlers.onMeta?.(data.session_id); break;
+        case "tool_proposal": handlers.onToolProposal?.({ name: data.name, args: data.args ?? {} }); break;
         case "tool_start": handlers.onToolStart?.({ name: data.name, args: data.args ?? {} }); break;
         case "tool_result": handlers.onToolResult?.({ name: data.name, summary: data.summary ?? "", ok: !!data.ok }); break;
+        case "auth_required": handlers.onAuthRequired?.({ name: data.name, provider: data.provider ?? "", kind: data.kind ?? "", scopes: data.scopes ?? [], setupUrl: data.setup_url ?? "" }); break;
         case "navigate": handlers.onNavigate?.(String(data.path ?? "")); break;
         case "warning": handlers.onWarning?.(String(data.message ?? "")); break;
         case "token": if (data.token) handlers.onToken?.(data.token); break;

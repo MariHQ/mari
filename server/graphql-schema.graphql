@@ -293,6 +293,7 @@ type KnowledgeChatDestination {
   welcome: String!
   status: String!
   url: String!
+  tools: JSON!
 }
 
 type LineageEdge {
@@ -407,13 +408,16 @@ type Mutation {
   deleteWorkflow(id: Int!): Boolean!
   setWorkflowStatus(id: Int!, status: String!): Boolean!
   setWorkflowPinned(id: Int!, pinned: Boolean!): Boolean!
-  createKnowledgeChatDestination(name: String!, slug: String!, title: String!, welcome: String! = ""): Int!
-  updateKnowledgeChatDestination(id: Int!, name: String!, title: String!, welcome: String!): Boolean!
+  createKnowledgeChatDestination(name: String!, slug: String!, title: String!, tools: [String!]!, welcome: String! = ""): Int!
+  updateKnowledgeChatDestination(id: Int!, name: String!, title: String!, welcome: String!, tools: [String!]!): Boolean!
   deployKnowledgeChatDestination(id: Int!): String!
   createMcpServer(name: String!, scope: String!, capabilities: JSON!): String!
   updateMcpServer(id: Int!, scope: String = null, capabilities: JSON!): Boolean!
   deleteMcpServer(id: Int!): Boolean!
   testMcpServer(id: Int!): JSON!
+  tuneTrajectoryStep(trajectoryId: Int!, ordinal: Int!, disposition: String!, editedArgs: JSON = null): Boolean!
+  tuneTrajectoryEvidence(trajectoryId: Int!, documentId: Int!, relevance: String!, note: String! = ""): Boolean!
+  promoteTrajectoryToWorkflow(trajectoryId: Int!, name: String!): Int!
   connectSource(provider: String!, displayName: String!, config: JSON!): Boolean!
   disconnectSource(provider: String!): Boolean!
   pauseSource(sourceId: Int!): Boolean!
@@ -702,6 +706,17 @@ type Trajectory {
   startedAt: String!
   completedAt: String!
   steps: [TrajectoryStep!]!
+  evidence: [TrajectoryEvidence!]!
+  promotedWorkflowId: Int
+}
+
+type TrajectoryEvidence {
+  documentId: Int!
+  title: String!
+  reason: String!
+  rank: Int!
+  relevance: String!
+  note: String!
 }
 
 type TrajectoryStep {
@@ -711,6 +726,8 @@ type TrajectoryStep {
   args: JSON!
   summary: String!
   ok: Boolean!
+  disposition: String!
+  editedArgs: JSON
 }
 
 type UploadFile {

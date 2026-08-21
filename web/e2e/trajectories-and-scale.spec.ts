@@ -16,6 +16,27 @@ test("trajectory view progressively discloses grounded layers and chronological 
   await expect(page.locator("body")).not.toContainText("secret-token");
 });
 
+test("a human can tune evidence and tool calls before codifying a trajectory", async ({ page }) => {
+  await page.goto("/trajectories");
+  await page.getByText("Evidence and abstraction layers", { exact: true }).click();
+  await page.getByLabel("search disposition").selectOption("preferred");
+  await page.getByText("Tune arguments", { exact: true }).first().click();
+  await page.getByLabel("search arguments").fill('{"query":"mari retention"}');
+  await page.getByRole("button", { name: "Save tool" }).click();
+  await expect.poll(() => api.calls.some((call) => call.query.includes("tuneTrajectoryStep")
+    && call.variables.disposition === "preferred")).toBeTruthy();
+
+  await page.getByLabel("Retention runbook relevance").selectOption("pinned");
+  await page.getByLabel("Retention runbook note").fill("Canonical evidence");
+  await page.getByRole("button", { name: "Save", exact: true }).last().click();
+  await expect.poll(() => api.calls.some((call) => call.query.includes("tuneTrajectoryEvidence")
+    && call.variables.relevance === "pinned")).toBeTruthy();
+
+  await page.getByLabel("Workflow name").fill("Retention answer workflow");
+  await page.getByRole("button", { name: "Create paused workflow" }).click();
+  await expect(page.getByRole("button", { name: "Open draft workflow" })).toBeVisible();
+});
+
 test("trajectory taxonomy filter and pagination remain URL-addressable", async ({ page }) => {
   const rows = Array.from({ length: 60 }, (_, index) => ({
     id: index + 1, sessionId: index + 100, prompt: `Task ${index + 1}`, status: "ready",
@@ -72,6 +93,7 @@ test("large lineage opens as a comprehensible aggregate instead of a 35-node hai
   api.setData("graphStats", { docs: count, edges: edges.length, sources: 2, people: 50,
     activity: [{ date: "2026-08-19", count }] });
   await page.goto("/lineage");
+  await page.getByRole("button", { name: "Overview", exact: true }).click();
   await expect(page.getByText(/2 groups · 2,000 documents, rolled up/i)).toBeVisible();
   await expect(page.getByRole("group", { name: /Documents\. Use the arrow keys/ }).getByRole("button")).toHaveCount(2);
   await expect(page.getByText("Document 1", { exact: true })).toHaveCount(0);

@@ -17,7 +17,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from mari_server.providers import models as llm
 from mari_server.identity import context as access
-from mari_server.persistence.postgres.database import exec_, q, q1
+from mari_server.persistence.postgres.database import exec_, jload, q, q1
 from mari_components.trajectories import (
     TrajectoryStep as ComponentTrajectoryStep,
     analyze_trajectory as component_analyze_trajectory,
@@ -34,7 +34,9 @@ _RECONCILE_LOCK = threading.Lock()
 _LAST_RECONCILE: dict[int, float] = {}
 
 
-def list_trajectories(limit: int, offset: int, category: str | None = None) -> tuple[list[dict], list[dict]]:
+def list_trajectories(
+    limit: int, offset: int, category: str | None = None,
+) -> tuple[list[dict], list[dict], list[dict]]:
     project_id = access.require_current_access().project_id
     args: list = [project_id]
     where = "project_id = %s"
@@ -45,11 +47,17 @@ def list_trajectories(limit: int, offset: int, category: str | None = None) -> t
     rows = q(f"SELECT * FROM trajectories WHERE {where} ORDER BY started_at DESC, id DESC LIMIT %s OFFSET %s",
              tuple(args))
     if not rows:
-        return [], []
-    steps = q("""SELECT trajectory_id, ordinal, tool, action_family, args, summary, ok
+        return [], [], []
+    trajectory_ids = [row["id"] for row in rows]
+    steps = q("""SELECT trajectory_id, ordinal, tool, action_family, args, summary, ok,
+                          disposition, edited_args
                    FROM trajectory_steps WHERE project_id = %s AND trajectory_id = ANY(%s)
-                   ORDER BY trajectory_id, ordinal""", (project_id, [row["id"] for row in rows]))
-    return rows, steps
+                   ORDER BY trajectory_id, ordinal""", (project_id, trajectory_ids))
+    evidence = q("""SELECT trajectory_id, document_id, title, reason, rank, relevance, note
+                      FROM trajectory_evidence
+                     WHERE project_id = %s AND trajectory_id = ANY(%s)
+                     ORDER BY trajectory_id, rank, id""", (project_id, trajectory_ids))
+    return rows, steps, evidence
 
 
 def trajectory_count(category: str | None = None) -> int:
@@ -250,6 +258,28 @@ def harvest(session_id: int, prompt: str, trace: list[dict], model: str) -> int:
                  VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
               (project_access.project_id, trajectory_id, step["ordinal"], step["tool"], step["action_family"],
                json.dumps(step["args"]), step["summary"], step["ok"]))
+    evidence: dict[int, dict] = {}
+    for event in trace:
+        for reference in event.get("evidence") or ():
+            if not isinstance(reference, dict):
+                continue
+            try:
+                document_id = int(reference.get("document_id"))
+            except (TypeError, ValueError):
+                continue
+            evidence.setdefault(document_id, reference)
+    for document_id, reference in evidence.items():
+        exec_("""INSERT INTO trajectory_evidence
+                   (project_id, trajectory_id, document_id, title, reason, rank)
+                 SELECT %s, %s, d.id, %s, %s, %s FROM documents d
+                  WHERE d.project_id = %s AND d.id = %s
+                 ON CONFLICT (trajectory_id, document_id) DO UPDATE
+                   SET reason = EXCLUDED.reason, rank = LEAST(trajectory_evidence.rank, EXCLUDED.rank)""",
+              (project_access.project_id, trajectory_id,
+               str(reference.get("title") or "")[:300],
+               str(reference.get("reason") or "")[:300],
+               max(0, int(reference.get("rank") or 0)),
+               project_access.project_id, document_id))
     try:
         accepted = _submit(project_access, trajectory_id, prompt, steps)
     except Exception:  # noqa: BLE001 -- deterministic fallback remains queryable
@@ -257,3 +287,84 @@ def harvest(session_id: int, prompt: str, trace: list[dict], model: str) -> int:
     if not accepted:
         _fallback(trajectory_id, steps, project_access.project_id, "Queued capacity exceeded")
     return trajectory_id
+
+
+def tune_step(trajectory_id: int, ordinal: int, disposition: str, edited_args: dict | None) -> bool:
+    if disposition not in {"included", "excluded", "preferred"}:
+        raise ValueError("Tool disposition must be included, excluded, or preferred.")
+    project_id = access.require_current_access().project_id
+    return bool(q1("""UPDATE trajectory_steps SET disposition = %s, edited_args = %s
+                       WHERE project_id = %s AND trajectory_id = %s AND ordinal = %s
+                       RETURNING id""",
+                   (disposition, json.dumps(edited_args) if edited_args is not None else None,
+                    project_id, trajectory_id, ordinal)))
+
+
+def tune_evidence(trajectory_id: int, document_id: int, relevance: str, note: str) -> bool:
+    if relevance not in {"observed", "relevant", "irrelevant", "pinned"}:
+        raise ValueError("Evidence relevance is not recognized.")
+    project_id = access.require_current_access().project_id
+    return bool(q1("""UPDATE trajectory_evidence SET relevance = %s, note = %s
+                       WHERE project_id = %s AND trajectory_id = %s AND document_id = %s
+                       RETURNING id""",
+                   (relevance, note.strip()[:500], project_id, trajectory_id, document_id)))
+
+
+def promote_to_workflow(trajectory_id: int, name: str) -> int:
+    """Create a paused, editable workflow from the human-tuned trace."""
+    project_id = access.require_current_access().project_id
+    clean_name = name.strip()
+    if not clean_name:
+        raise ValueError("Workflow name is required.")
+
+    def promote(conn):
+        row = conn.execute(
+            """SELECT id, layer2, macro_intent, promoted_workflow_id FROM trajectories
+                 WHERE project_id = %s AND id = %s FOR UPDATE""",
+            (project_id, trajectory_id),
+        ).fetchone()
+        if not row:
+            raise ValueError("Trajectory not found.")
+        if row.get("promoted_workflow_id"):
+            return int(row["promoted_workflow_id"])
+        if conn.execute(
+            "SELECT 1 FROM workflows WHERE project_id = %s AND name = %s", (project_id, clean_name),
+        ).fetchone():
+            raise ValueError("A workflow with that name already exists.")
+        observed = conn.execute(
+            """SELECT ordinal, tool, action_family, args, edited_args, disposition
+                 FROM trajectory_steps
+                WHERE project_id = %s AND trajectory_id = %s AND disposition <> 'excluded'
+                ORDER BY ordinal""", (project_id, trajectory_id),
+        ).fetchall()
+        if not observed:
+            raise ValueError("Include at least one tool call before creating a workflow.")
+        nodes = [{"kind": "trigger", "label": "Manual", "config": {"label": "Human approved"}}]
+        nodes.extend({
+            "kind": "observed_tool", "label": str(step["tool"]),
+            "config": {
+                "tool": str(step["tool"]),
+                "arguments": jload(step.get("edited_args")) if step.get("edited_args") is not None
+                else (jload(step.get("args")) or {}),
+                "family": str(step["action_family"]),
+                "disposition": str(step["disposition"]),
+            },
+        } for step in observed)
+        workflow = conn.execute(
+            """INSERT INTO workflows
+                 (project_id, name, description, color, pinned, status, nodes, trigger)
+               VALUES (%s, %s, %s, '#5f6f52', false, 'paused', %s, '{"on":""}'::jsonb)
+               RETURNING id""",
+            (project_id, clean_name,
+             str(row.get("layer2") or row.get("macro_intent") or "Observed agent workflow")[:500],
+             json.dumps(nodes)),
+        ).fetchone()
+        workflow_id = int(workflow["id"])
+        conn.execute(
+            "UPDATE trajectories SET promoted_workflow_id = %s WHERE project_id = %s AND id = %s",
+            (workflow_id, project_id, trajectory_id),
+        )
+        return workflow_id
+
+    from mari_server.persistence.postgres.database import transaction
+    return transaction(promote)

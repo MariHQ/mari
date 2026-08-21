@@ -17,7 +17,7 @@ def info(project_id: int = 7):
 class KnowledgeChatDestinationTests(unittest.TestCase):
     def test_create_validates_slug_and_calls_application_port(self):
         ports = knowledge_chat.KnowledgeChatPorts(
-            create=lambda project, name, slug, title, welcome: 12,
+            create=lambda project, name, slug, title, welcome, tools: 12,
             update=lambda *_args: False,
             deploy=lambda *_args: None,
             audit=lambda *_args: None,
@@ -27,13 +27,13 @@ class KnowledgeChatDestinationTests(unittest.TestCase):
             mut = graphql_destinations.DestinationMutations()
             self.assertEqual(
                 mut.create_knowledge_chat_destination(
-                    info(), "Company KB", "company-kb", "Ask Acme", "Welcome",
+                    info(), "Company KB", "company-kb", "Ask Acme", ["search"], "Welcome",
                 ),
                 12,
             )
             with self.assertRaisesRegex(ValueError, "URL slug"):
                 mut.create_knowledge_chat_destination(
-                    info(), "Company KB", "Bad Slug", "Ask Acme", "",
+                    info(), "Company KB", "Bad Slug", "Ask Acme", ["search"], "",
                 )
 
     def test_update_and_deploy_cannot_cross_projects(self):
@@ -46,7 +46,7 @@ class KnowledgeChatDestinationTests(unittest.TestCase):
         with patch.object(graphql_destinations, "_require_admin"), \
              patch.object(graphql_destinations.knowledge_chat_repository, "ports", return_value=ports):
             mut = graphql_destinations.DestinationMutations()
-            self.assertFalse(mut.update_knowledge_chat_destination(info(7), 99, "Name", "Title", "Welcome"))
+            self.assertFalse(mut.update_knowledge_chat_destination(info(7), 99, "Name", "Title", "Welcome", ["search"]))
             with self.assertRaisesRegex(ValueError, "not found"):
                 mut.deploy_knowledge_chat_destination(info(7), 99)
 
@@ -66,7 +66,8 @@ class KnowledgeChatDestinationTests(unittest.TestCase):
 
     def test_live_config_is_public_but_only_resolves_live_destination(self):
         row = {"id": 2, "project_id": 7, "project_slug": "acme", "project_name": "Acme",
-               "name": "Company KB", "slug": "company-kb", "title": "Ask Acme", "welcome": "Welcome"}
+               "name": "Company KB", "slug": "company-kb", "title": "Ask Acme", "welcome": "Welcome",
+               "tools": ["search"]}
         with patch.object(chat_api, "live_destination", return_value=row):
             self.assertEqual(chat_api.destination("acme", "company-kb")["title"], "Ask Acme")
         with patch.object(chat_api, "live_destination", return_value=None):
@@ -76,7 +77,8 @@ class KnowledgeChatDestinationTests(unittest.TestCase):
 
     def test_public_chat_uses_destination_scoped_read_access(self):
         row = {"id": 2, "project_id": 7, "project_slug": "acme", "project_name": "Acme",
-               "name": "Company KB", "slug": "company-kb", "title": "Ask Acme", "welcome": "Welcome"}
+               "name": "Company KB", "slug": "company-kb", "title": "Ask Acme", "welcome": "Welcome",
+               "tools": ["search"]}
         sentinel = object()
         with patch.object(chat_api, "live_destination", return_value=row), \
              patch.object(chat_api, "_sse", return_value=sentinel) as answer:
@@ -87,6 +89,7 @@ class KnowledgeChatDestinationTests(unittest.TestCase):
         self.assertEqual(destination_access.principal_type, "knowledge_chat")
         self.assertEqual(destination_access.capabilities, frozenset({"knowledge.read"}))
         self.assertEqual(answer.call_args.args[2], "knowledge_chat:2")
+        self.assertEqual(answer.call_args.args[3], frozenset({"search"}))
 
 
 if __name__ == "__main__":

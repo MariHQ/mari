@@ -8,6 +8,7 @@ from mari_server.identity import context as access
 from mari_server.providers import models as llm
 from mari_server.persistence.postgres.database import log_usage
 from mari_server.persistence.postgres import chat as chat_store
+from mari_server.persistence.postgres import trajectories as trajectory_store
 from mari_server.search.service import hybrid_search
 from mari_components.destinations.chat import ChatContext, ChatPorts, answer_search_query
 
@@ -22,7 +23,8 @@ def live_destination(project_slug: str, destination_slug: str):
     return chat_store.live_destination(project_slug, destination_slug)
 
 
-def ports(project_access: access.AccessContext, usage_detail: str) -> ChatPorts:
+def ports(project_access: access.AccessContext, usage_detail: str,
+          enabled_tools: frozenset[str]) -> ChatPorts:
     project_id = project_access.project_id
 
     def prepare(session_id: int | None, message: str) -> ChatContext:
@@ -34,7 +36,8 @@ def ports(project_access: access.AccessContext, usage_detail: str) -> ChatPorts:
             raise LookupError("Chat session not found.")
         chat_store.add_message(project_id, session_id, "user", message)
 
-        approved = chat_store.approved_answer(project_id, message, llm.embed(message))
+        approved = (chat_store.approved_answer(project_id, message, llm.embed(message))
+                    if "answers" in enabled_tools else None)
         if approved:
             sources = [{"n": 1, "source": "approved", "title": approved["question"],
                         "meta": "Approved answer · served verbatim",
@@ -42,13 +45,14 @@ def ports(project_access: access.AccessContext, usage_detail: str) -> ChatPorts:
             return ChatContext(session_id, sources, (), str(approved["answer"]))
 
         with access.use_access(project_access):
-            documents = hybrid_search(answer_search_query(message), 8)
+            documents = (hybrid_search(answer_search_query(message), 8)
+                         if "search" in enabled_tools else [])
         documents = documents[:4]
         context = "\n\n".join(
             f"[{i + 1}] {row['title']} ({row['source']})\n{row['body'] or row['snippet']}"
             for i, row in enumerate(documents)
         )
-        facts = chat_store.verified_facts(project_id)
+        facts = chat_store.verified_facts(project_id) if "facts" in enabled_tools else []
         context += "\n\nVerified facts:\n" + "\n".join(f"- {row['claim']}" for row in facts)
         sources = [{"n": i + 1, "source": row["source"], "title": row["title"],
                     "meta": row["snippet"][:110], "document_id": row["id"],
@@ -67,4 +71,20 @@ def ports(project_access: access.AccessContext, usage_detail: str) -> ChatPorts:
             project_id, session_id, "assistant", answer, json.dumps(list(sources)),
         ),
         record_usage=lambda: log_usage("chat_answer", usage_detail),
+        observe=lambda session_id, message, sources, approved: trajectory_store.harvest(
+            session_id, message, [{
+                "kind": "tool",
+                "name": "read_approved_answer" if approved else "search",
+                "args": {"query": message[:200]},
+                "summary": ("served approved answer" if approved
+                            else f"retrieved {len(sources)} documents"),
+                "ok": True,
+                "evidence": [{
+                    "document_id": source.get("document_id"),
+                    "title": source.get("title", ""),
+                    "reason": "used as answer context",
+                    "rank": source.get("n", 0),
+                } for source in sources if source.get("document_id")],
+            }], "knowledge-chat-v1",
+        ),
     )
