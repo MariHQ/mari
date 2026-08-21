@@ -46,8 +46,19 @@ def pulse_inputs() -> tuple[list[dict], list[dict], list[dict]]:
         workflows = conn.execute(
             "SELECT id, status, nodes, trigger FROM workflows WHERE project_id = %s", (project_id,),
         ).fetchall()
+        # The persisted counter is an ingestion progress hint and can lag when
+        # a machine restarts between committing document pages and finalizing
+        # the source row.  Product reads must report the canonical projection,
+        # otherwise a healthy searchable corpus can render as "0 documents".
         sources = conn.execute(
-            "SELECT * FROM sources WHERE project_id = %s ORDER BY id", (project_id,),
+            """SELECT s.*, count(d.id) AS docs_count
+                 FROM sources s
+                 LEFT JOIN documents d
+                   ON d.project_id = s.project_id AND d.source_id = s.id
+                WHERE s.project_id = %s
+                GROUP BY s.id
+                ORDER BY s.id""",
+            (project_id,),
         ).fetchall()
     return daily, workflows, sources
 
