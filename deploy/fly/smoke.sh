@@ -36,7 +36,7 @@ docker exec \
   -e MARI_EMBEDDING_PROVIDER=sentence-transformers \
   -e MARI_EMBEDDING_MODEL=sentence-transformers/all-mpnet-base-v2 \
   "$container" gosu mari python3 -c \
-  "import llm; vector=llm.embed('Mari product knowledge'); assert vector is not None, llm.last_error(); assert len(vector) == 768"
+  "from mari_server.providers import models; vector=models.embed('Mari product knowledge'); assert vector is not None, models.last_error(); assert len(vector) == 768"
 
 docker restart "$container" >/dev/null
 i=0
