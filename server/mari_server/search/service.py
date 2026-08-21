@@ -63,7 +63,7 @@ MAX_K = 500
 # The TTL keeps a transient ollama outage from being remembered all day.
 _VEC_TTL_SECONDS = 120.0
 _VEC_CACHE_MAX = 128
-_vec_cache: dict[tuple[int, str], tuple[float, list[float] | None]] = {}
+_vec_cache: dict[tuple[int, str, str], tuple[float, list[float] | None]] = {}
 _vec_lock = threading.Lock()
 
 
@@ -71,7 +71,7 @@ def query_vector(query: str) -> list[float] | None:
     """The embedding for this query text — computed once, then reused for the
     short window in which a page and its count are fetched. None means the
     embedder had nothing to say, and every caller in that window agrees."""
-    cache_key = (access.require_current_access().project_id, query)
+    cache_key = (access.require_current_access().project_id, llm.embedding_profile(), query)
     now = time.monotonic()
     with _vec_lock:
         hit = _vec_cache.get(cache_key)
@@ -160,7 +160,7 @@ def _rank_hybrid(query: str) -> list[dict]:
     ctx = access.require_current_access()
     project_id = ctx.project_id
     cache_key = (project_id, ctx.principal_type, ctx.principal_id,
-                 tuple(sorted(ctx.principals)), query)
+                 tuple(sorted(ctx.principals)), llm.embedding_profile(), query)
     now = time.monotonic()
     with _rank_lock:
         hit = _rank_cache.get(cache_key)
@@ -178,7 +178,8 @@ def _rank_hybrid(query: str) -> list[dict]:
         try:
             if retrieval.ensure_index():
                 semantic = {h["document_id"]: h["score"] for h in retrieval.index_for(project_id).search(
-                    np.asarray([vec], np.float32), k=ANN_CANDIDATES, candidate_k=1000)}
+                    np.asarray([vec], np.float32), k=ANN_CANDIDATES, candidate_k=1000,
+                    embedding_profile=llm.embedding_profile())}
         except (OSError, ValueError):
             semantic = {}
 

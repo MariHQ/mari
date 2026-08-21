@@ -20,11 +20,11 @@ gen_model = "gemma3:4b"
 # Deployment overrides. Leave blank to use Settings → Models.
 generation_provider = ""
 generation_model = ""
-embedding_provider = "sentence-transformers"
-embedding_model = "sentence-transformers/all-mpnet-base-v2"
+embedding_provider = "openai"
+embedding_model = "text-embedding-3-small"
 
-[sentence_transformers]
-cache_dir = "var/mari/cache/sentence-transformers"
+[openai]
+api_key = ""
 
 [llm_gateway]
 base_url = ""

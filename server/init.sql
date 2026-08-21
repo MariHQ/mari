@@ -333,7 +333,7 @@ ON CONFLICT (tag) DO NOTHING;
 
 INSERT INTO settings (key, value) VALUES
   ('workspace',       '{"name":"","slug":"","plan":"","timezone":"America/Los_Angeles","language":"English (US)"}'),
-  ('embedding',       '{"provider":"ollama","model":"nomic-embed-text","dims":768,"options":["openai:text-embedding-3-small","ollama:nomic-embed-text","local:bge-small-en","local:all-MiniLM-L6-v2"],"default":"openai:text-embedding-3-small"}'),
+  ('embedding',       '{"provider":"openai","model":"text-embedding-3-small","dims":768,"options":["openai:text-embedding-3-small","ollama:nomic-embed-text"],"default":"openai:text-embedding-3-small"}'),
   ('llm',             '{"provider":"ollama","model":"gemma3:4b","options":["anthropic:claude-sonnet-5","openai:gpt-5.2","ollama:gemma3:4b"],"keys":{"anthropic":"","openai":""}}'),
   ('chunking',        '{"default":{"strategy":"heading","max_tokens":512,"overlap":64},"slack":{"strategy":"thread","max_tokens":768,"overlap":0}}'),
   ('digest_schedule', '{"cron":"0 9 * * MON","enabled":true,"last_run":""}')
@@ -437,6 +437,7 @@ CREATE TABLE IF NOT EXISTS chunks (
   idx          int NOT NULL,
   content      text NOT NULL,
   content_hash text NOT NULL,
+  embedding_profile text NOT NULL DEFAULT '',
   embedding    vector(768),
   UNIQUE (document_id, idx)
 );

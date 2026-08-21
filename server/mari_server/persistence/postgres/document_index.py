@@ -109,24 +109,30 @@ def sync_chunks(conn, doc_id: int, title: str, body: str,
     """Chunk + hash + embed-only-changed. Returns (chunks, newly_embedded)."""
     pieces = chunk_text(f"{title}\n\n{body}", max_tokens, overlap)
     project_id = access.require_current_access().project_id
-    existing = {r["idx"]: r["content_hash"] for r in conn.execute(
-        "SELECT idx, content_hash FROM chunks WHERE project_id = %s AND document_id = %s",
+    profile = llm.embedding_profile()
+    existing = {r["idx"]: r for r in conn.execute(
+        """SELECT idx, content_hash, embedding_profile, embedding IS NOT NULL AS embedded
+             FROM chunks WHERE project_id = %s AND document_id = %s""",
         (project_id, doc_id)).fetchall()}
     embedded = 0
     for idx, piece in enumerate(pieces):
         h = content_hash(piece)
-        if existing.get(idx) == h:
+        prior = existing.get(idx)
+        if (prior and prior["content_hash"] == h
+                and prior["embedding_profile"] == profile and prior["embedded"]):
             continue
         vec = llm.embed(piece)
         if vec:
             embedded += 1
         conn.execute("""
-            INSERT INTO chunks (project_id, document_id, idx, content, content_hash, embedding)
-            VALUES (%s, %s, %s, %s, %s, %s::vector)
+            INSERT INTO chunks (project_id, document_id, idx, content, content_hash,
+                                embedding_profile, embedding)
+            VALUES (%s, %s, %s, %s, %s, %s, %s::vector)
             ON CONFLICT (document_id, idx) DO UPDATE SET
               content = EXCLUDED.content, content_hash = EXCLUDED.content_hash,
+              embedding_profile = EXCLUDED.embedding_profile,
               embedding = EXCLUDED.embedding""",
-            (project_id, doc_id, idx, piece, h, str(vec) if vec else None))
+            (project_id, doc_id, idx, piece, h, profile, str(vec) if vec else None))
     conn.execute("DELETE FROM chunks WHERE project_id = %s AND document_id = %s AND idx >= %s",
                  (project_id, doc_id, len(pieces)))
     # doc-level embedding = mean of chunk embeddings (keeps existing doc search working)
@@ -152,17 +158,21 @@ def sync_chunks_many(conn, documents: list[tuple[int, str, str]],
                      max_tokens: int, overlap: int) -> tuple[int, int]:
     """Synchronize derived chunks for several documents with one model batch."""
     project_id = access.require_current_access().project_id
+    profile = llm.embedding_profile()
     prepared: list[tuple[int, int, str, str]] = []
     piece_counts: dict[int, int] = {}
     for doc_id, title, body in documents:
         pieces = chunk_text(f"{title}\n\n{body}", max_tokens, overlap)
         piece_counts[doc_id] = len(pieces)
-        existing = {r["idx"]: r["content_hash"] for r in conn.execute(
-            "SELECT idx, content_hash FROM chunks WHERE project_id = %s AND document_id = %s",
+        existing = {r["idx"]: r for r in conn.execute(
+            """SELECT idx, content_hash, embedding_profile, embedding IS NOT NULL AS embedded
+                 FROM chunks WHERE project_id = %s AND document_id = %s""",
             (project_id, doc_id)).fetchall()}
         for idx, piece in enumerate(pieces):
             h = content_hash(piece)
-            if existing.get(idx) != h:
+            prior = existing.get(idx)
+            if not (prior and prior["content_hash"] == h
+                    and prior["embedding_profile"] == profile and prior["embedded"]):
                 prepared.append((doc_id, idx, piece, h))
 
     vectors = llm.embed_many(row[2] for row in prepared)
@@ -171,12 +181,14 @@ def sync_chunks_many(conn, documents: list[tuple[int, str, str]],
         if vec:
             embedded += 1
         conn.execute("""
-            INSERT INTO chunks (project_id, document_id, idx, content, content_hash, embedding)
-            VALUES (%s, %s, %s, %s, %s, %s::vector)
+            INSERT INTO chunks (project_id, document_id, idx, content, content_hash,
+                                embedding_profile, embedding)
+            VALUES (%s, %s, %s, %s, %s, %s, %s::vector)
             ON CONFLICT (document_id, idx) DO UPDATE SET
               content = EXCLUDED.content, content_hash = EXCLUDED.content_hash,
+              embedding_profile = EXCLUDED.embedding_profile,
               embedding = EXCLUDED.embedding""",
-            (project_id, doc_id, idx, piece, h, str(vec) if vec else None))
+            (project_id, doc_id, idx, piece, h, profile, str(vec) if vec else None))
 
     for doc_id, count in piece_counts.items():
         conn.execute("DELETE FROM chunks WHERE project_id = %s AND document_id = %s AND idx >= %s",
@@ -194,6 +206,38 @@ def sync_chunks_many(conn, documents: list[tuple[int, str, str]],
     if embedded:
         retrieval.schedule_rebuild()
     return sum(piece_counts.values()), embedded
+
+
+def reindex_all(batch_size: int = 100) -> tuple[int, int]:
+    """Rebuild every projected document whose embedding profile is stale.
+
+    Chunks whose content and profile already match are reused without an HTTP
+    call. Batches commit independently because vectors are derived and a
+    stopped run can safely resume from the cache boundary.
+    """
+    project_id = access.require_current_access().project_id
+    max_tokens, overlap = chunk_settings()
+    documents = 0
+    embedded = 0
+    offset = 0
+    while True:
+        with connection() as conn:
+            rows = conn.execute(
+                """SELECT id, title, body FROM documents
+                     WHERE project_id = %s ORDER BY id LIMIT %s OFFSET %s""",
+                (project_id, batch_size, offset),
+            ).fetchall()
+            if not rows:
+                break
+            _, changed = sync_chunks_many(
+                conn,
+                [(int(row["id"]), str(row["title"]), str(row["body"] or "")) for row in rows],
+                max_tokens, overlap,
+            )
+        documents += len(rows)
+        embedded += changed
+        offset += len(rows)
+    return documents, embedded
 
 
 def delete_documents(conn, doc_ids: list[int]) -> None:

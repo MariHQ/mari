@@ -182,6 +182,8 @@ class MutAdmin:
         # the old provider — the page was decorative for half a minute.
         if key in ("llm", "embedding"):
             llm.reload_settings()
+        if key == "embedding":
+            ingest.start_reindex()
         return True
 
     @strawberry.mutation

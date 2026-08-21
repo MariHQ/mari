@@ -104,7 +104,7 @@ function initialData() {
     ],
     indexStats: { docs: 3, chunks: 4, embedded: 4 },
     modelCatalog: {
-      embedding: ["ollama:nomic-embed-text", "ollama:mxbai-embed-large", "sentence-transformers:sentence-transformers/all-mpnet-base-v2"],
+      embedding: ["openai:text-embedding-3-small", "ollama:nomic-embed-text", "ollama:mxbai-embed-large"],
       generation: ["ollama:gemma3:4b", "ollama:llama3.2", "gateway:deepseek-v4-flash"],
       errors: {},
     },

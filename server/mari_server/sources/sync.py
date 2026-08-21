@@ -32,6 +32,7 @@ def status(source_id: int) -> dict:
 
 
 _RUNNING: set[int] = set()
+_REINDEX_RUNNING: set[int] = set()
 log = logging.getLogger(__name__)
 
 
@@ -95,6 +96,32 @@ def run_sync(source_id: int, full: bool = False) -> dict | None:
         _RUNNING.add(source_id)
     update_status(source_id, state="running", phase="listing", done=0, total=0, error="")
     return _run_guarded(source_id, full)
+
+
+def start_reindex() -> bool:
+    """Re-embed stale document chunks after an embedding-model change."""
+    project_access = access.require_current_access()
+    project_id = project_access.project_id
+    with _LOCK:
+        if project_id in _REINDEX_RUNNING:
+            return False
+        _REINDEX_RUNNING.add(project_id)
+
+    def run() -> None:
+        try:
+            from mari_server.persistence.postgres import document_index
+            with access.use_access(project_access):
+                documents, embedded = document_index.reindex_all()
+                log.info("embedding reindex complete: project=%s documents=%s embeddings=%s",
+                         project_id, documents, embedded)
+        except Exception:
+            log.exception("embedding reindex failed: project=%s", project_id)
+        finally:
+            with _LOCK:
+                _REINDEX_RUNNING.discard(project_id)
+
+    threading.Thread(target=run, daemon=True, name=f"mari-reindex-{project_id}").start()
+    return True
 
 
 # ————————————————— startup wiring —————————————————

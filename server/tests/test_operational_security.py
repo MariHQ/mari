@@ -138,6 +138,16 @@ class RetrievalGenerationTests(unittest.TestCase):
             DerivedVectorIndex(directory, self.cfg).build(self._docs(1, 20))
             self.assertEqual(reader.search(self._docs(1, 0)[0], k=1)[0]["document_id"], 20)
 
+    def test_index_rejects_queries_from_a_different_embedding_space(self):
+        with tempfile.TemporaryDirectory() as directory:
+            index = DerivedVectorIndex(directory, self.cfg)
+            index.build(self._docs(0, 10), embedding_profile="openai:model-a")
+            self.assertEqual(
+                index.search(self._docs(0, 0)[0], k=1, embedding_profile="openai:model-b"),
+                [],
+            )
+            self.assertFalse(index.available_for("openai:model-b"))
+
     def test_partial_s3_generation_never_replaces_last_good_pointer(self):
         with tempfile.TemporaryDirectory() as cache, tempfile.TemporaryDirectory() as remote_dir:
             with patch.dict(os.environ, {"MARI_VECTOR_CACHE": cache}):
