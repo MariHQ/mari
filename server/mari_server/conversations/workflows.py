@@ -78,6 +78,7 @@ def select(query: str, available_tools: set[str] | None = None) -> dict | None:
     """Match intent → phase → step using cached provider embeddings."""
     rows = store.active_workflows(50)
     normalized = re.sub(r"[^a-z0-9]+", " ", query.lower()).strip()
+    exact_matches: list[tuple[bool, dict]] = []
     for row in rows:
         phases = _json(row.get("phases"), [])
         steps = _json(row.get("steps"), [])
@@ -99,10 +100,18 @@ def select(query: str, available_tools: set[str] | None = None) -> dict | None:
         if not chosen:
             continue
         phase_index = _phase_for(int(steps[exact_step].get("ordinal") or 0), phases)
-        return {**row, "steps": chosen, "match": {
+        selected = {**row, "steps": chosen, "match": {
             "workflow_score": 1.0, "phase_index": phase_index, "phase_score": 1.0,
             "step_index": exact_step, "step_score": 1.0, "exact": True,
         }}
+        fresh_cache = (row.get("cache_policy") == "reviewed_answer"
+                       and store.workflow_cache_state(row) == "fresh")
+        exact_matches.append((fresh_cache, selected))
+    if exact_matches:
+        # Multiple reviewed workflows may intentionally share a trigger. A
+        # current explicit cache is the most specific executable contract and
+        # must not be shadowed by a newer uncached observation.
+        return max(exact_matches, key=lambda item: int(item[0]))[1]
     query_vector = llm.embed(query)
     if not query_vector:
         return None

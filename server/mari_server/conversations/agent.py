@@ -146,6 +146,7 @@ class ProductionAgentRuntime:
             save_answer=save_answer,
             observe_trajectory=lambda session_id, message, trace, version: trajectory.harvest(
                 session_id, message, list(trace), version,
+                int(selected["id"]) if selected else None,
             ),
             record_usage=log_usage,
         )

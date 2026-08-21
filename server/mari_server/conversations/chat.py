@@ -103,5 +103,6 @@ def ports(project_access: access.AccessContext, usage_detail: str,
                     "rank": source.get("n", 0),
                 } for source in sources if source.get("document_id")],
             }], "knowledge-chat-v1",
+            int(selected_state["workflow"]["id"]) if selected_state["workflow"] else None,
         ),
     )

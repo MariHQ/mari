@@ -21,10 +21,21 @@ ROW = {
 class AssistantWorkflowCacheTests(unittest.TestCase):
     def test_exact_reviewed_trigger_needs_no_embedding(self):
         with patch.object(workflows.store, "active_workflows", return_value=[dict(ROW)]), \
+             patch.object(workflows.store, "workflow_cache_state", return_value="fresh"), \
              patch.object(workflows.llm, "embed") as embed:
             selected = workflows.select("what is mari?", {"search"})
         self.assertEqual(selected["id"], 14)
         self.assertTrue(selected["match"]["exact"])
+        embed.assert_not_called()
+
+    def test_fresh_cache_wins_over_newer_uncached_duplicate_trigger(self):
+        uncached = {**ROW, "id": 15, "cache_policy": "none"}
+        with patch.object(workflows.store, "active_workflows",
+                          return_value=[uncached, dict(ROW)]), \
+             patch.object(workflows.store, "workflow_cache_state", return_value="fresh"), \
+             patch.object(workflows.llm, "embed") as embed:
+            selected = workflows.select("what is mari?", {"search"})
+        self.assertEqual(selected["id"], 14)
         embed.assert_not_called()
 
     def test_cached_agent_response_never_iterates_the_model_loop(self):

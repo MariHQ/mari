@@ -65,7 +65,8 @@ def list_trajectories(
                               AS promoted_workflow_dependency_count
                     FROM trajectories t
                     LEFT JOIN assistant_workflows aw
-                      ON aw.project_id = t.project_id AND aw.id = t.promoted_workflow_id
+                      ON aw.project_id = t.project_id
+                     AND aw.id = COALESCE(t.promoted_workflow_id, t.matched_workflow_id)
                    WHERE {where.replace('project_id', 't.project_id')}
                    ORDER BY t.started_at DESC, t.id DESC LIMIT %s OFFSET %s""",
              tuple(args))
@@ -261,16 +262,19 @@ def _maybe_reconcile(project_access: access.AccessContext) -> None:
             _LAST_RECONCILE.pop(project_access.project_id, None)
 
 
-def harvest(session_id: int, prompt: str, trace: list[dict], model: str) -> int:
+def harvest(session_id: int, prompt: str, trace: list[dict], model: str,
+            matched_workflow_id: int | None = None) -> int:
     project_access = access.require_current_access()
     _maybe_reconcile(project_access)
     steps = normalize_steps(trace)
     row = q1("""INSERT INTO trajectories
-                  (project_id, session_id, prompt, status, model, step_count, failure_count, rework_count, phases)
-                SELECT %s, s.id, %s, 'processing', %s, %s, %s, %s, %s
+                  (project_id, session_id, prompt, status, model, step_count, failure_count,
+                   rework_count, phases, matched_workflow_id)
+                SELECT %s, s.id, %s, 'processing', %s, %s, %s, %s, %s, %s
                   FROM chat_sessions s WHERE s.id = %s AND s.project_id = %s RETURNING id""",
              (project_access.project_id, prompt[:8000], model[:100], len(steps),
               sum(not s["ok"] for s in steps), rework_count(steps), json.dumps(segment_phases(steps)),
+              matched_workflow_id,
               session_id, project_access.project_id))
     if not row:
         raise ValueError("Chat session does not belong to the active project")
@@ -342,7 +346,8 @@ def promote_to_workflow(trajectory_id: int, name: str) -> int:
 
     def promote(conn):
         row = conn.execute(
-            """SELECT id, layer2, macro_intent, phases, promoted_workflow_id FROM trajectories
+            """SELECT id, layer2, macro_intent, phases, promoted_workflow_id,
+                      matched_workflow_id FROM trajectories
                  WHERE project_id = %s AND id = %s FOR UPDATE""",
             (project_id, trajectory_id),
         ).fetchone()
@@ -350,6 +355,14 @@ def promote_to_workflow(trajectory_id: int, name: str) -> int:
             raise ValueError("Trajectory not found.")
         if row.get("promoted_workflow_id"):
             return int(row["promoted_workflow_id"])
+        if row.get("matched_workflow_id"):
+            workflow_id = int(row["matched_workflow_id"])
+            conn.execute(
+                """UPDATE trajectories SET promoted_workflow_id = %s
+                     WHERE project_id = %s AND id = %s""",
+                (workflow_id, project_id, trajectory_id),
+            )
+            return workflow_id
         if conn.execute(
             "SELECT 1 FROM assistant_workflows WHERE project_id = %s AND name = %s",
             (project_id, clean_name),
