@@ -56,8 +56,9 @@ class TrajectoryMutations:
         workflow_id = trajectories.promote_to_workflow(
             trajectory_id, name, matched_workflow_id=matched,
         )
+        clustered = workflow_service.cluster_unassigned()
         audit("promoted trajectory", f"trajectory:{trajectory_id}",
-              detail=[("workflow", workflow_id)])
+              detail=[("workflow", workflow_id), ("clustered observations", clustered)])
         return workflow_id
 
     @strawberry.mutation

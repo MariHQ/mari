@@ -434,6 +434,27 @@ def trajectory_for_split(trajectory_id: int) -> dict | None:
               (project_id, trajectory_id))
 
 
+def unassigned_trajectories(limit: int = 200) -> list[dict]:
+    project_id = access.require_current_access().project_id
+    return q("""SELECT id, prompt FROM trajectories
+                 WHERE project_id = %s AND promoted_workflow_id IS NULL
+                   AND matched_workflow_id IS NULL AND status IN ('ready', 'fallback')
+                 ORDER BY started_at DESC, id DESC LIMIT %s""",
+             (project_id, max(1, min(int(limit), 500))))
+
+
+def assign_trajectory_cluster(trajectory_id: int, workflow_id: int) -> bool:
+    project_id = access.require_current_access().project_id
+    return bool(q1("""UPDATE trajectories t SET matched_workflow_id = %s
+                        WHERE t.project_id = %s AND t.id = %s
+                          AND t.promoted_workflow_id IS NULL
+                          AND t.matched_workflow_id IS NULL
+                          AND EXISTS (SELECT 1 FROM assistant_workflows aw
+                                       WHERE aw.project_id = t.project_id AND aw.id = %s)
+                      RETURNING t.id""",
+                   (workflow_id, project_id, trajectory_id, workflow_id)))
+
+
 def split_workflow(trajectory_id: int, name: str) -> int:
     row = trajectory_for_split(trajectory_id)
     if not row or not row.get("workflow_id"):

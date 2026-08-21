@@ -240,3 +240,15 @@ def suggest_split_name(trajectory_id: int) -> str:
     if not name:
         raise RuntimeError(llm.last_error() or "The model did not suggest a workflow name.")
     return name
+
+
+def cluster_unassigned(limit: int = 200) -> int:
+    """Attach historical observations to their nearest reviewed workflow."""
+    assigned = 0
+    for observation in store.unassigned_trajectories(limit):
+        selected = select(str(observation.get("prompt") or ""), None)
+        if selected and store.assign_trajectory_cluster(
+            int(observation["id"]), int(selected["id"]),
+        ):
+            assigned += 1
+    return assigned
