@@ -79,8 +79,12 @@ class ProductionAgentRuntime:
         )
         return build_tool_bindings(dependencies)
 
-    def ports(self, bindings: dict[str, ToolBinding], message: str = "") -> AgentPorts:
-        selected = assistant_workflows.select(message, set(bindings))
+    def select_workflow(self, message: str, bindings: dict[str, ToolBinding]) -> dict | None:
+        return assistant_workflows.select(message, set(bindings))
+
+    def ports(self, bindings: dict[str, ToolBinding], message: str = "",
+              selected: dict | None = None) -> AgentPorts:
+        selected = selected if selected is not None else self.select_workflow(message, bindings)
         reviewed_calls = iter(selected.get("steps") or [] if selected else [])
         system = planner_instructions(
             bindings, assistant_workflows.guidance(message, set(bindings)),

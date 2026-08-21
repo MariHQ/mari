@@ -71,6 +71,11 @@ export function AgentDock() {
 
     const ok = await agentChatStream(text, sessionRef.current, {
       onMeta: (sid) => { sessionRef.current = sid; },
+      onWorkflowSelected: ({ id, name }) =>
+        patchLast((m) => ({ ...m, tools: [...(m.tools ?? []), {
+          name: `Workflow · ${name}`, args: { workflowId: id }, ok: true,
+          state: "complete", summary: "Codified workflow selected",
+        } as ToolCallData] })),
       onToolProposal: ({ name, args }) =>
         patchLast((m) => ({ ...m, tools: [...(m.tools ?? []), { name, args, ok: null, state: "proposed" } as ToolCallData] })),
       onToolStart: ({ name, args }) =>

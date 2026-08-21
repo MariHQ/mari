@@ -44,13 +44,18 @@ def agent_chat(
             raise HTTPException(404, str(error)) from error
     runtime.append_user_message(session_id, message)
     bindings = runtime.bindings()
+    selected_workflow = runtime.select_workflow(message, bindings)
     outputs = stream_agent_turn(
-        session_id, message, bindings, runtime.ports(bindings, message),
+        session_id, message, bindings, runtime.ports(bindings, message, selected_workflow),
         minimum_tool_observations=1,
     )
 
     def response() -> Iterator[str]:
         yield f"event: meta\ndata: {json.dumps({'session_id': session_id})}\n\n"
+        if selected_workflow:
+            yield "event: workflow_selected\ndata: " + json.dumps({
+                "id": selected_workflow["id"], "name": selected_workflow["name"],
+            }) + "\n\n"
         iterator = iter(outputs)
         while True:
             # StreamingResponse may resume a synchronous generator in a
