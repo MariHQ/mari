@@ -247,7 +247,7 @@ class MutAdmin:
                "last_error": "", "item_hashes": {}}
         source_id = admin_store.add_github_source(repo, cfg)
         audit("connected GitHub repo", repo, actor["name"],
-              detail=[("Branch", branch), ("Paths", paths or "(whole repository)")])
+              detail=[("Branch", branch), ("Paths", paths or "(documentation formats)")])
         # every github source gets a scheduled sync flow (Flows UI owns cadence)
         flowengine.ensure_sync_flow(source_id, repo)
         ingest.start_sync(source_id)
