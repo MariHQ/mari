@@ -18,6 +18,8 @@ from __future__ import annotations
 import datetime
 import hashlib
 import json
+import logging
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -27,6 +29,9 @@ import psycopg
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
+from slack_sdk.socket_mode import SocketModeClient
+from slack_sdk.socket_mode.response import SocketModeResponse
+from slack_sdk.web import WebClient
 
 from mari_server.identity import routes as auth
 from mari_server.persistence.postgres import document_index
@@ -52,11 +57,15 @@ SLACK_API = "https://slack.com/api"
 SLACK_WORKERS = max(1, int(config.get("bots", "slack_workers", 4)))
 _EVENT_INBOX = DEFAULT_INBOX
 _EVENT_DISPATCHER: EventDispatcher | None = None
+_SOCKET_LOCK = threading.Lock()
+_SOCKET_CLIENTS: dict[int, SocketModeClient] = {}
+log = logging.getLogger("mari.slack")
 
 
 class SlackSetupIn(BaseModel):
     bot_token: str
     signing_secret: str
+    app_token: str = ""
 
 
 # ————————————————— settings helpers —————————————————
@@ -253,7 +262,7 @@ settings:
   interactivity:
     is_enabled: false
   org_deploy_enabled: false
-  socket_mode_enabled: false
+  socket_mode_enabled: true
   token_rotation_enabled: false
 """
 
@@ -486,6 +495,88 @@ def _process_slack_delivery(row: dict) -> None:
             pass
 
 
+def _enqueue_slack_payload(payload: dict, installation: dict) -> dict:
+    """Persist one actionable Slack event, regardless of transport.
+
+    HTTP Events API and Socket Mode may deliver the same event during a
+    transition.  The provider event id is the shared idempotency boundary, so
+    enabling both cannot produce two answers.
+    """
+    if payload.get("type") != "event_callback":
+        return {"ok": True}
+    event = payload.get("event") or {}
+    etype = event.get("type", "")
+    is_mention = etype == "app_mention"
+    is_dm = etype == "message" and event.get("channel_type") == "im"
+    is_thread_reply = bool(
+        etype == "message" and event.get("thread_ts") and
+        bot_store.thread_exists(installation["id"], installation["project_id"],
+                                event.get("channel"), event.get("thread_ts"))
+    )
+    if not (is_mention or is_dm or is_thread_reply) or event.get("bot_id") or event.get("subtype"):
+        return {"ok": True}
+    event_id = str(payload.get("event_id") or "").strip()
+    if not event_id:
+        identity = json.dumps(
+            {"team": payload.get("team_id") or payload.get("team", {}).get("id"), "event": event},
+            sort_keys=True, separators=(",", ":"),
+        )
+        event_id = "derived:" + hashlib.sha256(identity.encode()).hexdigest()
+    root_ts = str(event.get("thread_ts") or event.get("ts") or "")
+    _row_id, inserted = _EVENT_INBOX.enqueue(
+        "slack", installation["project_id"], event_id,
+        {"installation_id": installation["id"], "event": event},
+        coalesce_key=f"{installation['id']}:{event.get('channel', '')}:{root_ts}",
+    )
+    return {"ok": True, "duplicate": True} if not inserted else {"ok": True}
+
+
+def _socket_request(client: SocketModeClient, request) -> None:
+    """ACK a Socket Mode envelope only after its event is durable."""
+    try:
+        if request.type == "events_api":
+            installation_id = int(getattr(client, "mari_installation_id"))
+            project_id = int(getattr(client, "mari_project_id"))
+            installation = bot_store.installation(installation_id, project_id)
+            if not installation:
+                raise RuntimeError("Slack installation is no longer active")
+            _enqueue_slack_payload(request.payload or {}, installation)
+        client.send_socket_mode_response(SocketModeResponse(envelope_id=request.envelope_id))
+    except Exception:
+        # Withhold the ACK. Slack will redeliver, and event_inbox deduplicates
+        # if persistence succeeded before a later failure.
+        log.exception("Slack Socket Mode delivery could not be persisted")
+
+
+def _start_socket_clients() -> None:
+    with _SOCKET_LOCK:
+        configured = {int(row["id"]): row for row in bot_store.socket_installations()}
+        for installation_id, client in list(_SOCKET_CLIENTS.items()):
+            if installation_id not in configured:
+                client.close()
+                del _SOCKET_CLIENTS[installation_id]
+        for installation_id, row in configured.items():
+            if installation_id in _SOCKET_CLIENTS:
+                continue
+            cfg = row.get("config") or {}
+            client = SocketModeClient(
+                app_token=str(cfg["app_token"]),
+                web_client=WebClient(token=str(cfg["bot_token"])),
+            )
+            client.mari_installation_id = installation_id
+            client.mari_project_id = int(row["project_id"])
+            client.socket_mode_request_listeners.append(_socket_request)
+            client.connect()
+            _SOCKET_CLIENTS[installation_id] = client
+
+
+def _stop_socket_clients() -> None:
+    with _SOCKET_LOCK:
+        for client in _SOCKET_CLIENTS.values():
+            client.close()
+        _SOCKET_CLIENTS.clear()
+
+
 def start_event_dispatcher() -> None:
     global _EVENT_DISPATCHER
     if _EVENT_DISPATCHER is None:
@@ -498,6 +589,7 @@ def start_event_dispatcher() -> None:
             workers=SLACK_WORKERS,
         )
     _EVENT_DISPATCHER.start()
+    _start_socket_clients()
 
 
 def stop_event_dispatcher() -> None:
@@ -505,6 +597,7 @@ def stop_event_dispatcher() -> None:
     if _EVENT_DISPATCHER is not None:
         _EVENT_DISPATCHER.stop()
         _EVENT_DISPATCHER = None
+    _stop_socket_clients()
 
 
 @router.post("/webhooks/slack")
@@ -535,39 +628,11 @@ async def slack_webhook(request: Request):
     ):
         return Response(status_code=401, content="bad signature")
 
-    if payload.get("type") == "event_callback":
-        event = payload.get("event") or {}
-        etype = event.get("type", "")
-        is_mention = etype == "app_mention"
-        is_dm = etype == "message" and event.get("channel_type") == "im"
-        is_thread_reply = bool(
-            etype == "message" and event.get("thread_ts") and
-            bot_store.thread_exists(installation["id"], installation["project_id"],
-                                    event.get("channel"), event.get("thread_ts"))
-        )
-        # Skip our own echoes and edits/joins (message_changed etc.).
-        if (is_mention or is_dm or is_thread_reply) and not event.get("bot_id") and not event.get("subtype"):
-            event_id = str(payload.get("event_id") or "").strip()
-            if not event_id:
-                # Slack normally provides event_id.  The deterministic fallback
-                # keeps older/test payloads idempotent without trusting text.
-                identity = json.dumps({"team": team_id, "event": event},
-                                      sort_keys=True, separators=(",", ":"))
-                event_id = "derived:" + hashlib.sha256(identity.encode()).hexdigest()
-            root_ts = str(event.get("thread_ts") or event.get("ts") or "")
-            try:
-                _row_id, inserted = _EVENT_INBOX.enqueue(
-                    "slack", installation["project_id"], event_id,
-                    {"installation_id": installation["id"], "event": event},
-                    coalesce_key=f"{installation['id']}:{event.get('channel', '')}:{root_ts}",
-                )
-            except Exception:
-                # No ACK when durability is unavailable: Slack will retry.
-                return Response(status_code=503, content="Slack delivery could not be persisted")
-            if not inserted:
-                return {"ok": True, "duplicate": True}
-
-    return {"ok": True}  # ack within 3s; work continues on the thread
+    try:
+        return _enqueue_slack_payload(payload, installation)
+    except Exception:
+        # No ACK when durability is unavailable: Slack will retry.
+        return Response(status_code=503, content="Slack delivery could not be persisted")
 
 
 # ————————————————— GET /bots/status —————————————————
@@ -609,16 +674,23 @@ def slack_setup(
     """
     token = body.bot_token.strip()
     signing_secret = body.signing_secret.strip()
+    app_token = body.app_token.strip()
     if not token.startswith("xoxb-") or len(token) > 500:
         raise HTTPException(400, "A Slack bot token beginning with xoxb- is required.")
     if not signing_secret or len(signing_secret) > 500:
         raise HTTPException(400, "A Slack signing secret is required.")
+    if app_token and (not app_token.startswith("xapp-") or len(app_token) > 500):
+        raise HTTPException(400, "A Slack app-level token beginning with xapp- is required.")
     verified = slack_call("auth.test", token)
     if not verified.get("ok"):
         raise HTTPException(400, f"Slack rejected the bot token: {verified.get('error', 'invalid_auth')}")
     team_id = str(verified.get("team_id") or "").strip()
     if not team_id:
         raise HTTPException(502, "Slack auth.test returned no team id.")
+    if app_token:
+        socket = slack_call("apps.connections.open", app_token)
+        if not socket.get("ok"):
+            raise HTTPException(400, f"Slack rejected the app-level token: {socket.get('error', 'invalid_auth')}")
     team_name = str(verified.get("team") or "").strip()[:200]
     bot_user = str(verified.get("user") or "").strip()[:200]
     project_id = current.project_id
@@ -630,12 +702,16 @@ def slack_setup(
         "connected_at": _now_iso(),
         "last_error": "",
     }
+    if app_token:
+        config_patch["app_token"] = app_token
     try:
         installation_id = bot_store.configure_slack(project_id, team_id, config_patch)
     except ValueError as error:
         raise HTTPException(409, str(error)) from None
     except psycopg.errors.UniqueViolation:
         raise HTTPException(409, "That Slack workspace was connected concurrently; retry setup.") from None
+    if app_token:
+        _start_socket_clients()
     return {"ok": True, "team": team_name, "teamId": team_id,
             "botUser": bot_user, "installationId": installation_id}
 

@@ -344,7 +344,7 @@ for (const connector of connectors) {
 
 test("LIVE Slack bot token reaches Slack auth.test", async ({ page }) => {
   test.skip(!mutations, "Set MARI_E2E_MUTATIONS=1 to allow sandbox bot configuration.");
-  test.skip(!env.MARI_E2E_SLACK_BOT_TOKEN || !env.MARI_E2E_SLACK_SIGNING_SECRET, "Missing Slack bot credentials.");
+  test.skip(!env.MARI_E2E_SLACK_BOT_TOKEN || !env.MARI_E2E_SLACK_APP_TOKEN || !env.MARI_E2E_SLACK_SIGNING_SECRET, "Missing Slack bot credentials.");
   await signIn(page);
   await page.goto("/publish?tab=bots");
   await expect(page.getByRole("button", { name: "Bots", exact: true })).toHaveAttribute("aria-pressed", "true");
@@ -352,6 +352,7 @@ test("LIVE Slack bot token reaches Slack auth.test", async ({ page }) => {
   const drawer = page.getByRole("dialog", { name: "Set up Slack bot" });
   await drawer.getByRole("button", { name: "Next" }).click();
   await drawer.getByRole("textbox", { name: "Bot token" }).fill(env.MARI_E2E_SLACK_BOT_TOKEN!);
+  await drawer.getByRole("textbox", { name: "App-level token" }).fill(env.MARI_E2E_SLACK_APP_TOKEN!);
   await drawer.getByRole("textbox", { name: "Signing secret" }).fill(env.MARI_E2E_SLACK_SIGNING_SECRET!);
   await drawer.getByRole("button", { name: "Save credentials" }).click();
   await drawer.getByRole("button", { name: "Next" }).click();
