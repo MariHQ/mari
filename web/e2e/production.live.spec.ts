@@ -185,9 +185,10 @@ test("LIVE ingested source is searchable, inspectable, and represented in lineag
 
   await page.goto("/lineage");
   await expect(main).toContainText(
-    new RegExp(`${source!.provider}\\s*·\\s*[1-9][0-9]*\\s*documents`, "i"),
+    new RegExp(`${source!.docsCount}\\s*documents`, "i"),
     { timeout: 30_000 },
   );
+  await expect(main).toContainText(/GitHub\s*·\s*GitHub/i);
   await expect(main).not.toContainText(/Service unavailable|temporarily unreachable/i);
 });
 
@@ -227,6 +228,22 @@ test("LIVE agent searches indexed knowledge before streaming a grounded answer",
   await expect(dock).toContainText(/search/i);
   await expect(dock).toContainText(/GitHub|README|document|source/i);
   await expect(dock).not.toContainText(/Agent execution stopped|MalformedModelOutput|PermanentFailure|can't reach|could not be persisted/i);
+});
+
+test("LIVE reviewed trajectory opens its promoted draft workflow", async ({ page }) => {
+  await signIn(page);
+  const data = await graphql<{ trajectories: {
+    id: number; macroIntent: string; promotedWorkflowId: number | null;
+  }[] }>(page, `{ trajectories(limit: 50) { id macroIntent promotedWorkflowId } }`);
+  const reviewed = data.trajectories.find((row) => row.promotedWorkflowId);
+  test.skip(!reviewed, "No trajectory has been reviewed and promoted in this workspace.");
+
+  await page.goto("/trajectories");
+  const card = page.locator("article", { has: page.getByRole("heading", { name: reviewed!.macroIntent }) });
+  await card.getByText("Evidence and abstraction layers", { exact: true }).click();
+  await expect(card.getByRole("list", { name: "Trajectory steps" })).toBeVisible();
+  await card.getByRole("button", { name: "Open draft workflow" }).click();
+  await expect(page).toHaveURL(new RegExp(`/flows\\?workflow=${reviewed!.promotedWorkflowId}$`));
 });
 
 test("LIVE deployed knowledge chat answers from indexed sources", async ({ page }) => {
