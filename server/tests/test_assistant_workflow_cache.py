@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from mari_server.conversations import routes, workflows
+from mari_server.destinations import slack
 from mari_server.identity.context import AccessContext
 
 
@@ -81,6 +82,17 @@ class AssistantWorkflowCacheTests(unittest.TestCase):
         self.assertIn("Mari manages product knowledge", body)
         self.assertIn('"cache_hit": true', body)
         runtime.save_cached_workflow_response.assert_called_once()
+
+    def test_cached_slack_response_never_invokes_generation(self):
+        with patch.object(workflows, "select", return_value=dict(ROW)), \
+             patch.object(workflows, "cached_response",
+                          return_value={"answer": ROW["cached_answer"], "sources": []}), \
+             patch.object(slack.llm, "embed") as embed, \
+             patch.object(slack.llm, "chat_stream") as generate:
+            answer = "".join(slack.stream_answer_question("tell me about mari", ""))
+        self.assertEqual(answer, ROW["cached_answer"])
+        embed.assert_not_called()
+        generate.assert_not_called()
 
 
 if __name__ == "__main__":

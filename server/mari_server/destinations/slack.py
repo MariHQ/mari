@@ -454,8 +454,12 @@ def _process_slack_delivery(row: dict) -> None:
             root_text = _slack_root_message(token, channel, thread_ts)
             if root_text:
                 turns = _with_turn(turns, "assistant", root_text, thread_ts)
+    # Only earlier thread turns are supplemental context. Including the
+    # current top-level question here made every Slack mention look like a
+    # conversation follow-up, which intentionally bypasses reviewed workflow
+    # caches and needlessly invokes the model.
+    context = _conversation_context(turns) if thread_ts else ""
     turns = _with_turn(turns, "user", question, event_ts)
-    context = _conversation_context(turns)
     parts: list[str] = []
     visible = ""
     last_update = time.monotonic()
