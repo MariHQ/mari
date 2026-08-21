@@ -72,6 +72,38 @@ def upsert_document(conn, source_id: int, external_id: str, title: str, body: st
     return doc_id, inserted
 
 
+def upsert_documents(conn, documents: list[dict]) -> list[tuple[int, bool]]:
+    """Write one connector page through the canonical/projection boundary."""
+    project_id = access.require_current_access().project_id
+    prepared: list[tuple[DocumentVersion, document_application.ProjectionFields]] = []
+    for document in documents:
+        source_updated_at = document.get("source_updated_at") or ""
+        provider_time = None
+        if source_updated_at:
+            provider_time = dt.datetime.fromisoformat(source_updated_at.replace("Z", "+00:00"))
+            if provider_time.tzinfo is None:
+                provider_time = provider_time.replace(tzinfo=dt.timezone.utc)
+            provider_time = provider_time.astimezone(dt.timezone.utc)
+        prepared.append((DocumentVersion(
+            project_id=project_id, source_id=str(document["source_id"]),
+            external_id=document["external_id"], revision=document["content_hash"],
+            title=document["title"], body=document["body"],
+            source_url=document["source_path"],
+            acl={"visibility": document["acl_visibility"],
+                 "principals": list(document["acl_principals"])},
+            reason="connector ingestion", actor=document["author"] or "connector",
+            source_updated_at=provider_time,
+        ), document_application.ProjectionFields(
+            source=document["source"], kind="page", author=document["author"],
+            author_initials=document["initials"],
+        )))
+    results = document_application.upsert_many(
+        prepared, ports=document_repository.ports(conn),
+    )
+    conn.commit()
+    return results
+
+
 def sync_chunks(conn, doc_id: int, title: str, body: str,
                  max_tokens: int, overlap: int) -> tuple[int, int]:
     """Chunk + hash + embed-only-changed. Returns (chunks, newly_embedded)."""

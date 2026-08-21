@@ -173,6 +173,7 @@ def sync_source(source_id: int, full: bool, *, update_status, fire_document_trig
             page_chunks = page_embeddings = 0
             documents_to_embed: list[tuple[int, str, str]] = []
             with document_index.connection() as conn:
+                projection_rows: list[dict] = []
                 for document in plan.upserts:
                     path = document.external_id
                     title = document.title.strip() or path
@@ -184,13 +185,19 @@ def sync_source(source_id: int, full: bool, *, update_status, fire_document_trig
                         f"{principal.kind}:{principal.identifier}"
                         for principal in document.acl.principals
                     )
-                    doc_id, inserted = document_index.upsert_document(
-                        conn, source_id, f"{key}:{source_id}:{path}", title, body,
-                        f"{key}/{path}", "page", fingerprint, author, source=key,
-                        initials=initials, acl_visibility=document.acl.visibility,
-                        acl_principals=principals,
-                        source_updated_at=document.updated_at,
-                    )
+                    projection_rows.append({
+                        "source_id": source_id,
+                        "external_id": f"{key}:{source_id}:{path}",
+                        "title": title, "body": body, "source_path": f"{key}/{path}",
+                        "content_hash": fingerprint, "author": author, "source": key,
+                        "initials": initials, "acl_visibility": document.acl.visibility,
+                        "acl_principals": principals, "source_updated_at": document.updated_at,
+                    })
+
+                projected = document_index.upsert_documents(conn, projection_rows)
+                for document, (doc_id, inserted) in zip(plan.upserts, projected, strict=True):
+                    title = document.title.strip() or document.external_id
+                    body = document.body
                     (inserted_ids if inserted else updated_ids).append(doc_id)
                     update_status(source_id, phase="embedding")
                     if body.strip():

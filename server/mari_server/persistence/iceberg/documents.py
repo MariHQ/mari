@@ -117,6 +117,58 @@ class IcebergDocumentStore:
             )
             return row
 
+    def append_many(self, versions: list[DocumentVersion]) -> None:
+        """Append one connector page in a single Iceberg snapshot."""
+        if not versions:
+            return
+        with self._lock:
+            existing_rows: list[dict[str, t.Any]] = []
+            for project_id in {version.project_id for version in versions}:
+                existing_rows.extend(self._rows(project_id=project_id))
+            latest = self._latest(existing_rows)
+            rows: list[dict[str, t.Any]] = []
+            for version in versions:
+                key = document_key(version.project_id, version.source_id, version.external_id)
+                current = latest.get(key)
+                content_hash = version.content_hash
+                acl_json = version.acl_json
+                if current and all((
+                    current["revision"] == version.revision,
+                    current["content_hash"] == content_hash,
+                    current["title"] == version.title,
+                    current["status"] == version.status,
+                    current["source_url"] == version.source_url,
+                    current["acl_json"] == acl_json,
+                    current.get("source_updated_at") == version.source_updated_at,
+                )):
+                    continue
+                rows.append({
+                    "version_id": version.version_id,
+                    "project_id": version.project_id,
+                    "document_key": key,
+                    "source_id": version.source_id,
+                    "external_id": version.external_id,
+                    "revision": version.revision,
+                    "title": version.title,
+                    "body": version.body,
+                    "content_hash": content_hash,
+                    "status": version.status,
+                    "source_url": version.source_url,
+                    "acl_json": acl_json,
+                    "reason": version.reason,
+                    "actor": version.actor,
+                    "source_updated_at": (
+                        version.source_updated_at.astimezone(dt.timezone.utc)
+                        if version.source_updated_at else None
+                    ),
+                    "recorded_at": version.recorded_at.astimezone(dt.timezone.utc),
+                })
+            if rows:
+                self.store.catalog.load_table(TABLE).append(
+                    pa.Table.from_pylist(rows, schema=SCHEMA),
+                    snapshot_properties={"mari.batch-size": str(len(rows))},
+                )
+
     def transition(self, *, project_id: int, source_id: str, external_id: str,
                    status: str, reason: str, actor: str) -> dict[str, t.Any]:
         current = self.get(project_id, source_id, external_id, include_deleted=True)
