@@ -32,7 +32,7 @@ Everything runs on your infrastructure: Postgres for transactional state, Iceber
 ### 🔌 Ingestion that stays fresh
 - **14 real connectors** (see below) feeding one pipeline: fetch → chunk → content-hash → embed. Unchanged content is never re-embedded — a no-op resync of a 200-doc repo takes seconds.
 - **Resumable, diff-based sync.** Cursors survive restarts; losing one is safe — sync falls back to a full tree diff by content hash and re-embeds nothing that hasn't actually changed.
-- **Live updates**: GitHub webhooks trigger instant re-syncs; scheduled sync **flows** (visible, editable — not env vars) cover the rest.
+- **Live updates**: GitHub webhooks trigger instant re-syncs; scheduled syncs cover the rest, on a per-source cadence you set from the Sources page rather than in env vars.
 - GitHub ingestion goes beyond files: **commit messages, PR descriptions, issues, and comments** become searchable knowledge documents.
 
 ### 🔎 Hybrid search & cited answers
@@ -42,7 +42,7 @@ Everything runs on your infrastructure: Postgres for transactional state, Iceber
 
 ### 🤖 The Mari agent
 - An **agent dock** on every page (floating launcher, bottom right): compact stream, visible tool calls with expandable results, streaming tokens.
-- It can search and read source documents, manage governed knowledge, sync sources, run automations, create Review items, and **navigate the app** while the conversation stays open.
+- It can search and read source documents, manage governed knowledge, sync sources, and **navigate the app** while the conversation stays open.
 - Safety rails: source content is read-only, navigation is whitelist-validated, write tools are capability-gated, and every action lands in the audit trail.
 
 ### 🕸 Lineage you can actually read
@@ -50,11 +50,8 @@ Everything runs on your infrastructure: Postgres for transactional state, Iceber
 - **Roll-up macro nodes**: hundreds of commits/PRs collapse into per-repo groups ("229 commits · MariHQ/web") that expand on click, ranked by connectivity. Aggregated edges show link volume ("references ×52").
 - Link extraction is real: `#123` cross-references (PR ↔ issue ↔ commit), resolved markdown links between pages, and capped embedding-similarity edges.
 
-### ⚙️ Flows (automation)
-- A visual pipeline editor with real execution: fetch → refine (LLM) → fact-check → tag → approve → notify.
-- **Document triggers**: run a flow when a document is added/changed, filtered by source, tag, or path glob.
-- **Schedule triggers**: repo syncs and the weekly digest are flows you can see and edit, not hidden config.
-- Runs carry provenance: *"Triggered by: docs/auth.md updated"*, *"Scheduled · every 10 min"*.
+### ⚙️ Scheduled syncs and promoted workflows
+Source syncs and the weekly digest run on a schedule you control from the Sources page, and a reviewed agent trajectory can be promoted into a workflow that runs the same way. Steps execute server-side (fetch → refine → fact-check → tag → approve → notify) and every run carries its provenance: *"Triggered by: docs/auth.md updated"*, *"Scheduled · every 10 min"*. There is no pipeline editor: workflows are promoted from observed work, not drawn by hand.
 
 ### ✅ Facts, decisions & answers
 - **Facts**: verifiable claims with owners, sources, and verification lifecycle.
@@ -68,6 +65,7 @@ Everything runs on your infrastructure: Postgres for transactional state, Iceber
 ### 🚀 Destinations
 - Deploy a project-scoped interactive **Knowledge chat** destination with streamed answers and evidence links.
 - Expose the same corpus through MCP, the scoped Search API, Slack, and GitHub bots.
+- Building your own bot or agent on top of Mari? Use the MCP server or the `mari-components` packages directly; `/api/search` is a convenience endpoint, not the integration surface.
 
 ### 💬 Bots (self-serve)
 - **Slack bot**: copy a generated app manifest, paste your bot token, verify — then @mention Mari in any channel and it answers from your knowledge base.
@@ -295,7 +293,7 @@ Two rules follow from the pages being pure presenters:
 
 Want to contribute? Read [CONTRIBUTING.md](CONTRIBUTING.md) — commits must be signed off (`git commit -s`), which is how you agree to the [CLA](CLA.md).
 
-Deeper docs: [DESIGN.md](DESIGN.md) (product design), [LINEAGE-DESIGN.md](LINEAGE-DESIGN.md), [FLOWS-DESIGN.md](FLOWS-DESIGN.md), and the frozen integration contracts (`*-CONTRACT.md`).
+Deeper docs: [DESIGN.md](DESIGN.md) (product design), [LINEAGE-DESIGN.md](LINEAGE-DESIGN.md), and the frozen integration contracts (`*-CONTRACT.md`).
 
 ---
 

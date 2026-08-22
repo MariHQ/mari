@@ -12,15 +12,24 @@ class ProductSurface:
     label: str
 
 
+#: Every surface the agent may navigate to, and the words it may use for them.
+#:
+#: `/workflows` is one page with two tabs: the workflows Mari observed itself
+#: running, and the answers approved out of them. `/trajectories` and
+#: `/answers` are the routes that page used to have; they still resolve (the
+#: console redirects them, carrying their query through), so an agent working
+#: from an older transcript, a bookmark, or a stored href still lands.
 PRODUCT_SURFACES = (
     ProductSurface("/", "Home"), ProductSurface("/knowledge", "Knowledge"),
-    ProductSurface("/tasks", "Review"), ProductSurface("/answers", "Approved answers"),
     ProductSurface("/facts", "Facts"), ProductSurface("/decisions", "Decisions"),
-    ProductSurface("/lineage", "Lineage"), ProductSurface("/flows", "Automations"),
+    ProductSurface("/lineage", "Lineage"),
+    ProductSurface("/workflows", "Workflows"),
+    ProductSurface("/workflows?tab=answers", "Approved answers"),
     ProductSurface("/publish", "Documentation destinations"),
     ProductSurface("/publish?tab=mcp", "MCP servers"),
     ProductSurface("/publish?tab=bots", "Bots"), ProductSurface("/insights", "Analytics"),
-    ProductSurface("/trajectories", "Agent trajectories"),
+    ProductSurface("/trajectories", "Observed workflows (moved to Workflows)"),
+    ProductSurface("/answers", "Approved answers (moved to Workflows)"),
     ProductSurface("/library", "Library"), ProductSurface("/sources", "Sources"),
     ProductSurface("/audit", "Repository audit"),
     ProductSurface("/preferences", "Preferences"), ProductSurface("/welcome", "Onboarding"),

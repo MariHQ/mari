@@ -153,6 +153,22 @@ function PublicOnly({ id, children }: { id: string; children: React.ReactNode })
   return <>{children}</>;
 }
 
+/** /trajectories and /answers -> the Workflows tab that replaced them.
+ *
+ *  A bare `<Navigate to="/workflows">` would drop the query string, and the
+ *  query string is the whole reason these routes still exist: the links people
+ *  hold are `/answers?answer=4` (a Review item, a chat citation) and
+ *  `/trajectories?category=…` (a bookmark). Everything the old route carried
+ *  is carried through, with `tab` set to the half that used to be the page. */
+function MovedToWorkflows({ tab }: { tab: "observed" | "answers" }) {
+  const { search } = useLocation();
+  const params = new URLSearchParams(search);
+  if (tab === "answers") params.set("tab", "answers");
+  else params.delete("tab");
+  const query = params.toString();
+  return <Navigate to={query ? `/workflows?${query}` : "/workflows"} replace />;
+}
+
 /** Gives the library's <Link> the app's router.
 
     Without this every <a href> in the library falls back to a full page load:
@@ -174,6 +190,20 @@ function Routed() {
                 : <Gate><Element /></Gate>}
             />
           ))}
+        {/* Retired surfaces. The Flows pipeline editor and the Review page
+            are gone, but their URLs are in bookmarks, in old notifications and
+            in links people pasted to each other. Sending them to the surface
+            that replaced the work is kinder than the catch-all below, which
+            would drop someone on the dashboard with no idea why. */}
+        <Route path="/flows" element={<Navigate to="/workflows" replace />} />
+        <Route path="/tasks" element={<Navigate to="/" replace />} />
+        {/* Trajectories and Answers are the two tabs of Workflows now. These
+            keep their query strings, because the queries are what make the old
+            links worth honouring: /answers?answer=4 is what a Review item and
+            a served chat citation point at, and /trajectories?category=… is
+            what somebody bookmarked. */}
+        <Route path="/trajectories" element={<MovedToWorkflows tab="observed" />} />
+        <Route path="/answers" element={<MovedToWorkflows tab="answers" />} />
         {/* Unknown path: say so. Behind the session gate, because a signed-out
             visitor's problem is that they are signed out, not that the page is
             missing. */}

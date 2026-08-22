@@ -42,7 +42,7 @@ from mari_server.product.types import (
     DocHistory, Document, DocumentTemplate, Fact, FactContradiction, Finding,
     FreshnessRow, GithubRepo, GithubTeamSync, GlossaryCandidate, GlossaryTerm,
     GraphStats, GraphView, InsightStats, LineageEdge, LineageNode, McpServer,
-    Member, Notification, Provisioning, ReadabilityRow, RelatedDoc, Setting,
+    Member, Notification, PromotedWorkflow, Provisioning, ReadabilityRow, RelatedDoc, Setting,
     KnowledgeChatDestination, SourcePulse, StyleGuide, StyleRule, SyncEvent,
     SyncStatus, TagDef, Task, TaskSummary, ReviewConnection, ReviewItem, ReviewPageInfo,
     TopCited, UploadFile, UploadManifest,
@@ -306,6 +306,47 @@ def _effective_model_setting(key: str, value):
     return out
 
 
+def _trajectories(rows: list[dict], steps: list[dict],
+                  evidence: list[dict]) -> list[Trajectory]:
+    """Rows + their steps + their evidence -> the API's Trajectory objects.
+
+    Shared by the list and the single-workflow read so a deep-linked workflow
+    and the same workflow in the list can never be two different shapes."""
+    if not rows:
+        return []
+    by_id: dict[int, list[TrajectoryStep]] = {int(row["id"]): [] for row in rows}
+    for step in steps:
+        by_id[int(step["trajectory_id"])].append(TrajectoryStep(
+            ordinal=int(step["ordinal"]), tool=step["tool"], action_family=step["action_family"],
+            args=jload(step["args"]) or {}, summary=step["summary"], ok=bool(step["ok"]),
+            disposition=step["disposition"], edited_args=jload(step.get("edited_args"))))
+    evidence_by_id: dict[int, list[TrajectoryEvidence]] = {int(row["id"]): [] for row in rows}
+    for reference in evidence:
+        evidence_by_id[int(reference["trajectory_id"])].append(TrajectoryEvidence(
+            document_id=int(reference["document_id"]), title=reference["title"],
+            reason=reference["reason"], rank=int(reference["rank"]),
+            relevance=reference["relevance"], note=reference["note"],
+        ))
+    return [Trajectory(
+        id=int(row["id"]), session_id=row.get("session_id"), prompt=row["prompt"],
+        status=row["status"], model=row["model"], layer1=row["layer1"], layer2=row["layer2"],
+        category=row["category"], macro_intent=row["macro_intent"], phases=jload(row["phases"]) or [],
+        step_count=int(row["step_count"]), failure_count=int(row["failure_count"]),
+        rework_count=int(row["rework_count"]), started_at=row["started_at"].isoformat(),
+        completed_at=row["completed_at"].isoformat() if row.get("completed_at") else "",
+        steps=by_id[int(row["id"])], evidence=evidence_by_id[int(row["id"])],
+        promoted_workflow_id=row.get("promoted_workflow_id"),
+        # Only when the join found the workflow: a promotion whose workflow has
+        # since been deleted reports no workflow rather than an empty card.
+        promoted_workflow=PromotedWorkflow(
+            id=int(row["promoted_workflow_id"]), name=str(row.get("promoted_workflow_name") or ""),
+            status=str(row.get("promoted_workflow_status") or ""),
+            node_count=int(row.get("promoted_workflow_nodes") or 0),
+        ) if row.get("promoted_workflow_id") and row.get("promoted_workflow_name") is not None else None,
+        disposition=str(row.get("disposition") or "observed"),
+    ) for row in rows]
+
+
 # ————————————————— Query —————————————————
 
 
@@ -313,46 +354,51 @@ def _effective_model_setting(key: str, value):
 class Query:
     @strawberry.field
     def trajectories(self, limit: int = 50, offset: int = 0,
-                     category: str | None = None) -> list[Trajectory]:
-        """Newest harvested agent workflows, bounded for progressive rendering."""
+                     category: str | None = None, status: str | None = None,
+                     failures: str | None = None,
+                     search: str | None = None) -> list[Trajectory]:
+        """Newest harvested agent workflows, bounded for progressive rendering.
+
+        `failures` is "with", "none", or absent. Every filter is applied in SQL
+        so the rows and `trajectoryTotal` describe the same set."""
         cap, start = max(1, min(int(limit), 100)), max(0, int(offset))
         rows, steps, evidence = trajectory_store.list_trajectories(
-            cap, start, (category or "").strip() or None,
+            cap, start, (category or "").strip() or None, (status or "").strip() or None,
+            (failures or "").strip() or None, (search or "").strip() or None,
         )
-        if not rows:
-            return []
-        by_id: dict[int, list[TrajectoryStep]] = {int(row["id"]): [] for row in rows}
-        for step in steps:
-            by_id[int(step["trajectory_id"])].append(TrajectoryStep(
-                ordinal=int(step["ordinal"]), tool=step["tool"], action_family=step["action_family"],
-                args=jload(step["args"]) or {}, summary=step["summary"], ok=bool(step["ok"]),
-                disposition=step["disposition"], edited_args=jload(step.get("edited_args"))))
-        evidence_by_id: dict[int, list[TrajectoryEvidence]] = {
-            int(row["id"]): [] for row in rows
-        }
-        for reference in evidence:
-            evidence_by_id[int(reference["trajectory_id"])].append(TrajectoryEvidence(
-                document_id=int(reference["document_id"]), title=reference["title"],
-                reason=reference["reason"], rank=int(reference["rank"]),
-                relevance=reference["relevance"], note=reference["note"],
-            ))
-        return [Trajectory(
-            id=int(row["id"]), session_id=row.get("session_id"), prompt=row["prompt"],
-            status=row["status"], model=row["model"], layer1=row["layer1"], layer2=row["layer2"],
-            category=row["category"], macro_intent=row["macro_intent"], phases=jload(row["phases"]) or [],
-            step_count=int(row["step_count"]), failure_count=int(row["failure_count"]),
-            rework_count=int(row["rework_count"]), started_at=row["started_at"].isoformat(),
-            completed_at=row["completed_at"].isoformat() if row.get("completed_at") else "",
-            steps=by_id[int(row["id"])], evidence=evidence_by_id[int(row["id"])],
-            promoted_workflow_id=row.get("promoted_workflow_id")) for row in rows]
+        return _trajectories(rows, steps, evidence)
 
     @strawberry.field
-    def trajectory_total(self, category: str | None = None) -> int:
-        return trajectory_store.trajectory_count((category or "").strip() or None)
+    def trajectory(self, id: int | None = None) -> Trajectory | None:
+        """One observed workflow, for a deep link into the Workflows drawer.
+
+        `id` is optional so the Workflows page can ask for its focused workflow
+        in the same round trip as the list; without one this answers None
+        rather than picking a row nobody asked for."""
+        if id is None:
+            return None
+        found = _trajectories(*trajectory_store.get_trajectory(int(id)))
+        return found[0] if found else None
+
+    @strawberry.field
+    def trajectory_total(self, category: str | None = None, status: str | None = None,
+                         failures: str | None = None, search: str | None = None) -> int:
+        return trajectory_store.trajectory_count(
+            (category or "").strip() or None, (status or "").strip() or None,
+            (failures or "").strip() or None, (search or "").strip() or None,
+        )
 
     @strawberry.field
     def trajectory_categories(self) -> list[str]:
         return trajectory_store.trajectory_categories()
+
+    @strawberry.field
+    def trajectory_statuses(self) -> list[str]:
+        """The statuses this workspace's runs actually have, for the filter.
+
+        Read from the rows rather than hardcoded, so a filter can never offer a
+        status that would return nothing."""
+        return trajectory_store.trajectory_statuses()
 
     @strawberry.field
     def overview_stats(self, since: str | None = None) -> JSON:
@@ -967,7 +1013,14 @@ class Query:
         return [ApprovedAnswer(id=r["id"], question=r["question"], answer=r["answer"], status=r["status"],
                                owner=r["owner_name"], channels=r["channels"], sources=jload(r["sources"]),
                                served=r["served"], spark=r["spark"],
-                               updated=r["updated"].isoformat())
+                               updated=r["updated"].isoformat(),
+                               trajectory_id=r.get("trajectory_id"),
+                               supersedes=r.get("supersedes"),
+                               # "" rather than a placeholder date: an answer
+                               # with no recheck set has none, and the card
+                               # draws nothing rather than inventing one.
+                               recheck_after=r["recheck_after"].isoformat()
+                               if r.get("recheck_after") else "")
                 for r in knowledge_store.approved_answers()]
 
     @strawberry.field

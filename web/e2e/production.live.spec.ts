@@ -88,9 +88,9 @@ const connectors = [
 ] as const;
 
 const productRoutes = [
-  "/", "/tasks", "/facts", "/decisions", "/knowledge", "/knowledge/doc?id=1",
-  "/answers", "/insights", "/audit", "/lineage", "/flows", "/library",
-  "/publish", "/publish?tab=mcp", "/publish?tab=bots", "/trajectories", "/sources",
+  "/", "/facts", "/decisions", "/knowledge", "/knowledge/doc?id=1",
+  "/workflows", "/workflows?tab=answers", "/insights", "/audit", "/lineage", "/library",
+  "/publish", "/publish?tab=mcp", "/publish?tab=bots", "/sources",
   "/preferences", "/settings/general", "/settings/models", "/settings/design",
   "/settings/members", "/settings/api-keys", "/settings/audit",
 ] as const;
@@ -126,7 +126,7 @@ test("LIVE primary navigation and destination tabs perform real SPA transitions"
   await signIn(page);
   const destinations: [string, RegExp][] = [
     ["Home", /\/$/], ["Knowledge", /\/knowledge$/], ["Lineage", /\/lineage$/],
-    ["Review", /\/tasks$/], ["Destinations", /\/publish/],
+    ["Destinations", /\/publish/],
     ["Analytics", /\/insights$/], ["Sources", /\/sources$/], ["Settings", /\/settings\/general$/],
   ];
   for (const [name, url] of destinations) {
@@ -230,20 +230,38 @@ test("LIVE agent searches indexed knowledge before streaming a grounded answer",
   await expect(dock).not.toContainText(/Agent execution stopped|MalformedModelOutput|PermanentFailure|can't reach|could not be persisted/i);
 });
 
-test("LIVE reviewed trajectory opens its promoted draft workflow", async ({ page }) => {
+test("LIVE a promoted workflow is shown on the run that produced it", async ({ page }) => {
   await signIn(page);
   const data = await graphql<{ trajectories: {
-    id: number; macroIntent: string; promotedWorkflowId: number | null;
-  }[] }>(page, `{ trajectories(limit: 50) { id macroIntent promotedWorkflowId } }`);
-  const reviewed = data.trajectories.find((row) => row.promotedWorkflowId);
-  test.skip(!reviewed, "No trajectory has been reviewed and promoted in this workspace.");
+    id: number; macroIntent: string;
+    promotedWorkflow: { name: string; nodeCount: number } | null;
+  }[] }>(page, `{ trajectories(limit: 50) { id macroIntent promotedWorkflow { name nodeCount } } }`);
+  const reviewed = data.trajectories.find((row) => row.promotedWorkflow);
+  test.skip(!reviewed, "No workflow has been reviewed and promoted in this workspace.");
 
-  await page.goto("/trajectories");
+  /* Promotion used to answer with a button that navigated to /flows. That page
+     is gone, and even while it existed, leaving the run behind was the only
+     way to find out whether the button had done anything. The workflow it made
+     is drawn on the card now, so this asserts the state, not a URL. */
+  await page.goto("/workflows");
   const card = page.locator("article", { has: page.getByRole("heading", { name: reviewed!.macroIntent }) });
-  await card.getByText("Evidence and abstraction layers", { exact: true }).click();
-  await expect(card.getByRole("list", { name: "Trajectory steps" })).toBeVisible();
-  await card.getByRole("button", { name: "Open draft workflow" }).click();
-  await expect(page).toHaveURL(new RegExp(`/flows\\?workflow=${reviewed!.promotedWorkflowId}$`));
+  await expect(card).toContainText(reviewed!.promotedWorkflow!.name);
+  await expect(card).toContainText(`${reviewed!.promotedWorkflow!.nodeCount} node`);
+  await expect(card).toContainText(/paused/i);
+
+  // And the tuning workbench is a drawer now, not a <details> on the card.
+  await card.getByRole("button", { name: "Inspect run" }).click();
+  await expect(page.getByRole("dialog")).toContainText("Chronological evidence");
+});
+
+test("LIVE the retired Trajectories and Answers routes land on Workflows", async ({ page }) => {
+  await signIn(page);
+  await page.goto("/trajectories");
+  await expect(page).toHaveURL(/\/workflows$/);
+  // The query string is what makes the old links worth honouring: /answers?answer=4
+  // is what a Review item and a served chat citation point at.
+  await page.goto("/answers?answer=4");
+  await expect(page).toHaveURL(/\/workflows\?answer=4&tab=answers$/);
 });
 
 test("LIVE deployed knowledge chat answers from indexed sources", async ({ page }) => {

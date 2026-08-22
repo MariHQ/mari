@@ -22,7 +22,7 @@ class ReadOnlyDocumentTests(unittest.TestCase):
         bindings = build_tool_bindings(ToolDependencies(
             store=EmptyStore(),
             search=lambda *_args: (), record_search=lambda _text: None,
-            review_items=lambda: (), connector_definitions=lambda: (),
+            connector_definitions=lambda: (),
         ))
         self.assertNotIn("edit_document", bindings)
 

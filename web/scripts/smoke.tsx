@@ -5,20 +5,17 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { PageModule } from "@mari-design/components/pages";
 import { page as overview } from "@mari-design/components/pages/OverviewPage";
-import { page as tasks } from "@mari-design/components/pages/TasksPage";
 import { page as facts } from "@mari-design/components/pages/FactsPage";
 import { page as decisions } from "@mari-design/components/pages/DecisionsPage";
 import { page as knowledge } from "@mari-design/components/pages/KnowledgePage";
 import { page as insights } from "@mari-design/components/pages/InsightsPage";
-import { page as trajectories } from "@mari-design/components/pages/TrajectoriesPage";
+import { page as workflows } from "@mari-design/components/pages/WorkflowsPage";
 import { page as audit } from "@mari-design/components/pages/AuditPage";
 import { page as members } from "@mari-design/components/pages/SettingsMembersPage";
 import { page as apiKeys } from "@mari-design/components/pages/SettingsApiKeysPage";
 import { page as auditLog } from "@mari-design/components/pages/SettingsAuditLogPage";
 import { page as docReview } from "@mari-design/components/pages/DocReviewPage";
-import { page as answers } from "@mari-design/components/pages/AnswersPage";
 import { page as lineage } from "@mari-design/components/pages/LineagePage";
-import { page as flows } from "@mari-design/components/pages/FlowsPage";
 import { page as library } from "@mari-design/components/pages/LibraryPage";
 import { page as publish } from "@mari-design/components/pages/PublishPage";
 import { page as sources } from "@mari-design/components/pages/SourcesPage";
@@ -28,8 +25,6 @@ import { page as welcome } from "@mari-design/components/pages/WelcomePage";
 import { page as login } from "@mari-design/components/pages/LoginPage";
 import { page as setup } from "@mari-design/components/pages/SetupPage";
 import { buildLogin, buildSetup } from "../src/data/auth-pages";
-import { buildAnswers, EMPTY as ANSWERS_EMPTY, mapAnswers, mapHarvestSources } from "../src/data/answers";
-import { buildFlows, EMPTY as FLOWS_EMPTY } from "../src/data/flows";
 import { buildLibrary, EMPTY as LIBRARY_EMPTY } from "../src/data/library";
 import { buildLineage, EMPTY as LINEAGE_EMPTY } from "../src/data/lineage";
 import { buildPublish, EMPTY as PUBLISH_EMPTY } from "../src/data/publish";
@@ -47,8 +42,9 @@ import { mapSearch } from "../src/data/knowledge";
 import { mapFreshness, mapWidgets } from "../src/data/insights";
 import { EMPTY, mapOverview } from "../src/data/overview";
 import { buildApiKeys, buildMembers, mapApiKeys, mapGithubTeam, mapMembers } from "../src/data/settings";
-import { buildTasks, mapAssignees, mapStrip, mapTasks } from "../src/data/tasks";
-import { buildTrajectories, EMPTY as TRAJECTORIES_EMPTY } from "../src/data/trajectories";
+import {
+  buildAnswers, buildWorkflows, EMPTY as WORKFLOWS_EMPTY, mapAnswers, mapHarvestSources,
+} from "../src/data/workflows";
 import { buildFocusedGraph, buildOverviewGraph } from "@mari-design/components/features/LineageDataModel";
 
 /* This file used to install a DOM shim so `DocReviewOutlinePanel` could be
@@ -88,21 +84,13 @@ function states(p: PageModule<any, any>, empty: any, opts: { errorIgnored?: bool
 /* ── Overview ───────────────────────────────────────────────────────────── */
 
 /** A plausible response to src/data/overview.ts's QUERY, shaped exactly as the
-    Strawberry resolvers return it. Deliberately includes an unknown step kind
-    and a step with no run row, because real workspaces have both. */
+    Strawberry resolvers return it. */
 const OVERVIEW_RES: any = {
   overviewStats: { changes: 47, factsReview: 6, flowsRunning: 3 },
-  tasks: [{ id: 1, title: "Verify the proration rule", assigneeInitials: "DR", kind: "factcheck", kindLabel: "Fact check", done: false }],
   digest: [{ title: "Billing docs realigned", summary: "Three pages drifted.", where: [{ source: "notion", label: "Pricing FAQ" }], impact: [{ name: "Support", tone: "info" }] }],
   activityFeed: [{ id: 1, kind: "run", actor: "Docs guardrail", text: "completed a run over", target: "billing/*.md", secondsAgo: 42 }],
   search: [{ id: 101, source: "notion", title: "Pricing FAQ", date: "2026-07-20" }],
   sourcePulse: [{ provider: "github", name: "GitHub", status: "active", stat: "128", unit: "commits", bars: [4, 7, 5, 9, 6, 11, 8] }],
-  workflows: [{ id: 7, name: "Docs guardrail", status: "active", nodes: [
-    { kind: "trigger", label: "When docs change" },
-    { kind: "notify", label: "Post to Slack" },
-    { kind: "not_a_real_step", label: "From a newer flow editor" },
-  ] }],
-  workflowRuns: [{ id: 900, workflowId: 7, status: "passed", started: "2026-07-20T14:57:00", rows: [{ step: "Post to Slack", status: "passed" }] }],
 };
 
 console.log("overview");
@@ -111,11 +99,6 @@ console.log("overview");
    the adapter passes through. */
 const data = mapOverview(OVERVIEW_RES, "Dana", "America/Los_Angeles", { preset: "30d" });
 
-check("drops step kinds the library cannot draw", data.flow?.nodes.length === 2);
-check("carries per-step outcomes from the last run",
-  data.flow?.nodes.find((n) => n.label === "Post to Slack")?.state === "succeeded");
-check("leaves un-run steps without an outcome",
-  data.flow?.nodes.find((n) => n.label === "When docs change")?.state === undefined);
 check("passes dates through unformatted", data.docs[0]?.date === "2026-07-20");
 
 check("the greeting's zone is the account's, not this machine's",
@@ -134,47 +117,6 @@ check("empty state derives from the data",
 check("error is shown verbatim",
   render(overview, { data: EMPTY, loading: false, error: "API offline" }).includes("API offline"));
 states(overview, EMPTY);
-
-/* ── Tasks ──────────────────────────────────────────────────────────────── */
-
-console.log("tasks");
-const TASKS_RES: any = {
-  reviewItems: { items: [
-    { id: "task:1", title: "Verify the proration rule", assignee: "Dana Rodriguez", kind: "task", status: "pending", source: "Manual", due: "2026-07-18" },
-    { id: "task:2", title: "Approve the SSO guide", assignee: "Morgan Green", kind: "task", status: "done", source: "Manual", due: "" },
-  ], totalCount: 2, pageInfo: { endCursor: "2", hasNextPage: false } },
-  /* Who a task can be filed to. Without this the composer draws no owner
-     picker and every task silently files to whoever is signed in. */
-  members: [
-    { id: 1, name: "Dana Rodriguez", initials: "DR", status: "active" },
-    { id: 2, name: "Priya Kapoor", initials: "PK", status: "invited" },
-  ],
-};
-const taskRows = mapTasks(TASKS_RES);
-check("tasks: a due date arrives as an ISO date, not a formatted one", taskRows[0].due === "2026-07-18");
-check("tasks: a task with no deadline carries none", taskRows[1].due === undefined);
-check("tasks: overdue comes off the server, not off a clock here", taskRows[0].overdue === true);
-const taskStrip = mapStrip(TASKS_RES)!;
-check("tasks: the strip is the server's rollup of the same rows",
-  taskStrip.statValue === "2" && taskStrip.statLabel === "open" && taskStrip.people.includes("DR"));
-check("tasks: an empty inbox has nothing to summarise",
-  mapStrip({ reviewItems: { items: [], totalCount: 0, pageInfo: { endCursor: "", hasNextPage: false } } } as any) === null);
-const taskAssignees = mapAssignees(TASKS_RES);
-check("tasks: a task cannot be filed to someone who has never signed in",
-  taskAssignees.length === 1 && taskAssignees[0].name === "Dana Rodriguez");
-const tasksData = buildTasks(taskRows, taskStrip, "", taskAssignees);
-check("tasks: the strip reaches the page", tasksData.strip !== null);
-check("tasks: no priority vocabulary means no priority control",
-  tasksData.priorities === undefined);
-const tasksHtml = render(tasks, { data: tasksData, loading: false, error: null });
-check("tasks: renders both columns", tasksHtml.includes("Verify the proration rule") && tasksHtml.includes("Approve the SSO guide"));
-check("tasks: renders the strip headline", tasksHtml.includes("Review queue"));
-/* The row formats the ISO date itself now (§5, P-TA-4), so the raw value must
-   NOT reach the screen: an assertion on "2026-07-18" would pass only while the
-   page was echoing an unformatted string. */
-check("tasks: formats the due date rather than echoing the ISO value",
-  tasksHtml.includes("Jul 18, 2026") && !tasksHtml.includes("2026-07-18"));
-states(tasks, buildTasks([], null, ""));
 
 /* ── Facts ──────────────────────────────────────────────────────────────── */
 
@@ -291,22 +233,7 @@ check("insights: the chart names the source the workspace named",
   insightsHtml.includes("GitHub · acme/handbook"));
 states(insights, { widgets: null, freshness: null, extras: null });
 
-/* ── Agent trajectories ────────────────────────────────────────────────── */
-
-console.log("trajectories");
-const trajectoryData = buildTrajectories({
-  trajectories: [{
-    id: 1, sessionId: 1, prompt: "Fix docs", status: "ready", model: "ollama:gemma3:4b",
-    layer1: "Searched and updated one document.", layer2: "Updated documentation.",
-    category: "Documentation", macroIntent: "Repair docs", phases: [], stepCount: 2,
-    failureCount: 0, reworkCount: 0, startedAt: "2026-08-19T12:00:00Z",
-    completedAt: "2026-08-19T12:00:01Z", steps: [], evidence: [], promotedWorkflowId: null,
-  }], trajectoryTotal: 1, trajectoryCategories: ["Documentation"],
-}, null, 0);
-const trajectoryHtml = render(trajectories, { data: trajectoryData, loading: false, error: null });
-check("trajectories: renders inferred macro intent", trajectoryHtml.includes("Repair docs"));
-check("trajectories: renders bounded count", trajectoryHtml.includes("Showing 1-1 of 1"));
-states(trajectories, TRAJECTORIES_EMPTY);
+/* Workflows is asserted in one block below, after the answers it folds in. */
 
 /* ── Audit ──────────────────────────────────────────────────────────────── */
 
@@ -480,18 +407,36 @@ check("doc review: opaque markdown blocks survive to the page",
   docHtml.includes("Downgrades never refund"));
 states(docReview, DOC_REVIEW_EMPTY);
 
-/* ── Answers ────────────────────────────────────────────────────────────── */
+/* ── Workflows (both tabs) ──────────────────────────────────────────────── */
 
-console.log("answers");
-const ANSWERS_RES: any = {
+console.log("workflows");
+const WORKFLOWS_RES: any = {
+  trajectories: [{
+    id: 1, sessionId: 1, prompt: "Fix docs", status: "ready", model: "ollama:gemma3:4b",
+    layer1: "Searched and updated one document.", layer2: "Updated documentation.",
+    category: "Documentation", macroIntent: "Repair docs", phases: [], stepCount: 2,
+    failureCount: 0, reworkCount: 0, startedAt: "2026-08-19T12:00:00Z",
+    completedAt: "2026-08-19T12:00:01Z", steps: [], evidence: [],
+    promotedWorkflowId: 7,
+    promotedWorkflow: { id: 7, name: "Repair a stale doc", status: "paused", nodeCount: 3 },
+    disposition: "observed",
+  }],
+  // The deep-linked workflow ?trajectory= names. Null here: nothing is focused.
+  trajectory: null,
+  trajectoryTotal: 1,
+  trajectoryCategories: ["Documentation"],
+  trajectoryStatuses: ["ready"],
   approvedAnswers: [
     { id: 1, question: "How long do sessions last?", answer: "30-day rolling tokens.", status: "approved",
       owner: "Priya Nair", channels: ["slack-bot", "carrier-pigeon"], sources: [{ source: "docs", title: "Sessions" }],
-      served: 1284, spark: [4, 6, 5], updated: "2026-07-16" },
+      served: 1284, spark: [4, 6, 5], updated: "2026-07-16",
+      trajectoryId: 1, supersedes: null, recheckAfter: "2026-11-16T00:00:00+00:00" },
     { id: 2, question: "Webhook retries?", answer: "Exponential backoff.", status: "draft",
-      owner: "Marcus Vale", channels: [], sources: [], served: 0, spark: [], updated: "2026-07-15" },
+      owner: "Marcus Vale", channels: [], sources: [], served: 0, spark: [], updated: "2026-07-15",
+      trajectoryId: null, supersedes: null, recheckAfter: "" },
     { id: 3, question: "From a newer status", answer: "…", status: "archived",
-      owner: "", channels: [], sources: [], served: 0, spark: [], updated: "2026-07-01" },
+      owner: "", channels: [], sources: [], served: 0, spark: [], updated: "2026-07-01",
+      trajectoryId: null, supersedes: null, recheckAfter: "" },
   ],
   answerCoverageGaps: ["how do i rotate my api key?"],
   // Nothing indexed from chat, so that source has nothing to scan.
@@ -500,25 +445,63 @@ const ANSWERS_RES: any = {
     { key: "github", label: "GitHub", count: 1284 },
   ],
 };
-const answerRows = mapAnswers(ANSWERS_RES);
-check("answers: a status this build cannot draw is dropped", answerRows.length === 2);
-check("answers: an unknown channel has no toggle, so it is dropped",
+
+const answerRows = mapAnswers(WORKFLOWS_RES);
+check("workflows: a status this build cannot draw is dropped", answerRows.length === 2);
+check("workflows: an unknown channel has no toggle, so it is dropped",
   answerRows[0].channels.length === 1);
-/* The harvest source list is data now: the page draws no "Harvest questions"
-   button without it, and offers only the sources this workspace can scan. */
-const harvestSources = mapHarvestSources(ANSWERS_RES);
-check("answers: a source with nothing in it is not offered",
+check("workflows: an answer carries the workflow it was promoted from",
+  answerRows[0].trajectoryId === 1);
+check("workflows: no recheck date means no recheck date, not an empty string",
+  answerRows[1].recheckAfter === undefined);
+/* The harvest source list is data: the tab draws no "Harvest questions" button
+   without it, and offers only the sources this workspace can scan. */
+const harvestSources = mapHarvestSources(WORKFLOWS_RES);
+check("workflows: a source with nothing in it is not offered",
   harvestSources.length === 2 && harvestSources.every((s) => s.key !== "chat"));
-const answersData = buildAnswers(answerRows, ANSWERS_RES.answerCoverageGaps, "all", harvestSources);
-check("answers: the stat strip counts the answers under it",
-  answersData.stats[0].value === "1" && answersData.stats[2].value === "1,284");
-const answersHtml = render(answers, { data: answersData, loading: false, error: null });
-check("answers: renders the questions", answersHtml.includes("How long do sessions last?"));
-check("answers: offers the harvest it has sources for", answersHtml.includes("Harvest questions"));
-check("answers: a workspace with nothing to scan is offered no harvest",
-  !render(answers, { data: buildAnswers(answerRows, [], "all"), loading: false, error: null })
-    .includes("Harvest questions"));
-states(answers, ANSWERS_EMPTY);
+
+const workflowsData = buildWorkflows(WORKFLOWS_RES, "observed", {
+  category: null, status: null, failures: null, search: "", offset: 0, focus: null,
+});
+check("workflows: the answer stat strip counts the answers under it",
+  workflowsData.answers.stats[0].value === "1" && workflowsData.answers.stats[2].value === "1,284");
+const observedHtml = render(workflows, { data: workflowsData, loading: false, error: null });
+check("workflows: renders the inferred macro intent", observedHtml.includes("Repair docs"));
+check("workflows: renders the count of what it is showing",
+  observedHtml.includes("1 workflow"));
+/* The promotion is shown IN PLACE — this is the assertion that replaces the
+   old "Open draft workflow" navigation. */
+check("workflows: the promoted workflow is drawn on the card",
+  observedHtml.includes("Repair a stale doc") && observedHtml.includes("3 nodes"));
+check("workflows: both tabs are offered",
+  observedHtml.includes("Observed") && observedHtml.includes("Approved answers"));
+
+const answersTab = render(workflows, {
+  data: { ...workflowsData, tab: "answers" }, loading: false, error: null,
+});
+check("workflows: the answers tab renders the questions",
+  answersTab.includes("How long do sessions last?"));
+check("workflows: the answers tab offers the harvest it has sources for",
+  answersTab.includes("Harvest questions"));
+check("workflows: a workspace with nothing to scan is offered no harvest",
+  !render(workflows, {
+    data: { ...workflowsData, tab: "answers", answers: buildAnswers(answerRows, [], "all") },
+    loading: false, error: null,
+  }).includes("Harvest questions"));
+
+/* The drawer is a deep link, so it has to open off `focused` — the run it
+   names is very often not on the page the filters currently show. */
+const focusedHtml = render(workflows, {
+  data: {
+    ...workflowsData,
+    observed: { ...workflowsData.observed, rows: [], focused: workflowsData.observed.rows[0] },
+  },
+  loading: false, error: null,
+});
+check("workflows: a deep-linked run opens the drawer even when the list is filtered past it",
+  focusedHtml.includes("Chronological evidence"));
+
+states(workflows, WORKFLOWS_EMPTY);
 
 /* ── Lineage ────────────────────────────────────────────────────────────── */
 
@@ -575,43 +558,6 @@ check("lineage: impact walks dependencies in reverse",
 check("lineage: renders the graph",
   render(lineage, { data: lineageData, loading: false, error: null }).includes("Pricing FAQ"));
 states(lineage, LINEAGE_EMPTY);
-
-/* ── Flows ──────────────────────────────────────────────────────────────── */
-
-console.log("flows");
-const FLOWS_RES: any = {
-  workflows: [
-    { id: 1, name: "Docs guardrail", description: "Fact-checks changed docs.", color: "#B23A1E", status: "active",
-      nodes: [{ kind: "trigger", label: "PR merged" }, { kind: "fact_check", label: "Verify facts" }],
-      trigger: { on: "document_changed", source_id: 1, path_glob: "docs/**" } },
-    { id: 2, name: "Slack digest", description: "Weekly digest.", color: "#1E6FA8", status: "archived",
-      nodes: [], trigger: { on: "schedule", every_minutes: 10080 } },
-  ],
-  workflowRuns: [
-    { id: 900, workflowId: 1, workflowName: "Docs guardrail", number: 145, status: "passed",
-      started: "2026-07-20T14:12:00", duration: "00:00:41", triggeredBy: "docs/api.md merged",
-      stats: { ctx: { docs: [] }, contradictions: 2, edits: 0, links: 1 },
-      rows: [{ step: "Verify facts", status: "passed", detail: "38 facts", duration: "38s" },
-             { step: "From a newer engine", status: "quantum", detail: "" }] },
-    { id: 899, workflowId: 1, workflowName: "Docs guardrail", number: 143, status: "exploded",
-      started: "2026-07-19T10:02:00", duration: "", triggeredBy: "", stats: null, rows: null },
-  ],
-  sourcePulse: [{ id: 1, name: "GitHub · acme/docs" }],
-};
-const flowsData = buildFlows(FLOWS_RES);
-check("flows: a run status outside the vocabulary is dropped", flowsData.flows[0].recentRuns.length === 1);
-check("flows: a step status outside the vocabulary is dropped",
-  flowsData.flows.length === 2 && FLOWS_RES.workflowRuns[0].rows.length === 2);
-check("flows: a schedule reads as its interval", flowsData.flows[1].whenLabel === "Every week");
-check("flows: a manual-only trigger says so", buildFlows({
-  ...FLOWS_RES, workflows: [{ ...FLOWS_RES.workflows[0], trigger: {} }],
-} as any).flows[0].whenLabel === "Manual only");
-check("flows: only real per-run counters become tiles",
-  flowsData.flows[0].lastRun?.status === "passed");
-check("flows: anything but active is paused", flowsData.flows[1].status === "paused");
-check("flows: renders the list",
-  render(flows, { data: flowsData, loading: false, error: null }).includes("Docs guardrail"));
-states(flows, FLOWS_EMPTY);
 
 /* ── Library ────────────────────────────────────────────────────────────── */
 

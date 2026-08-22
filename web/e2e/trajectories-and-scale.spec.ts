@@ -5,7 +5,7 @@ let api: MockApi;
 test.beforeEach(async ({ page }) => { api = await installMockApi(page); });
 
 test("trajectory view progressively discloses grounded layers and chronological evidence", async ({ page }) => {
-  await page.goto("/trajectories");
+  await page.goto("/workflows");
   await expect(page.getByText("Repair policy documentation", { exact: true })).toBeVisible();
   await expect(page.getByText("Updated a policy document from retrieved evidence.", { exact: true })).toBeVisible();
   await expect(page.getByText("Searched the knowledge base, inspected the runbook, and updated the document.", { exact: true })).toBeHidden();
@@ -17,7 +17,7 @@ test("trajectory view progressively discloses grounded layers and chronological 
 });
 
 test("a human can tune evidence and tool calls before codifying a trajectory", async ({ page }) => {
-  await page.goto("/trajectories");
+  await page.goto("/workflows");
   await page.getByText("Evidence and abstraction layers", { exact: true }).click();
   await page.getByLabel("search disposition").selectOption("preferred");
   await page.getByText("Tune arguments", { exact: true }).first().click();
@@ -48,7 +48,7 @@ test("trajectory taxonomy filter and pagination remain URL-addressable", async (
   }));
   api.setData("trajectories", rows);
   api.setData("trajectoryCategories", ["Documentation maintenance", "Incident response"]);
-  await page.goto("/trajectories");
+  await page.goto("/workflows");
   await expect(page.locator("article")).toHaveCount(25);
   await page.getByLabel("Trajectory category").selectOption("Incident response");
   await expect(page).toHaveURL(/category=Incident(?:\+|%20)response/);
@@ -69,7 +69,7 @@ test("a 5,000-row trajectory archive renders only one bounded page", async ({ pa
   };
   api.setData("trajectories", Array.from({ length: 5000 }, (_, index) => ({ ...base, id: index + 1 })));
   api.setData("trajectoryCategories", ["Investigation"]);
-  await page.goto("/trajectories");
+  await page.goto("/workflows");
   await expect(page.getByText("Showing 1-25 of 5000", { exact: true })).toBeVisible();
   await expect(page.locator("article")).toHaveCount(25);
   expect(await page.locator("article").count()).toBeLessThanOrEqual(25);
@@ -114,7 +114,7 @@ test("trajectory read failures replace the archive rather than masquerading as e
       await route.fallback();
     }
   });
-  await page.goto("/trajectories");
+  await page.goto("/workflows");
   await expect(page.getByText("Iceberg catalog unavailable", { exact: true })).toBeVisible();
   await expect(page.getByText("No agent trajectories yet", { exact: true })).toHaveCount(0);
 });

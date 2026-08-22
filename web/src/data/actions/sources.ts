@@ -129,7 +129,7 @@ export function sourcesActions(): SourcesActions {
 
     /* The cadence is not a column on the source: every connected source gets a
        schedule-triggered "Sync <name>" flow, and that flow's trigger IS the
-       schedule — the same one the Flows editor shows. So this writes the flow,
+       schedule the sync runtime reads. So this writes the flow,
        and `sourcePulse` reads it back, which is why the two can never disagree.
        `null` means manual only, which is a trigger with no event. */
     setSyncSchedule: async (s, everyMinutes) => {

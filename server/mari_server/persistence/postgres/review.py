@@ -64,7 +64,7 @@ def project_items() -> list[ReviewRecord]:
       UNION ALL
       SELECT 'workflow:' || r.id, 'workflow', w.name || ' approval', 'waiting',
              'automation', '', NULL, 'workflow', r.id::text, w.name,
-             '/flows?run=' || r.id, '', 1::real, 1, true
+             '/workflows?run=' || r.id, '', 1::real, 1, true
         FROM workflow_runs r JOIN workflows w ON w.id = r.workflow_id
         WHERE r.project_id = %s AND w.project_id = r.project_id AND r.status = 'waiting'
       )

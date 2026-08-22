@@ -13,22 +13,31 @@ import { mutate, type ActionContext } from "../actions";
  *  than an uncolored chip with no bucket. */
 const SEVERITIES = new Set(["update-required", "review", "minor"]);
 
-export function lineageActions({ navigate, currentUserName }: ActionContext): LineageActions {
+export function lineageActions({ navigate, replace, currentUserName }: ActionContext): LineageActions {
+  /* Moving the focus or the question is REPLACE, not push.
+   *
+   * Both used to push, so walking a lineage — the whole point of the page —
+   * filled the history stack one node at a time and Back crawled the graph
+   * backwards instead of leaving it. They still belong in the URL: the view
+   * has to stay shareable and reloadable, and the breadcrumb reads its way
+   * back out of them. They are just not places to go back to. Opening a
+   * document is, and that one pushes. */
+  const view = (patch: Record<string, string | null>) => {
+    const params = new URLSearchParams(window.location.search);
+    for (const [key, value] of Object.entries(patch)) {
+      if (value === null) params.delete(key); else params.set(key, value);
+    }
+    const qs = params.toString();
+    replace(qs ? `/lineage?${qs}` : "/lineage");
+  };
+
   return {
     // The graph's nodes ARE documents; the drawers offered "Open document" and
     // linked to "#". The library names the destination, the app follows it.
+    // A real destination, so a real history entry.
     openDocument: (docId: number) => navigate(`/knowledge/doc?id=${docId}`),
-    setFocalNode: (nodeId: string) => {
-      const params = new URLSearchParams(window.location.search);
-      params.set("focal", nodeId);
-      navigate(`/lineage?${params.toString()}`);
-    },
-    setMode: (mode, focalId) => {
-      const params = new URLSearchParams(window.location.search);
-      params.set("mode", mode);
-      if (focalId) params.set("focal", focalId);
-      navigate(`/lineage?${params.toString()}`);
-    },
+    setFocalNode: (nodeId: string) => view({ focal: nodeId }),
+    setMode: (mode, focalId) => view({ mode, ...(focalId ? { focal: focalId } : null) }),
     // x/y are 0..1 fractions of the canvas, which is exactly what `documents.
     // graph_x`/`graph_y` store and what the lineage query reads back.
     pinNode: async ({ docId, x, y }) => {
@@ -64,9 +73,16 @@ export function lineageActions({ navigate, currentUserName }: ActionContext): Li
     deriveLinks: async () => {
       await mutate("mutation { deriveLinks }");
     },
-    saveView: async ({ name, state }) => {
-      await mutate("mutation($name: String!, $state: String!) { saveGraphView(name: $name, state: $state) }",
+    /* The id comes back so the toolbar can offer to remove the view it just
+       saved, without waiting for the next read to hand it one. */
+    saveView: async ({ name, state }): Promise<number | void> => {
+      const d = await mutate("mutation($name: String!, $state: String!) { saveGraphView(name: $name, state: $state) }",
         { name, state });
+      const id = d?.saveGraphView;
+      return typeof id === "number" ? id : undefined;
+    },
+    deleteView: async ({ id }) => {
+      await mutate("mutation($id: Int!) { deleteGraphView(id: $id) }", { id });
     },
     analyzeImpact: async (claim: string): Promise<ImpactResult> => {
       const d = await mutate(
@@ -86,8 +102,5 @@ export function lineageActions({ navigate, currentUserName }: ActionContext): Li
           })),
       };
     },
-    // No delete-view handler: the toolbar has no control that removes a saved
-    // view, so `deleteGraphView` stays unwired rather than being called from
-    // somewhere the user cannot see.
   };
 }

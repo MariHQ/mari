@@ -15,9 +15,6 @@ class AgentToolReadStore(Protocol):
     def document(self, document_id: int) -> Mapping[str, Any] | None: ...
     def document_tags(self, document_id: int) -> Sequence[Mapping[str, Any]]: ...
     def sources(self) -> Sequence[Mapping[str, Any]]: ...
-    def workflows(self) -> Sequence[Mapping[str, Any]]: ...
-    def workflow(self, workflow_id: int) -> Mapping[str, Any] | None: ...
-    def workflow_runs(self, workflow_id: int) -> Sequence[Mapping[str, Any]]: ...
     def trajectories(self) -> Sequence[Mapping[str, Any]]: ...
     def trajectory(self, trajectory_id: int) -> Mapping[str, Any] | None: ...
     def trajectory_steps(self, trajectory_id: int) -> Sequence[Mapping[str, Any]]: ...
@@ -29,7 +26,6 @@ class ToolDependencies:
     store: AgentToolReadStore
     search: Callable[[str, int], Sequence[Mapping[str, Any]]]
     record_search: Callable[[str], None]
-    review_items: Callable[[], Sequence[Any]]
     connector_definitions: Callable[[], Sequence[Any]]
 
 
@@ -102,28 +98,6 @@ def build_tool_bindings(deps: ToolDependencies) -> dict[str, ToolBinding]:
         } for row in rows]
         return ToolOutcome(True, f"{len(detail)} sources", detail)
 
-    def list_flows(_arguments: Mapping[str, Any]) -> ToolOutcome:
-        rows = deps.store.workflows()
-        detail = [{
-            "id": row["id"], "name": row["name"], "status": row["status"],
-            "description": str(row.get("description") or "")[:100],
-        } for row in rows]
-        return ToolOutcome(True, f"{len(detail)} flows", detail)
-
-    def inspect_flow(arguments: Mapping[str, Any]) -> ToolOutcome:
-        try:
-            workflow_id = int(arguments.get("id"))
-        except (TypeError, ValueError):
-            return ToolOutcome(False, "inspect_flow needs a workflow id", "error: invalid id")
-        row = deps.store.workflow(workflow_id)
-        if not row:
-            return ToolOutcome(False, f"workflow {workflow_id} not found", "error: no workflow")
-        runs = deps.store.workflow_runs(workflow_id)
-        return ToolOutcome(
-            True, f'inspected "{row["name"]}" and {len(runs)} recent runs',
-            {"workflow": dict(row), "runs": [dict(run) for run in runs]},
-        )
-
     def list_workflow_observations(arguments: Mapping[str, Any]) -> ToolOutcome:
         rows = deps.store.trajectories()
         wanted = str(arguments.get("query") or "").strip().casefold()
@@ -153,15 +127,6 @@ def build_tool_bindings(deps: ToolDependencies) -> dict[str, ToolBinding]:
         return ToolOutcome(True, f"inspected observed workflow {trajectory_id}",
                            {**dict(row), "steps": [dict(step) for step in steps]})
 
-    def list_tasks(_arguments: Mapping[str, Any]) -> ToolOutcome:
-        rows = deps.review_items()
-        detail = [{
-            "id": row.id, "title": row.title, "kind": row.kind, "status": row.status,
-            "done": row.status in {"done", "approved", "rejected"},
-        } for row in rows]
-        open_count = sum(not row["done"] for row in detail)
-        return ToolOutcome(True, f"{len(detail)} review items ({open_count} open)", detail)
-
     def list_answers(_arguments: Mapping[str, Any]) -> ToolOutcome:
         rows = deps.store.answers()
         detail = [dict(row) for row in rows]
@@ -174,16 +139,18 @@ def build_tool_bindings(deps: ToolDependencies) -> dict[str, ToolBinding]:
         return ToolOutcome(True, f"→ {path}", {"path": path}, path)
 
     return {
-        "search": ToolBinding("search(query) — hybrid knowledge search with real document ids", search),
+        "search": ToolBinding(
+            "search(query) - hybrid knowledge search with real document ids. The agent cannot "
+            "answer a knowledge question without calling this: list_sources only reports connector "
+            "health, not document content, and is not a substitute.",
+            search,
+        ),
         "read_document": ToolBinding("read_document(id) — one document with provenance and tags", read_document),
         "list_product_surfaces": ToolBinding("list_product_surfaces() — shipped surfaces and paths", list_product_surfaces),
         "list_connector_types": ToolBinding("list_connector_types() — supported connector contracts", list_connector_types),
         "list_sources": ToolBinding("list_sources() — connected sources and health", list_sources),
-        "list_flows": ToolBinding("list_flows() — configured automations", list_flows),
-        "inspect_flow": ToolBinding("inspect_flow(id) — definition and recent run evidence", inspect_flow),
         "list_workflow_observations": ToolBinding("list_workflow_observations(query?) — mined behavior and rework", list_workflow_observations),
         "inspect_workflow_observation": ToolBinding("inspect_workflow_observation(id) — phases and tool outcomes", inspect_workflow_observation),
-        "list_tasks": ToolBinding("list_tasks() — unified Review items", list_tasks),
         "list_answers": ToolBinding("list_answers() — approved-answer library", list_answers),
         "navigate": ToolBinding("navigate(path) — open a path returned by list_product_surfaces", navigate),
     }

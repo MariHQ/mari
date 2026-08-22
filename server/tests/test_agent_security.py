@@ -26,7 +26,6 @@ class AgentSecurityTests(unittest.TestCase):
             store=Store(),
             search=lambda _text, _limit: (),
             record_search=lambda _text: None,
-            review_items=lambda: (),
             connector_definitions=lambda: (),
         ))
 

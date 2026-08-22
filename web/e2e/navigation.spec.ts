@@ -2,12 +2,12 @@ import { expect, test } from "@playwright/test";
 import { installMockApi } from "./fixtures/mock-api";
 
 const ROUTES = [
-  ["/", null, "Home"], ["/tasks", "Review", "Review"], ["/facts", "Facts", "Facts"],
+  ["/", null, "Home"], ["/facts", "Facts", "Facts"],
   ["/decisions", "Decisions", "Decisions"], ["/knowledge", "Knowledge", "Knowledge"],
-  ["/knowledge/doc?id=1", "Retention runbook", "Knowledge"], ["/answers", "Approved answers", "Answers"],
+  ["/knowledge/doc?id=1", "Retention runbook", "Knowledge"], ["/workflows?tab=answers", "Approved answers", "Workflows"],
   ["/insights", "Insights", "Analytics"], ["/audit", "Repository audit", "Review"], ["/lineage", "Lineage", "Lineage"],
-  ["/flows", "Automations", null], ["/library", "Library", "Knowledge"], ["/publish", "Destinations", "Destinations"],
-  ["/trajectories", "Agent trajectories", "Trajectories"],
+  ["/library", "Library", "Knowledge"], ["/publish", "Destinations", "Destinations"],
+  ["/workflows", "Workflows", "Workflows"],
   ["/sources", "Sources", "Sources"], ["/settings/general", "General", "Settings"],
   ["/settings/models", "Models", "Settings"], ["/settings/design", "Design & brand", "Settings"],
   ["/settings/members", "Members", "Settings"], ["/settings/api-keys", "API keys", "Settings"],

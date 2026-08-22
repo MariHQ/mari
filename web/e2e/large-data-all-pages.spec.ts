@@ -9,32 +9,13 @@ async function expectNoPageOverflow(page: import("@playwright/test").Page) {
   expect(overflow).toBeLessThanOrEqual(1);
 }
 
-test("a 1,500-item review queue renders a bounded, navigable page", async ({ page }) => {
-  api.setData("reviewItems", {
-    items: Array.from({ length: 1_500 }, (_, index) => ({
-      id: `task:${index + 1}`, title: `Queue item ${index + 1}`, assignee: "Dana Reyes",
-      kind: "task", status: "pending", source: "", due: "2026-08-30",
-      subjectType: "", subjectId: "", subjectTitle: "", subjectHref: "",
-    })),
-    totalCount: 1_500,
-    pageInfo: { endCursor: "", hasNextPage: true },
-  });
-  await page.goto("/tasks");
-  await expect(page.getByText("Showing 1 to 25 of 1,500 open review items")).toBeVisible();
-  await expect(page.getByRole("button", { name: "Mark done" })).toHaveCount(25);
-  await page.getByRole("button", { name: "Next page" }).click();
-  await expect(page.getByText("Showing 26 to 50 of 1,500 open review items")).toBeVisible();
-  await expect(page.getByText("Queue item 26", { exact: true })).toBeVisible();
-  await expectNoPageOverflow(page);
-});
-
 test("a 1,200-answer catalog renders 24 cards and preserves pagination", async ({ page }) => {
   api.setData("approvedAnswers", Array.from({ length: 1_200 }, (_, index) => ({
     id: index + 1, question: `Question ${index + 1}`, answer: `Grounded answer ${index + 1}`,
     status: "approved", owner: "Dana", channels: ["slack-bot"], sources: [], served: index,
     spark: [1, 2, 1], updated: "2026-08-19T12:00:00Z",
   })));
-  await page.goto("/answers");
+  await page.goto("/workflows?tab=answers");
   await expect(page.getByText("Showing 1 to 24 of 1,200 answers")).toBeVisible();
   await expect(page.getByText(/^Question \d+$/)).toHaveCount(24);
   await page.getByRole("button", { name: "Next page" }).click();

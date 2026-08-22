@@ -18,6 +18,7 @@ from concurrent.futures import ThreadPoolExecutor
 from mari_server.providers import models as llm
 from mari_server.identity import context as access
 from mari_server.persistence.postgres.database import exec_, jload, q, q1
+from mari_server.persistence.postgres.search import like_pattern
 from mari_components.trajectories import (
     TrajectoryStep as ComponentTrajectoryStep,
     analyze_trajectory as component_analyze_trajectory,
@@ -33,22 +34,47 @@ _PENDING = threading.BoundedSemaphore(_PENDING_LIMIT)
 _RECONCILE_LOCK = threading.Lock()
 _LAST_RECONCILE: dict[int, float] = {}
 
+# The card shows the promoted workflow inline (name, status, node count) rather
+# than navigating away to it, so the promotion is read with the trajectory it
+# came from instead of by a second round trip per card.
+_PROMOTED_JOIN = ("LEFT JOIN workflows w ON w.id = t.promoted_workflow_id "
+                  "AND w.project_id = t.project_id")
+_SELECT = ("t.*, w.name AS promoted_workflow_name, w.status AS promoted_workflow_status, "
+           "COALESCE(jsonb_array_length(w.nodes), 0) AS promoted_workflow_nodes")
 
-def list_trajectories(
-    limit: int, offset: int, category: str | None = None,
-) -> tuple[list[dict], list[dict], list[dict]]:
-    project_id = access.require_current_access().project_id
-    args: list = [project_id]
-    where = "project_id = %s"
+#: What the Observed tab's failure filter accepts. Anything else is ignored
+#: rather than refused: a stale bookmark narrows to nothing it can explain.
+_FAILURE_FILTERS = {"with", "none"}
+
+
+def _filter_clause(category: str | None, status: str | None,
+                   failures: str | None, search: str | None) -> tuple[str, list]:
+    """The Observed tab's filters, as SQL. The caller supplies project_id first.
+
+    Filtering here rather than in the page is what keeps "Showing 1-25 of N"
+    honest: a client-side filter over one page of 25 would narrow the rows and
+    leave the total describing a different set.
+    """
+    where = ["t.project_id = %s"]
+    args: list = []
     if category:
-        where += " AND category = %s"
+        where.append("t.category = %s")
         args.append(category)
-    args.extend((limit, offset))
-    rows = q(f"SELECT * FROM trajectories WHERE {where} ORDER BY started_at DESC, id DESC LIMIT %s OFFSET %s",
-             tuple(args))
-    if not rows:
-        return [], [], []
-    trajectory_ids = [row["id"] for row in rows]
+    if status:
+        where.append("t.status = %s")
+        args.append(status)
+    if failures in _FAILURE_FILTERS:
+        where.append("t.failure_count > 0" if failures == "with" else "t.failure_count = 0")
+    if search:
+        where.append("(t.prompt ILIKE %s OR t.macro_intent ILIKE %s"
+                     " OR t.layer2 ILIKE %s OR t.category ILIKE %s)")
+        args.extend([like_pattern(search[:120])] * 4)
+    return " AND ".join(where), args
+
+
+def _details(project_id: int, trajectory_ids: list[int]) -> tuple[list[dict], list[dict]]:
+    if not trajectory_ids:
+        return [], []
     steps = q("""SELECT trajectory_id, ordinal, tool, action_family, args, summary, ok,
                           disposition, edited_args
                    FROM trajectory_steps WHERE project_id = %s AND trajectory_id = ANY(%s)
@@ -57,15 +83,48 @@ def list_trajectories(
                       FROM trajectory_evidence
                      WHERE project_id = %s AND trajectory_id = ANY(%s)
                      ORDER BY trajectory_id, rank, id""", (project_id, trajectory_ids))
-    return rows, steps, evidence
+    return steps, evidence
 
 
-def trajectory_count(category: str | None = None) -> int:
+def list_trajectories(
+    limit: int, offset: int, category: str | None = None, status: str | None = None,
+    failures: str | None = None, search: str | None = None,
+) -> tuple[list[dict], list[dict], list[dict]]:
     project_id = access.require_current_access().project_id
-    if category:
-        return int(q1("SELECT count(*) AS n FROM trajectories WHERE project_id = %s AND category = %s",
-                      (project_id, category))["n"])
-    return int(q1("SELECT count(*) AS n FROM trajectories WHERE project_id = %s", (project_id,))["n"])
+    where, args = _filter_clause(category, status, failures, search)
+    rows = q(f"""SELECT {_SELECT} FROM trajectories t {_PROMOTED_JOIN}
+                  WHERE {where} ORDER BY t.started_at DESC, t.id DESC LIMIT %s OFFSET %s""",
+             (project_id, *args, limit, offset))
+    return (rows, *_details(project_id, [row["id"] for row in rows]))
+
+
+def get_trajectory(trajectory_id: int) -> tuple[list[dict], list[dict], list[dict]]:
+    """One observed workflow by id, in the same shape the list returns.
+
+    The Observed tab deep-links a single workflow into its drawer (an approved
+    answer links back to the workflow it was promoted from), and that workflow
+    is very often not on the page the reader happens to be looking at. Reading
+    it directly is what makes the link land on the workflow rather than on a
+    filtered list that does not contain it."""
+    project_id = access.require_current_access().project_id
+    rows = q(f"""SELECT {_SELECT} FROM trajectories t {_PROMOTED_JOIN}
+                  WHERE t.project_id = %s AND t.id = %s""", (project_id, trajectory_id))
+    return (rows, *_details(project_id, [row["id"] for row in rows]))
+
+
+def trajectory_count(category: str | None = None, status: str | None = None,
+                     failures: str | None = None, search: str | None = None) -> int:
+    project_id = access.require_current_access().project_id
+    where, args = _filter_clause(category, status, failures, search)
+    return int(q1(f"SELECT count(*) AS n FROM trajectories t WHERE {where}",
+                  (project_id, *args))["n"])
+
+
+def trajectory_statuses() -> list[str]:
+    project_id = access.require_current_access().project_id
+    return [row["status"] for row in q(
+        """SELECT status FROM trajectories WHERE project_id = %s
+           GROUP BY status ORDER BY count(*) DESC, status""", (project_id,))]
 
 
 def trajectory_categories() -> list[str]:
@@ -310,8 +369,14 @@ def tune_evidence(trajectory_id: int, document_id: int, relevance: str, note: st
                    (relevance, note.strip()[:500], project_id, trajectory_id, document_id)))
 
 
-def promote_to_workflow(trajectory_id: int, name: str) -> int:
-    """Create a paused, editable workflow from the human-tuned trace."""
+def promote_to_workflow(trajectory_id: int, name: str) -> dict:
+    """Create a paused, editable workflow from the human-tuned trace.
+
+    Answers with the workflow itself, not just its id: the card shows what
+    promotion produced (name, status, how many nodes) in place, and the node
+    count is the part worth showing — an excluded tool is not in the workflow,
+    so the count is how tuning becomes visible.
+    """
     project_id = access.require_current_access().project_id
     clean_name = name.strip()
     if not clean_name:
@@ -326,7 +391,13 @@ def promote_to_workflow(trajectory_id: int, name: str) -> int:
         if not row:
             raise ValueError("Trajectory not found.")
         if row.get("promoted_workflow_id"):
-            return int(row["promoted_workflow_id"])
+            existing = conn.execute(
+                """SELECT id, name, status, COALESCE(jsonb_array_length(nodes), 0) AS node_count
+                     FROM workflows WHERE project_id = %s AND id = %s""",
+                (project_id, row["promoted_workflow_id"]),
+            ).fetchone()
+            if existing:
+                return dict(existing)
         if conn.execute(
             "SELECT 1 FROM workflows WHERE project_id = %s AND name = %s", (project_id, clean_name),
         ).fetchone():
@@ -364,7 +435,183 @@ def promote_to_workflow(trajectory_id: int, name: str) -> int:
             "UPDATE trajectories SET promoted_workflow_id = %s WHERE project_id = %s AND id = %s",
             (workflow_id, project_id, trajectory_id),
         )
-        return workflow_id
+        return {"id": workflow_id, "name": clean_name, "status": "paused",
+                "node_count": len(nodes)}
 
     from mari_server.persistence.postgres.database import transaction
     return transaction(promote)
+
+
+def set_disposition(trajectory_id: int, disposition: str) -> bool:
+    """Turn an observed workflow down without deleting the evidence for it.
+
+    A rejected workflow stays queryable: the point of harvesting a trace is to
+    learn what the agent did, and deleting every trace somebody disagreed with
+    throws that away. Deletion is a separate, confirmed action.
+    """
+    if disposition not in {"observed", "rejected"}:
+        raise ValueError("Workflow disposition must be observed or rejected.")
+    project_id = access.require_current_access().project_id
+    return bool(q1("""UPDATE trajectories SET disposition = %s
+                       WHERE project_id = %s AND id = %s RETURNING id""",
+                   (disposition, project_id, trajectory_id)))
+
+
+def delete_trajectory(trajectory_id: int) -> bool:
+    """Remove an observed workflow and everything harvested with it.
+
+    Steps and evidence are cascaded by their foreign keys, and they are deleted
+    explicitly first so a legacy row whose constraint predates the cascade
+    cannot leave orphans behind.
+    """
+    project_id = access.require_current_access().project_id
+
+    def remove(conn):
+        exists = conn.execute(
+            "SELECT id FROM trajectories WHERE project_id = %s AND id = %s FOR UPDATE",
+            (project_id, trajectory_id),
+        ).fetchone()
+        if not exists:
+            return False
+        conn.execute("DELETE FROM trajectory_evidence WHERE project_id = %s AND trajectory_id = %s",
+                     (project_id, trajectory_id))
+        conn.execute("DELETE FROM trajectory_steps WHERE project_id = %s AND trajectory_id = %s",
+                     (project_id, trajectory_id))
+        conn.execute("DELETE FROM trajectories WHERE project_id = %s AND id = %s",
+                     (project_id, trajectory_id))
+        return True
+
+    from mari_server.persistence.postgres.database import transaction
+    return transaction(remove)
+
+
+#: How long a promoted draft runs before the console asks somebody to look at
+#: it again. An answer mined from one conversation is the most perishable thing
+#: in the library, so it carries a recheck date from the moment it is drafted.
+_RECHECK_DAYS = 90
+
+
+def promote_to_answer(trajectory_id: int, owner: str) -> int:
+    """Draft an approved answer from what the agent actually answered.
+
+    The question is what the person asked, the wording is the answer the agent
+    gave, and the sources are the documents the run cited. It lands as a DRAFT:
+    nothing a bot serves changes until a human approves it, which is the whole
+    contract of the Approved answers tab.
+    """
+    project_id = access.require_current_access().project_id
+
+    def promote(conn):
+        row = conn.execute(
+            """SELECT id, session_id, prompt, macro_intent FROM trajectories
+                 WHERE project_id = %s AND id = %s FOR UPDATE""",
+            (project_id, trajectory_id),
+        ).fetchone()
+        if not row:
+            raise ValueError("Workflow not found.")
+        question = str(row.get("prompt") or row.get("macro_intent") or "").strip()[:200]
+        if not question:
+            raise ValueError("This workflow has no question to promote.")
+        answered = conn.execute(
+            """SELECT content FROM chat_messages
+                 WHERE project_id = %s AND session_id = %s AND role = 'assistant'
+                 ORDER BY id DESC LIMIT 1""",
+            (project_id, row.get("session_id")),
+        ).fetchone() if row.get("session_id") else None
+        answer = str((answered or {}).get("content") or "").strip()
+        if not answer:
+            raise ValueError("This workflow has no answer to promote yet.")
+        sources = [
+            {"source": str(reference["source"] or "mari"), "title": str(reference["title"] or "")}
+            for reference in conn.execute(
+                """SELECT COALESCE(d.source, '') AS source,
+                          COALESCE(NULLIF(e.title, ''), d.title, '') AS title
+                     FROM trajectory_evidence e LEFT JOIN documents d ON d.id = e.document_id
+                    WHERE e.project_id = %s AND e.trajectory_id = %s
+                      AND e.relevance <> 'irrelevant'
+                    ORDER BY (e.relevance = 'pinned') DESC, e.rank, e.id LIMIT 8""",
+                (project_id, trajectory_id),
+            ).fetchall()
+        ]
+        # An earlier promotion of the same workflow under a different question:
+        # the new draft replaces it rather than sitting beside it unexplained.
+        previous = conn.execute(
+            """SELECT id FROM approved_answers
+                 WHERE project_id = %s AND trajectory_id = %s AND question <> %s
+                 ORDER BY id DESC LIMIT 1""",
+            (project_id, trajectory_id, question),
+        ).fetchone()
+        existing = conn.execute(
+            "SELECT id, status FROM approved_answers WHERE project_id = %s AND question = %s",
+            (project_id, question),
+        ).fetchone()
+        if existing and str(existing["status"]) != "draft":
+            # Never overwrite wording bots are already serving, or wording
+            # somebody deliberately retired.
+            raise ValueError(
+                f"An answer for that question is already {existing['status']}. "
+                "Edit it in Approved answers instead.")
+        recheck = f"{_RECHECK_DAYS} days"
+        if existing:
+            conn.execute(
+                """UPDATE approved_answers
+                      SET answer = %s, sources = %s, trajectory_id = %s, supersedes = %s,
+                          owner_name = %s, recheck_after = now() + %s::interval, updated = now()
+                    WHERE project_id = %s AND id = %s""",
+                (answer, json.dumps(sources), trajectory_id,
+                 previous["id"] if previous else None, owner[:120], recheck,
+                 project_id, existing["id"]),
+            )
+            return int(existing["id"])
+        created = conn.execute(
+            """INSERT INTO approved_answers
+                 (project_id, question, answer, status, owner_name, sources,
+                  trajectory_id, supersedes, recheck_after, updated)
+               VALUES (%s, %s, %s, 'draft', %s, %s, %s, %s, now() + %s::interval, now())
+               RETURNING id""",
+            (project_id, question, answer, owner[:120], json.dumps(sources),
+             trajectory_id, previous["id"] if previous else None, recheck),
+        ).fetchone()
+        return int(created["id"])
+
+    from mari_server.persistence.postgres.database import transaction
+    return transaction(promote)
+
+
+def tool_preferences(category: str | None = None) -> dict[str, list[str]]:
+    """Which tools reviewers marked preferred, and which they marked excluded.
+
+    The Workflows page grades a run's individual tool calls. This is the read
+    that makes those grades matter: the planner sees preferred tools first and
+    never sees an excluded one. A tool is preferred when it was marked so more
+    often than it was excluded, and excluded when the reverse holds; a tool
+    people disagree about stays where it was.
+    """
+    project_id = access.require_current_access().project_id
+    rows = q("""SELECT s.tool,
+                       count(*) FILTER (WHERE s.disposition = 'preferred') AS preferred,
+                       count(*) FILTER (WHERE s.disposition = 'excluded') AS excluded
+                  FROM trajectory_steps s
+                  JOIN trajectories t ON t.id = s.trajectory_id AND t.project_id = s.project_id
+                 WHERE s.project_id = %s AND s.disposition <> 'included'
+                   AND t.disposition <> 'rejected'
+                   AND (%s::text IS NULL OR t.category = %s)
+                 GROUP BY s.tool""", (project_id, category, category))
+    preferred = [str(row["tool"]) for row in rows if int(row["preferred"]) > int(row["excluded"])]
+    excluded = [str(row["tool"]) for row in rows if int(row["excluded"]) > int(row["preferred"])]
+    return {"preferred": sorted(preferred), "excluded": sorted(excluded)}
+
+
+def pinned_document_ids(limit: int = 200) -> set[int]:
+    """Documents a reviewer pinned as the evidence an answer should rest on.
+
+    The Workflows page lets somebody mark a document "pinned" against the run
+    that cited it. Retrieval still decides WHETHER a document is relevant to a
+    new question; this only decides that, among the documents it did find, a
+    pinned one is worth putting in front of the model rather than cutting.
+    """
+    project_id = access.require_current_access().project_id
+    return {int(row["document_id"]) for row in q(
+        """SELECT DISTINCT document_id FROM trajectory_evidence
+            WHERE project_id = %s AND relevance = 'pinned' LIMIT %s""",
+        (project_id, max(1, min(int(limit), 1000))))}

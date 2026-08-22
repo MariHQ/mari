@@ -5,14 +5,13 @@ snapshots: a case passes only when the agent emits a successful tool result,
 navigates to a shipped route, completes its SSE turn, and gives the concrete
 next actions required by that workflow.
 
-The matrix covers Home, Knowledge and document retrieval, unified Review,
-Facts, Decisions, Approved answers, Lineage, Automations, documentation sites,
-MCP, bots, priority connectors, Analytics, agent trajectories, Library, model
-configuration, members and enterprise identity, API keys, audit logs,
-repository audit, branding, workspace settings, preferences, and onboarding.
-Inventory evals additionally assert that sources, Review items, automations,
-and approved answers are grounded in live projection results rather than model
-memory. The production-stack Playwright suite sends a real agent-chat request
+The matrix covers Home, Knowledge and document retrieval, Facts, Decisions,
+Approved answers, Lineage, documentation sites, MCP, bots, priority
+connectors, Analytics, agent trajectories, Library, model configuration,
+members and enterprise identity, API keys, audit logs, repository audit,
+branding, workspace settings, preferences, and onboarding. Inventory evals
+additionally assert that sources and approved answers are grounded in live
+projection results rather than model memory. The production-stack Playwright suite sends a real agent-chat request
 for MCP setup and verifies the browser reaches the correct tab with usable
 token/client/test instructions.
 

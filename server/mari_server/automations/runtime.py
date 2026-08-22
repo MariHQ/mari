@@ -105,6 +105,10 @@ def _step_derive_links(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
     return "passed", f"{added} new semantic links", {"links": added}
 
 
+# Still a live workflow step even though the Review PAGE is gone: a scheduled
+# or promoted workflow can still file a review task, and the review projection
+# (persistence/postgres/review.py) still reads those rows for policy
+# auto-approval and inline approvals. Do not remove with the Review UI.
 def _step_create_task(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
     title = cfg.get("title", "Review flow output")
     assignee = str(cfg.get("assignee") or "").strip()

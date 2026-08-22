@@ -61,8 +61,15 @@ DB_PORT=$(db_port) || {
 DB_URL="postgresql://mari:mari@localhost:${DB_PORT}/mari_cloud"
 [ "$DB_PORT" = "5432" ] || echo "==> Postgres on :$DB_PORT (5432 is taken by something else)"
 
-echo "==> Schema (idempotent)"
-docker compose exec -T db psql -U mari -d mari_cloud -v ON_ERROR_STOP=1 -q -f - < server/init.sql
+# The baseline schema only belongs on an empty database. Once the migration
+# ledger exists the API applies server/migrations/ itself at startup, and
+# re-running init.sql would trip on constraints later migrations replaced.
+if docker compose exec -T db psql -U mari -d mari_cloud -tAc "select to_regclass('schema_migrations')" 2>/dev/null | grep -q schema_migrations; then
+  echo "==> Schema: migration ledger present, the API applies migrations at startup"
+else
+  echo "==> Schema (baseline)"
+  docker compose exec -T db psql -U mari -d mari_cloud -v ON_ERROR_STOP=1 -q -f - < server/init.sql
+fi
 
 if curl -sf http://localhost:11434/api/tags >/dev/null 2>&1; then
   echo "==> Ollama detected on the host"

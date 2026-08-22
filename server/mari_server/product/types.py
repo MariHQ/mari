@@ -621,6 +621,19 @@ class TrajectoryEvidence:
 
 
 @strawberry.type
+class PromotedWorkflow:
+    """The workflow an observed run was codified into.
+
+    Carried with the run so the card can show what promotion produced (name,
+    status, how many nodes) in place, instead of sending the reader to another
+    page to find out whether the button did anything."""
+    id: int
+    name: str
+    status: str
+    node_count: int
+
+
+@strawberry.type
 class Trajectory:
     id: int
     session_id: int | None
@@ -640,6 +653,10 @@ class Trajectory:
     steps: list[TrajectoryStep]
     evidence: list[TrajectoryEvidence]
     promoted_workflow_id: int | None
+    promoted_workflow: PromotedWorkflow | None
+    #: "observed" or "rejected". A rejected run keeps its evidence; only an
+    #: explicit delete removes it.
+    disposition: str
 
 
 @strawberry.type
@@ -654,6 +671,14 @@ class ApprovedAnswer:
     served: int
     spark: list[int]
     updated: str
+    #: The observed workflow this answer was drafted from, when it was promoted
+    #: out of one. The Approved answers tab links back to it.
+    trajectory_id: int | None
+    #: An earlier answer this one replaces.
+    supersedes: int | None
+    #: When somebody should look at this answer again. ISO 8601, or "" when the
+    #: answer carries no recheck date; never a date the row does not hold.
+    recheck_after: str
 
 
 @strawberry.type

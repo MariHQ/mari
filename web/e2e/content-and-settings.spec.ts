@@ -4,26 +4,6 @@ import { installMockApi, type MockApi } from "./fixtures/mock-api";
 let api: MockApi;
 test.beforeEach(async ({ page }) => { api = await installMockApi(page); });
 
-test("review items can be created, completed, filtered, and report write failures", async ({ page }) => {
-  await page.goto("/tasks");
-  await page.getByRole("textbox", { name: "Review item", exact: true }).fill("Review the deletion SLA");
-  await page.locator('select:has(option[value="approval"])').selectOption("approval");
-  await page.getByLabel("Due date").fill("2026-08-29");
-  await page.getByRole("button", { name: "Add review item" }).click();
-  await expect.poll(() => api.calls.some((call) => call.query.includes("createTask") && call.variables.title === "Review the deletion SLA")).toBeTruthy();
-
-  await page.getByRole("button", { name: "Mark done" }).first().click();
-  await expect.poll(() => api.calls.some((call) => call.query.includes("setTaskDone") && call.variables.done === true)).toBeTruthy();
-  await page.getByRole("button", { name: /Assigned to me/ }).click();
-  await expect(page.getByRole("button", { name: /Assigned to me/ })).toHaveAttribute("aria-pressed", "true");
-
-  api.failNext(/createTask/, "The work queue is unavailable");
-  await page.getByRole("textbox", { name: "Review item", exact: true }).fill("This write should remain visible");
-  await page.getByRole("button", { name: "Add review item" }).click();
-  await expect(page.getByText("The work queue is unavailable")).toBeVisible();
-  await expect(page.getByRole("textbox", { name: "Review item", exact: true })).toHaveValue("This write should remain visible");
-});
-
 test("decisions can be captured, ratified with confirmation, and impact-analysed", async ({ page }) => {
   api.setData("decisions", [{
     id: 7, statement: "Store canonical records in Iceberg", context: "Scale analytical reads.",
@@ -52,7 +32,7 @@ test("decisions can be captured, ratified with confirmation, and impact-analysed
 });
 
 test("answers can be drafted and harvested from selected sources", async ({ page }) => {
-  await page.goto("/answers");
+  await page.goto("/workflows?tab=answers");
   await page.getByRole("button", { name: "New answer" }).click();
   await page.getByPlaceholder("Question people ask").fill("What is the deletion SLA?");
   await page.getByPlaceholder("The wording to serve, verbatim").fill("Deletion completes within seven days.");

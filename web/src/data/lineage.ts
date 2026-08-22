@@ -6,8 +6,9 @@
 
 import { useMemo } from "react";
 import { useSearchParams } from "react-router-dom";
-import type { LineageData, LineageDrawer } from "@mari-design/components/pages/LineagePage";
-import type { LEdge, LNode, Lens, LayoutMode, LineageMode } from "@mari-design/components/features/LineageDataModel";
+import type { LineageCrumb, LineageData, LineageDrawer } from "@mari-design/components/pages/LineagePage";
+import { groupKindWord, groupParts, type LEdge, type LNode, type Lens, type LayoutMode, type LineageMode }
+  from "@mari-design/components/features/LineageDataModel";
 import { useQuery } from "../lib/api";
 import type { PageData } from "./types";
 
@@ -62,6 +63,8 @@ export type LineageView = {
   node: string | null;
   edge: string | null;
   group: string | null;
+  /** Roll-up groups a link asks to open unfolded on the canvas. */
+  expand: string[];
 };
 
 const LENSES = new Set<Lens>(["source", "stale", "owner", "health"]);
@@ -87,6 +90,8 @@ export function readView(params: URLSearchParams): LineageView {
     node: params.get("node") || null,
     edge: params.get("edge") || null,
     group: params.get("group") || null,
+    // Same contract as `q`: the link seeds it, the reader owns it from there.
+    expand: (params.get("expand") || "").split(",").map((g) => g.trim()).filter(Boolean),
   };
 }
 
@@ -126,6 +131,69 @@ function drawerFor(view: LineageView, nodes: LNode[], edges: LEdge[]): LineageDr
   // The assert drawer renders what `analyzeImpact` returned; there is no
   // result to deep-link to, so it is never opened from a URL.
   return null;
+}
+
+/* ── the trail out of a drill-down ───────────────────────────────────────── */
+
+/** A lineage URL carrying `over` on top of the settings that survive every
+ *  step back. Lens, layout, the as-of date and the query are HOW the reader is
+ *  looking; mode, focus, the open group and the open node are WHERE they have
+ *  drilled to, and those are exactly what a crumb undoes. */
+export function lineageHref(view: LineageView, over: Record<string, string | null>): string {
+  const params = new URLSearchParams();
+  if (view.lens !== "source") params.set("lens", view.lens);
+  if (view.layout !== "flow") params.set("layout", view.layout);
+  if (view.asOf) params.set("asOf", view.asOf);
+  if (view.query) params.set("q", view.query);
+  for (const [key, value] of Object.entries(over)) if (value) params.set(key, value);
+  const qs = params.toString();
+  return qs ? `/lineage?${qs}` : "/lineage";
+}
+
+const MODE_LABEL: Record<LineageMode, string> = {
+  documents: "Documents",
+  overview: "Overview",
+  provenance: "Provenance",
+  impact: "Impact",
+};
+
+/** A roll-up bucket in words: "MariHQ/web commits", "Slack documents". */
+function groupLabel(groupId: string): string {
+  const { repo, kind } = groupParts(groupId);
+  const word = groupKindWord(kind, 2);
+  return word ? `${repo} ${word}` : repo;
+}
+
+/** Lineage > Overview > MariHQ/web commits > PR #482.
+ *
+ *  Built from the URL, because the URL is what a crumb has to be able to go
+ *  back to. `null` when nothing is drilled into: a trail of one crumb pointing
+ *  at the page you are already on is furniture, not navigation. Every crumb
+ *  but the last carries an href, which is the whole point — before this the
+ *  page rendered a Breadcrumb it was never given anything to draw, so a reader
+ *  who had drilled into a focal node had no way back out but the browser. */
+export function buildCrumbs(view: LineageView, nodes: LNode[]): LineageCrumb[] | null {
+  const focal = view.focalId ? nodes.find((n) => n.id === view.focalId) ?? null : null;
+  const opened = view.node ? nodes.find((n) => n.id === view.node) ?? null : null;
+  const leaf = opened ?? focal;
+  const group = view.group || leaf?.group || null;
+  if (view.mode === "documents" && !leaf && !group) return null;
+
+  const trail: LineageCrumb[] = [{ label: "Lineage", href: lineageHref(view, {}) }];
+  const mode = view.mode === "documents" ? null : view.mode;
+  if (mode) {
+    trail.push({ label: MODE_LABEL[view.mode], href: lineageHref(view, { mode, focal: view.focalId }) });
+  }
+  if (group) {
+    // A bucket is an overview idea, so its crumb opens the overview on it.
+    trail.push({ label: groupLabel(group), href: lineageHref(view, { mode: "overview", group }) });
+  }
+  if (leaf) {
+    trail.push({ label: leaf.title, href: lineageHref(view, { mode, focal: leaf.id, node: opened?.id ?? null }) });
+  }
+  if (trail.length === 1) return null;
+  // The last crumb is where the reader already is (§ Breadcrumb): no link.
+  return trail.map((crumb, i) => (i === trail.length - 1 ? { label: crumb.label } : crumb));
 }
 
 /* ── mapping helpers ────────────────────────────────────────────────────── */
@@ -210,7 +278,7 @@ export const EMPTY: LineageData = {
 /** The default view: a freshly opened graph, live, whole, nothing selected. */
 const LIVE: LineageView = {
   lens: "source", layout: "flow", mode: "documents", focalId: null, trace: null,
-  asOf: null, query: null, node: null, edge: null, group: null,
+  asOf: null, query: null, node: null, edge: null, group: null, expand: [],
 };
 
 export function buildLineage(res: Res | null, view: LineageView = LIVE): LineageData {
@@ -246,11 +314,16 @@ export function buildLineage(res: Res | null, view: LineageView = LIVE): Lineage
     trace: traced,
     asOf: asOfIndex(dates, view.asOf),
     search: view.query ? { query: view.query } : null,
+    // Only groups the graph actually has: unfolding a bucket that is not there
+    // would leave an "Expanded" chip standing for nothing.
+    expanded: view.expand.filter((group) => nodes.some((n) => (n.group || `source:${n.source}`) === group)),
     drawer: drawerFor(view, nodes, edges),
-    // Crumbs and the long-text extras card have no source in the graph query;
-    // they are canvas compositions, and inventing a trail nobody navigated
-    // would be worse than no trail.
-    crumbs: null,
+    // The trail out of whatever the reader drilled into, from the URL that
+    // took them there. `null` on a fresh graph: there is nothing to go back
+    // out of yet, and a one-crumb trail is furniture.
+    crumbs: buildCrumbs(view, nodes),
+    // The long-text extras card has no source in the graph query; it is a
+    // canvas composition.
     extras: null,
     // The header's "document being traced" names the focal document and
     // carries its id, so the button has a real destination. Nothing in focus,

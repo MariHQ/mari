@@ -3,9 +3,9 @@ import { expect, test } from "@playwright/test";
 import { installMockApi } from "./fixtures/mock-api";
 
 const ROUTES = [
-  "/", "/tasks", "/facts", "/decisions", "/knowledge", "/knowledge/doc?id=1",
-  "/answers", "/insights", "/audit", "/lineage", "/flows", "/library",
-  "/publish", "/trajectories", "/sources", "/preferences", "/welcome",
+  "/", "/facts", "/decisions", "/knowledge", "/knowledge/doc?id=1",
+  "/workflows", "/workflows?tab=answers", "/insights", "/audit", "/lineage", "/library",
+  "/publish", "/sources", "/preferences", "/welcome",
   "/settings/general", "/settings/models", "/settings/design", "/settings/members",
   "/settings/api-keys", "/settings/audit",
 ] as const;

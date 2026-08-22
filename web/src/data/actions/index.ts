@@ -17,12 +17,10 @@
 
 import { gqlResult, invalidateQueries } from "../../lib/api";
 
-import { answersActions } from "./answers";
 import { auditActions } from "./audit";
 import { decisionsActions } from "./decisions";
 import { docReviewActions } from "./doc-review";
 import { factsActions } from "./facts";
-import { flowsActions } from "./flows";
 import { insightsActions } from "./insights";
 import { knowledgeActions } from "./knowledge";
 import { lineageActions } from "./lineage";
@@ -39,8 +37,7 @@ import { settingsMembersActions } from "./settings-members";
 import { settingsModelsActions } from "./settings-models";
 import { setupActions } from "./setup";
 import { sourcesActions } from "./sources";
-import { tasksActions } from "./tasks";
-import { trajectoriesActions } from "./trajectories";
+import { workflowsActions } from "./workflows";
 import { welcomeActions } from "./welcome";
 
 /** Run a mutation, surface the real server message, then invalidate reads so
@@ -72,12 +69,10 @@ export type ActionContext = {
 
 /** Page id -> factory. Ids match `PAGES[].id` in the library. */
 export const ACTION_FACTORIES: Record<string, (ctx: ActionContext) => unknown> = {
-  answers: answersActions,
   audit: auditActions,
   decisions: decisionsActions,
   "doc-review": docReviewActions,
   facts: factsActions,
-  flows: flowsActions,
   insights: insightsActions,
   knowledge: knowledgeActions,
   lineage: lineageActions,
@@ -94,7 +89,6 @@ export const ACTION_FACTORIES: Record<string, (ctx: ActionContext) => unknown> =
   "settings-models": settingsModelsActions,
   setup: setupActions,
   sources: sourcesActions,
-  tasks: tasksActions,
-  trajectories: trajectoriesActions,
   welcome: welcomeActions,
+  workflows: workflowsActions,
 };

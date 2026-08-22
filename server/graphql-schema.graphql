@@ -41,6 +41,9 @@ type ApprovedAnswer {
   served: Int!
   spark: [Int!]!
   updated: String!
+  trajectoryId: Int
+  supersedes: Int
+  recheckAfter: String!
 }
 
 type AuditDetail {
@@ -353,12 +356,12 @@ type Member {
 }
 
 type Mutation {
-  evaluateReviewItem(reviewId: String!, dryRun: Boolean! = true): ReviewPolicyDecision!
+  evaluateReviewItem(reviewId: String!, dryRun: Boolean! = true): ReviewPolicyDecision! @deprecated(reason: "The Review page was removed. The review projection stays one more release as the backend for policy auto-approval and inline approvals.")
   automateReview(first: Int! = 100, dryRun: Boolean! = true): [ReviewPolicyDecision!]!
-  setTaskDone(id: Int!, done: Boolean!): Boolean!
-  clearDoneTasks: Int!
+  setTaskDone(id: Int!, done: Boolean!): Boolean! @deprecated(reason: "The Review page was removed. The review projection stays one more release as the backend for policy auto-approval and inline approvals.")
+  clearDoneTasks: Int! @deprecated(reason: "The Review page was removed. The review projection stays one more release as the backend for policy auto-approval and inline approvals.")
   verifyFact(id: Int!): Boolean!
-  createTask(title: String!, kind: String! = "factcheck", kindLabel: String! = "Fact check", assignee: String! = "", due: String = null, subjectType: String! = "", subjectId: String! = "", subjectTitle: String! = "", subjectHref: String! = ""): Boolean!
+  createTask(title: String!, kind: String! = "factcheck", kindLabel: String! = "Fact check", assignee: String! = "", due: String = null, subjectType: String! = "", subjectId: String! = "", subjectTitle: String! = "", subjectHref: String! = ""): Boolean! @deprecated(reason: "The Review page was removed. The review projection stays one more release as the backend for policy auto-approval and inline approvals.")
   setTaskDue(id: Int!, due: String = null): Boolean!
   addFact(claim: String!, source: String!, owner: String! = "", documentId: Int = null): Boolean!
   upsertGlossary(term: String!, definition: String!, id: Int = null, evidence: String! = "", evidenceDocId: Int = null): Boolean!
@@ -404,10 +407,10 @@ type Mutation {
   toggleWatch(documentId: Int!): Boolean!
   runWorkflow(workflowId: Int!, dryRun: Boolean! = false): Int!
   approveRun(runId: Int!): Boolean!
-  saveWorkflow(name: String!, description: String!, steps: JSON!, id: Int = null, color: String! = "#5c7a4c", pinned: Boolean! = true): Int!
-  deleteWorkflow(id: Int!): Boolean!
+  saveWorkflow(name: String!, description: String!, steps: JSON!, id: Int = null, color: String! = "#5c7a4c", pinned: Boolean! = true): Int! @deprecated(reason: "The Flows pipeline editor was removed; nothing in the product authors workflows any more. Scheduled syncs and promoted workflows still run. Kept for one release for existing API clients.")
+  deleteWorkflow(id: Int!): Boolean! @deprecated(reason: "The Flows pipeline editor was removed; nothing in the product authors workflows any more. Scheduled syncs and promoted workflows still run. Kept for one release for existing API clients.")
   setWorkflowStatus(id: Int!, status: String!): Boolean!
-  setWorkflowPinned(id: Int!, pinned: Boolean!): Boolean!
+  setWorkflowPinned(id: Int!, pinned: Boolean!): Boolean! @deprecated(reason: "The Flows pipeline editor was removed; nothing in the product authors workflows any more. Scheduled syncs and promoted workflows still run. Kept for one release for existing API clients.")
   createKnowledgeChatDestination(name: String!, slug: String!, title: String!, tools: [String!]!, welcome: String! = ""): Int!
   updateKnowledgeChatDestination(id: Int!, name: String!, title: String!, welcome: String!, tools: [String!]!): Boolean!
   deployKnowledgeChatDestination(id: Int!): String!
@@ -417,7 +420,10 @@ type Mutation {
   testMcpServer(id: Int!): JSON!
   tuneTrajectoryStep(trajectoryId: Int!, ordinal: Int!, disposition: String!, editedArgs: JSON = null): Boolean!
   tuneTrajectoryEvidence(trajectoryId: Int!, documentId: Int!, relevance: String!, note: String! = ""): Boolean!
-  promoteTrajectoryToWorkflow(trajectoryId: Int!, name: String!): Int!
+  promoteTrajectoryToWorkflow(trajectoryId: Int!, name: String!): PromotedWorkflow!
+  promoteTrajectoryToAnswer(trajectoryId: Int!): Int!
+  rejectTrajectory(trajectoryId: Int!, rejected: Boolean! = true): Boolean!
+  deleteTrajectory(trajectoryId: Int!): Boolean!
   connectSource(provider: String!, displayName: String!, config: JSON!): Boolean!
   disconnectSource(provider: String!): Boolean!
   pauseSource(sourceId: Int!): Boolean!
@@ -451,6 +457,13 @@ type Notification {
   read: Boolean!
 }
 
+type PromotedWorkflow {
+  id: Int!
+  name: String!
+  status: String!
+  nodeCount: Int!
+}
+
 type Provisioning {
   manualInvites: Boolean!
   githubTeam: GithubTeamSync!
@@ -461,9 +474,11 @@ type Provisioning {
 }
 
 type Query {
-  trajectories(limit: Int! = 50, offset: Int! = 0, category: String = null): [Trajectory!]!
-  trajectoryTotal(category: String = null): Int!
+  trajectories(limit: Int! = 50, offset: Int! = 0, category: String = null, status: String = null, failures: String = null, search: String = null): [Trajectory!]!
+  trajectory(id: Int = null): Trajectory
+  trajectoryTotal(category: String = null, status: String = null, failures: String = null, search: String = null): Int!
   trajectoryCategories: [String!]!
+  trajectoryStatuses: [String!]!
   overviewStats(since: String = null): JSON!
   sourcePulse: [SourcePulse!]!
   githubRepos: [GithubRepo!]!
@@ -708,6 +723,8 @@ type Trajectory {
   steps: [TrajectoryStep!]!
   evidence: [TrajectoryEvidence!]!
   promotedWorkflowId: Int
+  promotedWorkflow: PromotedWorkflow
+  disposition: String!
 }
 
 type TrajectoryEvidence {

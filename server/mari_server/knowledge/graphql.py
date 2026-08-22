@@ -48,9 +48,15 @@ from mari_server.knowledge.service import (
     regenerate_digest as regenerate_knowledge_digest, scan_decisions_for, scan_facts_for,
 )
 
+DEPRECATED_REVIEW = (
+    "The Review page was removed. The review projection stays one more "
+    "release as the backend for policy auto-approval and inline approvals."
+)
+
+
 @strawberry.type
 class MutKnowledge:
-    @strawberry.mutation
+    @strawberry.mutation(deprecation_reason=DEPRECATED_REVIEW)
     def evaluate_review_item(self, review_id: str, dry_run: bool = True) -> ReviewPolicyDecision:
         item = review_repository.find_item(review_id)
         if not item:
@@ -89,7 +95,7 @@ class MutKnowledge:
             result.replayed, result.dry_run,
         ) for result in results]
 
-    @strawberry.mutation
+    @strawberry.mutation(deprecation_reason=DEPRECATED_REVIEW)
     def set_task_done(self, id: int, done: bool) -> bool:
         title = knowledge_store.set_task_done(id, done)
         if not title:
@@ -97,7 +103,7 @@ class MutKnowledge:
         audit("completed" if done else "reopened", title)
         return True
 
-    @strawberry.mutation
+    @strawberry.mutation(deprecation_reason=DEPRECATED_REVIEW)
     def clear_done_tasks(self) -> int:
         n = knowledge_store.clear_done_tasks()
         if n:
@@ -114,7 +120,7 @@ class MutKnowledge:
         audit("verified fact", claim)
         return True
 
-    @strawberry.mutation
+    @strawberry.mutation(deprecation_reason=DEPRECATED_REVIEW)
     def create_task(self, title: str, kind: str = "factcheck", kind_label: str = "Fact check",
                     assignee: str = "", due: str | None = None,
                     subject_type: str = "", subject_id: str = "",

@@ -1,12 +1,12 @@
 import { expect, test, type Page } from "@playwright/test";
 
 const PRODUCTION_ROUTES = [
-  ["/", null], ["/tasks", "Review"], ["/facts", "Facts"],
+  ["/", null], ["/facts", "Facts"],
   ["/decisions", "Decisions"], ["/knowledge", "Knowledge"],
-  ["/knowledge/doc?id=1", "Retention runbook"], ["/answers", "Approved answers"],
+  ["/knowledge/doc?id=1", "Retention runbook"], ["/workflows?tab=answers", "Approved answers"],
   ["/insights", "Insights"], ["/audit", "Repository audit"], ["/lineage", "Lineage"],
-  ["/flows", "Automations"], ["/library", "Library"], ["/publish", "Destinations"],
-  ["/trajectories", "Agent trajectories"], ["/sources", "Sources"],
+  ["/library", "Library"], ["/publish", "Destinations"],
+  ["/workflows", "Workflows"], ["/sources", "Sources"],
   ["/settings/general", "General"], ["/settings/models", "Models"],
   ["/settings/design", "Design & brand"], ["/settings/members", "Members"],
   ["/settings/api-keys", "API keys"], ["/settings/audit", "Audit log"],
@@ -63,16 +63,6 @@ test("real Postgres knowledge is searchable through the production web image", a
   await page.goto("/knowledge?q=retention");
   await expect(page.getByText("Retention runbook", { exact: true }).first()).toBeVisible();
   await expect(page.getByText(/retained for 30 days/i).first()).toBeVisible();
-});
-
-test("review writes persist through GraphQL and a browser reload", async ({ page }) => {
-  await page.goto("/tasks");
-  const title = `CI persisted review ${Date.now()}`;
-  await page.getByRole("textbox", { name: "Review item", exact: true }).fill(title);
-  await page.getByRole("button", { name: "Add review item" }).click();
-  await expect(page.getByText(title, { exact: true })).toBeVisible();
-  await page.reload();
-  await expect(page.getByText(title, { exact: true })).toBeVisible();
 });
 
 test("project identity and audit data survive a new browser context", async ({ browser }) => {

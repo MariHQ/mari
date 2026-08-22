@@ -42,26 +42,6 @@ test("fact write failures remain visible and do not close the form", async ({ pa
   await expect(drawer).toBeVisible();
 });
 
-test("flows support real runs, dry runs, pausing, and creation handoff", async ({ page }) => {
-  await page.goto("/flows");
-  const flow = page.getByRole("row").filter({ hasText: "Fact review" });
-  await flow.getByRole("button", { name: "Run", exact: true }).click();
-  await flow.getByRole("button", { name: "Test run" }).click();
-  await flow.getByRole("switch", { name: /Fact review/ }).click();
-  await expect.poll(() => api.calls.filter((c) => c.query.includes("runWorkflow")).length).toBe(2);
-  expect(api.calls.some((c) => c.query.includes("runWorkflow") && c.variables.dryRun === true)).toBeTruthy();
-  expect(api.calls.some((c) => c.query.includes("setWorkflowStatus") && c.variables.status === "paused")).toBeTruthy();
-
-  await page.getByRole("button", { name: "New automation" }).click();
-  const drawer = page.getByRole("dialog", { name: "New automation" });
-  await drawer.getByLabel("Name").fill("Browser acceptance flow");
-  await drawer.getByLabel("What does it guarantee?").fill("Every workflow path remains executable.");
-  await drawer.getByRole("button", { name: "Create and open editor" }).click();
-  await expect(page).toHaveURL(/\/flows\?flow=2$/);
-  expect(api.calls.some((c) => c.query.includes("saveWorkflow") && c.variables.name === "Browser acceptance flow")).toBeTruthy();
-  expect(api.calls.some((c) => c.query.includes("setWorkflowTrigger") && c.variables.id === 2)).toBeTruthy();
-});
-
 test("MCP publishing creates a scoped endpoint and reveals its token only once", async ({ page }) => {
   await page.goto("/publish?tab=mcp");
   await expect(page.getByText("MCP servers", { exact: true }).first()).toBeVisible();

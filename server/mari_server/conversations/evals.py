@@ -45,10 +45,6 @@ CASES = (
         ("destinations", "credentials", "connection test", "sandbox event"),
     ),
     AgentEvalCase(
-        "review", "Help me approve a fact in the review queue", "/tasks",
-        ("filter", "evidence-linked", "verify", "policy-review"),
-    ),
-    AgentEvalCase(
         "facts", "Show me how to manage contradictions in facts", "/facts",
         ("search or filter", "source evidence", "contradictions", "review queue"),
     ),
@@ -63,10 +59,6 @@ CASES = (
     AgentEvalCase(
         "lineage", "Help me inspect the dependency graph lineage", "/lineage",
         ("lens", "focal record", "neighborhood", "impact and history"),
-    ),
-    AgentEvalCase(
-        "automations", "Help me configure an automation", "/flows",
-        ("trigger", "steps", "dry-run", "run history"),
     ),
     AgentEvalCase(
         "site_publish", "Help me publish a documentation site", "/publish",
@@ -125,10 +117,6 @@ CASES = (
 TOOL_CASES = (
     AgentToolEvalCase("source_inventory", "What sources are connected?", "list_sources",
                       ("connected", "health")),
-    AgentToolEvalCase("automation_inventory", "What automations are available?", "list_flows",
-                      ("fact scan", "active")),
-    AgentToolEvalCase("review_inventory", "Which review tasks are open?", "list_tasks",
-                      ("verify retention", "open")),
     AgentToolEvalCase("answer_inventory", "Show the approved answer library", "list_answers",
                       ("how long", "approved")),
 )

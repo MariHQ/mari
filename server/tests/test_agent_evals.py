@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import unittest
-from types import SimpleNamespace
 
 from mari_server.conversations import evals as agent_evals
 from mari_server.conversations.routes import serialize_sse
@@ -11,14 +10,10 @@ from mari_server.conversations.tools import ToolDependencies, build_tool_binding
 
 
 class FakeToolStore:
-    def __init__(self, *, document=None, sources=(), workflows=(), workflow=None,
-                 workflow_runs=(), trajectories=(), trajectory=None,
+    def __init__(self, *, document=None, sources=(), trajectories=(), trajectory=None,
                  trajectory_steps=(), answers=()):
         self._document = document
         self._sources = sources
-        self._workflows = workflows
-        self._workflow = workflow
-        self._workflow_runs = workflow_runs
         self._trajectories = trajectories
         self._trajectory = trajectory
         self._trajectory_steps = trajectory_steps
@@ -33,15 +28,6 @@ class FakeToolStore:
     def sources(self):
         return self._sources
 
-    def workflows(self):
-        return self._workflows
-
-    def workflow(self, _workflow_id):
-        return self._workflow
-
-    def workflow_runs(self, _workflow_id):
-        return self._workflow_runs
-
     def trajectories(self):
         return self._trajectories
 
@@ -55,10 +41,10 @@ class FakeToolStore:
         return self._answers
 
 
-def dependencies(*, store=None, search=lambda _text, _limit: (), review_items=lambda: ()):
+def dependencies(*, store=None, search=lambda _text, _limit: ()):
     return ToolDependencies(
         store=store or FakeToolStore(), search=search,
-        record_search=lambda _text: None, review_items=review_items,
+        record_search=lambda _text: None,
         connector_definitions=lambda: (),
     )
 
@@ -98,12 +84,8 @@ class AgentOutcomeEvals(unittest.TestCase):
             store=FakeToolStore(
                 sources=[{"id": 1, "display_name": "Confluence", "provider": "confluence",
                           "kind": "connector", "status": "active", "health": "Healthy", "docs_count": 50}],
-                workflows=[{"id": 2, "name": "Fact scan", "status": "active", "description": ""}],
                 answers=[{"id": 4, "question": "How long?", "status": "approved", "served": 8}],
             ),
-            review_items=lambda: [SimpleNamespace(
-                id="task:3", title="Verify retention", kind="factcheck", status="pending",
-            )],
         )
         for case in agent_evals.TOOL_CASES:
             events, _saved = run([
@@ -115,11 +97,6 @@ class AgentOutcomeEvals(unittest.TestCase):
 
     def test_workflow_refinement_uses_run_and_trajectory_evidence(self) -> None:
         store = FakeToolStore(
-            workflows=[{"id": 2, "name": "Fact scan", "status": "active", "description": ""}],
-            workflow={"id": 2, "name": "Fact scan", "description": "", "status": "active",
-                      "nodes": [], "trigger": {}},
-            workflow_runs=[{"id": 4, "number": 3, "status": "failed", "progress": 50,
-                            "stats": {}, "rows_data": [], "triggered_by": "change"}],
             trajectories=[{"id": 9, "prompt": "refine", "status": "ready", "layer2": "Ran scan",
                            "category": "Automation", "macro_intent": "Improve scan", "step_count": 2,
                            "failure_count": 1, "rework_count": 1, "started_at": None}],
@@ -131,8 +108,6 @@ class AgentOutcomeEvals(unittest.TestCase):
         )
 
         events, _saved = run([
-            {"action": "tool", "tool": "list_flows", "arguments": {}},
-            {"action": "tool", "tool": "inspect_flow", "arguments": {"id": 2}},
             {"action": "tool", "tool": "list_workflow_observations", "arguments": {}},
             {"action": "tool", "tool": "inspect_workflow_observation", "arguments": {"id": 9}},
             {"action": "answer"},
@@ -140,7 +115,7 @@ class AgentOutcomeEvals(unittest.TestCase):
         parsed = agent_evals.parse_sse_events(events)
         self.assertEqual(
             [data["name"] for event, data in parsed if event == "tool_result"],
-            ["list_flows", "inspect_flow", "list_workflow_observations", "inspect_workflow_observation"],
+            ["list_workflow_observations", "inspect_workflow_observation"],
         )
 
     def test_final_answer_stream_is_not_buffered(self) -> None:
