@@ -86,7 +86,7 @@ function states(p: PageModule<any, any>, empty: any, opts: { errorIgnored?: bool
 /** A plausible response to src/data/overview.ts's QUERY, shaped exactly as the
     Strawberry resolvers return it. */
 const OVERVIEW_RES: any = {
-  overviewStats: { changes: 47, factsReview: 6, flowsRunning: 3 },
+  overviewStats: { changes: 47, factsReview: 6, workflowsActive: 3 },
   digest: [{ title: "Billing docs realigned", summary: "Three pages drifted.", where: [{ source: "notion", label: "Pricing FAQ" }], impact: [{ name: "Support", tone: "info" }] }],
   activityFeed: [{ id: 1, kind: "run", actor: "Docs guardrail", text: "completed a run over", target: "billing/*.md", secondsAgo: 42 }],
   search: [{ id: 101, source: "notion", title: "Pricing FAQ", date: "2026-07-20" }],

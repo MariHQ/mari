@@ -25,8 +25,8 @@ import type { PageData } from "./types";
 
 /* `since` bounds the "changes" count, which is the one stat that counts events
    over a window; the other two are gauges of the workspace right now (facts
-   awaiting review, flows running) and stay as they are whatever window is
-   picked, because that is what they measure. */
+   awaiting review, active assistant workflows) and stay as they are whatever
+   window is picked, because that is what they measure. */
 const QUERY = `query Overview($since: String) {
   overviewStats(since: $since)
   digest { title summary where { source label } impact { name tone } }
@@ -41,7 +41,7 @@ const ACTIVITY_POLL_MS = 10_000;
 /* ── response shape ─────────────────────────────────────────────────────── */
 
 type Res = {
-  overviewStats: { changes: number; factsReview: number; flowsRunning: number } | null;
+  overviewStats: { changes: number; factsReview: number; workflowsActive: number } | null;
   digest: {
     title: string; summary: string;
     where: { source: string; label: string }[];
@@ -68,7 +68,7 @@ const pulseStatus = (s: string): PulseTileData["status"] =>
  *  `loading` or `error`. */
 export const EMPTY: OverviewData = {
   personName: "",
-  stats: { changes: 0, factsReview: 0, flowsRunning: 0 },
+  stats: { changes: 0, factsReview: 0, workflowsActive: 0 },
   digest: [], activity: [], docs: [], sources: [],
   activityPollMs: ACTIVITY_POLL_MS,
 };
@@ -86,7 +86,7 @@ export function mapOverview(
     stats: {
       changes: res.overviewStats?.changes ?? 0,
       factsReview: res.overviewStats?.factsReview ?? 0,
-      flowsRunning: res.overviewStats?.flowsRunning ?? 0,
+      workflowsActive: res.overviewStats?.workflowsActive ?? 0,
     },
     digest: (res.digest ?? []).map<DigestTopic>((d) => ({
       title: d.title,

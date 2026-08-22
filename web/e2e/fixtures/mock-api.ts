@@ -20,7 +20,7 @@ const now = "2026-08-19T12:00:00Z";
 
 function initialData() {
   return {
-    overviewStats: { changes: 12, factsReview: 1, flowsRunning: 0, documents: 3 },
+    overviewStats: { changes: 12, factsReview: 1, workflowsActive: 0, documents: 3 },
     tasks: [{
       id: 1, title: "Verify retention policy", assigneeInitials: "DR", kind: "factcheck",
       kindLabel: "Fact check", done: false, due: "2026-08-25", overdue: false,

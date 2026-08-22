@@ -463,8 +463,8 @@ class Query:
         `>` on the default window and `>=` on the picked one, so the same
         dashboard counted its two windows by two different rules.
 
-        The other three are gauges of the workspace right now (facts awaiting
-        review, runs in flight, active flows) and have no window to count over."""
+        The rest are gauges of the workspace right now (facts awaiting review,
+        active assistant workflows) and have no window to count over."""
         floor = _iso_date_arg(since)
         return analytics_store.overview(floor)
 

@@ -18,8 +18,15 @@ def overview(since: str | None) -> dict:
           WHERE project_id = %s AND status IN ('running','waiting')""", (project_id,)).fetchone()["n"]
         flows = conn.execute("SELECT count(*) AS n FROM workflows WHERE project_id = %s AND status = 'active'",
                              (project_id,)).fetchone()["n"]
+        workflows_active = conn.execute(
+            "SELECT count(*) AS n FROM assistant_workflows WHERE project_id = %s AND status = 'active'",
+            (project_id,)).fetchone()["n"]
+    # flowsRunning/flowsActive are unused now that the Flows tab is gone
+    # (the product concept is assistant workflows); kept in the dict for one
+    # release so a console still on the old build does not lose a tile.
     return {"changes": int(changes), "factsReview": int(facts),
-            "flowsRunning": int(running), "flowsActive": int(flows)}
+            "flowsRunning": int(running), "flowsActive": int(flows),
+            "workflowsActive": int(workflows_active)}
 
 
 def insight_stats(since: str | None, until: str | None) -> tuple[dict, int, int]:
