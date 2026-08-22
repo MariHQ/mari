@@ -150,3 +150,13 @@ def project_slack(project_id: int) -> dict | None:
     with db.connect() as conn:
         return conn.execute("""SELECT id, config FROM bot_installations WHERE project_id = %s
           AND provider = 'slack' AND status = 'connected' ORDER BY id LIMIT 1""", (project_id,)).fetchone()
+
+
+def socket_installations() -> list[dict]:
+    """Active Slack installations configured for direct Socket Mode events."""
+    with db.connect() as conn:
+        return conn.execute("""SELECT id, project_id, config FROM bot_installations
+          WHERE provider = 'slack' AND status = 'connected'
+          AND coalesce(config->>'app_token', '') LIKE 'xapp-%'
+          AND coalesce(config->>'bot_token', '') LIKE 'xoxb-%'
+          ORDER BY id""").fetchall()

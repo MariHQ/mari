@@ -19,7 +19,7 @@ from mari_server.conversations.prompts import (
 
 ROOT = Path(__file__).resolve().parents[2]
 STYLE_DOC = ROOT / "docs" / "chat-style.md"
-MIGRATION = ROOT / "server" / "migrations" / "0018_chat_style_pack.sql"
+MIGRATION = ROOT / "server" / "migrations" / "0024_chat_style_pack.sql"
 
 # One sentence that must reach the model on each surface, and nowhere else.
 SURFACE_MARKERS = {

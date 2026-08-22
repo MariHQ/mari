@@ -117,7 +117,7 @@ connect a source, pick a style guide, and seed your glossary.
 
 After that the workspace is **invite-only**: admins invite members from Settings → Members, and only an invited address can register.
 
-**Local model configuration:** generation can use Ollama or an OpenAI-compatible gateway; derived embeddings can use Sentence Transformers locally. Provider selection is explicit and unavailable providers surface an error instead of silently changing behavior.
+**Model configuration:** generation can use Ollama or an OpenAI-compatible gateway. Embeddings always use an HTTP provider—OpenAI, Ollama, or a configured compatible gateway—and derived vectors are cached by content and model profile. Provider selection is explicit and unavailable providers surface an error instead of silently changing behavior.
 
 ### Testing
 

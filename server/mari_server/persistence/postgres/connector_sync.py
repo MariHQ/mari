@@ -280,15 +280,43 @@ def sync_source(source_id: int, full: bool, *, update_status, fire_document_trig
 
         added_doc_ids.extend(report.inserted_ids)
         changed_doc_ids.extend(report.updated_ids)
+        reconciled_deletes = 0
+        if authoritative_full and report.snapshot_complete:
+            # The connector manifest is the durable fast path, but it is not
+            # allowed to be the only deletion boundary. Older releases and
+            # changed connector profiles can leave source rows that no longer
+            # have manifest entries. A complete full snapshot is authoritative
+            # over every document owned by this source, so reconcile the
+            # projection itself against the terminal manifest as well.
+            with document_index.connection() as conn:
+                rows = conn.execute(
+                    "SELECT id, source_path FROM documents WHERE source_id = %s", (source_id,),
+                ).fetchall()
+                gone = deletion_ids(
+                    rows, key, set(report.state.manifest), set(),
+                    full=True, snapshot_complete=True,
+                )
+                if gone:
+                    document_index.delete_documents(conn, gone)
+                    reconciled_deletes = len(gone)
+                    doc_count = conn.execute(
+                        "SELECT count(*) AS n FROM documents WHERE source_id = %s", (source_id,),
+                    ).fetchone()["n"]
+                    conn.execute(
+                        "UPDATE sources SET docs_count = %s, stat_num = %s WHERE id = %s",
+                        (doc_count, str(doc_count), source_id),
+                    )
+                    conn.commit()
+        removed = report.deleted + reconciled_deletes
         stats.update({
-            "items_changed": report.changed, "files_deleted": report.deleted,
+            "items_changed": report.changed, "files_deleted": removed,
             "chunks": report.chunks, "embedded": report.embeddings,
             "skipped": report.unchanged,
         })
-        if report.changed or report.deleted:
+        if report.changed or removed:
             invalidate_search(access.require_current_access().project_id)
         durable_cursor = report.state.checkpoint or report.state.cursor or ""
-        detail = (f"{report.changed} items changed · {report.deleted} removed · "
+        detail = (f"{report.changed} items changed · {removed} removed · "
                   f"{report.chunks} chunks · {report.embeddings} embedded · "
                   f"{report.unchanged} unchanged (hash skip)" +
                   (" · snapshot incomplete (cursor held; absence not reconciled)"

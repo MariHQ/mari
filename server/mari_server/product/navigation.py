@@ -28,6 +28,7 @@ PRODUCT_SURFACES = (
     ProductSurface("/publish", "Documentation destinations"),
     ProductSurface("/publish?tab=mcp", "MCP servers"),
     ProductSurface("/publish?tab=bots", "Bots"), ProductSurface("/insights", "Analytics"),
+    ProductSurface("/workflows", "Workflows"),
     ProductSurface("/trajectories", "Observed workflows (moved to Workflows)"),
     ProductSurface("/answers", "Approved answers (moved to Workflows)"),
     ProductSurface("/library", "Library"), ProductSurface("/sources", "Sources"),

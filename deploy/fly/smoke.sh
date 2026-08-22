@@ -33,8 +33,8 @@ curl -fsS http://127.0.0.1:18080/livez >/dev/null
 docker exec "$container" gosu postgres psql -h 127.0.0.1 -U mari -d mari_cloud \
   -tAc "SELECT extname FROM pg_extension WHERE extname='vector'" | grep -q vector
 docker exec \
-  -e MARI_EMBEDDING_PROVIDER=sentence-transformers \
-  -e MARI_EMBEDDING_MODEL=sentence-transformers/all-mpnet-base-v2 \
+  -e MARI_EMBEDDING_PROVIDER=ollama \
+  -e MARI_EMBEDDING_MODEL=nomic-embed-text \
   "$container" gosu mari python3 -c \
   "from mari_server.providers import models; vector=models.embed('Mari product knowledge'); assert vector is not None, models.last_error(); assert len(vector) == 768"
 

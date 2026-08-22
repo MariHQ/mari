@@ -34,13 +34,46 @@ _PENDING = threading.BoundedSemaphore(_PENDING_LIMIT)
 _RECONCILE_LOCK = threading.Lock()
 _LAST_RECONCILE: dict[int, float] = {}
 
-# The card shows the promoted workflow inline (name, status, node count) rather
-# than navigating away to it, so the promotion is read with the trajectory it
-# came from instead of by a second round trip per card.
-_PROMOTED_JOIN = ("LEFT JOIN workflows w ON w.id = t.promoted_workflow_id "
-                  "AND w.project_id = t.project_id")
-_SELECT = ("t.*, w.name AS promoted_workflow_name, w.status AS promoted_workflow_status, "
-           "COALESCE(jsonb_array_length(w.nodes), 0) AS promoted_workflow_nodes")
+# The card shows the codified workflow inline (name, state, cache, cluster
+# size) rather than navigating away to it, so the promotion is read with the
+# trajectory it came from instead of by a second round trip per card. A run
+# belongs to the workflow it was promoted into, or the cluster it was observed
+# or matched under, in that order.
+_PROMOTED_JOIN = ("LEFT JOIN assistant_workflows aw ON aw.project_id = t.project_id "
+                  "AND aw.id = COALESCE(t.promoted_workflow_id, t.observed_cluster_id, "
+                  "t.matched_workflow_id)")
+_SELECT = """t.*,
+             COALESCE(t.promoted_workflow_id, t.observed_cluster_id, t.matched_workflow_id)
+               AS promoted_workflow_id,
+             aw.status AS promoted_workflow_status,
+             aw.name AS promoted_workflow_name,
+             COALESCE(jsonb_array_length(aw.steps), 0) AS promoted_workflow_nodes,
+             aw.trajectory_id AS workflow_root_trajectory_id,
+             CASE WHEN aw.id IS NULL THEN 1 ELSE (
+               SELECT count(*) FROM trajectories member
+                WHERE member.project_id = t.project_id
+                  AND (member.observed_cluster_id = aw.id
+                       OR member.matched_workflow_id = aw.id
+                       OR member.promoted_workflow_id = aw.id)
+             ) END AS workflow_observation_count,
+             COALESCE(aw.cache_policy, 'none') AS promoted_workflow_cache_policy,
+             CASE
+               WHEN aw.id IS NULL OR aw.cache_policy = 'none' THEN 'disabled'
+               WHEN aw.cached_answer = '' THEN 'empty'
+               WHEN EXISTS (
+                 SELECT 1
+                   FROM jsonb_array_elements(aw.cache_dependencies) dependency
+                   LEFT JOIN documents d
+                     ON d.project_id = aw.project_id
+                    AND d.id = (dependency->>'document_id')::int
+                  WHERE d.id IS NULL
+                     OR COALESCE(d.content_hash, '') <> COALESCE(dependency->>'content_hash', '')
+               ) THEN 'stale'
+               ELSE 'fresh'
+             END AS promoted_workflow_cache_state,
+             aw.cache_refreshed_at AS promoted_workflow_cache_refreshed_at,
+             jsonb_array_length(COALESCE(aw.cache_dependencies, '[]'))
+               AS promoted_workflow_dependency_count"""
 
 #: What the Observed tab's failure filter accepts. Anything else is ignored
 #: rather than refused: a stale bookmark narrows to nothing it can explain.
@@ -132,6 +165,38 @@ def trajectory_categories() -> list[str]:
     return [row["category"] for row in q(
         """SELECT category FROM trajectories WHERE project_id = %s
            GROUP BY category ORDER BY count(*) DESC, category""", (project_id,))]
+
+
+def workflow_embedding_indexes(workflow_ids: list[int]) -> dict[int, dict]:
+    if not workflow_ids:
+        return {}
+    project_id = access.require_current_access().project_id
+    return {int(row["id"]): row for row in q(
+        """SELECT id, name, match_index, embedding_profile
+             FROM assistant_workflows
+            WHERE project_id = %s AND id = ANY(%s)""",
+        (project_id, list(dict.fromkeys(workflow_ids))),
+    )}
+
+
+def workflow_harvest_context(limit: int = 100) -> tuple[list[dict], list[dict]]:
+    project_id = access.require_current_access().project_id
+    observations = q(
+        """SELECT id, prompt, macro_intent, category, execution_mode,
+                  selected_workflow_id, selected_workflow_score, selected_workflow_exact,
+                  COALESCE(promoted_workflow_id, observed_cluster_id,
+                           matched_workflow_id) AS workflow_id
+             FROM trajectories
+            WHERE project_id = %s AND status IN ('ready', 'fallback')
+            ORDER BY started_at DESC, id DESC LIMIT %s""",
+        (project_id, max(10, min(int(limit), 200))),
+    )
+    workflows = q(
+        """SELECT id, name, description FROM assistant_workflows
+            WHERE project_id = %s AND status = 'active' ORDER BY updated_at DESC""",
+        (project_id,),
+    )
+    return observations, workflows
 
 FAMILY = {
     "search": "discover", "read_document": "inspect", "list_sources": "inspect",
@@ -297,16 +362,26 @@ def _maybe_reconcile(project_access: access.AccessContext) -> None:
             _LAST_RECONCILE.pop(project_access.project_id, None)
 
 
-def harvest(session_id: int, prompt: str, trace: list[dict], model: str) -> int:
+def harvest(session_id: int, prompt: str, trace: list[dict], model: str,
+            selected_workflow_id: int | None = None, *, execution_mode: str = "generation",
+            selected_workflow_score: float | None = None,
+            selected_workflow_exact: bool = False,
+            observed_cluster_id: int | None = None) -> int:
     project_access = access.require_current_access()
     _maybe_reconcile(project_access)
     steps = normalize_steps(trace)
     row = q1("""INSERT INTO trajectories
-                  (project_id, session_id, prompt, status, model, step_count, failure_count, rework_count, phases)
-                SELECT %s, s.id, %s, 'processing', %s, %s, %s, %s, %s
+                  (project_id, session_id, prompt, status, model, step_count, failure_count,
+                   rework_count, phases, matched_workflow_id, selected_workflow_id,
+                   selected_workflow_score, selected_workflow_exact, execution_mode,
+                   observed_cluster_id)
+                SELECT %s, s.id, %s, 'processing', %s, %s, %s, %s, %s, %s,
+                       %s, %s, %s, %s, %s
                   FROM chat_sessions s WHERE s.id = %s AND s.project_id = %s RETURNING id""",
              (project_access.project_id, prompt[:8000], model[:100], len(steps),
               sum(not s["ok"] for s in steps), rework_count(steps), json.dumps(segment_phases(steps)),
+              observed_cluster_id, selected_workflow_id, selected_workflow_score,
+              selected_workflow_exact, execution_mode[:40], observed_cluster_id,
               session_id, project_access.project_id))
     if not row:
         raise ValueError("Chat session does not belong to the active project")
@@ -348,6 +423,54 @@ def harvest(session_id: int, prompt: str, trace: list[dict], model: str) -> int:
     return trajectory_id
 
 
+def record_external_observation(prompt: str, trace: list[dict], model: str,
+                                selected_workflow_id: int | None = None, *,
+                                execution_mode: str = "generation",
+                                selected_workflow_score: float | None = None,
+                                selected_workflow_exact: bool = False,
+                                observed_cluster_id: int | None = None) -> int:
+    """Record an already-completed destination turn without another model call."""
+    project_id = access.require_current_access().project_id
+    steps = normalize_steps(trace)
+    summary = "; ".join(step["summary"] for step in steps if step.get("summary"))[:2000]
+    row = q1(
+        """INSERT INTO trajectories
+              (project_id, session_id, prompt, status, model, layer1, layer2, category,
+               macro_intent, step_count, failure_count, rework_count, phases,
+               matched_workflow_id, selected_workflow_id, selected_workflow_score,
+               selected_workflow_exact, execution_mode, observed_cluster_id, completed_at)
+            VALUES (%s, NULL, %s, 'ready', %s, %s, %s, 'Assistant conversations',
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now()) RETURNING id""",
+        (project_id, prompt[:8000], model[:100], summary, prompt[:500], prompt[:300],
+         len(steps), sum(not step["ok"] for step in steps), rework_count(steps),
+         json.dumps(segment_phases(steps)), observed_cluster_id, selected_workflow_id,
+         selected_workflow_score, selected_workflow_exact, execution_mode[:40],
+         observed_cluster_id),
+    )
+    trajectory_id = int(row["id"])
+    for step in steps:
+        exec_("""INSERT INTO trajectory_steps
+                   (project_id, trajectory_id, ordinal, tool, action_family, args, summary, ok)
+                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
+              (project_id, trajectory_id, step["ordinal"], step["tool"],
+               step["action_family"], json.dumps(step["args"]), step["summary"], step["ok"]))
+    for event in trace:
+        for reference in event.get("evidence") or ():
+            try:
+                document_id = int(reference.get("document_id"))
+            except (AttributeError, TypeError, ValueError):
+                continue
+            exec_("""INSERT INTO trajectory_evidence
+                       (project_id, trajectory_id, document_id, title, reason, rank)
+                     SELECT %s, %s, d.id, %s, %s, %s FROM documents d
+                      WHERE d.project_id = %s AND d.id = %s
+                     ON CONFLICT (trajectory_id, document_id) DO NOTHING""",
+                  (project_id, trajectory_id, str(reference.get("title") or "")[:300],
+                   str(reference.get("reason") or "")[:300],
+                   max(0, int(reference.get("rank") or 0)), project_id, document_id))
+    return trajectory_id
+
+
 def tune_step(trajectory_id: int, ordinal: int, disposition: str, edited_args: dict | None) -> bool:
     if disposition not in {"included", "excluded", "preferred"}:
         raise ValueError("Tool disposition must be included, excluded, or preferred.")
@@ -369,14 +492,9 @@ def tune_evidence(trajectory_id: int, document_id: int, relevance: str, note: st
                    (relevance, note.strip()[:500], project_id, trajectory_id, document_id)))
 
 
-def promote_to_workflow(trajectory_id: int, name: str) -> dict:
-    """Create a paused, editable workflow from the human-tuned trace.
-
-    Answers with the workflow itself, not just its id: the card shows what
-    promotion produced (name, status, how many nodes) in place, and the node
-    count is the part worth showing — an excluded tool is not in the workflow,
-    so the count is how tuning becomes visible.
-    """
+def promote_to_workflow(trajectory_id: int, name: str, *, force_new: bool = False,
+                        matched_workflow_id: int | None = None) -> int:
+    """Codify a human-tuned trace as active assistant guidance."""
     project_id = access.require_current_access().project_id
     clean_name = name.strip()
     if not clean_name:
@@ -384,56 +502,67 @@ def promote_to_workflow(trajectory_id: int, name: str) -> dict:
 
     def promote(conn):
         row = conn.execute(
-            """SELECT id, layer2, macro_intent, promoted_workflow_id FROM trajectories
+            """SELECT id, layer2, macro_intent, phases, promoted_workflow_id,
+                      matched_workflow_id FROM trajectories
                  WHERE project_id = %s AND id = %s FOR UPDATE""",
             (project_id, trajectory_id),
         ).fetchone()
         if not row:
             raise ValueError("Trajectory not found.")
-        if row.get("promoted_workflow_id"):
-            existing = conn.execute(
-                """SELECT id, name, status, COALESCE(jsonb_array_length(nodes), 0) AS node_count
-                     FROM workflows WHERE project_id = %s AND id = %s""",
-                (project_id, row["promoted_workflow_id"]),
+        if row.get("promoted_workflow_id") and not force_new:
+            return int(row["promoted_workflow_id"])
+        existing_match = row.get("matched_workflow_id") or matched_workflow_id
+        if existing_match and not force_new:
+            workflow_id = int(existing_match)
+            owned = conn.execute(
+                "SELECT id FROM assistant_workflows WHERE project_id = %s AND id = %s",
+                (project_id, workflow_id),
             ).fetchone()
-            if existing:
-                return dict(existing)
+            if not owned:
+                raise ValueError("Matched workflow not found.")
+            conn.execute(
+                """UPDATE trajectories SET promoted_workflow_id = %s, matched_workflow_id = %s
+                     WHERE project_id = %s AND id = %s""",
+                (workflow_id, workflow_id, project_id, trajectory_id),
+            )
+            return workflow_id
         if conn.execute(
-            "SELECT 1 FROM workflows WHERE project_id = %s AND name = %s", (project_id, clean_name),
+            "SELECT 1 FROM assistant_workflows WHERE project_id = %s AND name = %s",
+            (project_id, clean_name),
         ).fetchone():
             raise ValueError("A workflow with that name already exists.")
         observed = conn.execute(
-            """SELECT ordinal, tool, action_family, args, edited_args, disposition
+            """SELECT ordinal, tool, action_family, args, edited_args, disposition, summary
                  FROM trajectory_steps
                 WHERE project_id = %s AND trajectory_id = %s AND disposition <> 'excluded'
                 ORDER BY ordinal""", (project_id, trajectory_id),
         ).fetchall()
         if not observed:
             raise ValueError("Include at least one tool call before creating a workflow.")
-        nodes = [{"kind": "trigger", "label": "Manual", "config": {"label": "Human approved"}}]
-        nodes.extend({
-            "kind": "observed_tool", "label": str(step["tool"]),
-            "config": {
+        steps = [{
+                "ordinal": int(step["ordinal"]),
                 "tool": str(step["tool"]),
                 "arguments": jload(step.get("edited_args")) if step.get("edited_args") is not None
                 else (jload(step.get("args")) or {}),
                 "family": str(step["action_family"]),
                 "disposition": str(step["disposition"]),
-            },
-        } for step in observed)
+                "summary": str(step.get("summary") or ""),
+        } for step in observed]
         workflow = conn.execute(
-            """INSERT INTO workflows
-                 (project_id, name, description, color, pinned, status, nodes, trigger)
-               VALUES (%s, %s, %s, '#5f6f52', false, 'paused', %s, '{"on":""}'::jsonb)
+            """INSERT INTO assistant_workflows
+                 (project_id, trajectory_id, name, description, status, steps, phases)
+               VALUES (%s, %s, %s, %s, 'active', %s, %s)
                RETURNING id""",
-            (project_id, clean_name,
+            (project_id, trajectory_id, clean_name,
              str(row.get("layer2") or row.get("macro_intent") or "Observed agent workflow")[:500],
-             json.dumps(nodes)),
+             json.dumps(steps), json.dumps(jload(row.get("phases")) or [])),
         ).fetchone()
         workflow_id = int(workflow["id"])
         conn.execute(
-            "UPDATE trajectories SET promoted_workflow_id = %s WHERE project_id = %s AND id = %s",
-            (workflow_id, project_id, trajectory_id),
+            """UPDATE trajectories
+                  SET promoted_workflow_id = %s, matched_workflow_id = %s
+                WHERE project_id = %s AND id = %s""",
+            (workflow_id, workflow_id, project_id, trajectory_id),
         )
         return {"id": workflow_id, "name": clean_name, "status": "paused",
                 "node_count": len(nodes)}
@@ -615,3 +744,277 @@ def pinned_document_ids(limit: int = 200) -> set[int]:
         """SELECT DISTINCT document_id FROM trajectory_evidence
             WHERE project_id = %s AND relevance = 'pinned' LIMIT %s""",
         (project_id, max(1, min(int(limit), 1000))))}
+def promoted_workflow_summary(workflow_id: int) -> dict | None:
+    """What the card shows after codifying: name, state, and how many tool
+    steps the workflow carries (an excluded tool is not in it, so the count is
+    how tuning becomes visible)."""
+    project_id = access.require_current_access().project_id
+    return q1("""SELECT id, name, status, COALESCE(jsonb_array_length(steps), 0) AS node_count
+                   FROM assistant_workflows WHERE project_id = %s AND id = %s""",
+              (project_id, workflow_id))
+
+
+def trajectory_for_split(trajectory_id: int) -> dict | None:
+    project_id = access.require_current_access().project_id
+    return q1("""SELECT id, prompt, layer2, macro_intent,
+                        COALESCE(promoted_workflow_id, observed_cluster_id,
+                                 matched_workflow_id) AS workflow_id
+                   FROM trajectories WHERE project_id = %s AND id = %s""",
+              (project_id, trajectory_id))
+
+
+def unassigned_trajectories(limit: int = 200) -> list[dict]:
+    project_id = access.require_current_access().project_id
+    return q("""SELECT id, prompt FROM trajectories
+                 WHERE project_id = %s AND promoted_workflow_id IS NULL
+                   AND observed_cluster_id IS NULL AND matched_workflow_id IS NULL
+                   AND status IN ('ready', 'fallback')
+                 ORDER BY started_at DESC, id DESC LIMIT %s""",
+             (project_id, max(1, min(int(limit), 500))))
+
+
+def assign_trajectory_cluster(trajectory_id: int, workflow_id: int) -> bool:
+    project_id = access.require_current_access().project_id
+    return bool(q1("""UPDATE trajectories t
+                          SET observed_cluster_id = %s, matched_workflow_id = %s
+                        WHERE t.project_id = %s AND t.id = %s
+                          AND t.promoted_workflow_id IS NULL
+                          AND t.matched_workflow_id IS NULL
+                          AND EXISTS (SELECT 1 FROM assistant_workflows aw
+                                       WHERE aw.project_id = t.project_id AND aw.id = %s)
+                      RETURNING t.id""",
+                   (workflow_id, workflow_id, project_id, trajectory_id, workflow_id)))
+
+
+def split_workflow(trajectory_id: int, name: str) -> int:
+    row = trajectory_for_split(trajectory_id)
+    if not row or not row.get("workflow_id"):
+        raise ValueError("Only an observation already in a workflow can be split.")
+    return promote_to_workflow(trajectory_id, name, force_new=True)
+
+
+def set_workflow_enabled(workflow_id: int, enabled: bool) -> bool:
+    project_id = access.require_current_access().project_id
+    return bool(q1(
+        """UPDATE assistant_workflows SET status = %s, updated_at = now()
+              WHERE project_id = %s AND id = %s RETURNING id""",
+        ("active" if enabled else "paused", project_id, workflow_id),
+    ))
+
+
+def delete_workflow(workflow_id: int) -> bool:
+    """Delete the codified workflow while retaining its observed trajectories."""
+    project_id = access.require_current_access().project_id
+
+    def delete(conn):
+        row = conn.execute(
+            """SELECT id FROM assistant_workflows
+                 WHERE project_id = %s AND id = %s FOR UPDATE""",
+            (project_id, workflow_id),
+        ).fetchone()
+        if not row:
+            return False
+        conn.execute(
+            """UPDATE trajectories
+                  SET promoted_workflow_id = NULL, matched_workflow_id = NULL
+                WHERE project_id = %s
+                  AND (promoted_workflow_id = %s OR matched_workflow_id = %s)""",
+            (project_id, workflow_id, workflow_id),
+        )
+        return bool(conn.execute(
+            """DELETE FROM assistant_workflows
+                 WHERE project_id = %s AND id = %s RETURNING id""",
+            (project_id, workflow_id),
+        ).fetchone())
+
+    from mari_server.persistence.postgres.database import transaction
+    return bool(transaction(delete))
+
+
+def active_workflows(limit: int = 20) -> list[dict]:
+    project_id = access.require_current_access().project_id
+    return q(
+        """SELECT aw.id, aw.trajectory_id, aw.name, aw.description, aw.steps, aw.phases,
+                  aw.match_index, aw.embedding_profile, aw.match_threshold, aw.cache_policy,
+                  aw.cached_answer, aw.cached_sources, aw.cache_dependencies,
+                  aw.cache_refreshed_at, t.prompt AS trajectory_prompt
+             FROM assistant_workflows aw JOIN trajectories t
+               ON t.project_id = aw.project_id AND t.id = aw.trajectory_id
+            WHERE aw.project_id = %s AND aw.status = 'active'
+            ORDER BY aw.updated_at DESC, aw.id DESC LIMIT %s""",
+        (project_id, max(1, min(int(limit), 50))),
+    )
+
+
+def workflow_cache_state(workflow: dict) -> str:
+    if workflow.get("cache_policy") != "reviewed_answer":
+        return "disabled"
+    if not str(workflow.get("cached_answer") or ""):
+        return "empty"
+    dependencies = jload(workflow.get("cache_dependencies")) or []
+    if not dependencies:
+        return "fresh"
+    project_id = access.require_current_access().project_id
+    document_ids = [int(row["document_id"]) for row in dependencies]
+    current = {int(row["id"]): str(row.get("content_hash") or "") for row in q(
+        "SELECT id, content_hash FROM documents WHERE project_id = %s AND id = ANY(%s)",
+        (project_id, document_ids),
+    )}
+    return "stale" if any(
+        current.get(int(row["document_id"])) != str(row.get("content_hash") or "")
+        for row in dependencies
+    ) else "fresh"
+
+
+def cached_response(workflow: dict) -> dict | None:
+    if workflow_cache_state(workflow) != "fresh":
+        return None
+    return {
+        "answer": str(workflow.get("cached_answer") or ""),
+        "sources": jload(workflow.get("cached_sources")) or [],
+        "refreshed_at": workflow.get("cache_refreshed_at"),
+    }
+
+
+def _dependencies(conn, project_id: int, document_ids: list[int]) -> list[dict]:
+    if not document_ids:
+        return []
+    return [{"document_id": int(row["id"]), "content_hash": str(row.get("content_hash") or "")}
+            for row in conn.execute(
+                """SELECT id, content_hash FROM documents
+                     WHERE project_id = %s AND id = ANY(%s) ORDER BY id""",
+                (project_id, list(dict.fromkeys(document_ids))),
+            ).fetchall()]
+
+
+def _source_snapshots(conn, project_id: int, document_ids: list[int]) -> list[dict]:
+    if not document_ids:
+        return []
+    return [{
+        "n": index, "document_id": int(row["id"]), "title": str(row["title"]),
+        "source": str(row["source"]), "href": f"/knowledge/doc?id={row['id']}",
+    } for index, row in enumerate(conn.execute(
+        """SELECT id, title, source FROM documents
+             WHERE project_id = %s AND id = ANY(%s)
+             ORDER BY array_position(%s::int[], id)""",
+        (project_id, list(dict.fromkeys(document_ids)), list(dict.fromkeys(document_ids))),
+    ).fetchall(), 1)]
+
+
+def configure_workflow_cache(workflow_id: int, enabled: bool) -> bool:
+    """Explicitly enable a reviewed-response cache or remove it completely."""
+    project_id = access.require_current_access().project_id
+
+    def configure(conn):
+        workflow = conn.execute(
+            """SELECT id, trajectory_id FROM assistant_workflows
+                 WHERE project_id = %s AND id = %s FOR UPDATE""",
+            (project_id, workflow_id),
+        ).fetchone()
+        if not workflow:
+            return False
+        if not enabled:
+            conn.execute(
+                """UPDATE assistant_workflows SET cache_policy = 'none', cached_answer = '',
+                          cached_sources = '[]', cache_dependencies = '[]',
+                          cache_refreshed_at = NULL, updated_at = now()
+                     WHERE project_id = %s AND id = %s""",
+                (project_id, workflow_id),
+            )
+            return True
+        trajectory = conn.execute(
+            "SELECT session_id FROM trajectories WHERE project_id = %s AND id = %s",
+            (project_id, workflow["trajectory_id"]),
+        ).fetchone()
+        message = None
+        if trajectory and trajectory.get("session_id"):
+            message = conn.execute(
+                """SELECT content FROM chat_messages
+                     WHERE project_id = %s AND session_id = %s AND role = 'assistant'
+                     ORDER BY id DESC LIMIT 1""",
+                (project_id, trajectory["session_id"]),
+            ).fetchone()
+        if not message or not str(message.get("content") or "").strip():
+            raise ValueError("This workflow has no reviewed answer to cache. Reconcile it first.")
+        evidence = conn.execute(
+            """SELECT document_id FROM trajectory_evidence
+                 WHERE project_id = %s AND trajectory_id = %s AND relevance <> 'irrelevant'
+                 ORDER BY rank, id""",
+            (project_id, workflow["trajectory_id"]),
+        ).fetchall()
+        document_ids = [int(row["document_id"]) for row in evidence]
+        dependencies = _dependencies(conn, project_id, document_ids)
+        if not dependencies:
+            raise ValueError("This workflow has no tracked documents to validate.")
+        sources = _source_snapshots(conn, project_id, document_ids)
+        conn.execute(
+            """UPDATE assistant_workflows
+                  SET cache_policy = 'reviewed_answer', cached_answer = %s,
+                      cached_sources = %s, cache_dependencies = %s,
+                      cache_refreshed_at = now(), updated_at = now()
+                WHERE project_id = %s AND id = %s""",
+            (str(message["content"]), json.dumps(sources),
+             json.dumps(dependencies), project_id, workflow_id),
+        )
+        return True
+
+    from mari_server.persistence.postgres.database import transaction
+    return bool(transaction(configure))
+
+
+def workflow_for_reconcile(workflow_id: int) -> dict | None:
+    project_id = access.require_current_access().project_id
+    return q1(
+        """SELECT aw.*, t.prompt
+             FROM assistant_workflows aw JOIN trajectories t
+               ON t.project_id = aw.project_id AND t.id = aw.trajectory_id
+            WHERE aw.project_id = %s AND aw.id = %s""",
+        (project_id, workflow_id),
+    )
+
+
+def stale_workflow_ids(limit: int = 50) -> list[int]:
+    project_id = access.require_current_access().project_id
+    rows = q(
+        """SELECT aw.id FROM assistant_workflows aw
+            WHERE aw.project_id = %s AND aw.cache_policy = 'reviewed_answer'
+              AND (aw.cached_answer = '' OR EXISTS (
+                SELECT 1 FROM jsonb_array_elements(aw.cache_dependencies) dependency
+                LEFT JOIN documents d ON d.project_id = aw.project_id
+                  AND d.id = (dependency->>'document_id')::int
+                WHERE d.id IS NULL OR COALESCE(d.content_hash, '') <>
+                  COALESCE(dependency->>'content_hash', '')
+              ))
+            ORDER BY aw.updated_at, aw.id LIMIT %s""",
+        (project_id, max(1, min(int(limit), 100))),
+    )
+    return [int(row["id"]) for row in rows]
+
+
+def save_workflow_cache(workflow_id: int, answer: str, sources: list[dict],
+                        document_ids: list[int]) -> bool:
+    project_id = access.require_current_access().project_id
+
+    def save(conn):
+        dependencies = _dependencies(conn, project_id, document_ids)
+        return bool(conn.execute(
+            """UPDATE assistant_workflows
+                  SET cached_answer = %s, cached_sources = %s, cache_dependencies = %s,
+                      cache_refreshed_at = now(), updated_at = now()
+                WHERE project_id = %s AND id = %s
+                  AND cache_policy = 'reviewed_answer' RETURNING id""",
+            (answer, json.dumps(sources), json.dumps(dependencies), project_id, workflow_id),
+        ).fetchone())
+
+    from mari_server.persistence.postgres.database import transaction
+    return bool(transaction(save))
+
+
+def save_match_index(workflow_id: int, profile: str, value: dict) -> None:
+    project_id = access.require_current_access().project_id
+    exec_(
+        """UPDATE assistant_workflows
+              SET match_index = %s, embedding_profile = %s, updated_at = now()
+              WHERE project_id = %s AND id = %s""",
+        (json.dumps(value), profile, project_id, workflow_id),
+    )

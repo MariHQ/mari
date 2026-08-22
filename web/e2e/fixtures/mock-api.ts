@@ -13,6 +13,7 @@ export type MockApi = {
   failNext: (pattern: RegExp, message: string) => void;
   failNextAuthCheck: (status?: number) => void;
   setData: (key: string, value: any) => void;
+  getData: (key: string) => any;
 };
 
 const now = "2026-08-19T12:00:00Z";
@@ -104,7 +105,7 @@ function initialData() {
     ],
     indexStats: { docs: 3, chunks: 4, embedded: 4 },
     modelCatalog: {
-      embedding: ["ollama:nomic-embed-text", "ollama:mxbai-embed-large", "sentence-transformers:sentence-transformers/all-mpnet-base-v2"],
+      embedding: ["openai:text-embedding-3-small", "ollama:nomic-embed-text", "ollama:mxbai-embed-large"],
       generation: ["ollama:gemma3:4b", "ollama:llama3.2", "gateway:deepseek-v4-flash"],
       errors: {},
     },
@@ -138,6 +139,11 @@ function initialData() {
       ],
       evidence: [{ documentId: 1, title: "Retention runbook", reason: "used as answer context", rank: 1, relevance: "observed", note: "" }],
       promotedWorkflowId: null,
+      promotedWorkflowStatus: "",
+      promotedWorkflowCachePolicy: "none",
+      promotedWorkflowCacheState: "disabled",
+      promotedWorkflowCacheRefreshedAt: "",
+      promotedWorkflowDependencyCount: 0,
     }],
     trajectoryTotal: 1,
     trajectoryCategories: ["Documentation maintenance"],
@@ -236,8 +242,36 @@ export async function installMockApi(page: Page, options: {
       data = { tuneTrajectoryStep: true };
     } else if (/tuneTrajectoryEvidence/.test(query)) {
       data = { tuneTrajectoryEvidence: true };
+    } else if (/harvestWorkflowCandidates/.test(query)) {
+      data = { harvestWorkflowCandidates: [{
+        seedTrajectoryId: 1,
+        name: "Answer retention questions",
+        reason: "Several turns use the same policy lookup and evidence path.",
+        observationIds: [1],
+        prompts: ["Update the retention documentation"],
+        existingWorkflowId: null,
+        suggested: true,
+      }, {
+        seedTrajectoryId: 2,
+        name: "what are the top capabilities of mari",
+        reason: "This turn generated a new answer after selecting Ask about Mari.",
+        observationIds: [2],
+        prompts: ["what are the top capabilities of mari"],
+        existingWorkflowId: 14,
+        suggested: false,
+      }] };
     } else if (/promoteTrajectoryToWorkflow/.test(query)) {
-      data = { promoteTrajectoryToWorkflow: 44 };
+      data = { promoteTrajectoryToWorkflow: { id: 44, name: String(variables.name ?? "Workflow"), status: "active", nodeCount: 3 } };
+    } else if (/splitAssistantWorkflow/.test(query)) {
+      data = { splitAssistantWorkflow: 45 };
+    } else if (/setAssistantWorkflowEnabled/.test(query)) {
+      data = { setAssistantWorkflowEnabled: true };
+    } else if (/setAssistantWorkflowCache/.test(query)) {
+      data = { setAssistantWorkflowCache: true };
+    } else if (/reconcileStaleAssistantWorkflows/.test(query)) {
+      data = { reconcileStaleAssistantWorkflows: 1 };
+    } else if (/deleteAssistantWorkflow/.test(query)) {
+      data = { deleteAssistantWorkflow: true };
     } else if (/workflowRun\(/.test(query)) {
       data = { workflowRun: { id: 99, number: 1900, workflowName: "Fact scan", status: "passed", progress: 100, stats: { facts: 2 }, rows: [{ step: "Scan facts", status: "passed", detail: "2 claims", duration: "00:00:01" }] } };
     } else if (/approveRun/.test(query)) {
@@ -340,7 +374,8 @@ oauth_config:
 settings:
   event_subscriptions:
     request_url: https://mari.example.test/webhooks/slack
-    bot_events: [app_mention, message.channels, message.im]` });
+    bot_events: [app_mention, message.channels, message.im]
+  socket_mode_enabled: true` });
   });
   await page.route("**/bots/slack/setup", async (route) => {
     const body = route.request().postDataJSON();
@@ -365,5 +400,6 @@ settings:
     failNext: (pattern, message) => { failure = { pattern, message }; },
     failNextAuthCheck: (status = 503) => { authFailureStatus = status; },
     setData: (key, value) => { state[key] = value; },
+    getData: (key) => state[key],
   };
 }

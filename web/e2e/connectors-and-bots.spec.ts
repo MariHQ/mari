@@ -100,9 +100,11 @@ test("Slack bot setup persists the verified project installation, calls auth.tes
   await expect(drawer).toContainText("message.channels");
   await expect(drawer).toContainText("messages_tab_enabled: true");
   await expect(drawer).toContainText("messages_tab_read_only_enabled: false");
+  await expect(drawer).toContainText("socket_mode_enabled: true");
   expect(api.restCalls.some((call) => call.path === "/bots/slack/manifest")).toBeTruthy();
   await drawer.getByRole("button", { name: "Next" }).click();
   await drawer.getByRole("textbox", { name: "Bot token" }).fill("xoxb-browser-secret  ");
+  await drawer.getByRole("textbox", { name: "App-level token" }).fill("xapp-browser-secret  ");
   await drawer.getByRole("textbox", { name: "Signing secret" }).fill("signing-browser-secret");
   await drawer.getByRole("button", { name: "Save credentials" }).click();
   await expect(drawer.getByText("Saved", { exact: true })).toBeVisible();
@@ -119,7 +121,7 @@ test("Slack bot setup persists the verified project installation, calls auth.tes
   await expect(page.getByText("Acme", { exact: true }).first()).toBeVisible();
   await expect(page.getByText("xoxb-browser-secret", { exact: true })).toHaveCount(0);
   const setup = api.restCalls.find((c) => c.path === "/bots/slack/setup");
-  expect(setup?.body).toEqual({ bot_token: "xoxb-browser-secret", signing_secret: "signing-browser-secret" });
+  expect(setup?.body).toEqual({ bot_token: "xoxb-browser-secret", app_token: "xapp-browser-secret", signing_secret: "signing-browser-secret" });
   expect(api.calls.some((c) => c.query.includes("updateSetting") && c.variables.key === "slack_bot")).toBeFalsy();
   expect(api.restCalls.some((c) => c.path === "/bots/slack/test")).toBeTruthy();
 });

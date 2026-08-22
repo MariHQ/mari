@@ -9,16 +9,58 @@ test("trajectory view progressively discloses grounded layers and chronological 
   await expect(page.getByText("Repair policy documentation", { exact: true })).toBeVisible();
   await expect(page.getByText("Updated a policy document from retrieved evidence.", { exact: true })).toBeVisible();
   await expect(page.getByText("Searched the knowledge base, inspected the runbook, and updated the document.", { exact: true })).toBeHidden();
-  await page.getByText("Evidence and abstraction layers", { exact: true }).click();
+  await page.getByRole("button", { name: "Inspect run" }).first().click();
   await expect(page.getByText("Searched the knowledge base, inspected the runbook, and updated the document.", { exact: true })).toBeVisible();
   await expect(page.getByRole("list", { name: "Trajectory steps" }).getByRole("listitem")).toHaveCount(3);
   await expect(page.locator("body")).not.toContainText("private document body");
   await expect(page.locator("body")).not.toContainText("secret-token");
 });
 
+test("an expanded workflow shows its real embedding projection", async ({ page }) => {
+  const row = api.getData("trajectories")[0];
+  api.setData("trajectories", [{
+    ...row,
+    promotedWorkflowId: 44,
+    promotedWorkflowName: "Repair policy documentation",
+    promotedWorkflowStatus: "active",
+    workflowObservationCount: 3,
+    promotedWorkflowEmbeddingMap: {
+      profile: "openai:text-embedding-3-small:dimensions=768:muvera-unit-v1",
+      points: [
+        { kind: "intent", label: "Repair policy documentation", x: -0.1, y: 0.05 },
+        { kind: "phase", label: "Discover", x: -0.8, y: 0.7 },
+        { kind: "tool", label: "search", x: 1, y: -0.6 },
+      ],
+    },
+  }]);
+  await page.goto("/workflows");
+  await page.getByText("3 chat observations in this workflow", { exact: true }).click();
+  await expect(page.getByRole("figure", { name: "Workflow embedding" })).toBeVisible();
+  await expect(page.getByRole("img", { name: "Embedding projection with 3 points" })).toBeVisible();
+  await expect(page.getByText("openai:text-embedding-3-small:dimensions=768:muvera-unit-v1", { exact: true })).toBeVisible();
+});
+
+test("a human can harvest and codify a proposed workflow", async ({ page }) => {
+  await page.goto("/workflows");
+  await page.getByRole("button", { name: "Harvest new workflows" }).click();
+  await expect(page.getByRole("dialog", { name: "Harvest new workflows" })).toBeVisible();
+  await page.getByRole("button", { name: "Analyze recent turns" }).click();
+  await expect(page.getByLabel("Candidate 1 name")).toHaveValue("Answer retention questions");
+  await expect(page.getByLabel("Candidate 2 name")).toHaveValue("what are the top capabilities of mari");
+  await expect(page.getByLabel("Select candidate 2")).not.toBeChecked();
+  await expect(page.getByText("Update the retention documentation", { exact: true })).toBeHidden();
+  await page.getByText("1 supporting turn", { exact: true }).first().click();
+  await expect(page.getByText("Update the retention documentation", { exact: true })).toBeVisible();
+  await page.getByLabel("Candidate 1 name").fill("Answer policy retention questions");
+  await page.getByRole("button", { name: "Codify selected" }).click();
+  await expect(page.getByRole("heading", { name: "Workflows codified" })).toBeVisible();
+  await expect.poll(() => api.calls.some((call) => call.query.includes("promoteTrajectoryToWorkflow")
+    && call.variables.name === "Answer policy retention questions")).toBeTruthy();
+});
+
 test("a human can tune evidence and tool calls before codifying a trajectory", async ({ page }) => {
   await page.goto("/workflows");
-  await page.getByText("Evidence and abstraction layers", { exact: true }).click();
+  await page.getByRole("button", { name: "Inspect run" }).first().click();
   await page.getByLabel("search disposition").selectOption("preferred");
   await page.getByText("Tune arguments", { exact: true }).first().click();
   await page.getByLabel("search arguments").fill('{"query":"mari retention"}');
@@ -33,8 +75,45 @@ test("a human can tune evidence and tool calls before codifying a trajectory", a
     && call.variables.relevance === "pinned")).toBeTruthy();
 
   await page.getByLabel("Workflow name").fill("Retention answer workflow");
-  await page.getByRole("button", { name: "Create paused workflow" }).click();
-  await expect(page.getByRole("button", { name: "Open draft workflow" })).toBeVisible();
+  await page.getByRole("button", { name: "Codify workflow" }).click();
+  await expect(page).toHaveURL("/workflows");
+  await expect(page.getByText("Enabled for assistants", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Pause workflow" }).click();
+  await expect.poll(() => api.calls.some((call) => call.query.includes("setAssistantWorkflowEnabled")
+    && call.variables.enabled === false)).toBeTruthy();
+  await expect(page.getByRole("button", { name: "Enable workflow" })).toBeVisible();
+  await page.getByRole("button", { name: "Cache reviewed answer" }).click();
+  await expect.poll(() => api.calls.some((call) => call.query.includes("setAssistantWorkflowCache")
+    && call.variables.enabled === true)).toBeTruthy();
+  await expect(page.getByText("Current", { exact: true })).toBeVisible();
+});
+
+test("stale reviewed-answer workflows can be reconciled together", async ({ page }) => {
+  const row = api.getData("trajectories")[0];
+  api.setData("trajectories", [{
+    ...row, promotedWorkflowId: 44, promotedWorkflowStatus: "active",
+    promotedWorkflowCachePolicy: "reviewed_answer", promotedWorkflowCacheState: "stale",
+    promotedWorkflowDependencyCount: 2, promotedWorkflowCacheRefreshedAt: "2026-08-20T12:00:00Z",
+  }]);
+  await page.goto("/workflows");
+  await page.getByRole("button", { name: "Reconcile stale caches (1)" }).click();
+  await expect.poll(() => api.calls.some((call) =>
+    call.query.includes("reconcileStaleAssistantWorkflows"))).toBeTruthy();
+});
+
+test("a codified workflow can be deleted without deleting its observed trajectory", async ({ page }) => {
+  const row = api.getData("trajectories")[0];
+  api.setData("trajectories", [{
+    ...row, promotedWorkflowId: 44, promotedWorkflowStatus: "active",
+    promotedWorkflowCachePolicy: "none", promotedWorkflowCacheState: "disabled",
+  }]);
+  await page.goto("/workflows");
+  await page.getByRole("button", { name: "Inspect run" }).first().click();
+  await page.getByRole("button", { name: "Delete workflow" }).click();
+  await page.getByRole("button", { name: "Confirm delete" }).click();
+  await expect.poll(() => api.calls.some((call) => call.query.includes("deleteAssistantWorkflow")
+    && call.variables.workflowId === 44)).toBeTruthy();
+  await expect(page.getByText("Workflow deleted. The observed run is kept.", { exact: true }).first()).toBeVisible();
 });
 
 test("trajectory taxonomy filter and pagination remain URL-addressable", async ({ page }) => {
@@ -116,5 +195,5 @@ test("trajectory read failures replace the archive rather than masquerading as e
   });
   await page.goto("/workflows");
   await expect(page.getByText("Iceberg catalog unavailable", { exact: true })).toBeVisible();
-  await expect(page.getByText("No agent trajectories yet", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("No observed workflows yet", { exact: true })).toHaveCount(0);
 });

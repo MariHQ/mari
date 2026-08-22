@@ -14,7 +14,6 @@ from mari_server.identity import routes as identity_routes
 from mari_server.operations import telemetry
 from mari_server.persistence.postgres import repository_audit
 from mari_server.persistence.postgres.database import close_pool, ensure_schema, open_pool
-from mari_server.providers import models
 from mari_server.sources import gdrive_events, sync
 
 
@@ -29,14 +28,6 @@ async def lifespan(application: FastAPI):
         identity_routes.ensure_schema()
         repository_audit.ensure_schema()
         identity_routes.first_run_check()
-        if os.environ.get("MARI_EMBEDDING_WARMUP", "").strip().lower() in {"1", "true", "yes"}:
-            started = time.perf_counter()
-            vector = models.embed("Mari search readiness")
-            if vector is None:
-                raise RuntimeError(f"embedding warmup failed: {models.last_error() or 'unknown error'}")
-            logging.getLogger("mari.lifecycle").info(
-                "embedding model ready", extra={"duration_ms": round((time.perf_counter() - started) * 1000, 2)},
-            )
         sync.start_poller()
         slack.start_event_dispatcher()
         gdrive_events.start_watch_renewal()

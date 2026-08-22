@@ -60,7 +60,7 @@ def ensure_schema() -> None:
 BUILDS_DIR = pathlib.Path(
     os.environ.get(
         "MARI_REPO_AUDIT_DIR",
-        pathlib.Path(__file__).resolve().parents[2] / "data" / "repo-audit",
+        pathlib.Path(__file__).resolve().parents[3] / "var" / "mari" / "repo-audit",
     )
 )
 

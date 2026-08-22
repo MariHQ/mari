@@ -244,6 +244,7 @@ class SlackSetupToAnswerTests(unittest.TestCase):
              patch.object(bots.bot_store, "touch_installation"), \
              patch.object(bots.bot_store, "verified_facts", return_value=[]), \
              patch.object(bots.bot_store, "log_usage"), \
+             patch.object(bots.trajectory_store, "record_external_observation"), \
              patch.object(bots, "_EVENT_INBOX", inbox), \
              patch.object(bots, "_refresh_slack_aggregate"), \
              patch.object(search_service.search_store, "keyword_candidates", return_value=documents), \
@@ -327,9 +328,10 @@ class SlackSetupToAnswerTests(unittest.TestCase):
                           side_effect=lambda *args: saved_threads.append(args)), \
              patch.object(bots.bot_store, "touch_installation"), \
              patch.object(bots.bot_store, "log_usage"), \
+             patch.object(bots.trajectory_store, "record_external_observation"), \
              patch.object(bots, "_refresh_slack_aggregate") as refresh, \
              patch.object(bots, "stream_answer_question",
-                          side_effect=lambda question, context: answered.append((question, context)) or iter(["Production is ready [1]."])):
+                          side_effect=lambda question, context, **_kwargs: answered.append((question, context)) or iter(["Production is ready [1]."])):
             bots._process_slack_delivery(row)
 
         history = [call for call in FakeSlackHandler.calls
@@ -341,9 +343,40 @@ class SlackSetupToAnswerTests(unittest.TestCase):
         self.assertEqual(history[0]["body"]["limit"], 15)
         self.assertEqual(answered[0][0], "and production?")
         self.assertIn("Use the production checklist [3].", answered[0][1])
+        self.assertNotIn("and production?", answered[0][1])
         self.assertEqual(posts[0]["body"]["thread_ts"], "posted.1")
         refresh.assert_called_once_with(7, "xoxb-valid", "C1", "posted.1")
         self.assertTrue(any(args[3] == "posted.1" for args in saved_threads))
+
+    def test_top_level_mention_has_no_synthetic_thread_context(self):
+        self._setup()
+        row = {
+            "project_id": 7,
+            "delivery_id": "Ev-cached-root",
+            "payload": {
+                "installation_id": 5,
+                "event": {"type": "app_mention", "text": "<@B> tell me about mari",
+                          "channel": "C1", "ts": "20.0"},
+            },
+        }
+        answered = []
+        with patch.object(bots, "SLACK_API", self.slack_api), \
+             patch.object(bots.bot_store, "installation", return_value=self._installed_row()), \
+             patch.object(bots.bot_store, "save_thread"), \
+             patch.object(bots.bot_store, "touch_installation"), \
+             patch.object(bots.bot_store, "log_usage"), \
+             patch.object(bots.trajectory_store, "record_external_observation") as observe, \
+             patch.object(bots, "_refresh_slack_aggregate"), \
+             patch.object(bots, "stream_answer_question",
+                          side_effect=lambda question, context, observe=None: (
+                              observe({"id": 14}, [], "cache") if observe else None,
+                              answered.append((question, context)),
+                              iter(["Cached Mari answer."]),
+                          )[-1]):
+            bots._process_slack_delivery(row)
+
+        self.assertEqual(answered, [("tell me about mari", "")])
+        observe.assert_called_once()
 
 
 if __name__ == "__main__":

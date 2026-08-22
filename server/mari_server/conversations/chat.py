@@ -14,6 +14,10 @@ from mari_server.search.service import hybrid_search
 from mari_server.conversations import citations
 from mari_server.conversations.prompts import answer_system, workspace_style_text
 from mari_components.destinations.chat import ChatContext, ChatPorts, answer_search_query
+from mari_server.conversations.workflows import guidance as workflow_guidance
+from mari_server.conversations.workflows import retrieval_query as workflow_retrieval_query
+from mari_server.conversations.workflows import select as select_workflow
+from mari_server.conversations.workflows import cached_response as workflow_cached_response
 
 
 def live_destination(project_slug: str, destination_slug: str):
@@ -44,8 +48,13 @@ def ports(project_access: access.AccessContext, usage_detail: str,
     # conversations/agent.py composes its planner prompt per request.
     with access.use_access(project_access):
         system = answer_system(workspace_style_text(), surface)
+    selected_state: dict[str, object] = {"workflow": None, "execution_mode": "generation"}
 
     def prepare(session_id: int | None, message: str) -> ChatContext:
+        retrieval_question = answer_search_query(message)
+        selected_state["workflow"] = workflow = select_workflow(retrieval_question, {"search"})
+        cached = workflow_cached_response(workflow)
+        retrieval_question = workflow_retrieval_query(retrieval_question, workflow)
         if session_id is None:
             session_id = chat_store.create_session(
                 project_id, project_access.user_id or None, message,
@@ -53,6 +62,12 @@ def ports(project_access: access.AccessContext, usage_detail: str,
         elif not chat_store.session_exists(project_id, project_access.user_id, session_id):
             raise LookupError("Chat session not found.")
         chat_store.add_message(project_id, session_id, "user", message)
+
+        if cached:
+            selected_state["execution_mode"] = "cache"
+            return ChatContext(
+                session_id, cached.get("sources") or (), (), cached["answer"], True,
+            )
 
         approved = (chat_store.approved_answer(project_id, message, llm.embed(message))
                     if "answers" in enabled_tools else None)
@@ -66,11 +81,13 @@ def ports(project_access: access.AccessContext, usage_detail: str,
                         "author": "", "updated": "", "tags": [], "document_id": None,
                         "href": f"/answers?answer={approved['id']}",
                         "source_url": None, "score": 1.0}]
+            selected_state["execution_mode"] = "approved_answer"
             return ChatContext(session_id, sources, (), str(approved["answer"]))
 
+        selected_state["execution_mode"] = "workflow_generation" if workflow else "generation"
         source_urls: dict[int, str] = {}
         with access.use_access(project_access):
-            documents = (hybrid_search(answer_search_query(message), 8)
+            documents = (hybrid_search(retrieval_question, 8)
                          if "search" in enabled_tools else [])
             # Dedupe before numbering, so the [n] in the context and the n in
             # the payload are the same citation.
@@ -96,12 +113,15 @@ def ports(project_access: access.AccessContext, usage_detail: str,
         history = chat_store.messages(project_id, session_id, 10)
         messages = [{"role": row["role"], "content": row["content"]}
                     for row in reversed(history)]
-        messages[-1]["content"] = f"Context:\n{context}\n\nQuestion: {message}"
+        messages[-1]["content"] = f"Context:\n{context}\n\nQuestion: {retrieval_question}"
         return ChatContext(session_id, sources, messages)
 
     return ChatPorts(
         prepare=prepare,
-        generate=lambda messages: llm.chat_stream([dict(row) for row in messages], system),
+        generate=lambda messages: llm.chat_stream(
+            [dict(row) for row in messages],
+            system + workflow_guidance(selected_state["workflow"]),
+        ),
         persist=lambda session_id, answer, sources: chat_store.add_message(
             project_id, session_id, "assistant", answer, json.dumps(list(sources)),
         ),
@@ -121,5 +141,15 @@ def ports(project_access: access.AccessContext, usage_detail: str,
                     "rank": source.get("n", 0),
                 } for source in sources if source.get("document_id")],
             }], "knowledge-chat-v1",
+            int(selected_state["workflow"]["id"]) if selected_state["workflow"] else None,
+            execution_mode=str(selected_state["execution_mode"]),
+            selected_workflow_score=(float((selected_state["workflow"].get("match") or {})["workflow_score"])
+                                     if selected_state["workflow"] and
+                                     (selected_state["workflow"].get("match") or {}).get("workflow_score") is not None
+                                     else None),
+            selected_workflow_exact=bool(selected_state["workflow"] and
+                                         (selected_state["workflow"].get("match") or {}).get("exact")),
+            observed_cluster_id=(int(selected_state["workflow"]["id"])
+                                 if selected_state["workflow"] else None),
         ),
     )

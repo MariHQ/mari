@@ -15,7 +15,7 @@ const ROUTES = [
 ] as const;
 
 const PRIMARY_DESTINATIONS = [
-  "Home", "Knowledge", "Facts", "Answers", "Decisions", "Lineage", "Trajectories", "Review", "Destinations", "Analytics", "Sources", "Settings",
+  "Home", "Knowledge", "Facts", "Answers", "Decisions", "Lineage", "Workflows", "Review", "Destinations", "Analytics", "Sources", "Settings",
 ] as const;
 
 const LEGACY_PRIMARY_LABELS = [

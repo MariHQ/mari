@@ -133,15 +133,16 @@ test("provider keys use explicit edits, including legitimate bullet characters",
     call.variables.key === "llm" && (call.variables.value as any).keys?.openai === "sk-live-•-valid")).toBeTruthy();
 });
 
-test("generation gateway validates, preserves local embeddings, and runs prompt-free health", async ({ page }) => {
+test("generation gateway validates, preserves HTTP embeddings, and runs prompt-free health", async ({ page }) => {
   await page.goto("/settings/models");
   await expect(page.getByText("Generation gateway", { exact: true })).toBeVisible();
   await expect(page.getByText(/Embeddings remain independently configured/)).toBeVisible();
   await expect(page.getByText(/Claude plugin/i)).toHaveCount(0);
   await expect(page.getByRole("option", { name: /Enterprise gateway/ })).toHaveCount(1);
-  await expect(page.getByRole("option", { name: /Sentence Transformers.*all-mpnet-base-v2/ })).toHaveCount(1);
+  await expect(page.getByRole("option", { name: /OpenAI.*text-embedding-3-small/ })).toHaveCount(1);
+  await expect(page.getByRole("option", { name: /Sentence Transformers/ })).toHaveCount(0);
   const embedding = page.getByText("Embedding model", { exact: true }).locator("xpath=ancestor::*[contains(@class,'rounded')][1]");
-  await embedding.getByRole("combobox").selectOption("sentence-transformers:sentence-transformers/all-mpnet-base-v2");
+  await embedding.getByRole("combobox").selectOption("openai:text-embedding-3-small");
   await page.getByRole("button", { name: "Save", exact: true }).first().click();
   await embedding.getByRole("button", { name: "Re-index everything?" }).click();
   await expect.poll(() => api.calls.filter((call) => call.variables.key === "embedding").length).toBe(1);
@@ -169,7 +170,7 @@ test("generation gateway validates, preserves local embeddings, and runs prompt-
   expect((llmSave?.variables.value as any).gateway.headers).toEqual({ "X-Tenant": "rippling" });
   const embeddingSaves = api.calls.filter((call) => call.variables.key === "embedding");
   expect(embeddingSaves).toHaveLength(1);
-  expect((embeddingSaves[0].variables.value as any).provider).toBe("sentence-transformers");
+  expect((embeddingSaves[0].variables.value as any).provider).toBe("openai");
 
   await page.getByRole("button", { name: "Test gateway" }).click();
   await expect(page.getByText("Gateway healthy", { exact: true })).toBeVisible();

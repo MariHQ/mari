@@ -19,10 +19,7 @@ WORKDIR /app/server
 COPY mari-components/ /app/mari-components/
 RUN python3 -m pip install --break-system-packages --no-cache-dir /app/mari-components/packages/*
 COPY server/requirements.txt ./requirements.txt
-RUN python3 -m pip install --break-system-packages --no-cache-dir \
-      --index-url https://download.pytorch.org/whl/cpu \
-      --extra-index-url https://pypi.org/simple 'torch==2.13.0+cpu' \
-    && python3 -m pip install --break-system-packages --no-cache-dir -r requirements.txt
+RUN python3 -m pip install --break-system-packages --no-cache-dir -r requirements.txt
 COPY server/ /app/server/
 COPY --from=web-build /build/dist/ /app/web/
 COPY deploy/fly/start.sh /app/start.sh
@@ -34,10 +31,8 @@ RUN chmod 0755 /app/start.sh \
 ENV PGDATA=/data/postgres \
     HOME=/data/mari \
     XDG_CACHE_HOME=/data/cache \
-    HF_HOME=/data/models/huggingface \
     MARI_DB=postgresql://mari@127.0.0.1:5432/mari_cloud \
-    MARI_STATIC_DIR=/app/web \
-    MARI_SENTENCE_TRANSFORMERS_CACHE=/data/models/sentence-transformers
+    MARI_STATIC_DIR=/app/web
 
 EXPOSE 8080
 ENTRYPOINT ["/usr/bin/tini", "-g", "--", "/app/start.sh"]

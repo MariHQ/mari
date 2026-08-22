@@ -29,6 +29,7 @@ from mari_server.persistence.postgres import review as review_repository
 from mari_server.persistence.postgres import knowledge as knowledge_store
 from mari_server.persistence.postgres import documents as document_repository, lineage as lineage_store
 from mari_server.persistence.postgres import trajectories as trajectory_store, workflows as workflow_store
+from mari_components.trajectories import project_embeddings_2d
 from mari_server.persistence.postgres import mcp as mcp_repository, knowledge_chats as knowledge_chat_repository
 from mari_server.persistence.postgres import sources as source_store, audit as audit_store
 from mari_server.persistence.postgres import settings as settings_store, analytics as analytics_store
@@ -306,6 +307,31 @@ def _effective_model_setting(key: str, value):
     return out
 
 
+def _workflow_embedding_map(row: dict | None) -> dict:
+    if not row:
+        return {"profile": "", "points": []}
+    index = jload(row.get("match_index")) or {}
+    items: list[dict] = []
+    root = index.get("embedding")
+    if isinstance(root, list):
+        items.append({"kind": "intent", "label": str(row.get("name") or "Workflow"),
+                      "embedding": root})
+    for position, phase in enumerate(index.get("phases") or [], 1):
+        if isinstance(phase, dict) and isinstance(phase.get("embedding"), list):
+            items.append({"kind": "phase", "label": str(phase.get("name") or f"Phase {position}"),
+                          "embedding": phase["embedding"]})
+    for position, step in enumerate(index.get("steps") or [], 1):
+        if isinstance(step, dict) and isinstance(step.get("embedding"), list):
+            label = str(step.get("tool") or step.get("summary") or f"Step {position}")
+            items.append({"kind": "tool", "label": label, "embedding": step["embedding"]})
+    coordinates = project_embeddings_2d([item["embedding"] for item in items])
+    return {
+        "profile": str(row.get("embedding_profile") or ""),
+        "points": [{"kind": item["kind"], "label": item["label"], "x": x, "y": y}
+                   for item, (x, y) in zip(items, coordinates)],
+    }
+
+
 def _trajectories(rows: list[dict], steps: list[dict],
                   evidence: list[dict]) -> list[Trajectory]:
     """Rows + their steps + their evidence -> the API's Trajectory objects.
@@ -327,6 +353,9 @@ def _trajectories(rows: list[dict], steps: list[dict],
             reason=reference["reason"], rank=int(reference["rank"]),
             relevance=reference["relevance"], note=reference["note"],
         ))
+    workflow_ids = [int(row["promoted_workflow_id"]) for row in rows
+                    if row.get("promoted_workflow_id")]
+    embedding_indexes = trajectory_store.workflow_embedding_indexes(workflow_ids)
     return [Trajectory(
         id=int(row["id"]), session_id=row.get("session_id"), prompt=row["prompt"],
         status=row["status"], model=row["model"], layer1=row["layer1"], layer2=row["layer2"],
@@ -334,8 +363,29 @@ def _trajectories(rows: list[dict], steps: list[dict],
         step_count=int(row["step_count"]), failure_count=int(row["failure_count"]),
         rework_count=int(row["rework_count"]), started_at=row["started_at"].isoformat(),
         completed_at=row["completed_at"].isoformat() if row.get("completed_at") else "",
+        selected_workflow_id=row.get("selected_workflow_id"),
+        selected_workflow_score=(float(row["selected_workflow_score"])
+                                 if row.get("selected_workflow_score") is not None else None),
+        selected_workflow_exact=bool(row.get("selected_workflow_exact")),
+        execution_mode=row.get("execution_mode") or "unknown",
+        observed_cluster_id=row.get("observed_cluster_id"),
         steps=by_id[int(row["id"])], evidence=evidence_by_id[int(row["id"])],
         promoted_workflow_id=row.get("promoted_workflow_id"),
+        promoted_workflow_name=row.get("promoted_workflow_name") or "",
+        workflow_root_trajectory_id=row.get("workflow_root_trajectory_id"),
+        workflow_observation_count=int(row.get("workflow_observation_count") or 1),
+        promoted_workflow_status=row.get("promoted_workflow_status") or "",
+        promoted_workflow_cache_policy=row.get("promoted_workflow_cache_policy") or "none",
+        promoted_workflow_cache_state=row.get("promoted_workflow_cache_state") or "disabled",
+        promoted_workflow_cache_refreshed_at=(
+            row["promoted_workflow_cache_refreshed_at"].isoformat()
+            if row.get("promoted_workflow_cache_refreshed_at") else ""
+        ),
+        promoted_workflow_dependency_count=int(row.get("promoted_workflow_dependency_count") or 0),
+        promoted_workflow_embedding_map=_workflow_embedding_map(
+            embedding_indexes.get(int(row["promoted_workflow_id"]))
+            if row.get("promoted_workflow_id") else None
+        ),
         # Only when the join found the workflow: a promotion whose workflow has
         # since been deleted reports no workflow rather than an empty card.
         promoted_workflow=PromotedWorkflow(

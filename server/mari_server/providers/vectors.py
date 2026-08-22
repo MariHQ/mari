@@ -103,7 +103,8 @@ class DerivedVectorIndex:
         else:
             self.path = pathlib.Path(self.uri).expanduser()
 
-    def build(self, documents: dict[int, np.ndarray], hashes: dict[int, str] | None = None) -> dict:
+    def build(self, documents: dict[int, np.ndarray], hashes: dict[int, str] | None = None,
+              *, embedding_profile: str = "") -> dict:
         clean = {int(k): np.asarray(v, np.float32) for k, v in documents.items() if len(v)}
         if not clean:
             raise ValueError("cannot build an empty vector index")
@@ -125,6 +126,7 @@ class DerivedVectorIndex:
             "documents": len(ids),
             "vectors": len(vectors),
             "input_dimension": int(vectors.shape[1]),
+            "embedding_profile": embedding_profile,
             "fde": dataclasses.asdict(self.config) | {"dimension": self.config.dimension},
             "polar": codec,
             "hashes": {str(i): (hashes or {}).get(int(i), "") for i in ids},
@@ -137,9 +139,13 @@ class DerivedVectorIndex:
             self._loaded_at = time.time()
         return metadata
 
-    def search(self, query_points: np.ndarray, k: int = 10, candidate_k: int = 1000) -> list[dict]:
+    def search(self, query_points: np.ndarray, k: int = 10, candidate_k: int = 1000,
+               *, embedding_profile: str | None = None) -> list[dict]:
         snap = self._load()
         if not snap:
+            return []
+        if (embedding_profile is not None
+                and snap["metadata"].get("embedding_profile") != embedding_profile):
             return []
         query_points = np.asarray(query_points, np.float32)
         params = projection_parameters(self.config, int(snap["metadata"]["input_dimension"]))
@@ -312,6 +318,10 @@ class DerivedVectorIndex:
     def available(self) -> bool:
         return self._load() is not None
 
+    def available_for(self, embedding_profile: str) -> bool:
+        snapshot = self._load()
+        return bool(snapshot and snapshot["metadata"].get("embedding_profile") == embedding_profile)
+
 
 _INDEXES: dict[int, DerivedVectorIndex] = {}
 _INDEXES_LOCK = threading.Lock()
@@ -354,8 +364,10 @@ def rebuild_from_database() -> dict | None:
     """Snapshot canonical chunk vectors. Imported lazily to avoid db cycles."""
     from mari_server.identity import context as access
     from mari_server.persistence.postgres import vectors
+    from mari_server.providers import models
     context = access.require_current_access()
-    rows = vectors.embedded_chunks(context.project_id)
+    profile = models.embedding_profile()
+    rows = vectors.embedded_chunks(context.project_id, profile)
     grouped: dict[int, list[np.ndarray]] = defaultdict(list)
     hashes: dict[int, list[str]] = defaultdict(list)
     for row in rows:
@@ -367,16 +379,20 @@ def rebuild_from_database() -> dict | None:
         return None
     matrices = {doc_id: np.stack(vectors) for doc_id, vectors in grouped.items()}
     hash_rows = {doc_id: "|".join(values) for doc_id, values in hashes.items()}
-    return index_for(context.project_id).build(matrices, hash_rows)
+    return index_for(context.project_id).build(
+        matrices, hash_rows, embedding_profile=profile,
+    )
 
 
 def ensure_index() -> bool:
     from mari_server.identity import context as access
+    from mari_server.providers import models
     index = index_for(access.require_current_access().project_id)
-    if index.available:
+    profile = models.embedding_profile()
+    if index.available_for(profile):
         return True
     with _REBUILD_LOCK:
-        if index.available:
+        if index.available_for(profile):
             return True
         return rebuild_from_database() is not None
 

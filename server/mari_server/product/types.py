@@ -650,6 +650,11 @@ class Trajectory:
     rework_count: int
     started_at: str
     completed_at: str
+    selected_workflow_id: int | None
+    selected_workflow_score: float | None
+    selected_workflow_exact: bool
+    execution_mode: str
+    observed_cluster_id: int | None
     steps: list[TrajectoryStep]
     evidence: list[TrajectoryEvidence]
     promoted_workflow_id: int | None
@@ -657,6 +662,15 @@ class Trajectory:
     #: "observed" or "rejected". A rejected run keeps its evidence; only an
     #: explicit delete removes it.
     disposition: str
+    promoted_workflow_name: str
+    workflow_root_trajectory_id: int | None
+    workflow_observation_count: int
+    promoted_workflow_status: str
+    promoted_workflow_cache_policy: str
+    promoted_workflow_cache_state: str
+    promoted_workflow_cache_refreshed_at: str
+    promoted_workflow_dependency_count: int
+    promoted_workflow_embedding_map: JSON
 
 
 @strawberry.type

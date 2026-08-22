@@ -10,7 +10,7 @@ import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Sparkles, X } from "lucide-react";
 import { ChatDock } from "@mari-design/components";
-import type { ChatMessageData } from "@mari-design/components/chat/types";
+import type { ChatMessageData, ToolCallData } from "@mari-design/components/chat/types";
 import { useAuth } from "../lib/auth";
 import { agentChatStream } from "../lib/agentStream";
 
@@ -78,6 +78,11 @@ export function AgentDock() {
         sessionRef.current = sessionId;
         if (sources.length) patchLast((m) => ({ ...m, sources }));
       },
+      onWorkflowSelected: ({ id, name, workflowScore, phaseIndex, stepIndex, cacheHit }) =>
+        patchLast((m) => ({ ...m, tools: [...(m.tools ?? []), {
+          name: `Workflow · ${name}`, args: { workflowId: id }, ok: true,
+          state: "complete", summary: `${cacheHit ? "Served reviewed cache · " : ""}Matched phase ${phaseIndex + 1}, step ${stepIndex + 1} · ${workflowScore.toFixed(2)}`,
+        } as ToolCallData] })),
       onToolProposal: ({ name, args }) =>
         patchLast((m) => ({ ...m, tools: [...(m.tools ?? []), { name, args, ok: null, state: "proposed" }] })),
       onToolStart: ({ name, args }) =>

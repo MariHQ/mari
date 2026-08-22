@@ -6,11 +6,10 @@ BACKUP_DIR=/data/backups
 api_pid=""
 backup_pid=""
 postgres_pid=""
-mkdir -p "$PGDATA" "$BACKUP_DIR" /data/mari /data/cache \
-  /data/models/huggingface /data/models/sentence-transformers
+mkdir -p "$PGDATA" "$BACKUP_DIR" /data/mari /data/cache
 chown -R postgres:postgres "$PGDATA"
 chown -R postgres:postgres "$BACKUP_DIR"
-chown -R mari:mari /data/mari /data/cache /data/models /app/server/builds
+chown -R mari:mari /data/mari /data/cache /app/server/builds
 
 if [ ! -s "$PGDATA/PG_VERSION" ]; then
   gosu postgres initdb -D "$PGDATA" --auth-local=trust --auth-host=trust --username=mari

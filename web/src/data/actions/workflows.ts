@@ -132,6 +132,51 @@ export function workflowsActions({ replace }: ActionContext): WorkflowsActions {
     reject: async (trajectoryId, rejected) => { await mutate(REJECT, { trajectoryId, rejected }); },
     remove: async (trajectoryId) => { await mutate(DELETE, { trajectoryId }); },
 
+    /* ── codified workflow lifecycle ── */
+    setWorkflowEnabled: async (workflowId, enabled) => {
+      await mutate(`mutation($workflowId: Int!, $enabled: Boolean!) {
+        setAssistantWorkflowEnabled(workflowId: $workflowId, enabled: $enabled)
+      }`, { workflowId, enabled });
+    },
+    setWorkflowCache: async (workflowId, enabled) => {
+      await mutate(`mutation($workflowId: Int!, $enabled: Boolean!) {
+        setAssistantWorkflowCache(workflowId: $workflowId, enabled: $enabled)
+      }`, { workflowId, enabled });
+    },
+    reconcileStale: async () => {
+      const data = await mutate(`mutation { reconcileStaleAssistantWorkflows(limit: 50) }`);
+      return Number(data.reconcileStaleAssistantWorkflows);
+    },
+    deleteWorkflow: async (workflowId) => {
+      await mutate(`mutation($workflowId: Int!) { deleteAssistantWorkflow(workflowId: $workflowId) }`, { workflowId });
+    },
+
+    /* ── clusters and harvesting ── */
+    suggestSplitName: async (trajectoryId) => {
+      const data = await mutate(`mutation($trajectoryId: Int!) { suggestWorkflowSplitName(trajectoryId: $trajectoryId) }`, { trajectoryId });
+      return String(data.suggestWorkflowSplitName);
+    },
+    splitWorkflow: async (trajectoryId, name) => {
+      const data = await mutate(`mutation($trajectoryId: Int!, $name: String!) {
+        splitAssistantWorkflow(trajectoryId: $trajectoryId, name: $name)
+      }`, { trajectoryId, name });
+      return Number(data.splitAssistantWorkflow);
+    },
+    harvestCandidates: async () => {
+      const data = await mutate(`mutation { harvestWorkflowCandidates(limit: 100) }`);
+      return Array.isArray(data.harvestWorkflowCandidates) ? data.harvestWorkflowCandidates : [];
+    },
+    codifyCandidate: async (candidate) => {
+      if (candidate.existingWorkflowId) {
+        const data = await mutate(`mutation($trajectoryId: Int!, $name: String!) {
+          splitAssistantWorkflow(trajectoryId: $trajectoryId, name: $name)
+        }`, { trajectoryId: candidate.seedTrajectoryId, name: candidate.name });
+        return Number(data.splitAssistantWorkflow);
+      }
+      const data = await mutate(PROMOTE_WORKFLOW, { trajectoryId: candidate.seedTrajectoryId, name: candidate.name });
+      return Number(data.promoteTrajectoryToWorkflow.id);
+    },
+
     /* ── answers writes ── */
     save: async ({ id, question, answer }) => { await mutate(SAVE_ANSWER, { id, question, answer }); },
     // No id: the same mutation, inserting rather than updating. It lands as a

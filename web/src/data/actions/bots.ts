@@ -44,9 +44,10 @@ export function botActions(): SourcesBotsActions {
       if (!response.ok) throw new Error(`The server answered HTTP ${response.status}.`);
       return response.text();
     },
-    saveSlackCredentials: async ({ botToken, signingSecret }) => {
+    saveSlackCredentials: async ({ botToken, appToken, signingSecret }) => {
       await postBot("/bots/slack/setup", {
         bot_token: botToken.trim(),
+        app_token: appToken.trim(),
         signing_secret: signingSecret.trim(),
       });
       invalidateQueries();

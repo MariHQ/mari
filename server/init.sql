@@ -329,15 +329,15 @@ INSERT INTO tag_definitions (tag, label, kind, search_weight, is_default, behavi
   ('customer-facing', 'Customer facing', 'approval', 1.2, true, 'Publishable to doc sites'),
   ('internal-only',   'Internal only',   'neutral',  1.0, true, 'Excluded from doc sites'),
   ('deprecated',      'Deprecated',      'stale',    0.3, false, 'Hidden from Ask Mari answers')
-ON CONFLICT (tag) DO NOTHING;
+ON CONFLICT DO NOTHING;
 
 INSERT INTO settings (key, value) VALUES
   ('workspace',       '{"name":"","slug":"","plan":"","timezone":"America/Los_Angeles","language":"English (US)"}'),
-  ('embedding',       '{"provider":"ollama","model":"nomic-embed-text","dims":768,"options":["openai:text-embedding-3-small","ollama:nomic-embed-text","local:bge-small-en","local:all-MiniLM-L6-v2"],"default":"openai:text-embedding-3-small"}'),
+  ('embedding',       '{"provider":"openai","model":"text-embedding-3-small","dims":768,"options":["openai:text-embedding-3-small","ollama:nomic-embed-text"],"default":"openai:text-embedding-3-small"}'),
   ('llm',             '{"provider":"ollama","model":"gemma3:4b","options":["anthropic:claude-sonnet-5","openai:gpt-5.2","ollama:gemma3:4b"],"keys":{"anthropic":"","openai":""}}'),
   ('chunking',        '{"default":{"strategy":"heading","max_tokens":512,"overlap":64},"slack":{"strategy":"thread","max_tokens":768,"overlap":0}}'),
   ('digest_schedule', '{"cron":"0 9 * * MON","enabled":true,"last_run":""}')
-ON CONFLICT (key) DO NOTHING;
+ON CONFLICT DO NOTHING;
 
 -- ═══════════════════════════════════════════════════════════════════════
 -- ▼ approved answers, decisions
@@ -381,8 +381,8 @@ ALTER TABLE documents ADD COLUMN IF NOT EXISTS readability text NOT NULL DEFAULT
 ALTER TABLE documents ADD COLUMN IF NOT EXISTS created_src date;
 
 UPDATE documents SET created_src = CASE
-    WHEN graph_day IS NOT NULL THEN updated_src - LEAST(graph_day, 3)
-    ELSE updated_src END
+    WHEN graph_day IS NOT NULL THEN updated_src::date - LEAST(graph_day, 3)
+    ELSE updated_src::date END
 WHERE created_src IS NULL;
 
 ALTER TABLE edges ADD COLUMN IF NOT EXISTS created_at date;
@@ -390,7 +390,7 @@ ALTER TABLE edges ADD COLUMN IF NOT EXISTS created_at date;
 -- Derived edges without a day inherit the later endpoint's date.
 UPDATE edges e SET created_at = CASE
     WHEN e.day > 0 THEN DATE '2024-04-29' + e.day
-    ELSE GREATEST(f.updated_src, t.updated_src) END
+    ELSE GREATEST(f.updated_src::date, t.updated_src::date) END
 FROM documents f, documents t
 WHERE e.created_at IS NULL AND f.id = e.from_doc AND t.id = e.to_doc;
 
@@ -437,6 +437,7 @@ CREATE TABLE IF NOT EXISTS chunks (
   idx          int NOT NULL,
   content      text NOT NULL,
   content_hash text NOT NULL,
+  embedding_profile text NOT NULL DEFAULT '',
   embedding    vector(768),
   UNIQUE (document_id, idx)
 );
@@ -572,7 +573,7 @@ UPDATE facts SET verified_at = to_date(verified, 'Mon DD, YYYY')
 -- flag is false and stays false until one exists.
 INSERT INTO settings (key, value) VALUES
   ('provisioning', '{"manual_invites":true,"github_team":"","scim_enabled":false}')
-ON CONFLICT (key) DO NOTHING;
+ON CONFLICT DO NOTHING;
 
 -- ═══════════════════════════════════════════════════════════════════════
 -- ▼ editorial system: style guides + rule registry, document templates,
@@ -617,7 +618,7 @@ INSERT INTO style_guides (key, name, description, tone, builtin, sort) VALUES
   ('clarity',   'Clarity',            'Plain sentences with a named actor. No passive voice hiding who acts, no sentence too long to scan.', 'info', true, 20),
   ('house',     'House style',        'Sentence-case headings, serial commas, and the product wording this workspace has standardised on.', 'ink', true, 30),
   ('inclusive', 'Inclusive language', 'Neutral forms of address and technical terms that carry no loaded history.', 'ok', true, 40)
-ON CONFLICT (key) DO NOTHING;
+ON CONFLICT DO NOTHING;
 
 INSERT INTO style_rules (id, guide_key, family, severity, description, pack, suggestion, sort) VALUES
   ('ai-slop.hedging',      'ai-slop',   'AI slop',     'warn',     'Hedging filler like “it’s worth noting” adds no information.',        'slop-01', 'Delete the hedge and state the point.',        10),
@@ -644,7 +645,7 @@ ON CONFLICT (id) DO NOTHING;
 INSERT INTO settings (key, value) VALUES
   ('style_guide', '{"default_pack":""}'),
   ('voice',       '{"voice":"","terms":"","banned":"","inclusive":false,"jargon":false,"sentence_case":false}')
-ON CONFLICT (key) DO NOTHING;
+ON CONFLICT DO NOTHING;
 
 -- ————— document templates —————
 -- Scaffolds a new document can start from: a name, a category and the section
@@ -676,7 +677,7 @@ INSERT INTO document_templates (key, name, category, description, sections, icon
    '["Goal","Before you start","Steps","Verify it worked","Troubleshooting"]', 'book-open', true, 60),
   ('release-notes', 'Release notes', 'Announcements', 'What shipped, what changed for the reader, and what breaks.',
    '["Highlights","Changes","Fixes","Breaking changes","Upgrade notes"]', 'megaphone', true, 70)
-ON CONFLICT (key) DO NOTHING;
+ON CONFLICT DO NOTHING;
 
 -- ————— glossary provenance —————
 -- Where a harvested term was actually found. The glossary already recorded the
@@ -741,7 +742,7 @@ INSERT INTO site_theme_presets (key, name, accent, bg, card, ink, line, display_
   ('Mari Blueprint', 'Mari Blueprint', '#1e6fa8', '#ffffff', '#f7f8fa', '#10263b', '#d4d5d8',
    '''Inter'', ui-sans-serif, system-ui, sans-serif', '''Inter'', ui-sans-serif, system-ui, sans-serif', 5,
    '#0e2032', '#0a1926', '#eaf0f5', '#2d4356')
-ON CONFLICT (key) DO NOTHING;
+ON CONFLICT DO NOTHING;
 
 -- Backfills the row above on a database where it was already seeded before
 -- dark_bg/dark_card/dark_ink/dark_line existed (ON CONFLICT DO NOTHING above
@@ -778,7 +779,7 @@ INSERT INTO site_feature_defs (key, label, hint, default_on, sort) VALUES
   ('customizer', 'Live customizer',     'Shows the Customize button that writes theme changes back to Mari.',  true, 30),
   ('provenance', 'Provenance footer',   'Footer line naming the site and the domain each page was published from.', true, 40),
   ('source_path','Source paths',        'Prints the path of the document each page was built from.',           false, 50)
-ON CONFLICT (key) DO NOTHING;
+ON CONFLICT DO NOTHING;
 
 -- ═══════════════════════════════════════════════════════════════════════
 -- ▼ per-document claim provenance
@@ -1174,9 +1175,19 @@ BEGIN
     UPDATE mcp_servers SET project_id = only_project WHERE project_id IS NULL;
     UPDATE glossary SET project_id = only_project WHERE project_id IS NULL;
     UPDATE events SET project_id = only_project WHERE project_id IS NULL;
-    UPDATE workflows SET project_id = only_project WHERE project_id IS NULL;
+    UPDATE workflows legacy SET project_id = only_project
+      WHERE legacy.project_id IS NULL
+        AND legacy.id = (
+          SELECT min(candidate.id) FROM workflows candidate
+           WHERE candidate.project_id IS NULL AND candidate.name = legacy.name
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM workflows scoped
+           WHERE scoped.project_id = only_project AND scoped.name = legacy.name
+        );
     UPDATE workflow_runs r SET project_id = COALESCE(w.project_id, only_project)
-      FROM workflows w WHERE r.workflow_id = w.id AND r.project_id IS NULL;
+      FROM workflows w WHERE r.workflow_id = w.id AND r.project_id IS NULL
+        AND w.project_id IS NOT NULL;
     UPDATE sites SET project_id = only_project WHERE project_id IS NULL;
     UPDATE releases r SET project_id = COALESCE(s.project_id, only_project)
       FROM sites s WHERE r.site_id = s.id AND r.project_id IS NULL;

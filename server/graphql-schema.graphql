@@ -418,9 +418,16 @@ type Mutation {
   updateMcpServer(id: Int!, scope: String = null, capabilities: JSON!): Boolean!
   deleteMcpServer(id: Int!): Boolean!
   testMcpServer(id: Int!): JSON!
+  harvestWorkflowCandidates(limit: Int! = 100): JSON!
   tuneTrajectoryStep(trajectoryId: Int!, ordinal: Int!, disposition: String!, editedArgs: JSON = null): Boolean!
   tuneTrajectoryEvidence(trajectoryId: Int!, documentId: Int!, relevance: String!, note: String! = ""): Boolean!
   promoteTrajectoryToWorkflow(trajectoryId: Int!, name: String!): PromotedWorkflow!
+  suggestWorkflowSplitName(trajectoryId: Int!): String!
+  splitAssistantWorkflow(trajectoryId: Int!, name: String!): Int!
+  setAssistantWorkflowEnabled(workflowId: Int!, enabled: Boolean!): Boolean!
+  deleteAssistantWorkflow(workflowId: Int!): Boolean!
+  setAssistantWorkflowCache(workflowId: Int!, enabled: Boolean!): Boolean!
+  reconcileStaleAssistantWorkflows(limit: Int! = 50): Int!
   promoteTrajectoryToAnswer(trajectoryId: Int!): Int!
   rejectTrajectory(trajectoryId: Int!, rejected: Boolean! = true): Boolean!
   deleteTrajectory(trajectoryId: Int!): Boolean!
@@ -720,11 +727,25 @@ type Trajectory {
   reworkCount: Int!
   startedAt: String!
   completedAt: String!
+  selectedWorkflowId: Int
+  selectedWorkflowScore: Float
+  selectedWorkflowExact: Boolean!
+  executionMode: String!
+  observedClusterId: Int
   steps: [TrajectoryStep!]!
   evidence: [TrajectoryEvidence!]!
   promotedWorkflowId: Int
   promotedWorkflow: PromotedWorkflow
   disposition: String!
+  promotedWorkflowName: String!
+  workflowRootTrajectoryId: Int
+  workflowObservationCount: Int!
+  promotedWorkflowStatus: String!
+  promotedWorkflowCachePolicy: String!
+  promotedWorkflowCacheState: String!
+  promotedWorkflowCacheRefreshedAt: String!
+  promotedWorkflowDependencyCount: Int!
+  promotedWorkflowEmbeddingMap: JSON!
 }
 
 type TrajectoryEvidence {

@@ -15,7 +15,7 @@ class EffectiveModelSettingsTests(unittest.TestCase):
                  "model_header": "", "max_retries": 2,
              }), \
              patch.object(queries.llm, "embedding_model", return_value=(
-                 "sentence-transformers", "sentence-transformers/all-mpnet-base-v2",
+                 "openai", "text-embedding-3-small",
              )):
             generation = queries._effective_model_setting(
                 "llm", {"provider": "ollama", "model": "gemma3:4b"})
@@ -26,7 +26,7 @@ class EffectiveModelSettingsTests(unittest.TestCase):
                          ("gateway", "deepseek-v4-flash"))
         self.assertEqual(generation["gateway"]["compatibility"], "deepseek")
         self.assertEqual((embedding["provider"], embedding["model"]),
-                         ("sentence-transformers", "sentence-transformers/all-mpnet-base-v2"))
+                         ("openai", "text-embedding-3-small"))
         self.assertEqual(embedding["dims"], 768)
 
     def test_effective_gateway_secret_is_masked_before_graphql_response(self) -> None:

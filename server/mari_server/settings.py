@@ -22,9 +22,7 @@ _DEFAULTS: dict[str, t.Any] = {
     # pair; a partial pair is an explicit configuration error in llm.py.
     "models": {"generation_provider": "", "generation_model": "",
                "embedding_provider": "", "embedding_model": ""},
-    "sentence_transformers": {
-        "cache_dir": "var/mari/cache/sentence-transformers",
-    },
+    "openai": {"api_key": ""},
     "llm_gateway": {
         "base_url": "", "token": "", "headers": {}, "metadata": {},
         "model_header": "", "max_retries": 2, "compatibility": "openai",
@@ -102,7 +100,7 @@ def _load() -> dict:
         "MARI_LLM_MODEL": ("models", "generation_model"),
         "MARI_EMBEDDING_PROVIDER": ("models", "embedding_provider"),
         "MARI_EMBEDDING_MODEL": ("models", "embedding_model"),
-        "MARI_SENTENCE_TRANSFORMERS_CACHE": ("sentence_transformers", "cache_dir"),
+        "MARI_OPENAI_API_KEY": ("openai", "api_key"),
         "MARI_LLM_GATEWAY_URL": ("llm_gateway", "base_url"),
         "MARI_LLM_GATEWAY_TOKEN": ("llm_gateway", "token"),
         "MARI_LLM_GATEWAY_HEADERS": ("llm_gateway", "headers"),

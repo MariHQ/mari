@@ -16,7 +16,7 @@ provider/model pair in `mari.toml` or the environment; otherwise the admin-owned
 `settings.llm` / `settings.embedding` row is authoritative. A partial or
 missing selection is an error. Providers are never substituted after an error.
 
-Providers: `ollama` and `local` (a local daemon), `openai`, and `anthropic`
+Providers: `ollama` (over HTTP), `openai`, and `anthropic`
 (generation only — Anthropic serves no embedding endpoint). Provider API keys
 come from `settings.llm.keys`, which the console already collects and masks.
 
@@ -71,8 +71,6 @@ _SETTINGS_TTL = 30.0
 _settings_cache: dict[str, t.Any] = {"at": 0.0, "llm": {}, "embedding": {}}
 _settings_lock = threading.Lock()
 _last_error = threading.local()
-_sentence_models: dict[str, t.Any] = {}
-_sentence_models_lock = threading.Lock()
 _catalog_cache: dict[str, t.Any] = {"at": 0.0, "value": None}
 _catalog_lock = threading.Lock()
 
@@ -171,6 +169,10 @@ def _resolve(cfg: dict) -> tuple[str, str]:
 
 
 def _api_key(provider: str) -> str:
+    if provider == "openai":
+        deployed = str(config.get("openai", "api_key", "") or "").strip()
+        if deployed:
+            return deployed
     llm_cfg, _ = _settings()
     keys = llm_cfg.get("keys")
     return str(keys.get(provider) or "").strip() if isinstance(keys, dict) else ""
@@ -444,17 +446,52 @@ def _stream(url: str, payload: dict, headers: dict | None = None,
 # ————————————————— embeddings —————————————————
 
 
-def _sentence_model(model: str) -> t.Any:
-    with _sentence_models_lock:
-        loaded = _sentence_models.get(model)
-        if loaded is None:
-            from sentence_transformers import SentenceTransformer
-            loaded = SentenceTransformer(
-                model,
-                cache_folder=str(config.get("sentence_transformers", "cache_dir") or "") or None,
-            )
-            _sentence_models[model] = loaded
-        return loaded
+def embedding_profile() -> str:
+    """Stable, secret-free identity for cached derived vectors."""
+    provider, model = embedding_model()
+    return f"{provider}:{model}:dimensions={EMBED_DIMS}:muvera-unit-v1"
+
+
+def _http_embeddings(values: list[str], provider: str, model: str) -> list[list[float] | None]:
+    gateway = gateway_config() if provider == "gateway" else None
+    key = _api_key("openai") if provider == "openai" else ""
+    if provider == "openai" and not key:
+        _fail("settings.embedding names the openai provider but no credential is set")
+        return [None] * len(values)
+    if gateway and (config_error := _gateway_config_error(gateway)):
+        _fail(config_error)
+        return [None] * len(values)
+    payload: dict[str, t.Any] = {"model": model, "input": [value[:4000] for value in values]}
+    if model.startswith("text-embedding-3"):
+        payload["dimensions"] = EMBED_DIMS
+    base = gateway["base_url"] if gateway else OPENAI_BASE
+    headers = _gateway_headers(gateway, model) if gateway else {"Authorization": f"Bearer {key}"}
+    if gateway:
+        payload = _gateway_payload(payload, gateway)
+    out = _post(f"{base}/embeddings", payload, headers, timeout=60.0,
+                provider_name=provider, max_retries=gateway["max_retries"] if gateway else 2)
+    _record_response_usage(out, provider, model)
+    indexed: dict[int, t.Any] = {}
+    for position, item in enumerate((out or {}).get("data") or []):
+        if not isinstance(item, dict):
+            continue
+        raw_index = item.get("index", position)
+        try:
+            indexed[int(raw_index)] = item.get("embedding")
+        except (TypeError, ValueError):
+            continue
+    result: list[list[float] | None] = []
+    for index in range(len(values)):
+        vector = indexed.get(index)
+        if not vector or len(vector) != EMBED_DIMS:
+            if vector:
+                _fail(f"model {model!r} returned a {len(vector)}-dimension vector; this index stores {EMBED_DIMS}")
+            result.append(None)
+        else:
+            result.append(vector)
+    if all(result):
+        _ok()
+    return result
 
 
 def embed(text: str) -> list[float] | None:
@@ -475,40 +512,11 @@ def embed(text: str) -> list[float] | None:
         out = _post(f"{ollama_host()}/api/embeddings",
                     {"model": model, "prompt": body}, timeout=30.0)
         vec = out.get("embedding") if out else None
-    elif provider == "sentence-transformers":
-        try:
-            encoded = _sentence_model(model).encode(
-                body, normalize_embeddings=True, convert_to_numpy=True)
-            vec = encoded.tolist() if hasattr(encoded, "tolist") else list(encoded)
-        except Exception as exc:  # noqa: BLE001 — model/cache/runtime boundary
-            _fail(f"sentence-transformers model {model!r} failed ({type(exc).__name__})")
-            return None
     elif provider in ("openai", "gateway"):
-        gateway = gateway_config() if provider == "gateway" else None
-        key = (gateway or {}).get("token") or _api_key("openai")
-        if provider == "openai" and not key:
-            _fail(f"settings.embedding names the {provider} provider but no credential is set")
-            return None
-        payload: dict = {"model": model, "input": body}
-        if model.startswith("text-embedding-3"):
-            # These models serve a requested width directly, which is the only
-            # reason an OpenAI embedding can fit a vector(768) column at all.
-            payload["dimensions"] = EMBED_DIMS
-        base = gateway["base_url"] if gateway else OPENAI_BASE
-        if gateway and (config_error := _gateway_config_error(gateway)):
-            _fail(config_error)
-            return None
-        headers = _gateway_headers(gateway, model) if gateway else {"Authorization": f"Bearer {key}"}
-        if gateway:
-            payload = _gateway_payload(payload, gateway)
-        out = _post(f"{base}/embeddings", payload, headers, timeout=30.0,
-                    provider_name=provider, max_retries=gateway["max_retries"] if gateway else 0)
-        _record_response_usage(out, provider, model)
-        data = (out or {}).get("data") or []
-        vec = data[0].get("embedding") if data else None
+        return _http_embeddings([body], provider, model)[0]
     else:
         _fail(f"settings.embedding names provider {provider!r}, which has no embedding "
-              f"endpoint here (supported: ollama, sentence-transformers, openai, gateway)")
+              f"endpoint here (supported: ollama, openai, gateway)")
         return None
 
     if not vec:
@@ -529,30 +537,14 @@ def embed_many(texts: t.Iterable[str]) -> list[list[float] | None]:
     if not values:
         return []
     provider, model = embedding_model()
-    if provider != "sentence-transformers":
+    if provider == "ollama":
         return [embed(value) for value in values]
-    if not model:
+    if provider not in {"openai", "gateway"} or not model:
         _fail("embedding provider and model must both be configured")
         return [None] * len(values)
-    try:
-        encoded = _sentence_model(model).encode(
-            [value[:4000] for value in values], batch_size=32,
-            normalize_embeddings=True, convert_to_numpy=True,
-        )
-        rows = encoded.tolist() if hasattr(encoded, "tolist") else list(encoded)
-    except Exception as exc:  # noqa: BLE001 — model/cache/runtime boundary
-        _fail(f"sentence-transformers model {model!r} failed ({type(exc).__name__})")
-        return [None] * len(values)
     result: list[list[float] | None] = []
-    for vector in rows:
-        if len(vector) != EMBED_DIMS:
-            _fail(f"model {model!r} returned a {len(vector)}-dimension vector; this index "
-                  f"stores {EMBED_DIMS} (change the model, or migrate the column)")
-            result.append(None)
-        else:
-            result.append(vector)
-    if all(result):
-        _ok()
+    for start in range(0, len(values), 128):
+        result.extend(_http_embeddings(values[start:start + 128], provider, model))
     return result
 
 

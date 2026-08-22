@@ -32,8 +32,12 @@ const ROW = `
   stepCount failureCount reworkCount startedAt completedAt disposition
   steps { ordinal tool actionFamily args summary ok disposition editedArgs }
   evidence { documentId title reason rank relevance note }
+  selectedWorkflowId selectedWorkflowScore selectedWorkflowExact executionMode observedClusterId
   promotedWorkflowId
   promotedWorkflow { id name status nodeCount }
+  promotedWorkflowName workflowRootTrajectoryId workflowObservationCount
+  promotedWorkflowStatus promotedWorkflowCachePolicy promotedWorkflowCacheState
+  promotedWorkflowCacheRefreshedAt promotedWorkflowDependencyCount promotedWorkflowEmbeddingMap
 `;
 
 const QUERY = `query Workflows(
@@ -87,9 +91,41 @@ function row(raw: TrajectoryRow): TrajectoryRow {
     evidence: raw.evidence ?? [],
     phases: raw.phases ?? [],
     promotedWorkflowId: raw.promotedWorkflowId ?? null,
-    promotedWorkflow: raw.promotedWorkflow ?? null,
+    // The server sends the codified workflow as one object; an older server
+    // (or a row shaped by the flat fields alone) still names it, so the card
+    // can draw the panel either way.
+    promotedWorkflow: raw.promotedWorkflow ?? (raw.promotedWorkflowId && raw.promotedWorkflowName ? {
+      id: raw.promotedWorkflowId, name: raw.promotedWorkflowName,
+      status: raw.promotedWorkflowStatus || "active", nodeCount: raw.stepCount ?? 0,
+    } : null),
     disposition: raw.disposition || "observed",
+    promotedWorkflowName: raw.promotedWorkflowName ?? "",
+    workflowRootTrajectoryId: raw.workflowRootTrajectoryId ?? null,
+    workflowObservationCount: raw.workflowObservationCount ?? 1,
+    promotedWorkflowStatus: raw.promotedWorkflowStatus ?? "",
+    promotedWorkflowCachePolicy: raw.promotedWorkflowCachePolicy ?? "none",
+    promotedWorkflowCacheState: raw.promotedWorkflowCacheState ?? "disabled",
+    promotedWorkflowCacheRefreshedAt: raw.promotedWorkflowCacheRefreshedAt ?? "",
+    promotedWorkflowDependencyCount: raw.promotedWorkflowDependencyCount ?? 0,
+    promotedWorkflowEmbeddingMap: raw.promotedWorkflowEmbeddingMap ?? { profile: "", points: [] },
   };
+}
+
+/** One card per codified workflow. Observations that were promoted into, or
+    matched or clustered under, the same workflow fold into the card of the
+    cluster's seed (or the first one seen), each still readable on its own
+    inside that card. A run without a workflow is its own card. */
+export function clusterRows(rows: TrajectoryRow[]): TrajectoryRow[] {
+  const grouped = new Map<string, TrajectoryRow>();
+  for (const item of rows) {
+    const key = item.promotedWorkflowId ? `workflow:${item.promotedWorkflowId}` : `observation:${item.id}`;
+    const current = grouped.get(key);
+    if (!current) { grouped.set(key, { ...item, clusterObservations: [item] }); continue; }
+    const observations = [...(current.clusterObservations ?? [current]), item];
+    if (item.id === item.workflowRootTrajectoryId) grouped.set(key, { ...item, clusterObservations: observations });
+    else current.clusterObservations = observations;
+  }
+  return [...grouped.values()];
 }
 
 /** What the URL says the Observed tab is looking at. */
@@ -104,7 +140,7 @@ export type ObservedParams = {
 
 export function buildObserved(res: Res | null, params: ObservedParams): ObservedData {
   return {
-    rows: (res?.trajectories ?? []).slice(0, PAGE).map(row),
+    rows: clusterRows((res?.trajectories ?? []).slice(0, PAGE).map(row)),
     total: res?.trajectoryTotal ?? 0,
     categories: res?.trajectoryCategories ?? [],
     statuses: res?.trajectoryStatuses ?? [],
