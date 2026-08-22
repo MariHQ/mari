@@ -24,6 +24,7 @@ from mari_server.persistence.postgres.database import actor_name, audit
 from mari_server.product.types import AnswerCandidate, ImpactDoc, ImpactResult, ReviewPolicyDecision
 from mari_server.search.service import hybrid_search, like_pattern
 from mari_components import KnowledgeDocument
+from mari_components.errors import MalformedModelOutput
 from mari_components.knowledge import (
     assess_impact as component_assess_impact,
     check_claims as component_check_claims,
@@ -52,6 +53,58 @@ DEPRECATED_REVIEW = (
     "The Review page was removed. The review projection stays one more "
     "release as the backend for policy auto-approval and inline approvals."
 )
+
+#: Documents an impact analysis reads, and the most it reports on. The read is
+#: the recall budget; the report is what a person can act on in one sitting.
+IMPACT_CANDIDATES = 12
+IMPACT_REPORTED = 8
+#: How much of each document goes into the prompt. Twelve whole bodies is a
+#: prompt no local model answers inside its timeout, and the answer is a
+#: verdict about one passage, not a reading of the whole page.
+IMPACT_PASSAGE_CHARACTERS = 1_200
+#: One call reads a dozen passages and answers with a verdict for each, which
+#: is minutes of work on a self-hosted model. The default 120s cut it off
+#: mid-answer and the console reported a malformed model instead of a slow one.
+IMPACT_TIMEOUT_SECONDS = 240.0
+#: Room for a summary plus a verdict for every document read. The 1500-token
+#: default for JSON is a paragraph and a few rows; past it the answer arrives
+#: cut off mid-row, and half a JSON object is no analysis at all.
+IMPACT_OUTPUT_TOKENS = 3_000
+
+
+def _assess(*args, **kwargs):
+    """assess_impact, with the provider's own message when it never answered.
+
+    A call the model never returned from is not malformed output, and telling
+    the reader their model returned bad JSON when it in fact timed out or was
+    unreachable sends them looking in the wrong place.
+    """
+    try:
+        return component_assess_impact(*args, **kwargs)
+    except MalformedModelOutput:
+        detail = llm.last_error()
+        if not detail:
+            raise
+        raise ValueError(f"The impact analysis could not run: {detail}") from None
+
+
+def impact_passage(body: str, claim: str) -> str:
+    """The part of a document the claim is about, bounded.
+
+    The window around the first term the claim and the document share is what
+    the verdict rests on. A document that shares none of them gets its opening,
+    which is where a page states what it is about.
+    """
+    text = (body or "").strip()
+    if len(text) <= IMPACT_PASSAGE_CHARACTERS:
+        return text
+    lowered = text.lower()
+    hits = [at for term in re.findall(r"[a-z0-9][a-z0-9_-]{2,}", claim.lower())
+            if (at := lowered.find(term)) >= 0]
+    if not hits:
+        return text[:IMPACT_PASSAGE_CHARACTERS]
+    start = max(0, min(hits) - IMPACT_PASSAGE_CHARACTERS // 3)
+    return text[start:start + IMPACT_PASSAGE_CHARACTERS]
 
 
 @strawberry.type
@@ -410,27 +463,42 @@ class MutKnowledge:
     # ——— impact analysis ———
     @strawberry.mutation
     def impact_analysis(self, claim: str) -> ImpactResult:
-        rows = hybrid_search(claim, 6)
+        # Recall first: the analysis can only rule on documents it was shown,
+        # and 6 candidates left the blast radius of a claim that runs across a
+        # corpus mostly unread. The LLM call stays bounded to the same set.
+        rows = hybrid_search(claim, IMPACT_CANDIDATES)
         documents = [KnowledgeDocument(
             str(row.get("id") or row.get("external_id") or index), row["title"],
-            row.get("body") or row.get("snippet") or "", metadata={"source": row["source"]},
+            impact_passage(row.get("body") or row.get("snippet") or "", claim),
+            metadata={"source": row["source"]},
         ) for index, row in enumerate(rows, 1)]
-        result = component_assess_impact(
+        result = _assess(
             claim,
             documents,
             generate_json=lambda prompt, _version: llm.generate_json(
-                prompt, system="You analyze the blast radius of a changed fact."),
+                prompt, system="You analyze the blast radius of a changed fact.",
+                timeout=IMPACT_TIMEOUT_SECONDS, max_tokens=IMPACT_OUTPUT_TOKENS),
+            maximum_documents=IMPACT_CANDIDATES,
+            maximum_characters=IMPACT_CANDIDATES * IMPACT_PASSAGE_CHARACTERS,
         )
         audit("ran impact analysis", claim)
         by_id = {document.external_id: row for document, row in zip(documents, rows)}
-        return ImpactResult(
-            claim=claim,
-            summary=result.summary,
-            docs=[ImpactDoc(
-                title=by_id[identifier]["title"], source=by_id[identifier]["source"],
-                severity="review", reason="Evidence-linked impact",
-            ) for identifier in result.affected_document_ids[:8]],
-        )
+        # Every row carries the model's own verdict and the document it is
+        # about. The severity used to be the literal "review" for all of them,
+        # so the drawer's three buckets described one bucket.
+        docs = []
+        for impacted in result.documents:
+            row = by_id.get(impacted.document_id)
+            if row is None:
+                continue
+            docs.append(ImpactDoc(
+                title=row["title"], source=row["source"],
+                severity=impacted.severity, reason=impacted.reason,
+                document_id=int(row["id"]) if row.get("id") is not None else 0,
+            ))
+            if len(docs) >= IMPACT_REPORTED:
+                break
+        return ImpactResult(claim=claim, summary=result.summary, docs=docs)
 
     # ——— approved answers ———
     @strawberry.mutation

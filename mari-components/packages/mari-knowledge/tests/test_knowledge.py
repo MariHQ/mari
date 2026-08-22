@@ -18,6 +18,7 @@ from mari_components.knowledge import (
     mine_answers,
     refine_document,
     summarize_digest,
+    assess_impact,
 )
 
 
@@ -141,6 +142,89 @@ class KnowledgeRecipeTests(unittest.TestCase):
             }),
         )
         self.assertEqual(digest.topics[0].evidence[0].document_id, "doc:1")
+
+    def impact_documents(self):
+        return [
+            self.document,
+            KnowledgeDocument("doc:2", "Billing FAQ", "Plans inherit the retention window.", revision="v1"),
+        ]
+
+    def test_impact_returns_a_verdict_per_document_strongest_first(self):
+        impact = assess_impact(
+            "Retention is now 60 days",
+            self.impact_documents(),
+            generate_json=self.generator({
+                "summary": "Two documents quote retention.",
+                "documents": [
+                    {"document_id": "doc:2", "severity": "review", "reason": "inherits the window"},
+                    {"document_id": "doc:1", "severity": "update-required", "reason": "states 30 days"},
+                ],
+                "evidence": self.evidence(),
+            }),
+        )
+        self.assertEqual([(row.document_id, row.severity) for row in impact.documents],
+                         [("doc:1", "update-required"), ("doc:2", "review")])
+        self.assertEqual(impact.affected_document_ids, ("doc:1", "doc:2"))
+        self.assertEqual(impact.evidence[0].revision, "v1")
+
+    def test_impact_tolerates_titles_loose_severities_and_unknown_documents(self):
+        impact = assess_impact(
+            "Retention is now 60 days",
+            self.impact_documents(),
+            generate_json=self.generator({
+                "summary": "One document contradicts the change.",
+                "documents": [
+                    {"document_id": "Retention", "severity": "CRITICAL", "reason": "states 30 days"},
+                    {"document_id": "doc:2"},
+                    {"document_id": "doc:404", "severity": "review", "reason": "invented"},
+                ],
+            }),
+        )
+        self.assertEqual([(row.document_id, row.severity, row.reason) for row in impact.documents], [
+            ("doc:1", "update-required", "states 30 days"),
+            ("doc:2", "minor", "The model did not say why."),
+        ])
+
+    def test_impact_keeps_the_harder_verdict_and_drops_unverifiable_evidence(self):
+        impact = assess_impact(
+            "Retention is now 60 days",
+            [self.document],
+            generate_json=self.generator({
+                "summary": "One document.",
+                "documents": [
+                    {"document_id": "doc:1", "severity": "minor", "reason": "mentions it"},
+                    {"document_id": "doc:1", "severity": "update-required", "reason": "states 30 days"},
+                ],
+                "evidence": [{"document_id": "doc:1", "quote": "never written in this document"}],
+            }),
+        )
+        self.assertEqual([(row.severity, row.reason) for row in impact.documents],
+                         [("update-required", "states 30 days")])
+        self.assertEqual(impact.evidence, ())
+
+    def test_impact_accepts_the_bare_id_list_and_still_rejects_a_foreign_corpus(self):
+        legacy = assess_impact(
+            "Retention is now 60 days", [self.document],
+            generate_json=self.generator({"summary": "One touched.", "affected_document_ids": ["doc:1"]}),
+        )
+        self.assertEqual(legacy.affected_document_ids, ("doc:1",))
+        empty = assess_impact(
+            "Retention is now 60 days", [self.document],
+            generate_json=self.generator({"summary": "Nothing touched.", "documents": []}),
+        )
+        self.assertEqual(empty.documents, ())
+        with self.assertRaises(MalformedModelOutput):
+            assess_impact(
+                "Retention is now 60 days", [self.document],
+                generate_json=self.generator({"summary": "Other corpus.", "documents": [
+                    {"document_id": "elsewhere:9", "severity": "review", "reason": "x"},
+                ]}),
+            )
+        with self.assertRaises(MalformedModelOutput):
+            assess_impact(
+                "Retention is now 60 days", [self.document],
+                generate_json=self.generator({"documents": []}),
+            )
 
 
 if __name__ == "__main__":

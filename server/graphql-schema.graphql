@@ -267,6 +267,7 @@ type ImpactDoc {
   source: String!
   severity: String!
   reason: String!
+  documentId: Int!
 }
 
 type ImpactResult {

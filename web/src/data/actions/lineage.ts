@@ -6,12 +6,16 @@
 
 import type { LineageActions } from "@mari-design/components/pages/LineagePage";
 import type { DocHistoryRow, ImpactResult } from "@mari-design/components/features/LineageDataModel";
+import { SEVERITY_TASK } from "@mari-design/components/features/LineageDataModel";
 import { gqlResult } from "../../lib/api";
 import { mutate, type ActionContext } from "../actions";
 
 /** Severities the drawer buckets by. Anything else is a "mentions" row rather
  *  than an uncolored chip with no bucket. */
 const SEVERITIES = new Set(["update-required", "review", "minor"]);
+
+/** One impacted document as the mutation returns it. */
+type ImpactRow = { title: string; source: string; severity: string; reason: string; documentId: number };
 
 export function lineageActions({ navigate, replace, currentUserName }: ActionContext): LineageActions {
   /* Moving the focus or the question is REPLACE, not push.
@@ -86,7 +90,7 @@ export function lineageActions({ navigate, replace, currentUserName }: ActionCon
     },
     analyzeImpact: async (claim: string): Promise<ImpactResult> => {
       const d = await mutate(
-        "mutation($claim: String!) { impactAnalysis(claim: $claim) { claim summary docs { title source severity reason } } }",
+        "mutation($claim: String!) { impactAnalysis(claim: $claim) { claim summary docs { title source severity reason documentId } } }",
         { claim },
       );
       const r = d?.impactAnalysis;
@@ -95,12 +99,48 @@ export function lineageActions({ navigate, replace, currentUserName }: ActionCon
         summary: r?.summary ?? "",
         docs: (r?.docs ?? [])
           .filter((doc: { severity: string }) => SEVERITIES.has(doc.severity))
-          .map((doc: { title: string; source: string; severity: string; reason: string }) => ({
+          .map((doc: ImpactRow) => ({
             title: doc.title, source: doc.source,
             severity: doc.severity as ImpactResult["docs"][number]["severity"],
             reason: doc.reason,
+            // The id is what lets the page light the right card on the graph
+            // and open a task against the right document. 0 is the server
+            // saying it has no id for this row, which is not a document.
+            docId: doc.documentId || undefined,
           })),
       };
+    },
+    /* One task per impacted document, from the assert drawer's bulk create.
+       There is no bulk mutation, so this is `createTask` per document; the
+       count that comes back is what the drawer reports, so a partial run
+       reports what it actually opened rather than what it set out to.
+
+       The severity decides the KIND: an update-required document is a stale
+       document to fix, a review is a fact check, a mention is an approval to
+       glance at. `createReviewTask` keeps its own semantics — one task, one
+       document, from the node drawer. */
+    createImpactTasks: async (docs) => {
+      let created = 0;
+      for (const doc of docs) {
+        const task = SEVERITY_TASK[doc.severity];
+        await mutate(
+          "mutation($title: String!, $kind: String!, $kindLabel: String!, $assignee: String!, $subjectType: String!, $subjectId: String!, $subjectTitle: String!, $subjectHref: String!) { createTask(title: $title, kind: $kind, kindLabel: $kindLabel, assignee: $assignee, subjectType: $subjectType, subjectId: $subjectId, subjectTitle: $subjectTitle, subjectHref: $subjectHref) }",
+          {
+            title: `${doc.title}: ${doc.reason}`,
+            kind: task.kind,
+            kindLabel: task.kindLabel,
+            // Unassigned: nobody chose an owner for these, and the queue says
+            // so rather than putting whoever ran the analysis on all of them.
+            assignee: "",
+            subjectType: doc.docId ? "document" : "",
+            subjectId: doc.docId ? String(doc.docId) : "",
+            subjectTitle: doc.docId ? doc.title : "",
+            subjectHref: doc.docId ? `/knowledge/doc?id=${doc.docId}` : "",
+          },
+        );
+        created += 1;
+      }
+      return created;
     },
   };
 }

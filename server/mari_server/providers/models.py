@@ -63,6 +63,12 @@ DEFAULT_GEN_MODEL = "gemma3:4b"
 # `dimensions` argument, which is why they can serve this schema at all.
 EMBED_DIMS = 768
 
+#: Ollama context window bounds. The floor is its own default, so short calls
+#: behave exactly as before; the ceiling keeps a long one from asking a
+#: self-hosted machine for every token the model could theoretically hold.
+OLLAMA_MIN_CONTEXT = 4096
+OLLAMA_MAX_CONTEXT = 32768
+
 OPENAI_BASE = "https://api.openai.com/v1"
 ANTHROPIC_BASE = "https://api.anthropic.com/v1"
 ANTHROPIC_VERSION = "2023-06-01"
@@ -73,6 +79,16 @@ _settings_lock = threading.Lock()
 _last_error = threading.local()
 _catalog_cache: dict[str, t.Any] = {"at": 0.0, "value": None}
 _catalog_lock = threading.Lock()
+
+
+def _tokens(text: str) -> int:
+    """Roughly how many tokens `text` costs, erring high.
+
+    Three characters per token is short of every tokenizer this server talks
+    to, which is the safe direction: the number is only ever used to ask for
+    enough room, and asking for a little too much costs nothing.
+    """
+    return len(text or "") // 3
 
 
 def last_error() -> str:
@@ -552,8 +568,15 @@ def embed_many(texts: t.Iterable[str]) -> list[list[float] | None]:
 
 
 def generate(prompt: str, system: str = "", timeout: float = 120.0,
-             *, json_format: bool | dict[str, t.Any] = False) -> str | None:
-    """One completion, or None with `last_error()` explaining why."""
+             *, json_format: bool | dict[str, t.Any] = False,
+             max_tokens: int | None = None) -> str | None:
+    """One completion, or None with `last_error()` explaining why.
+
+    `max_tokens` raises the output budget for a caller whose answer is longer
+    than a paragraph — a report with a row per document, say. A truncated JSON
+    answer is not a partial answer, it is no answer at all, so a recipe that
+    asks for many rows has to say so. Omitted = the defaults below.
+    """
     provider, model = generation_model()
 
     if not provider or not model:
@@ -565,10 +588,22 @@ def generate(prompt: str, system: str = "", timeout: float = 120.0,
         # and, with it enabled, often leave `response` empty for JSON asks.
         # Ask for the answer directly; models without a thinking mode accept
         # the flag. A JSON report over many claims needs more room than prose.
+        # Ollama's context window defaults to 4096 tokens whatever the model
+        # can actually hold. Past that it drops the front of the prompt and
+        # stops the moment prompt-plus-answer reaches the window, which is how
+        # a recipe that sends a dozen documents lost most of them and had its
+        # JSON cut off mid-row. Size the window to the prompt being sent,
+        # bounded so one long call cannot ask a laptop for a 262k window.
+        budget = max_tokens or (1500 if json_format else 700)
         payload: dict[str, t.Any] = {
             "model": model, "prompt": prompt, "system": system, "stream": False,
             "think": False,
-            "options": {"temperature": 0.3, "num_predict": 1500 if json_format else 700},
+            "options": {
+                "temperature": 0.3,
+                "num_predict": budget,
+                "num_ctx": min(OLLAMA_MAX_CONTEXT,
+                               max(OLLAMA_MIN_CONTEXT, _tokens(prompt) + _tokens(system) + budget + 512)),
+            },
         }
         if json_format:
             payload["format"] = json_format if isinstance(json_format, dict) else "json"
@@ -594,7 +629,7 @@ def generate(prompt: str, system: str = "", timeout: float = 120.0,
         payload = {
             "model": model,
             "messages": messages,
-            **_completion_limit(gateway, 700),
+            **_completion_limit(gateway, max_tokens or 700),
             **_thinking_control(gateway),
             **_response_format(gateway, json_format),
         }
@@ -614,7 +649,7 @@ def generate(prompt: str, system: str = "", timeout: float = 120.0,
             _fail("settings.llm names the anthropic provider but no Anthropic API key is "
                   "set (Settings → Models)")
             return None
-        payload = {"model": model, "max_tokens": 1024,
+        payload = {"model": model, "max_tokens": max_tokens or 1024,
                    "messages": [{"role": "user", "content": prompt}]}
         if system:
             payload["system"] = system
@@ -636,14 +671,19 @@ def generate(prompt: str, system: str = "", timeout: float = 120.0,
 
 
 def generate_json(prompt: str, system: str = "", timeout: float = 120.0,
-                  *, schema: dict[str, t.Any] | None = None) -> t.Any | None:
+                  *, schema: dict[str, t.Any] | None = None,
+                  max_tokens: int | None = None) -> t.Any | None:
     """Ask for JSON and parse leniently (strip code fences, find first bracket).
 
     `timeout` is exposed because callers that make many of these in a row need
     to bound the total, and a 120-second default multiplied by eight documents
-    is sixteen minutes."""
+    is sixteen minutes.
+
+    `max_tokens` is exposed for the opposite reason: one call whose answer is a
+    row per document runs past the default budget and comes back as JSON cut
+    off mid-row, which parses as nothing at all."""
     raw = generate(prompt + "\n\nRespond with ONLY valid JSON, no prose.", system, timeout,
-                   json_format=schema or True)
+                   json_format=schema or True, max_tokens=max_tokens)
     if not raw:
         return None
     raw = raw.strip()
@@ -742,7 +782,7 @@ def chat_stream(messages: list[dict], system: str = "") -> t.Iterator[str]:
         if not key:
             _fail("settings.llm names the anthropic provider but no Anthropic API key is set")
             return
-        payload = {"model": model, "max_tokens": 1024, "stream": True, "messages": messages}
+        payload = {"model": model, "max_tokens": max_tokens or 1024, "stream": True, "messages": messages}
         if system:
             payload["system"] = system
         for line in _stream(f"{ANTHROPIC_BASE}/messages", payload,

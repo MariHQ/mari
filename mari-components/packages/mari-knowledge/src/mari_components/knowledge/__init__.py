@@ -11,7 +11,10 @@ from .links import (
 )
 from .refinement import RefinementEdit, refine_document
 from .scoring import evidence_confidence
-from .summaries import DigestSummary, DigestTopic, ImpactAssessment, assess_impact, summarize_digest
+from .summaries import (
+    IMPACT_SEVERITIES, DigestSummary, DigestTopic, ImpactAssessment, ImpactedDocument,
+    assess_impact, summarize_digest,
+)
 from .excerpt import excerpt
 from .lifecycle import DocumentPorts, ProjectionFields
 from .validation import SEVERITIES, TEMPLATE_ICONS, TONES, is_claim, iso_date, slug
@@ -23,7 +26,9 @@ __all__ = [
     "DocumentPorts",
     "FactAssessment",
     "GroundedAnswer",
+    "IMPACT_SEVERITIES",
     "ImpactAssessment",
+    "ImpactedDocument",
     "LinkCandidate",
     "DEFAULT_SIMILARITY_LIMIT",
     "DEFAULT_SIMILARITY_THRESHOLD",

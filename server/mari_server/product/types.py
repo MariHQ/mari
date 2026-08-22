@@ -779,6 +779,10 @@ class ImpactDoc:
     source: str
     severity: str
     reason: str
+    #: The document this verdict is about. The console needs it to light the
+    #: node on the lineage graph and to open a task against the right document;
+    #: a title is not an identity.
+    document_id: int
 
 
 @strawberry.type
