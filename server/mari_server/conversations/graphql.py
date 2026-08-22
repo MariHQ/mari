@@ -20,6 +20,12 @@ def _access(info: strawberry.Info):
 @strawberry.type
 class TrajectoryMutations:
     @strawberry.mutation
+    def harvest_workflow_candidates(self, info: strawberry.Info,
+                                    limit: int = 100) -> JSON:
+        _access(info)
+        return workflow_service.harvest_candidates(limit)
+
+    @strawberry.mutation
     def tune_trajectory_step(self, info: strawberry.Info, trajectory_id: int,
                              ordinal: int, disposition: str,
                              edited_args: JSON | None = None) -> bool:

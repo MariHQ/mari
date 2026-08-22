@@ -257,6 +257,55 @@ def suggest_split_name(trajectory_id: int) -> str:
     return name
 
 
+def harvest_candidates(limit: int = 100) -> list[dict]:
+    """Propose distinct workflow candidates for explicit human review."""
+    observations, existing = store.workflow_harvest_context(limit)
+    if not observations:
+        return []
+    compact = [{
+        "id": int(row["id"]), "prompt": str(row.get("prompt") or "")[:500],
+        "intent": str(row.get("macro_intent") or "")[:300],
+        "category": str(row.get("category") or ""), "workflow_id": row.get("workflow_id"),
+    } for row in observations]
+    result = llm.generate_json(
+        "Identify up to 8 distinct, reusable product-knowledge assistant workflows from these "
+        "observed turns. Existing workflows may contain narrower intents worth splitting. Only "
+        "propose a candidate when at least one observation supports it. Return observation ids "
+        "verbatim; never invent ids.\n\nExisting workflows:\n"
+        f"{json.dumps(existing, default=str)}\n\nObserved turns:\n{json.dumps(compact)}",
+        system=("You help a human curate workflow clusters. Prefer durable user intent over wording. "
+                "Do not create candidates for greetings, tests, or one-off chatter."),
+        schema={"type": "object", "properties": {"candidates": {"type": "array", "maxItems": 8,
+            "items": {"type": "object", "properties": {
+                "name": {"type": "string"}, "reason": {"type": "string"},
+                "observation_ids": {"type": "array", "items": {"type": "integer"}},
+            }, "required": ["name", "reason", "observation_ids"]}}}},
+    )
+    if result is None:
+        raise RuntimeError(llm.last_error() or "The model could not harvest workflow candidates.")
+    by_id = {int(row["id"]): row for row in observations}
+    candidates = []
+    seen: set[int] = set()
+    for raw in result.get("candidates") or []:
+        if not isinstance(raw, dict):
+            continue
+        ids = [int(value) for value in raw.get("observation_ids") or []
+               if isinstance(value, int) and int(value) in by_id]
+        ids = list(dict.fromkeys(ids))
+        if not ids or ids[0] in seen:
+            continue
+        seen.update(ids)
+        seed = by_id[ids[0]]
+        candidates.append({
+            "seedTrajectoryId": ids[0], "name": str(raw.get("name") or "").strip()[:120],
+            "reason": str(raw.get("reason") or "").strip()[:500],
+            "observationIds": ids,
+            "prompts": [str(by_id[value].get("prompt") or "")[:500] for value in ids],
+            "existingWorkflowId": seed.get("workflow_id"),
+        })
+    return [candidate for candidate in candidates if candidate["name"]]
+
+
 def cluster_unassigned(limit: int = 200) -> int:
     """Attach historical observations to their nearest reviewed workflow."""
     assigned = 0

@@ -50,6 +50,7 @@ from mari_components.destinations.chat import answer_search_query
 from mari_components.knowledge import answer_question as component_answer_question
 from mari_server.persistence.postgres.event_inbox import DEFAULT_INBOX, EventDispatcher
 from mari_server.persistence.postgres import bots as bot_store
+from mari_server.persistence.postgres import trajectories as trajectory_store
 
 router = APIRouter()
 
@@ -178,22 +179,31 @@ def answer_question(question: str, supplemental_context: str = "") -> str:
     return result.answer + suffix
 
 
-def stream_answer_question(question: str, supplemental_context: str = ""):
+def stream_answer_question(question: str, supplemental_context: str = "", *, observe=None):
     """Yield a grounded Slack answer as the model produces it."""
     from mari_server.conversations.workflows import cached_response, retrieval_query, select
     selected_workflow = select(question, {"search"})
     cached = cached_response(selected_workflow) if not supplemental_context else None
     if cached:
+        if observe:
+            observe(selected_workflow, cached.get("sources") or [], "cache")
         yield cached["answer"]
         return
     qvec = llm.embed(question)
     if qvec:
         approved = bot_store.approved_answer(qvec)
         if approved and approved["sim"] >= 0.62:
+            if observe:
+                observe(selected_workflow, [], "approved_answer")
             yield f"{approved['answer']}\n\n_Approved answer · served verbatim_"
             return
 
     docs = hybrid_search(retrieval_query(answer_search_query(question), selected_workflow), 8)[:4]
+    if observe:
+        observe(selected_workflow, [{
+            "document_id": int(row["id"]), "title": row["title"],
+            "reason": "used as Slack answer context", "rank": index,
+        } for index, row in enumerate(docs, 1)], "generation")
     facts = bot_store.verified_facts()
     if not docs and not facts:
         yield "I couldn't find enough product knowledge to answer that yet."
@@ -461,10 +471,13 @@ def _process_slack_delivery(row: dict) -> None:
     context = _conversation_context(turns) if thread_ts else ""
     turns = _with_turn(turns, "user", question, event_ts)
     parts: list[str] = []
+    observation: dict = {}
+    def capture(selected, evidence, mode):
+        observation.update({"selected": selected, "evidence": evidence, "mode": mode})
     visible = ""
     last_update = time.monotonic()
     with access.use_access(project_access):
-        for piece in stream_answer_question(question, context):
+        for piece in stream_answer_question(question, context, observe=capture):
             parts.append(str(piece))
             answer_so_far = "".join(parts)[:4000]
             now = time.monotonic()
@@ -484,6 +497,18 @@ def _process_slack_delivery(row: dict) -> None:
         if not updated.get("ok"):
             raise RuntimeError(f"chat.update: {updated.get('error', 'unknown error')}")
     _log_usage("chat_answer", "slack")
+    with access.use_access(project_access):
+        selected = observation.get("selected")
+        mode = str(observation.get("mode") or "generation")
+        trajectory_store.record_external_observation(
+            question,
+            [{"kind": "tool", "name": "read_workflow_cache" if mode == "cache" else "search",
+              "args": {"query": question[:200]},
+              "summary": "served reviewed workflow answer" if mode == "cache"
+                         else f"answered from {len(observation.get('evidence') or [])} documents",
+              "ok": True, "evidence": observation.get("evidence") or []}],
+            "slack", int(selected["id"]) if selected else None,
+        )
     participation_ts = thread_ts or bot_message_ts
     turns = _with_turn(turns, "assistant", answer, bot_message_ts)
     bot_store.save_thread(installation_id, installation["project_id"], channel,

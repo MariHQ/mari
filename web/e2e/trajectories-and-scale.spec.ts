@@ -40,6 +40,22 @@ test("an expanded workflow shows its real embedding projection", async ({ page }
   await expect(page.getByText("openai:text-embedding-3-small:dimensions=768:muvera-unit-v1", { exact: true })).toBeVisible();
 });
 
+test("a human can harvest and codify a proposed workflow", async ({ page }) => {
+  await page.goto("/workflows");
+  await page.getByRole("button", { name: "Harvest new workflows" }).click();
+  await expect(page.getByRole("dialog", { name: "Harvest new workflows" })).toBeVisible();
+  await page.getByRole("button", { name: "Analyze recent turns" }).click();
+  await expect(page.getByLabel("Candidate 1 name")).toHaveValue("Answer retention questions");
+  await expect(page.getByText("Update the retention documentation", { exact: true })).toBeHidden();
+  await page.getByText("1 supporting turn", { exact: true }).click();
+  await expect(page.getByText("Update the retention documentation", { exact: true })).toBeVisible();
+  await page.getByLabel("Candidate 1 name").fill("Answer policy retention questions");
+  await page.getByRole("button", { name: "Codify selected" }).click();
+  await expect(page.getByRole("heading", { name: "Workflows codified" })).toBeVisible();
+  await expect.poll(() => api.calls.some((call) => call.query.includes("promoteTrajectoryToWorkflow")
+    && call.variables.name === "Answer policy retention questions")).toBeTruthy();
+});
+
 test("a human can tune evidence and tool calls before codifying a trajectory", async ({ page }) => {
   await page.goto("/workflows");
   await page.getByText("Evidence and abstraction layers", { exact: true }).click();

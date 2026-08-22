@@ -121,6 +121,24 @@ def workflow_embedding_indexes(workflow_ids: list[int]) -> dict[int, dict]:
         (project_id, list(dict.fromkeys(workflow_ids))),
     )}
 
+
+def workflow_harvest_context(limit: int = 100) -> tuple[list[dict], list[dict]]:
+    project_id = access.require_current_access().project_id
+    observations = q(
+        """SELECT id, prompt, macro_intent, category,
+                  COALESCE(promoted_workflow_id, matched_workflow_id) AS workflow_id
+             FROM trajectories
+            WHERE project_id = %s AND status IN ('ready', 'fallback')
+            ORDER BY started_at DESC, id DESC LIMIT %s""",
+        (project_id, max(10, min(int(limit), 200))),
+    )
+    workflows = q(
+        """SELECT id, name, description FROM assistant_workflows
+            WHERE project_id = %s AND status = 'active' ORDER BY updated_at DESC""",
+        (project_id,),
+    )
+    return observations, workflows
+
 FAMILY = {
     "search": "discover", "read_document": "inspect", "list_sources": "inspect",
     "list_flows": "inspect", "inspect_flow": "inspect",
@@ -336,6 +354,47 @@ def harvest(session_id: int, prompt: str, trace: list[dict], model: str,
         accepted = False
     if not accepted:
         _fallback(trajectory_id, steps, project_access.project_id, "Queued capacity exceeded")
+    return trajectory_id
+
+
+def record_external_observation(prompt: str, trace: list[dict], model: str,
+                                matched_workflow_id: int | None = None) -> int:
+    """Record an already-completed destination turn without another model call."""
+    project_id = access.require_current_access().project_id
+    steps = normalize_steps(trace)
+    summary = "; ".join(step["summary"] for step in steps if step.get("summary"))[:2000]
+    row = q1(
+        """INSERT INTO trajectories
+              (project_id, session_id, prompt, status, model, layer1, layer2, category,
+               macro_intent, step_count, failure_count, rework_count, phases,
+               matched_workflow_id, completed_at)
+            VALUES (%s, NULL, %s, 'ready', %s, %s, %s, 'Assistant conversations',
+                    %s, %s, %s, %s, %s, %s, now()) RETURNING id""",
+        (project_id, prompt[:8000], model[:100], summary, prompt[:500], prompt[:300],
+         len(steps), sum(not step["ok"] for step in steps), rework_count(steps),
+         json.dumps(segment_phases(steps)), matched_workflow_id),
+    )
+    trajectory_id = int(row["id"])
+    for step in steps:
+        exec_("""INSERT INTO trajectory_steps
+                   (project_id, trajectory_id, ordinal, tool, action_family, args, summary, ok)
+                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
+              (project_id, trajectory_id, step["ordinal"], step["tool"],
+               step["action_family"], json.dumps(step["args"]), step["summary"], step["ok"]))
+    for event in trace:
+        for reference in event.get("evidence") or ():
+            try:
+                document_id = int(reference.get("document_id"))
+            except (AttributeError, TypeError, ValueError):
+                continue
+            exec_("""INSERT INTO trajectory_evidence
+                       (project_id, trajectory_id, document_id, title, reason, rank)
+                     SELECT %s, %s, d.id, %s, %s, %s FROM documents d
+                      WHERE d.project_id = %s AND d.id = %s
+                     ON CONFLICT (trajectory_id, document_id) DO NOTHING""",
+                  (project_id, trajectory_id, str(reference.get("title") or "")[:300],
+                   str(reference.get("reason") or "")[:300],
+                   max(0, int(reference.get("rank") or 0)), project_id, document_id))
     return trajectory_id
 
 

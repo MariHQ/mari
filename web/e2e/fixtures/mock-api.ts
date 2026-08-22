@@ -242,8 +242,19 @@ export async function installMockApi(page: Page, options: {
       data = { tuneTrajectoryStep: true };
     } else if (/tuneTrajectoryEvidence/.test(query)) {
       data = { tuneTrajectoryEvidence: true };
+    } else if (/harvestWorkflowCandidates/.test(query)) {
+      data = { harvestWorkflowCandidates: [{
+        seedTrajectoryId: 1,
+        name: "Answer retention questions",
+        reason: "Several turns use the same policy lookup and evidence path.",
+        observationIds: [1],
+        prompts: ["Update the retention documentation"],
+        existingWorkflowId: null,
+      }] };
     } else if (/promoteTrajectoryToWorkflow/.test(query)) {
       data = { promoteTrajectoryToWorkflow: 44 };
+    } else if (/splitAssistantWorkflow/.test(query)) {
+      data = { splitAssistantWorkflow: 45 };
     } else if (/setAssistantWorkflowEnabled/.test(query)) {
       data = { setAssistantWorkflowEnabled: true };
     } else if (/setAssistantWorkflowCache/.test(query)) {

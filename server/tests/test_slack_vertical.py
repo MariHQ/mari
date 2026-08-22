@@ -244,6 +244,7 @@ class SlackSetupToAnswerTests(unittest.TestCase):
              patch.object(bots.bot_store, "touch_installation"), \
              patch.object(bots.bot_store, "verified_facts", return_value=[]), \
              patch.object(bots.bot_store, "log_usage"), \
+             patch.object(bots.trajectory_store, "record_external_observation"), \
              patch.object(bots, "_EVENT_INBOX", inbox), \
              patch.object(bots, "_refresh_slack_aggregate"), \
              patch.object(search_service.search_store, "keyword_candidates", return_value=documents), \
@@ -327,9 +328,10 @@ class SlackSetupToAnswerTests(unittest.TestCase):
                           side_effect=lambda *args: saved_threads.append(args)), \
              patch.object(bots.bot_store, "touch_installation"), \
              patch.object(bots.bot_store, "log_usage"), \
+             patch.object(bots.trajectory_store, "record_external_observation"), \
              patch.object(bots, "_refresh_slack_aggregate") as refresh, \
              patch.object(bots, "stream_answer_question",
-                          side_effect=lambda question, context: answered.append((question, context)) or iter(["Production is ready [1]."])):
+                          side_effect=lambda question, context, **_kwargs: answered.append((question, context)) or iter(["Production is ready [1]."])):
             bots._process_slack_delivery(row)
 
         history = [call for call in FakeSlackHandler.calls
@@ -363,12 +365,18 @@ class SlackSetupToAnswerTests(unittest.TestCase):
              patch.object(bots.bot_store, "save_thread"), \
              patch.object(bots.bot_store, "touch_installation"), \
              patch.object(bots.bot_store, "log_usage"), \
+             patch.object(bots.trajectory_store, "record_external_observation") as observe, \
              patch.object(bots, "_refresh_slack_aggregate"), \
              patch.object(bots, "stream_answer_question",
-                          side_effect=lambda question, context: answered.append((question, context)) or iter(["Cached Mari answer."])):
+                          side_effect=lambda question, context, observe=None: (
+                              observe({"id": 14}, [], "cache") if observe else None,
+                              answered.append((question, context)),
+                              iter(["Cached Mari answer."]),
+                          )[-1]):
             bots._process_slack_delivery(row)
 
         self.assertEqual(answered, [("tell me about mari", "")])
+        observe.assert_called_once()
 
 
 if __name__ == "__main__":

@@ -67,5 +67,24 @@ export function trajectoriesActions({ replace }: ActionContext): TrajectoriesAct
       }`, { trajectoryId, name });
       return Number(data.splitAssistantWorkflow);
     },
+    harvestCandidates: async () => {
+      const data = await mutate(`mutation {
+        harvestWorkflowCandidates(limit: 100)
+      }`);
+      return Array.isArray(data.harvestWorkflowCandidates)
+        ? data.harvestWorkflowCandidates : [];
+    },
+    codifyCandidate: async (candidate) => {
+      if (candidate.existingWorkflowId) {
+        const data = await mutate(`mutation($trajectoryId: Int!, $name: String!) {
+          splitAssistantWorkflow(trajectoryId: $trajectoryId, name: $name)
+        }`, { trajectoryId: candidate.seedTrajectoryId, name: candidate.name });
+        return Number(data.splitAssistantWorkflow);
+      }
+      const data = await mutate(`mutation($trajectoryId: Int!, $name: String!) {
+        promoteTrajectoryToWorkflow(trajectoryId: $trajectoryId, name: $name)
+      }`, { trajectoryId: candidate.seedTrajectoryId, name: candidate.name });
+      return Number(data.promoteTrajectoryToWorkflow);
+    },
   };
 }
