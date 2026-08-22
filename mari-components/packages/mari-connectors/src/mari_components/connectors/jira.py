@@ -54,58 +54,83 @@ def _text(value: Any) -> str:
     return ""
 
 
+_FIELDS = "summary,description,comment,status,updated,issuetype,assignee,reporter,labels"
+
+
 def poll_jira(config: JiraConfig, request: PollRequest, *, http: HttpTransport) -> Iterator[PollPage]:
-    start_at = int(request.checkpoint or 0)
-    jql_parts = [config.jql.strip() or (f"project = {config.project_key.strip()}" if config.project_key.strip() else "")]
+    # /rest/api/3/search was removed by Atlassian; /search/jql pages by an
+    # opaque nextPageToken instead of startAt/total, and rejects an unbounded
+    # JQL (bare "ORDER BY updated" with no other clause), so a default query
+    # always carries an explicit bound.
+    page_token = request.checkpoint or None
+    default_bound = (
+        f"project = {config.project_key.strip()}" if config.project_key.strip() else "updated >= -365d"
+    )
+    where_parts = [config.jql.strip() or default_bound]
     if request.cursor:
         escaped = str(request.cursor).replace('"', '\\"')
-        jql_parts.append(f'updated > "{escaped}"')
-    jql_parts.append("ORDER BY updated ASC, key ASC")
-    jql = " AND ".join(part for part in jql_parts if part)
+        where_parts.append(f'updated > "{escaped}"')
+    where_clause = " AND ".join(part for part in where_parts if part)
+    # ORDER BY is a clause suffix, not a boolean condition: it must not be
+    # AND-joined into the WHERE clause (that is a JQL parse error: "Expecting
+    # a field name but got 'ORDER'").
+    jql = f"{where_clause} ORDER BY updated ASC, key ASC"
     newest = str(request.cursor or "")
     for _ in range(request.page_limit):
-        params = {
+        params: dict[str, Any] = {
             "jql": jql,
-            "startAt": start_at,
             "maxResults": request.page_size,
-            "fields": "summary,description,status,updated,created,reporter,assignee,comment",
+            "fields": _FIELDS,
         }
+        if page_token:
+            params["nextPageToken"] = page_token
         value = json_response(
             http,
-            HttpRequest("GET", _site(config) + "/rest/api/3/search?" + urllib.parse.urlencode(params), _headers(config)),
+            HttpRequest(
+                "GET",
+                _site(config) + "/rest/api/3/search/jql?" + urllib.parse.urlencode(params),
+                _headers(config),
+            ),
         )
         documents: list[KnowledgeDocument] = []
         issues = value.get("issues") or []
         for issue in issues:
-            fields = issue.get("fields") or {}
+            issue_fields = issue.get("fields") or {}
             key = str(issue.get("key") or issue.get("id") or "")
-            comments = (fields.get("comment") or {}).get("comments") or []
-            body = _text(fields.get("description"))
+            comments = (issue_fields.get("comment") or {}).get("comments") or []
+            body = _text(issue_fields.get("description"))
             for comment in comments:
                 body += f"\n\nComment by {(comment.get('author') or {}).get('displayName', 'unknown')}:\n{_text(comment.get('body'))}"
-            updated = str(fields.get("updated") or "")
+            updated = str(issue_fields.get("updated") or "")
             newest = max(newest, updated)
             documents.append(
                 KnowledgeDocument(
                     key,
-                    f"{key}: {fields.get('summary') or ''}",
+                    f"{key}: {issue_fields.get('summary') or ''}",
                     body.strip(),
                     revision=updated,
                     updated_at=updated,
                     source_url=f"{_site(config)}/browse/{urllib.parse.quote(key, safe='')}",
                     acl=DocumentACL("connector_scope"),
-                    metadata={"status": str((fields.get("status") or {}).get("name") or "")},
+                    metadata={"status": str((issue_fields.get("status") or {}).get("name") or "")},
                 )
             )
-        start_at += len(issues)
-        total = int(value.get("total", start_at) or start_at)
-        terminal = start_at >= total or not issues
+        page_token = value.get("nextPageToken")
+        is_last = value.get("isLast")
+        if is_last is None:
+            is_last = not page_token
+        terminal = bool(is_last) or not issues
         yield PollPage(
             tuple(documents),
             next_cursor=newest if terminal else request.cursor,
-            next_checkpoint=None if terminal else str(start_at),
+            next_checkpoint=None if terminal else str(page_token or ""),
             snapshot_complete=terminal,
         )
         if terminal:
             return
-    yield PollPage(next_cursor=request.cursor, next_checkpoint=str(start_at), snapshot_complete=False, provider_metadata={"reason": "page_limit"})
+    yield PollPage(
+        next_cursor=request.cursor,
+        next_checkpoint=str(page_token or ""),
+        snapshot_complete=False,
+        provider_metadata={"reason": "page_limit"},
+    )

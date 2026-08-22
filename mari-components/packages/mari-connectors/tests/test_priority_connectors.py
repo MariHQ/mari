@@ -7,6 +7,7 @@ import urllib.parse
 
 from mari_components.connectors.confluence import (
     ConfluenceConfig,
+    _site as confluence_site,
     poll_confluence,
     storage_to_text,
     validate_confluence,
@@ -16,6 +17,7 @@ from mari_components.connectors.google_drive import start_google_drive_watch
 from mari_components.connectors.github import (
     GitHubConfig, list_github_repositories, poll_github, validate_github_team,
 )
+from mari_components.connectors.jira import JiraConfig, poll_jira
 from mari_components.connectors.slack import SlackConfig, fetch_slack_thread_by_id, poll_slack
 from mari_components.http import HttpResponse
 from mari_components.types import PollRequest, SyncMode
@@ -68,6 +70,74 @@ class PriorityConnectorTests(unittest.TestCase):
         self.assertTrue(pages[0].snapshot_complete)
         self.assertEqual(pages[0].upserts[0].body, "# Hi\nBody")
         self.assertEqual(pages[0].next_cursor, "2026-01-02T00:00:00Z|2")
+        # Live Confluence sites reject "orderby" on this endpoint with a 400
+        # regardless of value; never send it.
+        self.assertNotIn("orderby", polling.requests[0].url)
+
+    def test_confluence_site_strips_trailing_wiki_suffix(self):
+        with_wiki = ConfluenceConfig("https://example.atlassian.net/wiki/", "me@example.com", "secret")
+        self.assertEqual(confluence_site(with_wiki), "https://example.atlassian.net")
+        bare = ConfluenceConfig("https://example.atlassian.net", "me@example.com", "secret")
+        self.assertEqual(confluence_site(bare), "https://example.atlassian.net")
+
+    def test_jira_search_jql_pages_by_next_page_token(self):
+        http = FakeHttp(
+            [
+                {
+                    "issues": [
+                        {
+                            "key": "MARI-1",
+                            "fields": {
+                                "summary": "Ship",
+                                "description": {"content": [{"type": "paragraph", "content": [{"text": "Details"}]}]},
+                                "status": {"name": "In Progress"},
+                                "updated": "2026-01-01T00:00:00.000+0000",
+                            },
+                        }
+                    ],
+                    "nextPageToken": "page-2",
+                    "isLast": False,
+                },
+                {
+                    "issues": [
+                        {
+                            "key": "MARI-2",
+                            "fields": {
+                                "summary": "Ship more",
+                                "description": {"content": []},
+                                "status": {"name": "Done"},
+                                "updated": "2026-01-02T00:00:00.000+0000",
+                            },
+                        }
+                    ],
+                    "isLast": True,
+                },
+            ]
+        )
+        config = JiraConfig("https://example.atlassian.net", "me@example.com", "secret", project_key="MARI")
+        pages = list(poll_jira(config, PollRequest(page_size=1), http=http))
+        self.assertEqual(len(pages), 2)
+        self.assertFalse(pages[0].snapshot_complete)
+        self.assertEqual(pages[0].next_checkpoint, "page-2")
+        self.assertEqual(pages[0].upserts[0].external_id, "MARI-1")
+        self.assertTrue(pages[1].snapshot_complete)
+        self.assertEqual(pages[1].upserts[0].external_id, "MARI-2")
+
+        first_url, second_url = http.requests[0].url, http.requests[1].url
+        self.assertIn("/rest/api/3/search/jql", first_url)
+        self.assertNotIn("startAt", first_url)
+        self.assertNotIn("nextPageToken", first_url)
+        self.assertIn("nextPageToken=page-2", second_url)
+        jql_param = urllib.parse.parse_qs(urllib.parse.urlsplit(first_url).query)["jql"][0]
+        # ORDER BY is a clause suffix, not a boolean condition: joining it
+        # with "AND" is a JQL parse error on live Jira.
+        self.assertNotIn("AND ORDER BY", jql_param)
+        self.assertTrue(jql_param.endswith("ORDER BY updated ASC, key ASC"))
+        fields_param = urllib.parse.parse_qs(urllib.parse.urlsplit(first_url).query)["fields"][0]
+        self.assertEqual(
+            fields_param,
+            "summary,description,comment,status,updated,issuetype,assignee,reporter,labels",
+        )
 
     def test_google_drive_snapshot_then_changes_tombstone(self):
         config = GoogleDriveConfig("token")

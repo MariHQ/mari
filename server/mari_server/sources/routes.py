@@ -166,7 +166,7 @@ def connect(body: ProviderIn) -> dict:
 
     qual = _qualifier(definition, body.config or {})
     provider_col = f"{key}:{qual}" if qual else key
-    display = f"{definition.name} — {qual}" if qual else definition.name
+    display = f"{definition.name} · {qual}" if qual else definition.name
     cfg = dict(body.config or {})
     cfg.update({"provider_key": key, "cursor": "", "item_hashes": {},
                 "last_sync_at": "", "last_error": ""})

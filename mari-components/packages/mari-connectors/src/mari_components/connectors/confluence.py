@@ -104,6 +104,11 @@ def storage_to_text(xhtml: str) -> str:
 
 def _site(config: ConfluenceConfig) -> str:
     site = config.site_url.strip().rstrip("/")
+    # Users commonly paste the /wiki URL they browse to; the REST API lives
+    # at the bare site root, so strip a trailing /wiki or it doubles up
+    # (.../wiki/wiki/rest/api).
+    if site.lower().endswith("/wiki"):
+        site = site[: -len("/wiki")]
     return site if site.startswith(("http://", "https://")) else f"https://{site}"
 
 
@@ -205,7 +210,13 @@ def poll_confluence(
             "expand": "body.storage,version,history.lastUpdated,space,_links",
             "limit": request.page_size,
             "start": start,
-            "orderby": "history.lastUpdated asc",
+            # No "orderby": live Confluence sites now reject it on this
+            # endpoint (400 "Unsupported orderBy field") regardless of value.
+            # It was never load-bearing for correctness: this sweep already
+            # walks every page (start += size until size < page_size) and
+            # sorts/filters each page client-side by (updated_at, id) below,
+            # so completeness and cursor ordering hold with the server's
+            # native (undefined) order too.
         }
         if config.space_key.strip():
             params["spaceKey"] = config.space_key.strip()
