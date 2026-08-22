@@ -47,6 +47,12 @@ def agent_chat(
     outputs = stream_agent_turn(
         session_id, message, bindings, runtime.ports(bindings),
         minimum_tool_observations=1,
+        # No intent classifier separates a pure "open X" navigation request
+        # from a knowledge question, so every turn's first move is forced to
+        # search. The tradeoff: a navigation-only request pays for one
+        # search call it did not need, in exchange for never answering a
+        # knowledge question from memory or list_sources.
+        required_first_tool="search",
     )
 
     def response() -> Iterator[str]:

@@ -61,6 +61,7 @@ def stream_agent_turn(
     *,
     maximum_steps: int = 8,
     minimum_tool_observations: int = 0,
+    required_first_tool: str | None = None,
 ) -> Iterator[AgentOutput]:
     """Execute one agent turn and emit transport-neutral events immediately."""
     messages = [dict(row) for row in ports.history(session_id)]
@@ -80,6 +81,7 @@ def stream_agent_turn(
             authorize_tool=ports.authorize_tool,
             maximum_steps=maximum_steps,
             minimum_tool_observations=minimum_tool_observations,
+            required_first_tool=required_first_tool,
         )
         for event in events:
             arguments = dict(event.arguments)

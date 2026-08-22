@@ -55,6 +55,7 @@ def run_tool_loop(
     observe: Callable[[AgentEvent], None] | None = None,
     maximum_steps: int = 8,
     minimum_tool_observations: int = 0,
+    required_first_tool: str | None = None,
 ) -> Iterator[AgentEvent]:
     """Lazily execute a bounded loop and yield every event immediately.
 
@@ -63,6 +64,12 @@ def run_tool_loop(
     loop never assembles answer chunks or stores emitted events. Observer
     failures propagate; a host can explicitly wrap a best-effort telemetry
     sink. Stopping iteration applies backpressure and stops further work.
+
+    ``required_first_tool``, when set, pins the decision for every step before
+    the first tool observation: the model is not asked to choose an action or
+    a tool, only to supply that tool's arguments, and the loop constructs
+    ``{"action": "tool", "tool": required_first_tool, "arguments": ...}``
+    itself. Once a tool observation exists, planning reverts to normal.
     """
     if maximum_steps < 1:
         raise ValueError("maximum_steps must be positive")
@@ -71,6 +78,8 @@ def run_tool_loop(
     by_name = {tool.name: tool for tool in tools}
     if len(by_name) != len(tools) or any(not name for name in by_name):
         raise ValueError("tool names must be non-empty and unique")
+    if required_first_tool is not None and required_first_tool not in by_name:
+        raise ValueError("required_first_tool must name a registered tool")
     transcript = [dict(message) for message in messages]
     catalog = "\n".join(
         f"- {tool.name}: {tool.description}{' [write]' if tool.writes else ''}"
@@ -85,22 +94,43 @@ def run_tool_loop(
 
     observations = 0
     for _step in range(1, maximum_steps + 1):
-        prompt = (
-            "Choose exactly one action. Use tools only when needed and never invent a tool result. "
-            'Return JSON {"action":"tool","tool":"name","arguments":{}}, '
-            '{"action":"tools","calls":[{"tool":"name","arguments":{}}]}, or '
-            '{"action":"answer"}.\nTools:\n' + catalog + "\nConversation:\n" + repr(transcript)
+        forced_tool = (
+            by_name[required_first_tool]
+            if required_first_tool is not None and observations == 0
+            else None
         )
-        try:
-            decision = require_object(
-                generate_json(prompt, "agent-loop-v2"), recipe="agent-loop-v2",
+        if forced_tool is not None:
+            version = "agent-loop-v2-forced-tool"
+            prompt = (
+                f'You must call the tool "{forced_tool.name}" now: {forced_tool.description} '
+                'Do not choose an action or another tool. Return JSON {"arguments":{}} with '
+                "only that tool's arguments.\nConversation:\n" + repr(transcript)
             )
+        else:
+            version = "agent-loop-v2"
+            prompt = (
+                "Choose exactly one action. Use tools only when needed and never invent a tool result. "
+                'Return JSON {"action":"tool","tool":"name","arguments":{}}, '
+                '{"action":"tools","calls":[{"tool":"name","arguments":{}}]}, or '
+                '{"action":"answer"}.\nTools:\n' + catalog + "\nConversation:\n" + repr(transcript)
+            )
+        try:
+            raw = require_object(generate_json(prompt, version), recipe=version)
         except MalformedModelOutput:
             transcript.append({
                 "role": "system",
                 "content": "Your previous decision was invalid. Return exactly one valid action object.",
             })
             continue
+        if forced_tool is not None:
+            arguments = raw.get("arguments")
+            decision: Mapping[str, Any] = {
+                "action": "tool",
+                "tool": forced_tool.name,
+                "arguments": arguments if isinstance(arguments, dict) else {},
+            }
+        else:
+            decision = raw
         action = str(decision.get("action") or "")
         if action == "answer":
             if observations < minimum_tool_observations:

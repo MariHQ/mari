@@ -63,6 +63,34 @@ class TrajectoryAgentTests(unittest.TestCase):
             "tool_call", "tool_result", "answer_delta", "answer_complete",
         ])
 
+    def test_required_first_tool_forces_the_first_call_then_plans_normally(self):
+        seen_versions = []
+
+        def plan(_prompt, version):
+            seen_versions.append(version)
+            if version == "agent-loop-v2-forced-tool":
+                # Even a model that tries to pick its own action/tool here is
+                # ignored: the loop pins the decision and reads only the args.
+                return {"action": "answer", "arguments": {"query": "Mari"}}
+            return {"action": "answer"}
+
+        events = tuple(run_tool_loop(
+            [{"role": "user", "content": "What is Mari?"}],
+            [Tool("search", "Search knowledge",
+                  lambda args: {"query": args["query"], "title": "Mari README"})],
+            generate_json=plan,
+            stream_answer=lambda _messages: ("Mari is a product knowledge system [Mari README].",),
+            authorize_write=lambda _tool, _args: False,
+            required_first_tool="search",
+        ))
+        self.assertEqual(seen_versions, ["agent-loop-v2-forced-tool", "agent-loop-v2"])
+        self.assertEqual([event.kind for event in events], [
+            "tool_call", "tool_result", "answer_delta", "answer_complete",
+        ])
+        tool_call = next(event for event in events if event.kind == "tool_call")
+        self.assertEqual(tool_call.name, "search")
+        self.assertEqual(dict(tool_call.arguments), {"query": "Mari"})
+
     def test_agent_retries_one_malformed_structured_decision(self):
         decisions = iter([
             None,

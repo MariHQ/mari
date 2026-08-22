@@ -70,9 +70,12 @@ class ApiKeyTests(unittest.TestCase):
 
         with patch.object(search_routes.identity, "authenticate_api_key", return_value=row), \
              patch.object(search_routes.identity, "touch_api_key") as touch, \
-             patch.object(search_routes, "hybrid_search", side_effect=search):
+             patch.object(search_routes, "hybrid_search", side_effect=search), \
+             patch.object(search_routes, "hybrid_count", return_value=1):
             result = search_routes.api_search(search_routes.ApiSearchIn(query="deploy"), "Bearer secret")
-        self.assertEqual(result["results"][0]["title"], "Runbook")
+        self.assertEqual(result.results[0].title, "Runbook")
+        self.assertEqual(result.total, 1)
+        self.assertAlmostEqual(result.results[0].score, 0.9 / 5.0)
         self.assertEqual(seen[0].project_id, 7)
         self.assertEqual(seen[0].principal_type, "api_key")
         self.assertIsNone(access.current_access())
