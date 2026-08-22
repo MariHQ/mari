@@ -8,24 +8,42 @@ from mari_server.identity import context as access
 from mari_server.providers import models as llm
 from mari_server.persistence.postgres.database import log_usage
 from mari_server.persistence.postgres import chat as chat_store
+from mari_server.persistence.postgres import documents as document_store
 from mari_server.persistence.postgres import trajectories as trajectory_store
 from mari_server.search.service import hybrid_search
+from mari_server.conversations import citations
+from mari_server.conversations.prompts import answer_system, workspace_style_text
 from mari_components.destinations.chat import ChatContext, ChatPorts, answer_search_query
-
-
-SYSTEM = (
-    "You are Mari, the team's knowledge assistant. Answer from the provided context. "
-    "Be concise (2-4 sentences), cite sources as [1], [2]. If the context does not cover it, say so."
-)
 
 
 def live_destination(project_slug: str, destination_slug: str):
     return chat_store.live_destination(project_slug, destination_slug)
 
 
+def _pinned_first(documents: list[dict]) -> list[dict]:
+    """Move documents pinned on the Workflows page to the front of the context.
+
+    Called inside an access scope, so the pins are the active project's. An
+    unavailable read leaves retrieval's own order alone rather than failing the
+    turn: a boost that cannot be applied is not an answer that cannot be given.
+    """
+    try:
+        pinned = trajectory_store.pinned_document_ids()
+    except Exception:  # noqa: BLE001 -- a missing boost must not break the answer
+        return documents
+    if not pinned:
+        return documents
+    return sorted(documents, key=lambda row: row.get("id") not in pinned)
+
+
 def ports(project_access: access.AccessContext, usage_detail: str,
-          enabled_tools: frozenset[str]) -> ChatPorts:
+          enabled_tools: frozenset[str], surface: str = "dock") -> ChatPorts:
     project_id = project_access.project_id
+    # Built per request, not at import: a workspace that edits its chat style
+    # pack sees the next answer change, without a restart. Mirrors how
+    # conversations/agent.py composes its planner prompt per request.
+    with access.use_access(project_access):
+        system = answer_system(workspace_style_text(), surface)
 
     def prepare(session_id: int | None, message: str) -> ChatContext:
         if session_id is None:
@@ -39,25 +57,42 @@ def ports(project_access: access.AccessContext, usage_detail: str,
         approved = (chat_store.approved_answer(project_id, message, llm.embed(message))
                     if "answers" in enabled_tools else None)
         if approved:
-            sources = [{"n": 1, "source": "approved", "title": approved["question"],
-                        "meta": "Approved answer · served verbatim",
-                        "href": f"/answers?answer={approved['id']}"}]
+            # Same field set as a retrieved source: a client renders one card
+            # component, and an approved answer is simply a source with no
+            # upstream document behind it.
+            served = "Approved answer · served verbatim"
+            sources = [{"n": 1, "source": "approved", "kind": "answer",
+                        "title": approved["question"], "snippet": served, "meta": served,
+                        "author": "", "updated": "", "tags": [], "document_id": None,
+                        "href": f"/answers?answer={approved['id']}",
+                        "source_url": None, "score": 1.0}]
             return ChatContext(session_id, sources, (), str(approved["answer"]))
 
+        source_urls: dict[int, str] = {}
         with access.use_access(project_access):
             documents = (hybrid_search(answer_search_query(message), 8)
                          if "search" in enabled_tools else [])
-        documents = documents[:4]
+            # Dedupe before numbering, so the [n] in the context and the n in
+            # the payload are the same citation.
+            documents = citations.dedupe(documents)
+            # Then let the Workflows page's pins speak. Retrieval still decides
+            # WHICH documents are relevant to this question; a pin only decides
+            # that, among the ones it found, a document somebody vouched for
+            # goes in front of the model instead of being cut by the slice
+            # below. Stable, so unpinned documents keep their retrieval order.
+            documents = _pinned_first(documents)[:4]
+            try:
+                source_urls = document_store.source_urls(
+                    [row["id"] for row in documents if row.get("id") is not None])
+            except Exception:
+                source_urls = {}
         context = "\n\n".join(
             f"[{i + 1}] {row['title']} ({row['source']})\n{row['body'] or row['snippet']}"
             for i, row in enumerate(documents)
         )
         facts = chat_store.verified_facts(project_id) if "facts" in enabled_tools else []
         context += "\n\nVerified facts:\n" + "\n".join(f"- {row['claim']}" for row in facts)
-        sources = [{"n": i + 1, "source": row["source"], "title": row["title"],
-                    "meta": row["snippet"][:110], "document_id": row["id"],
-                    "href": f"/knowledge/doc?id={row['id']}"}
-                   for i, row in enumerate(documents)]
+        sources = citations.source_payload(documents, source_urls=source_urls)
         history = chat_store.messages(project_id, session_id, 10)
         messages = [{"role": row["role"], "content": row["content"]}
                     for row in reversed(history)]
@@ -66,7 +101,7 @@ def ports(project_access: access.AccessContext, usage_detail: str,
 
     return ChatPorts(
         prepare=prepare,
-        generate=lambda messages: llm.chat_stream([dict(row) for row in messages], SYSTEM),
+        generate=lambda messages: llm.chat_stream([dict(row) for row in messages], system),
         persist=lambda session_id, answer, sources: chat_store.add_message(
             project_id, session_id, "assistant", answer, json.dumps(list(sources)),
         ),

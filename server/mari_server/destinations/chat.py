@@ -23,10 +23,10 @@ class ChatIn(BaseModel):
 
 
 def _sse(project_access: access.AccessContext, body: ChatIn, usage: str,
-         enabled_tools: frozenset[str]):
+         enabled_tools: frozenset[str], surface: str = "dock"):
     try:
         events = stream_answer(body.session_id, body.message,
-                               ports=ports(project_access, usage, enabled_tools))
+                               ports=ports(project_access, usage, enabled_tools, surface))
     except LookupError as error:
         raise HTTPException(404, str(error)) from error
 
@@ -71,5 +71,7 @@ def public_chat(project_slug: str, destination_slug: str, body: ChatIn):
     configured = row.get("tools") or []
     if isinstance(configured, str):
         configured = json.loads(configured)
+    # A published destination is read by people outside the workspace, so it
+    # gets the public surface rules, not the dock's.
     return _sse(project_access, body, f"knowledge_chat:{row['id']}",
-                frozenset(str(tool) for tool in configured))
+                frozenset(str(tool) for tool in configured), "public")

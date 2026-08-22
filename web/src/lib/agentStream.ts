@@ -1,17 +1,40 @@
-// Agent-chat SSE client (POST /agent/chat). Named events: meta, tool_start,
-// tool_result, navigate, warning, token, done. Supports AbortSignal for the
-// Stop button. Ported from the pre-library console (39a55e1), where it lived
-// as components/chat/stream.ts — the contract on the server side
-// (server/agentchat.py) is unchanged.
+// Agent-chat SSE client (POST /agent/chat). Named events: meta, tool_proposal,
+// tool_start, tool_result, auth_required, navigate, warning, token, done.
+// Supports AbortSignal for the Stop button. Ported from the pre-library console
+// (39a55e1), where it lived as components/chat/stream.ts — the contract on the
+// server side (server/agentchat.py) is unchanged.
 
+import type { ChatSourceData } from "@mari-design/components";
 import { projectHeaders } from "./api";
 
 type AgentToolStart = { name: string; args: Record<string, unknown> };
 type AgentToolResult = { name: string; summary: string; ok: boolean };
 type AgentAuthRequest = { name: string; provider: string; kind: string; scopes: string[]; setupUrl: string };
 
+/** The `meta` frame opens a turn. It carries the session id and, since the
+ *  retriever now runs before generation, the documents the answer is going to
+ *  cite — so `[3]` in the text has something to point at from the first token
+ *  rather than only once the stream finishes. */
+export type AgentMeta = { sessionId: number; sources: ChatSourceData[] };
+
+/** The server sends sources in the console's own field names (`document_id`,
+ *  `source_url`), so this is a shape check rather than a rename: drop anything
+ *  without a usable citation number and title instead of rendering a row that
+ *  says nothing. An older server sends only {n, source, title, meta,
+ *  document_id, href}, and every other field is optional for exactly that
+ *  reason. */
+function readSources(raw: unknown): ChatSourceData[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.filter(
+    (s): s is ChatSourceData =>
+      !!s && typeof s === "object" &&
+      typeof (s as ChatSourceData).n === "number" &&
+      typeof (s as ChatSourceData).title === "string",
+  );
+}
+
 export type AgentStreamHandlers = {
-  onMeta?: (sessionId: number) => void;
+  onMeta?: (meta: AgentMeta) => void;
   onToolStart?: (ev: AgentToolStart) => void;
   onToolProposal?: (ev: AgentToolStart) => void;
   onToolResult?: (ev: AgentToolResult) => void;
@@ -51,7 +74,7 @@ export async function agentChatStream(
       let data: any;
       try { data = JSON.parse(dataText); } catch { return; }
       switch (event) {
-        case "meta": handlers.onMeta?.(data.session_id); break;
+        case "meta": handlers.onMeta?.({ sessionId: data.session_id, sources: readSources(data.sources) }); break;
         case "tool_proposal": handlers.onToolProposal?.({ name: data.name, args: data.args ?? {} }); break;
         case "tool_start": handlers.onToolStart?.({ name: data.name, args: data.args ?? {} }); break;
         case "tool_result": handlers.onToolResult?.({ name: data.name, summary: data.summary ?? "", ok: !!data.ok }); break;

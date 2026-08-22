@@ -145,6 +145,25 @@ def history(document_id: int) -> list[dict]:
         ).fetchall()
 
 
+def source_urls(document_ids: list[int]) -> dict[int, str]:
+    """Canonical `source_url` per document id, for the current project.
+
+    The canonical field is projected into `documents.source_path`, so a chat
+    citation can offer "open where this lives" without an Iceberg scan per
+    answer. Rows whose path is not a URL are still returned; the caller decides
+    what counts as a link (citations.source_url_of).
+    """
+    if not document_ids:
+        return {}
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn:
+        rows = conn.execute(
+            "SELECT id, source_path FROM documents WHERE project_id = %s AND id = ANY(%s)",
+            (project_id, list(document_ids)),
+        ).fetchall()
+    return {int(row["id"]): str(row["source_path"] or "") for row in rows}
+
+
 def ids_for_source_path(conn, project_id: int, source_id: int, source_path: str) -> list[int]:
     return [int(row["id"]) for row in conn.execute(
         "SELECT id FROM documents WHERE project_id = %s AND source_id = %s AND source_path = %s",

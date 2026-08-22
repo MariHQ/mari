@@ -45,6 +45,7 @@ from mari_components.destinations.chat import answer_search_query
 from mari_components.knowledge import answer_question as component_answer_question
 from mari_server.persistence.postgres.event_inbox import DEFAULT_INBOX, EventDispatcher
 from mari_server.persistence.postgres import bots as bot_store
+from mari_server.conversations.prompts import answer_system, workspace_style_text
 
 router = APIRouter()
 
@@ -104,11 +105,11 @@ def slack_call(method: str, token: str, payload: dict | None = None) -> dict:
 
 # ————————————————— answer pipeline (same retrieval as /chat, non-streaming) —————————————————
 
-BOT_SYSTEM = (
-    "You are Mari, the team's knowledge assistant, answering in Slack. "
-    "Answer from the provided context. Be concise (2-4 sentences), cite sources as [1], [2]. "
-    "If the context doesn't cover it, say so."
-)
+def bot_system() -> str:
+    """Slack's system prompt: the same chat style as the dock, plus the Slack
+    surface rules (mrkdwn, no headings). Built per answer so a workspace that
+    edits its chat style pack does not have to restart the bot."""
+    return answer_system(workspace_style_text(), "slack")
 
 
 def answer_question(question: str, supplemental_context: str = "") -> str:
@@ -143,20 +144,30 @@ def answer_question(question: str, supplemental_context: str = "") -> str:
             "slack-conversation", "Slack conversation so far", supplemental_context,
             revision="current-thread",
         ))
+    system = bot_system()
     result = component_answer_question(
         question,
         knowledge,
-        generate_json=lambda prompt, _version: llm.generate_json(prompt, system=BOT_SYSTEM),
+        generate_json=lambda prompt, _version: llm.generate_json(prompt, system=system),
     )
     by_id = {document.external_id: document for document in knowledge}
-    cited = []
+    cited: list[str] = []
     for evidence in result.evidence:
-        title = by_id[evidence.document_id].title
-        if title not in cited:
-            cited.append(title)
+        document = by_id[evidence.document_id]
+        # A title alone is ambiguous across connectors: three sources can all
+        # hold a "Runbook". The source name is what tells the reader which one.
+        label = _source_label(document.title, (getattr(document, "metadata", None) or {}).get("source"))
+        if label not in cited:
+            cited.append(label)
     suffix = "\n\nSources: " + " · ".join(
-        f"[{index + 1}] {title}" for index, title in enumerate(cited)) if cited else ""
+        f"[{index + 1}] {label}" for index, label in enumerate(cited)) if cited else ""
     return result.answer + suffix
+
+
+def _source_label(title, source) -> str:
+    """"Deploy runbook (confluence)", or just the title when there is no source."""
+    name = str(source or "").strip()
+    return f"{title} ({name})" if name else str(title)
 
 
 def stream_answer_question(question: str, supplemental_context: str = ""):
@@ -185,7 +196,7 @@ def stream_answer_question(question: str, supplemental_context: str = ""):
     prompt = "Context:\n" + "\n\n".join(sections) + f"\n\nQuestion: {question}"
 
     emitted = False
-    for token in llm.chat_stream([{"role": "user", "content": prompt}], BOT_SYSTEM):
+    for token in llm.chat_stream([{"role": "user", "content": prompt}], bot_system()):
         if token:
             emitted = True
             yield token
@@ -194,7 +205,8 @@ def stream_answer_question(question: str, supplemental_context: str = ""):
         return
     if docs:
         yield "\n\nSources: " + " · ".join(
-            f"[{index}] {row['title']}" for index, row in enumerate(docs, 1)
+            f"[{index}] {_source_label(row['title'], row.get('source'))}"
+            for index, row in enumerate(docs, 1)
         )
 
 

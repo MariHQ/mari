@@ -10,11 +10,11 @@ import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Sparkles, X } from "lucide-react";
 import { ChatDock } from "@mari-design/components";
-import type { ChatMessageData, ToolCallData } from "@mari-design/components/chat/types";
+import type { ChatMessageData } from "@mari-design/components/chat/types";
 import { useAuth } from "../lib/auth";
 import { agentChatStream } from "../lib/agentStream";
 
-const OFFLINE_MSG = "I can't reach the Mari API right now — start the server and try again.";
+const OFFLINE_MSG = "I can't reach the Mari API right now. Start the server and try again.";
 
 const SUGGESTIONS = [
   "What sources are connected?",
@@ -70,9 +70,16 @@ export function AgentDock() {
     abortRef.current = ctrl;
 
     const ok = await agentChatStream(text, sessionRef.current, {
-      onMeta: (sid) => { sessionRef.current = sid; },
+      /* The retriever has already run by the time `meta` lands, so the cited
+         documents are attached to the assistant turn before the first token.
+         The reply's `[3]` is a link into this list, so it has to be here while
+         the text streams, not bolted on at the end. */
+      onMeta: ({ sessionId, sources }) => {
+        sessionRef.current = sessionId;
+        if (sources.length) patchLast((m) => ({ ...m, sources }));
+      },
       onToolProposal: ({ name, args }) =>
-        patchLast((m) => ({ ...m, tools: [...(m.tools ?? []), { name, args, ok: null, state: "proposed" } as ToolCallData] })),
+        patchLast((m) => ({ ...m, tools: [...(m.tools ?? []), { name, args, ok: null, state: "proposed" }] })),
       onToolStart: ({ name, args }) =>
         patchLast((m) => {
           const tools = [...(m.tools ?? [])];
@@ -151,7 +158,7 @@ export function AgentDock() {
         onSend={send}
         onStop={() => abortRef.current?.abort()}
         suggestions={messages.length === 0 ? SUGGESTIONS : undefined}
-        hint="The agent can search and read knowledge, explain product workflows, and take you to the right screen. Governed changes happen in Review and Automations."
+        hint="The agent can search and read knowledge, explain product workflows, and take you to the right screen. It reads; it does not change anything on its own."
         placeholder="Ask Mari…"
         headerActions={
           <button

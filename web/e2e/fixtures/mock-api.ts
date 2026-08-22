@@ -34,7 +34,7 @@ function initialData() {
         { id: "answer:4", kind: "answer", title: "What is the deletion SLA?", status: "pending", source: "support", assignee: "Dana Rodriguez", due: "", subjectType: "answer", subjectId: "4", subjectTitle: "Deletion SLA answer", subjectHref: "/answers?answer=4", confidence: 0.92, evidenceCount: 2, trustedSource: true },
         { id: "finding:5", kind: "finding", title: "Conflicting retention duration", status: "pending", source: "github", assignee: "", due: "", subjectType: "document", subjectId: "1", subjectTitle: "Retention runbook", subjectHref: "/knowledge/doc?id=1&pane=findings", confidence: 0, evidenceCount: 1, trustedSource: false },
         { id: "change:6", kind: "change", title: "Replace 10 days with 30 days", status: "pending", source: "github", assignee: "", due: "", subjectType: "document", subjectId: "1", subjectTitle: "Retention runbook", subjectHref: "/knowledge/doc?id=1&tab=changes", confidence: 1, evidenceCount: 1, trustedSource: false },
-        { id: "workflow:7", kind: "workflow", title: "Fact review approval", status: "waiting", source: "automation", assignee: "Dana Rodriguez", due: "", subjectType: "workflow", subjectId: "1", subjectTitle: "Fact review", subjectHref: "/flows?run=1", confidence: 1, evidenceCount: 1, trustedSource: true },
+        { id: "workflow:7", kind: "workflow", title: "Fact review approval", status: "waiting", source: "automation", assignee: "Dana Rodriguez", due: "", subjectType: "workflow", subjectId: "1", subjectTitle: "Fact review", subjectHref: "/workflows?run=1", confidence: 1, evidenceCount: 1, trustedSource: true },
       ],
       totalCount: 7,
       pageInfo: { endCursor: "Nw", hasNextPage: false },
@@ -307,14 +307,14 @@ export async function installMockApi(page: Page, options: {
     const path = new URL(route.request().url()).pathname;
     const body = route.request().postDataJSON(); restCalls.push({ path, body });
     await route.fulfill({ status: 200, contentType: "text/event-stream", body:
-      'event: meta\ndata: {"session_id":41,"sources":[{"n":1,"source":"github","title":"Retention runbook","meta":"Canonical policy","document_id":1,"href":"/knowledge/doc?id=1"}]}\n\n' +
+      'event: meta\ndata: {"session_id":41,"sources":[{"n":1,"source":"github","kind":"page","title":"Retention runbook","snippet":"Canonical policy","meta":"Canonical policy","author":"Dana","updated":"2026-08-18T00:00:00Z","tags":["canonical"],"document_id":1,"href":"/knowledge/doc?id=1","source_url":"https://github.com/acme/runbooks/blob/main/retention.md","score":1}]}\n\n' +
       'data: {"token":"Retention is 30 days [1]."}\n\nevent: done\ndata: {}\n\n' });
   });
   await page.route("**/chat", async (route) => {
     if (new URL(route.request().url()).pathname !== "/chat") return route.fallback();
     const body = route.request().postDataJSON(); restCalls.push({ path: "/chat", body });
     await route.fulfill({ status: 200, contentType: "text/event-stream", body:
-      'event: meta\ndata: {"session_id":41,"sources":[{"n":1,"source":"github","title":"Retention runbook","meta":"Canonical policy","document_id":1,"href":"/knowledge/doc?id=1"}]}\n\n' +
+      'event: meta\ndata: {"session_id":41,"sources":[{"n":1,"source":"github","kind":"page","title":"Retention runbook","snippet":"Canonical policy","meta":"Canonical policy","author":"Dana","updated":"2026-08-18T00:00:00Z","tags":["canonical"],"document_id":1,"href":"/knowledge/doc?id=1","source_url":"https://github.com/acme/runbooks/blob/main/retention.md","score":1}]}\n\n' +
       'data: {"token":"Retention is 30 days [1]."}\n\nevent: done\ndata: {}\n\n' });
   });
   await page.route("**/connectors/connect", async (route) => {

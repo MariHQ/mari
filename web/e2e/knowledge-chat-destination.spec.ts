@@ -37,11 +37,12 @@ test("deployed knowledge chat streams an answer and cited sources", async ({ pag
   await expect(page.getByRole("button", { name: "Open the Mari agent" })).toHaveCount(0);
   await page.getByLabel("Ask a question").fill("How long is retention?");
   await page.getByRole("button", { name: "Ask" }).click();
-  await expect(page.getByText("Retention is 30 days [1].")).toBeVisible();
+  await expect(page.getByText("Retention is 30 days", { exact: false })).toBeVisible();
   await expect(page.getByRole("list", { name: "Sources" })).toContainText("Retention runbook");
   expect(api.restCalls.some((call) => call.path === "/knowledge-chat-api/default/company-knowledge/chat" && call.body.message === "How long is retention?")).toBeTruthy();
-  await page.getByRole("link", { name: "[1] Retention runbook" }).click();
-  await expect(page).toHaveURL(/\/knowledge\/doc\?id=1/);
+  const sources = page.getByRole("list", { name: "Sources" });
+  await expect(sources.getByRole("link", { name: /Retention runbook/ })).toHaveAttribute("href", "https://github.com/acme/runbooks/blob/main/retention.md");
+  await expect(sources.locator('a[href^="/knowledge/doc"]')).toHaveCount(0);
 });
 
 test("knowledge chat admin and end-user surfaces remain usable on mobile", async ({ page }) => {
