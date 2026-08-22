@@ -45,7 +45,8 @@ def list_trajectories(
         args.append(category)
     args.extend((limit, offset))
     rows = q(f"""SELECT t.*,
-                            COALESCE(t.promoted_workflow_id, t.matched_workflow_id)
+                            COALESCE(t.promoted_workflow_id, t.observed_cluster_id,
+                                     t.matched_workflow_id)
                               AS promoted_workflow_id,
                             aw.status AS promoted_workflow_status,
                             aw.name AS promoted_workflow_name,
@@ -53,7 +54,8 @@ def list_trajectories(
                             CASE WHEN aw.id IS NULL THEN 1 ELSE (
                               SELECT count(*) FROM trajectories member
                                WHERE member.project_id = t.project_id
-                                 AND (member.matched_workflow_id = aw.id
+                                 AND (member.observed_cluster_id = aw.id
+                                      OR member.matched_workflow_id = aw.id
                                       OR member.promoted_workflow_id = aw.id)
                             ) END AS workflow_observation_count,
                             COALESCE(aw.cache_policy, 'none') AS promoted_workflow_cache_policy,
@@ -77,7 +79,8 @@ def list_trajectories(
                     FROM trajectories t
                     LEFT JOIN assistant_workflows aw
                       ON aw.project_id = t.project_id
-                     AND aw.id = COALESCE(t.promoted_workflow_id, t.matched_workflow_id)
+                     AND aw.id = COALESCE(t.promoted_workflow_id, t.observed_cluster_id,
+                                          t.matched_workflow_id)
                    WHERE {where.replace('project_id', 't.project_id')}
                    ORDER BY t.started_at DESC, t.id DESC LIMIT %s OFFSET %s""",
              tuple(args))
@@ -125,8 +128,10 @@ def workflow_embedding_indexes(workflow_ids: list[int]) -> dict[int, dict]:
 def workflow_harvest_context(limit: int = 100) -> tuple[list[dict], list[dict]]:
     project_id = access.require_current_access().project_id
     observations = q(
-        """SELECT id, prompt, macro_intent, category,
-                  COALESCE(promoted_workflow_id, matched_workflow_id) AS workflow_id
+        """SELECT id, prompt, macro_intent, category, execution_mode,
+                  selected_workflow_id, selected_workflow_score, selected_workflow_exact,
+                  COALESCE(promoted_workflow_id, observed_cluster_id,
+                           matched_workflow_id) AS workflow_id
              FROM trajectories
             WHERE project_id = %s AND status IN ('ready', 'fallback')
             ORDER BY started_at DESC, id DESC LIMIT %s""",
@@ -304,18 +309,25 @@ def _maybe_reconcile(project_access: access.AccessContext) -> None:
 
 
 def harvest(session_id: int, prompt: str, trace: list[dict], model: str,
-            matched_workflow_id: int | None = None) -> int:
+            selected_workflow_id: int | None = None, *, execution_mode: str = "generation",
+            selected_workflow_score: float | None = None,
+            selected_workflow_exact: bool = False,
+            observed_cluster_id: int | None = None) -> int:
     project_access = access.require_current_access()
     _maybe_reconcile(project_access)
     steps = normalize_steps(trace)
     row = q1("""INSERT INTO trajectories
                   (project_id, session_id, prompt, status, model, step_count, failure_count,
-                   rework_count, phases, matched_workflow_id)
-                SELECT %s, s.id, %s, 'processing', %s, %s, %s, %s, %s, %s
+                   rework_count, phases, matched_workflow_id, selected_workflow_id,
+                   selected_workflow_score, selected_workflow_exact, execution_mode,
+                   observed_cluster_id)
+                SELECT %s, s.id, %s, 'processing', %s, %s, %s, %s, %s, %s,
+                       %s, %s, %s, %s, %s
                   FROM chat_sessions s WHERE s.id = %s AND s.project_id = %s RETURNING id""",
              (project_access.project_id, prompt[:8000], model[:100], len(steps),
               sum(not s["ok"] for s in steps), rework_count(steps), json.dumps(segment_phases(steps)),
-              matched_workflow_id,
+              observed_cluster_id, selected_workflow_id, selected_workflow_score,
+              selected_workflow_exact, execution_mode[:40], observed_cluster_id,
               session_id, project_access.project_id))
     if not row:
         raise ValueError("Chat session does not belong to the active project")
@@ -358,7 +370,11 @@ def harvest(session_id: int, prompt: str, trace: list[dict], model: str,
 
 
 def record_external_observation(prompt: str, trace: list[dict], model: str,
-                                matched_workflow_id: int | None = None) -> int:
+                                selected_workflow_id: int | None = None, *,
+                                execution_mode: str = "generation",
+                                selected_workflow_score: float | None = None,
+                                selected_workflow_exact: bool = False,
+                                observed_cluster_id: int | None = None) -> int:
     """Record an already-completed destination turn without another model call."""
     project_id = access.require_current_access().project_id
     steps = normalize_steps(trace)
@@ -367,12 +383,15 @@ def record_external_observation(prompt: str, trace: list[dict], model: str,
         """INSERT INTO trajectories
               (project_id, session_id, prompt, status, model, layer1, layer2, category,
                macro_intent, step_count, failure_count, rework_count, phases,
-               matched_workflow_id, completed_at)
+               matched_workflow_id, selected_workflow_id, selected_workflow_score,
+               selected_workflow_exact, execution_mode, observed_cluster_id, completed_at)
             VALUES (%s, NULL, %s, 'ready', %s, %s, %s, 'Assistant conversations',
-                    %s, %s, %s, %s, %s, %s, now()) RETURNING id""",
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now()) RETURNING id""",
         (project_id, prompt[:8000], model[:100], summary, prompt[:500], prompt[:300],
          len(steps), sum(not step["ok"] for step in steps), rework_count(steps),
-         json.dumps(segment_phases(steps)), matched_workflow_id),
+         json.dumps(segment_phases(steps)), observed_cluster_id, selected_workflow_id,
+         selected_workflow_score, selected_workflow_exact, execution_mode[:40],
+         observed_cluster_id),
     )
     trajectory_id = int(row["id"])
     for step in steps:
@@ -500,7 +519,8 @@ def promote_to_workflow(trajectory_id: int, name: str, *, force_new: bool = Fals
 def trajectory_for_split(trajectory_id: int) -> dict | None:
     project_id = access.require_current_access().project_id
     return q1("""SELECT id, prompt, layer2, macro_intent,
-                        COALESCE(promoted_workflow_id, matched_workflow_id) AS workflow_id
+                        COALESCE(promoted_workflow_id, observed_cluster_id,
+                                 matched_workflow_id) AS workflow_id
                    FROM trajectories WHERE project_id = %s AND id = %s""",
               (project_id, trajectory_id))
 
@@ -509,21 +529,23 @@ def unassigned_trajectories(limit: int = 200) -> list[dict]:
     project_id = access.require_current_access().project_id
     return q("""SELECT id, prompt FROM trajectories
                  WHERE project_id = %s AND promoted_workflow_id IS NULL
-                   AND matched_workflow_id IS NULL AND status IN ('ready', 'fallback')
+                   AND observed_cluster_id IS NULL AND matched_workflow_id IS NULL
+                   AND status IN ('ready', 'fallback')
                  ORDER BY started_at DESC, id DESC LIMIT %s""",
              (project_id, max(1, min(int(limit), 500))))
 
 
 def assign_trajectory_cluster(trajectory_id: int, workflow_id: int) -> bool:
     project_id = access.require_current_access().project_id
-    return bool(q1("""UPDATE trajectories t SET matched_workflow_id = %s
+    return bool(q1("""UPDATE trajectories t
+                          SET observed_cluster_id = %s, matched_workflow_id = %s
                         WHERE t.project_id = %s AND t.id = %s
                           AND t.promoted_workflow_id IS NULL
                           AND t.matched_workflow_id IS NULL
                           AND EXISTS (SELECT 1 FROM assistant_workflows aw
                                        WHERE aw.project_id = t.project_id AND aw.id = %s)
                       RETURNING t.id""",
-                   (workflow_id, project_id, trajectory_id, workflow_id)))
+                   (workflow_id, workflow_id, project_id, trajectory_id, workflow_id)))
 
 
 def split_workflow(trajectory_id: int, name: str) -> int:

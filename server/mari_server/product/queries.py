@@ -372,6 +372,12 @@ class Query:
             step_count=int(row["step_count"]), failure_count=int(row["failure_count"]),
             rework_count=int(row["rework_count"]), started_at=row["started_at"].isoformat(),
             completed_at=row["completed_at"].isoformat() if row.get("completed_at") else "",
+            selected_workflow_id=row.get("selected_workflow_id"),
+            selected_workflow_score=(float(row["selected_workflow_score"])
+                                     if row.get("selected_workflow_score") is not None else None),
+            selected_workflow_exact=bool(row.get("selected_workflow_exact")),
+            execution_mode=row.get("execution_mode") or "unknown",
+            observed_cluster_id=row.get("observed_cluster_id"),
             steps=by_id[int(row["id"])], evidence=evidence_by_id[int(row["id"])],
             promoted_workflow_id=row.get("promoted_workflow_id"),
             promoted_workflow_name=row.get("promoted_workflow_name") or "",

@@ -637,6 +637,11 @@ class Trajectory:
     rework_count: int
     started_at: str
     completed_at: str
+    selected_workflow_id: int | None
+    selected_workflow_score: float | None
+    selected_workflow_exact: bool
+    execution_mode: str
+    observed_cluster_id: int | None
     steps: list[TrajectoryStep]
     evidence: list[TrajectoryEvidence]
     promoted_workflow_id: int | None

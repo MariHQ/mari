@@ -266,6 +266,10 @@ def harvest_candidates(limit: int = 100) -> list[dict]:
         "id": int(row["id"]), "prompt": str(row.get("prompt") or "")[:500],
         "intent": str(row.get("macro_intent") or "")[:300],
         "category": str(row.get("category") or ""), "workflow_id": row.get("workflow_id"),
+        "selected_workflow_id": row.get("selected_workflow_id"),
+        "selected_score": row.get("selected_workflow_score"),
+        "selected_exact": bool(row.get("selected_workflow_exact")),
+        "execution_mode": str(row.get("execution_mode") or "unknown"),
     } for row in observations]
     result = llm.generate_json(
         "Identify up to 8 distinct, reusable product-knowledge assistant workflows from these "
@@ -302,8 +306,42 @@ def harvest_candidates(limit: int = 100) -> list[dict]:
             "observationIds": ids,
             "prompts": [str(by_id[value].get("prompt") or "")[:500] for value in ids],
             "existingWorkflowId": seed.get("workflow_id"),
+            "suggested": True,
         })
-    return [candidate for candidate in candidates if candidate["name"]]
+    candidates = [candidate for candidate in candidates if candidate["name"]]
+
+    # A proposal model recommends groupings; it must never hide observations.
+    # Keep recent non-cache executions visible as unchecked review rows even
+    # when semantic selection associated them with an existing cluster.
+    proposed_ids = {item for candidate in candidates for item in candidate["observationIds"]}
+    workflow_names = {int(row["id"]): str(row.get("name") or "") for row in existing}
+    seen_prompts: set[str] = set()
+    for row in observations:
+        trajectory_id = int(row["id"])
+        prompt = str(row.get("prompt") or "").strip()
+        normalized = " ".join(prompt.lower().split()).rstrip("?.!")
+        if (not prompt or trajectory_id in proposed_ids or normalized in seen_prompts
+                or row.get("execution_mode") == "cache"):
+            continue
+        seen_prompts.add(normalized)
+        workflow_id = row.get("workflow_id")
+        workflow_name = workflow_names.get(int(workflow_id), "") if workflow_id else ""
+        candidates.append({
+            "seedTrajectoryId": trajectory_id,
+            "name": prompt.rstrip("?.!")[:120],
+            "reason": (f"This turn generated a new answer after selecting “{workflow_name}”. "
+                       "Review whether it is a new response variant or deserves a split."
+                       if workflow_name else
+                       "This turn generated an answer without selecting a workflow. Review it as "
+                       "a possible new workflow."),
+            "observationIds": [trajectory_id],
+            "prompts": [prompt[:500]],
+            "existingWorkflowId": workflow_id,
+            "suggested": False,
+        })
+        if len(candidates) >= 28:
+            break
+    return candidates
 
 
 def cluster_unassigned(limit: int = 200) -> int:

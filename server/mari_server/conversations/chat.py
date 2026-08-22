@@ -30,7 +30,7 @@ def live_destination(project_slug: str, destination_slug: str):
 def ports(project_access: access.AccessContext, usage_detail: str,
           enabled_tools: frozenset[str]) -> ChatPorts:
     project_id = project_access.project_id
-    selected_state: dict[str, dict | None] = {"workflow": None}
+    selected_state: dict[str, object] = {"workflow": None, "execution_mode": "generation"}
 
     def prepare(session_id: int | None, message: str) -> ChatContext:
         retrieval_question = answer_search_query(message)
@@ -46,6 +46,7 @@ def ports(project_access: access.AccessContext, usage_detail: str,
         chat_store.add_message(project_id, session_id, "user", message)
 
         if cached:
+            selected_state["execution_mode"] = "cache"
             return ChatContext(
                 session_id, cached.get("sources") or (), (), cached["answer"], True,
             )
@@ -53,11 +54,13 @@ def ports(project_access: access.AccessContext, usage_detail: str,
         approved = (chat_store.approved_answer(project_id, message, llm.embed(message))
                     if "answers" in enabled_tools else None)
         if approved:
+            selected_state["execution_mode"] = "approved_answer"
             sources = [{"n": 1, "source": "approved", "title": approved["question"],
                         "meta": "Approved answer · served verbatim",
                         "href": f"/answers?answer={approved['id']}"}]
             return ChatContext(session_id, sources, (), str(approved["answer"]))
 
+        selected_state["execution_mode"] = "workflow_generation" if workflow else "generation"
         with access.use_access(project_access):
             documents = (hybrid_search(retrieval_question, 8)
                          if "search" in enabled_tools else [])
@@ -104,5 +107,14 @@ def ports(project_access: access.AccessContext, usage_detail: str,
                 } for source in sources if source.get("document_id")],
             }], "knowledge-chat-v1",
             int(selected_state["workflow"]["id"]) if selected_state["workflow"] else None,
+            execution_mode=str(selected_state["execution_mode"]),
+            selected_workflow_score=(float((selected_state["workflow"].get("match") or {})["workflow_score"])
+                                     if selected_state["workflow"] and
+                                     (selected_state["workflow"].get("match") or {}).get("workflow_score") is not None
+                                     else None),
+            selected_workflow_exact=bool(selected_state["workflow"] and
+                                         (selected_state["workflow"].get("match") or {}).get("exact")),
+            observed_cluster_id=(int(selected_state["workflow"]["id"])
+                                 if selected_state["workflow"] else None),
         ),
     )

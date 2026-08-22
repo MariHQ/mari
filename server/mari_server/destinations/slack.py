@@ -499,6 +499,7 @@ def _process_slack_delivery(row: dict) -> None:
     _log_usage("chat_answer", "slack")
     with access.use_access(project_access):
         selected = observation.get("selected")
+        selected_match = selected.get("match") or {} if selected else {}
         mode = str(observation.get("mode") or "generation")
         trajectory_store.record_external_observation(
             question,
@@ -508,6 +509,11 @@ def _process_slack_delivery(row: dict) -> None:
                          else f"answered from {len(observation.get('evidence') or [])} documents",
               "ok": True, "evidence": observation.get("evidence") or []}],
             "slack", int(selected["id"]) if selected else None,
+            execution_mode=mode,
+            selected_workflow_score=(float(selected_match["workflow_score"])
+                                     if selected_match.get("workflow_score") is not None else None),
+            selected_workflow_exact=bool(selected_match.get("exact")),
+            observed_cluster_id=int(selected["id"]) if selected else None,
         )
     participation_ts = thread_ts or bot_message_ts
     turns = _with_turn(turns, "assistant", answer, bot_message_ts)

@@ -9,6 +9,7 @@ const QUERY = `query Trajectories($limit: Int!, $offset: Int!, $category: String
   trajectories(limit: $limit, offset: $offset, category: $category) {
     id sessionId prompt status model layer1 layer2 category macroIntent phases
     stepCount failureCount reworkCount startedAt completedAt
+    selectedWorkflowId selectedWorkflowScore selectedWorkflowExact executionMode observedClusterId
     steps { ordinal tool actionFamily args summary ok disposition editedArgs }
     evidence { documentId title reason rank relevance note }
     promotedWorkflowId promotedWorkflowStatus promotedWorkflowCachePolicy

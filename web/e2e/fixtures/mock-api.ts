@@ -250,6 +250,15 @@ export async function installMockApi(page: Page, options: {
         observationIds: [1],
         prompts: ["Update the retention documentation"],
         existingWorkflowId: null,
+        suggested: true,
+      }, {
+        seedTrajectoryId: 2,
+        name: "what are the top capabilities of mari",
+        reason: "This turn generated a new answer after selecting Ask about Mari.",
+        observationIds: [2],
+        prompts: ["what are the top capabilities of mari"],
+        existingWorkflowId: 14,
+        suggested: false,
       }] };
     } else if (/promoteTrajectoryToWorkflow/.test(query)) {
       data = { promoteTrajectoryToWorkflow: 44 };

@@ -46,8 +46,10 @@ test("a human can harvest and codify a proposed workflow", async ({ page }) => {
   await expect(page.getByRole("dialog", { name: "Harvest new workflows" })).toBeVisible();
   await page.getByRole("button", { name: "Analyze recent turns" }).click();
   await expect(page.getByLabel("Candidate 1 name")).toHaveValue("Answer retention questions");
+  await expect(page.getByLabel("Candidate 2 name")).toHaveValue("what are the top capabilities of mari");
+  await expect(page.getByLabel("Select candidate 2")).not.toBeChecked();
   await expect(page.getByText("Update the retention documentation", { exact: true })).toBeHidden();
-  await page.getByText("1 supporting turn", { exact: true }).click();
+  await page.getByText("1 supporting turn", { exact: true }).first().click();
   await expect(page.getByText("Update the retention documentation", { exact: true })).toBeVisible();
   await page.getByLabel("Candidate 1 name").fill("Answer policy retention questions");
   await page.getByRole("button", { name: "Codify selected" }).click();

@@ -147,6 +147,13 @@ class ProductionAgentRuntime:
             observe_trajectory=lambda session_id, message, trace, version: trajectory.harvest(
                 session_id, message, list(trace), version,
                 int(selected["id"]) if selected else None,
+                execution_mode="workflow_generation" if selected else "generation",
+                selected_workflow_score=(float((selected.get("match") or {})["workflow_score"])
+                                         if selected and (selected.get("match") or {}).get("workflow_score") is not None
+                                         else None),
+                selected_workflow_exact=bool(selected and
+                                             (selected.get("match") or {}).get("exact")),
+                observed_cluster_id=int(selected["id"]) if selected else None,
             ),
             record_usage=log_usage,
         )
