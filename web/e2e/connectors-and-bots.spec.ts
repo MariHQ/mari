@@ -129,7 +129,7 @@ test("GitHub bot setup persists its signing secret and explains PR fact validati
   await page.getByRole("button", { name: "Manage setup" }).nth(1).click();
   const drawer = page.getByRole("dialog", { name: "Set up GitHub bot" });
   await expect(drawer.getByText(/webhooks\/github/)).toBeVisible();
-  await expect(drawer.getByText(/Pushes, issues, pull requests, issue comments/)).toBeVisible();
+  await expect(drawer.getByText(/tick.*Pushes.*Issue comments.*Pull requests/)).toBeVisible();
   await drawer.getByRole("button", { name: "Next" }).click();
   await drawer.getByRole("button", { name: "Generate" }).click();
   await drawer.getByRole("button", { name: "Save secret" }).click();

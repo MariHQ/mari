@@ -118,7 +118,8 @@ class GitHubEventTests(unittest.TestCase):
         row = {"project_id": 3, "delivery_id": "mention-1", "payload": {
             "installation_id": 0, "source_id": 41, "bot_login": "mari",
             "hint": {"repository": "acme/docs", "number": 8, "is_pull_request": True,
-                     "comment_body": "@Mari validate facts", "comment_author_type": "User"}}}
+                     "event": "issue_comment", "comment_body": "@Mari validate facts",
+                     "comment_author_type": "User"}}}
         from mari_server.knowledge import service
         with patch.object(provider_events, "_source", return_value=source), \
              patch.object(service, "validate_github_pull_request") as validate, \
@@ -126,6 +127,84 @@ class GitHubEventTests(unittest.TestCase):
              patch.object(provider_events.event_store, "mark_github_delivery"):
             provider_events.process_github_delivery(row)
         validate.assert_called_once_with(source, 8, "mention-1")
+
+    def test_bare_mention_runs_fact_validation_without_validate_phrase(self):
+        source = {"id": 41, "project_id": 3, "project_slug": "acme", "project_name": "Acme",
+                  "config": {"repo": "acme/docs", "token": "token"}}
+        row = {"project_id": 3, "delivery_id": "mention-2", "payload": {
+            "installation_id": 0, "source_id": 41, "bot_login": "mari",
+            "hint": {"repository": "acme/docs", "number": 8, "is_pull_request": True,
+                     "event": "issue_comment", "comment_body": "@mari does this look right to you?",
+                     "comment_author_type": "User"}}}
+        from mari_server.knowledge import service
+        with patch.object(provider_events, "_source", return_value=source), \
+             patch.object(service, "validate_github_pull_request") as validate, \
+             patch.object(provider_events.ingest, "run_sync", return_value={}), \
+             patch.object(provider_events.event_store, "mark_github_delivery"):
+            provider_events.process_github_delivery(row)
+        validate.assert_called_once_with(source, 8, "mention-2")
+
+    def test_factcheck_label_runs_fact_validation_without_a_mention(self):
+        source = {"id": 41, "project_id": 3, "project_slug": "acme", "project_name": "Acme",
+                  "config": {"repo": "acme/docs", "token": "token"}}
+        row = {"project_id": 3, "delivery_id": "label-1", "payload": {
+            "installation_id": 0, "source_id": 41, "bot_login": "mari",
+            "factcheck_label": "mari:factcheck",
+            "hint": {"repository": "acme/docs", "number": 8, "is_pull_request": True,
+                     "event": "pull_request", "action": "labeled", "comment_body": "",
+                     "comment_author_type": "User", "labels": ["needs-review", "mari:factcheck"]}}}
+        from mari_server.knowledge import service
+        with patch.object(provider_events, "_source", return_value=source), \
+             patch.object(service, "validate_github_pull_request") as validate, \
+             patch.object(provider_events.ingest, "run_sync", return_value={}), \
+             patch.object(provider_events.event_store, "mark_github_delivery"):
+            provider_events.process_github_delivery(row)
+        validate.assert_called_once_with(source, 8, "label-1")
+
+    def test_push_event_never_runs_fact_validation(self):
+        source = {"id": 41, "project_id": 3, "project_slug": "acme", "project_name": "Acme",
+                  "config": {"repo": "acme/docs", "token": "token"}}
+        row = {"project_id": 3, "delivery_id": "push-1", "payload": {
+            "installation_id": 0, "source_id": 41, "bot_login": "mari",
+            "hint": {"repository": "acme/docs", "event": "push", "is_pull_request": False}}}
+        from mari_server.knowledge import service
+        with patch.object(provider_events, "_source", return_value=source), \
+             patch.object(service, "validate_github_pull_request") as validate, \
+             patch.object(provider_events.ingest, "run_sync", return_value={}), \
+             patch.object(provider_events.event_store, "mark_github_delivery"):
+            provider_events.process_github_delivery(row)
+        validate.assert_not_called()
+
+    def test_env_secret_fallback_verifies_when_no_project_secret_matches(self):
+        payload = {"repository": {"full_name": "acme/docs"}, "action": "edited"}
+        headers = {
+            "X-GitHub-Delivery": "delivery-env", "X-GitHub-Event": "pull_request",
+            "X-Hub-Signature-256": signature(payload, "env-secret"),
+        }
+        source = {"id": 41, "project_id": 3,
+                  "webhook_config": {"webhook_secret": "project-secret"}}
+        with patch.object(provider_events.event_store, "github_webhook_sources", return_value=[source]), \
+             patch.object(provider_events, "_env_github_secret", return_value="env-secret"), \
+             patch.object(provider_events.INBOX, "enqueue", return_value=(20, True)) as enqueue:
+            result = asyncio.run(provider_events.github_webhook(request_for(payload, headers)))
+        self.assertEqual(result["event_id"], 20)
+        envelope = enqueue.call_args.args[3]
+        self.assertEqual(envelope["factcheck_label"], provider_events.DEFAULT_FACTCHECK_LABEL)
+
+    def test_project_secret_still_wins_when_env_secret_is_different(self):
+        payload = {"repository": {"full_name": "acme/docs"}, "action": "edited"}
+        headers = {
+            "X-GitHub-Delivery": "delivery-proj", "X-GitHub-Event": "pull_request",
+            "X-Hub-Signature-256": signature(payload, "project-secret"),
+        }
+        source = {"id": 41, "project_id": 3,
+                  "webhook_config": {"webhook_secret": "project-secret"}}
+        with patch.object(provider_events.event_store, "github_webhook_sources", return_value=[source]), \
+             patch.object(provider_events, "_env_github_secret", return_value="different-env-secret"), \
+             patch.object(provider_events.INBOX, "enqueue", return_value=(21, True)) as enqueue:
+            result = asyncio.run(provider_events.github_webhook(request_for(payload, headers)))
+        self.assertEqual(result["event_id"], 21)
+        enqueue.assert_called_once()
 
     def test_worker_rejects_delivery_after_installation_disconnects(self):
         row = {"project_id": 3, "payload": {"installation_id": 7, "source_id": 41,

@@ -569,15 +569,23 @@ def generate(prompt: str, system: str = "", timeout: float = 120.0,
         return None
 
     if provider == "ollama":
+        # Thinking models (qwen3 and later) put their reasoning in `thinking`
+        # and, with it enabled, often leave `response` empty for JSON asks.
+        # Ask for the answer directly; models without a thinking mode accept
+        # the flag. A JSON report over many claims needs more room than prose.
         payload: dict[str, t.Any] = {
             "model": model, "prompt": prompt, "system": system, "stream": False,
-            "options": {"temperature": 0.3, "num_predict": 700},
+            "think": False,
+            "options": {"temperature": 0.3, "num_predict": 1500 if json_format else 700},
         }
         if json_format:
             payload["format"] = json_format if isinstance(json_format, dict) else "json"
         out = _post(f"{ollama_host()}/api/generate", payload,
                     timeout=timeout)
-        return out.get("response", "").strip() if out else None
+        if not out:
+            return None
+        text = str(out.get("response") or "").strip()
+        return text or str(out.get("thinking") or "").strip()
 
     if provider in ("openai", "gateway"):
         gateway = gateway_config() if provider == "gateway" else None

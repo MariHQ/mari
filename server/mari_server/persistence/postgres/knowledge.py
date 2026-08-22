@@ -65,14 +65,14 @@ def add_decision(statement: str, context: str, source: str, owner: str) -> bool:
     return bool(row)
 
 
-def fact_claims(*, verified_only: bool = False) -> set[str]:
+def fact_claims(*, verified_only: bool = False, original_case: bool = False) -> set[str]:
     project_id = access.require_current_access().project_id
     sql = "SELECT claim FROM facts WHERE project_id = %s"
     if verified_only:
         sql += " AND status = 'Verified'"
     with db.connect() as conn:
         rows = conn.execute(sql, (project_id,)).fetchall()
-    return {str(row["claim"]).lower() for row in rows}
+    return {str(row["claim"]) if original_case else str(row["claim"]).lower() for row in rows}
 
 
 def add_fact(claim: str, source: str, owner: str, document_id: int | None) -> bool:

@@ -41,6 +41,14 @@ class OllamaContractTests(unittest.TestCase):
         self.assertEqual(payload["model"], "gemma3:4b")
         self.assertFalse(payload["stream"])
         self.assertIn("ONLY valid JSON", payload["prompt"])
+        self.assertFalse(payload["think"])
+        self.assertEqual(payload["options"]["num_predict"], 1500)
+
+    def test_thinking_models_answer_from_the_thinking_field_when_response_is_empty(self) -> None:
+        with patch.object(llm, "generation_model", return_value=("ollama", "qwen3.6:27b")), \
+             patch.object(llm, "ollama_host", return_value="http://ollama:11434"), \
+             patch.object(llm, "_post", return_value={"response": "", "thinking": '{"ok": true}'}):
+            self.assertEqual(llm.generate_json("anything"), {"ok": True})
 
     def test_unreachable_ollama_degrades_with_an_actionable_error(self) -> None:
         with patch.object(llm, "generation_model", return_value=("ollama", "gemma3:4b")), \

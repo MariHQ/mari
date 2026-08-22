@@ -13,6 +13,7 @@ import typing as t
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
+from mari_server import settings as server_settings
 from mari_server.identity import access
 from mari_server.identity import routes as auth
 from mari_server.providers import connectors as component_connectors
@@ -33,6 +34,9 @@ from mari_components.connectors.events import (
 router = APIRouter()
 INBOX = DEFAULT_INBOX
 MAX_WEBHOOK_BYTES = 1_048_576
+DEFAULT_FACTCHECK_LABEL = "mari:factcheck"
+_MENTION_TRIGGER_PR_ACTIONS = {"opened", "edited"}
+_LABEL_TRIGGER_PR_ACTIONS = {"labeled", "opened", "synchronize"}
 
 
 def _json(value: t.Any) -> dict[str, t.Any]:
@@ -45,12 +49,28 @@ def _json(value: t.Any) -> dict[str, t.Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
-def _signed(raw: bytes, supplied: str, secret: str) -> bool:
-    try:
-        verify_hmac_sha256(raw, supplied, secret)
-        return True
-    except Exception:
-        return False
+def _signed(raw: bytes, supplied: str, *secrets: str) -> bool:
+    """Accept any non-empty secret in order (per-project secrets first)."""
+    for secret in secrets:
+        if not secret:
+            continue
+        try:
+            verify_hmac_sha256(raw, supplied, secret)
+            return True
+        except Exception:
+            continue
+    return False
+
+
+def _env_github_secret() -> str:
+    """The deploy-wide MARI_GITHUB_WEBHOOK_SECRET fallback, if set.
+
+    Signature verification tries the per-project ``github_bot.webhook_secret``
+    first; this is only consulted when no per-project secret matches, so a
+    deploy that only sets the env var (as /bots/status already treats as
+    "configured") actually verifies deliveries instead of 401ing every one.
+    """
+    return str(server_settings.get("github", "webhook_secret") or "").strip()
 
 
 async def _body(request: Request) -> bytes:
@@ -97,8 +117,37 @@ def _github_hint(event: str, payload: dict[str, t.Any]) -> dict[str, t.Any]:
         comment_author=str(actor.get("login") or "")[:200],
         comment_author_type=str(actor.get("type") or "")[:40],
         is_pull_request=bool(pull or issue.get("pull_request")),
+        labels=[str(_json(label).get("name") or "")[:200] for label in list(pull.get("labels") or [])[:50]],
     )
     return hint
+
+
+def requests_fact_check(hint: dict[str, t.Any], bot_login: str, label: str) -> bool:
+    """Decide whether a delivery should run fact validation on a pull request.
+
+    Two independent triggers, both scoped to pull requests and gated by the
+    same bot-author guard: a bare @mention of the bot in an issue comment or
+    in the PR body on open/edit, or the configured label being present on
+    labeled/opened/synchronize.
+    """
+    if not hint.get("is_pull_request"):
+        return False
+    if str(hint.get("comment_author_type") or "").casefold() == "bot":
+        return False
+    event = str(hint.get("event") or "")
+    action = str(hint.get("action") or "")
+    body = str(hint.get("comment_body") or "")
+    if event == "issue_comment" and requests_fact_validation(body, bot_login):
+        return True
+    if event == "pull_request":
+        if action in _MENTION_TRIGGER_PR_ACTIONS and requests_fact_validation(body, bot_login):
+            return True
+        if action in _LABEL_TRIGGER_PR_ACTIONS:
+            wanted = label.strip().casefold()
+            names = {str(name).strip().casefold() for name in hint.get("labels") or []}
+            if wanted and wanted in names:
+                return True
+    return False
 
 
 @router.post("/webhooks/github")
@@ -116,33 +165,36 @@ async def github_webhook(request: Request):
             return {"ok": True, "queued": False}
         raise HTTPException(400, "GitHub repository is required")
     signature = request.headers.get("X-Hub-Signature-256", "")
-    routes: list[tuple[dict, int, str]] = []
+    env_secret = _env_github_secret()
+    routes: list[tuple[dict, int, str, str]] = []
     external_id = str(_json(payload.get("installation")).get("id") or "")
     installation = event_store.github_installation(external_id) if external_id else None
     if installation:
         cfg = _json(installation.get("config"))
-        if not _signed(raw, signature, str(cfg.get("webhook_secret") or "")):
+        if not _signed(raw, signature, str(cfg.get("webhook_secret") or ""), env_secret):
             raise HTTPException(401, "bad GitHub signature")
         source = event_store.github_source(installation["project_id"], repository)
         if not source:
             raise HTTPException(404, "repository is not connected to this installation")
         routes.append(({**source, "project_id": installation["project_id"]},
-                       int(installation["id"]), str(cfg.get("bot_login") or "mari")))
+                       int(installation["id"]), str(cfg.get("bot_login") or "mari"),
+                       str(cfg.get("label") or DEFAULT_FACTCHECK_LABEL).strip() or DEFAULT_FACTCHECK_LABEL))
     else:
         for source in event_store.github_webhook_sources(repository):
             cfg = _json(source.get("webhook_config"))
-            if _signed(raw, signature, str(cfg.get("webhook_secret") or "")):
-                routes.append((source, 0, str(cfg.get("bot_login") or "mari")))
+            if _signed(raw, signature, str(cfg.get("webhook_secret") or ""), env_secret):
+                routes.append((source, 0, str(cfg.get("bot_login") or "mari"),
+                               str(cfg.get("label") or DEFAULT_FACTCHECK_LABEL).strip() or DEFAULT_FACTCHECK_LABEL))
         if not routes:
             raise HTTPException(401, "bad GitHub signature or repository is not connected")
 
     queued: list[int] = []
     try:
-        for source, installation_id, bot_login in routes:
+        for source, installation_id, bot_login, factcheck_label in routes:
             row_id, inserted = INBOX.enqueue(
                 "github", int(source["project_id"]), delivery_id,
                 {"installation_id": installation_id, "source_id": int(source["id"]),
-                 "bot_login": bot_login, "hint": hint},
+                 "bot_login": bot_login, "factcheck_label": factcheck_label, "hint": hint},
                 coalesce_key=f"source:{source['id']}",
             )
             if inserted:
@@ -246,10 +298,9 @@ def process_github_delivery(row: dict[str, t.Any]) -> None:
         raise RuntimeError("GitHub delivery does not match its routed source")
     with access.use_access(_worker_access(source, "github")):
         hint = _json(envelope.get("hint"))
-        if (hint.get("is_pull_request")
-                and str(hint.get("comment_author_type") or "").casefold() != "bot"
-                and requests_fact_validation(
-                    str(hint.get("comment_body") or ""), str(envelope.get("bot_login") or "mari"))):
+        bot_login = str(envelope.get("bot_login") or "mari")
+        factcheck_label = str(envelope.get("factcheck_label") or DEFAULT_FACTCHECK_LABEL)
+        if requests_fact_check(hint, bot_login, factcheck_label):
             from mari_server.knowledge.service import validate_github_pull_request
             validate_github_pull_request(
                 source, int(hint.get("number") or 0), str(row.get("delivery_id") or ""),

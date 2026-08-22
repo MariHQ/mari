@@ -378,7 +378,7 @@ def validate_github_pull_request(source: dict, number: int, delivery_id: str = "
         if patch:
             sections.append(f"File: {filename}\n{patch}")
     body = "\n\n".join(section for section in sections if section).strip()
-    claims = sorted(knowledge_store.fact_claims(verified_only=True))
+    claims = sorted(knowledge_store.fact_claims(verified_only=True, original_case=True))
     if not claims:
         report = "## Mari fact validation\n\nNo verified workspace facts are available yet, so this pull request could not be validated."
     elif not body:
@@ -405,7 +405,7 @@ def validate_github_pull_request(source: dict, number: int, delivery_id: str = "
         if contradictions:
             lines.extend(["", "### Contradictions"])
             for item in contradictions[:10]:
-                lines.append(f"- **{item.claim}** — {item.explanation}")
+                lines.append(f"- **{item.claim}**: {item.explanation}")
         else:
             lines.extend(["", "No contradictions were found in the text GitHub exposed for this change."])
         lines.extend(["", "_This checks text evidence against verified Mari facts; it is not a code-quality review._"])

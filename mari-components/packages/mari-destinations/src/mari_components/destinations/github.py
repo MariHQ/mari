@@ -11,14 +11,19 @@ from mari_components.errors import PermanentFailure
 from mari_components.http import HttpRequest, HttpTransport
 
 
-_FACT_INTENT = re.compile(r"\b(?:validate|verify|check|review)\b[^\n]{0,80}\bfacts?\b|\bfacts?\b[^\n]{0,80}\b(?:validate|verify|check|review)\b", re.I)
+def mentions_bot(body: str, bot_login: str = "mari") -> bool:
+    """A bare @login mention anywhere in the text, without requiring intent."""
+    login = bot_login.strip().lstrip("@") or "mari"
+    return bool(re.search(rf"(?<![\w-])@{re.escape(login)}(?![\w-])", body, re.I))
 
 
 def requests_fact_validation(body: str, bot_login: str = "mari") -> bool:
-    """Recognize a mention plus fact-validation intent without product state."""
-    login = bot_login.strip().lstrip("@") or "mari"
-    mentioned = re.search(rf"(?<![\w-])@{re.escape(login)}(?![\w-])", body, re.I)
-    return bool(mentioned and _FACT_INTENT.search(body))
+    """Recognize a request for a fact check without product state.
+
+    A bare @mention is enough on its own; explicit validate/verify/check/review
+    "facts" phrasing is still recognized, it is just no longer required.
+    """
+    return mentions_bot(body, bot_login)
 
 
 @dataclass(frozen=True, slots=True)

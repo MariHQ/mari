@@ -67,6 +67,31 @@ class KnowledgeRecipeTests(unittest.TestCase):
         self.assertEqual(evidence_confidence(text, (first,)), .9)
         self.assertEqual(evidence_confidence(text, (first, second)), 1)
 
+    def test_check_claims_tolerates_reordered_paraphrased_and_missing_claims(self):
+        claims = ["Retention is 30 days.", "Backups run nightly.", "Support answers within one hour."]
+        rows = [
+            {"claim": "backups run nightly", "verdict": "uncertain", "explanation": "Not mentioned", "evidence": []},
+            {"claim": "Retention is 30 days", "verdict": "supported", "explanation": "Direct", "evidence": self.evidence()},
+        ]
+        checked = check_claims(claims, [self.document], generate_json=self.generator({"assessments": rows}))
+        self.assertEqual([c.claim for c in checked], claims)
+        self.assertEqual([c.verdict for c in checked], ["supported", "uncertain", "uncertain"])
+        self.assertEqual(checked[2].explanation, "The model did not address this claim.")
+        with self.assertRaises(MalformedModelOutput):
+            check_claims(claims, [self.document], generate_json=self.generator({"assessments": [
+                {"claim": "Something else entirely", "verdict": "supported", "explanation": "", "evidence": []}]}))
+
+    def test_check_claims_accepts_bare_quotes_and_downgrades_unverifiable_evidence(self):
+        rows = [
+            {"claim": "Retention is 30 days.", "verdict": "supported", "explanation": "Direct", "evidence": ["Retention is 30 days."]},
+            {"claim": "Backups run nightly.", "verdict": "contradicted", "explanation": "Says weekly", "evidence": ["invented quote"]},
+        ]
+        checked = check_claims(["Retention is 30 days.", "Backups run nightly."], [self.document], generate_json=self.generator({"assessments": rows}))
+        self.assertEqual(checked[0].verdict, "supported")
+        self.assertEqual(checked[0].evidence[0].document_id, self.document.external_id)
+        self.assertEqual(checked[1].verdict, "uncertain")
+        self.assertIn("could not be verified", checked[1].explanation)
+
     def test_unknown_evidence_fails_without_fallback(self):
         with self.assertRaises(MalformedModelOutput):
             extract_facts([self.document], generate_json=self.generator({"facts": [{"claim": "x", "evidence": [{"document_id": "other", "quote": "x"}]}]}))
