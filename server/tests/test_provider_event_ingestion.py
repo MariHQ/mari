@@ -253,6 +253,31 @@ class ConfluenceEventTests(unittest.TestCase):
             "event": "page_updated", "page_id": "123", "space_key": "ENG"})
         self.assertNotIn("title", envelope["hint"])
 
+    def test_x_hub_signature_header_is_accepted(self):
+        headers = {
+            "X-Atlassian-Webhook-Identifier": "atl-1",
+            "X-Hub-Signature": signature(self.payload, "secret"),
+        }
+        with patch.object(provider_events.event_store, "confluence_source", return_value=self.source), \
+             patch.object(provider_events.INBOX, "enqueue", return_value=(18, True)) as enqueue:
+            result = asyncio.run(provider_events.confluence_webhook(
+                8, request_for(self.payload, headers)))
+        self.assertEqual(result["event_id"], 18)
+        enqueue.assert_called_once()
+
+    def test_x_hub_signature_is_preferred_over_legacy_mari_header(self):
+        headers = {
+            "X-Atlassian-Webhook-Identifier": "atl-1",
+            "X-Hub-Signature": signature(self.payload, "secret"),
+            "X-Mari-Signature-256": "sha256=bad",
+        }
+        with patch.object(provider_events.event_store, "confluence_source", return_value=self.source), \
+             patch.object(provider_events.INBOX, "enqueue", return_value=(19, True)) as enqueue:
+            result = asyncio.run(provider_events.confluence_webhook(
+                8, request_for(self.payload, headers)))
+        self.assertEqual(result["event_id"], 19)
+        enqueue.assert_called_once()
+
     def test_cross_space_event_is_rejected_before_enqueue(self):
         payload = {"event": "page_updated", "page": {
             "id": "123", "space": {"key": "HR"}}}

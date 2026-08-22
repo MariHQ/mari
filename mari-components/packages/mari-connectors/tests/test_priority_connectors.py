@@ -74,6 +74,72 @@ class PriorityConnectorTests(unittest.TestCase):
         # regardless of value; never send it.
         self.assertNotIn("orderby", polling.requests[0].url)
 
+    def test_confluence_author_prefers_last_editor_over_creator(self):
+        config = ConfluenceConfig("https://example.atlassian.net", "me@example.com", "secret")
+        polling = FakeHttp(
+            [
+                {
+                    "size": 1,
+                    "results": [
+                        {
+                            "id": "2",
+                            "title": "Two",
+                            "body": {"storage": {"value": "<p>Body</p>"}},
+                            "version": {"number": 3, "when": "2026-01-02T00:00:00Z",
+                                        "by": {"displayName": "Ana Ruiz"}},
+                            "history": {"lastUpdated": {"when": "2026-01-02T00:00:00Z"},
+                                        "createdBy": {"displayName": "Dev Park"}},
+                        }
+                    ],
+                }
+            ]
+        )
+        pages = list(poll_confluence(config, PollRequest(page_size=2), http=polling))
+        self.assertEqual(pages[0].upserts[0].metadata["author"], "Ana Ruiz")
+
+    def test_confluence_author_falls_back_to_creator_without_an_editor(self):
+        config = ConfluenceConfig("https://example.atlassian.net", "me@example.com", "secret")
+        polling = FakeHttp(
+            [
+                {
+                    "size": 1,
+                    "results": [
+                        {
+                            "id": "3",
+                            "title": "Three",
+                            "body": {"storage": {"value": "<p>Body</p>"}},
+                            "version": {"number": 1, "when": "2026-01-01T00:00:00Z"},
+                            "history": {"lastUpdated": {"when": "2026-01-01T00:00:00Z"},
+                                        "createdBy": {"displayName": "Dev Park"}},
+                        }
+                    ],
+                }
+            ]
+        )
+        pages = list(poll_confluence(config, PollRequest(page_size=2), http=polling))
+        self.assertEqual(pages[0].upserts[0].metadata["author"], "Dev Park")
+
+    def test_confluence_author_is_empty_when_no_person_is_exposed(self):
+        config = ConfluenceConfig("https://example.atlassian.net", "me@example.com", "secret")
+        polling = FakeHttp(
+            [
+                {
+                    "size": 1,
+                    "results": [
+                        {
+                            "id": "4",
+                            "title": "Four",
+                            "body": {"storage": {"value": "<p>Body</p>"}},
+                            "version": {"number": 1, "when": "2026-01-01T00:00:00Z"},
+                            "history": {"lastUpdated": {"when": "2026-01-01T00:00:00Z"}},
+                        }
+                    ],
+                }
+            ]
+        )
+        pages = list(poll_confluence(config, PollRequest(page_size=2), http=polling))
+        self.assertEqual(pages[0].upserts[0].metadata["author"], "")
+
     def test_confluence_site_strips_trailing_wiki_suffix(self):
         with_wiki = ConfluenceConfig("https://example.atlassian.net/wiki/", "me@example.com", "secret")
         self.assertEqual(confluence_site(with_wiki), "https://example.atlassian.net")
@@ -136,8 +202,106 @@ class PriorityConnectorTests(unittest.TestCase):
         fields_param = urllib.parse.parse_qs(urllib.parse.urlsplit(first_url).query)["fields"][0]
         self.assertEqual(
             fields_param,
-            "summary,description,comment,status,updated,issuetype,assignee,reporter,labels",
+            "summary,description,comment,status,updated,created,issuetype,assignee,reporter,labels",
         )
+        self.assertEqual(pages[0].upserts[0].updated_at, "2026-01-01T00:00:00Z")
+        self.assertEqual(pages[1].upserts[0].updated_at, "2026-01-02T00:00:00Z")
+
+    def test_jira_falls_back_to_created_when_updated_is_missing(self):
+        http = FakeHttp(
+            [
+                {
+                    "issues": [
+                        {
+                            "key": "MARI-3",
+                            "fields": {
+                                "summary": "No updated field",
+                                "description": {"content": []},
+                                "status": {"name": "Backlog"},
+                                "created": "2026-03-01T00:00:00.000+0000",
+                            },
+                        }
+                    ],
+                    "isLast": True,
+                },
+            ]
+        )
+        config = JiraConfig("https://example.atlassian.net", "me@example.com", "secret", project_key="MARI")
+        pages = list(poll_jira(config, PollRequest(page_size=1), http=http))
+        self.assertEqual(pages[0].upserts[0].updated_at, "2026-03-01T00:00:00Z")
+        self.assertEqual(pages[0].upserts[0].revision, "2026-03-01T00:00:00.000+0000")
+
+    def test_jira_author_prefers_assignee_over_reporter(self):
+        http = FakeHttp(
+            [
+                {
+                    "issues": [
+                        {
+                            "key": "MARI-4",
+                            "fields": {
+                                "summary": "Assigned issue",
+                                "description": {"content": []},
+                                "status": {"name": "In Progress"},
+                                "updated": "2026-01-01T00:00:00.000+0000",
+                                "assignee": {"displayName": "Mia Chen"},
+                                "reporter": {"displayName": "Ana Ruiz"},
+                            },
+                        }
+                    ],
+                    "isLast": True,
+                },
+            ]
+        )
+        config = JiraConfig("https://example.atlassian.net", "me@example.com", "secret", project_key="MARI")
+        pages = list(poll_jira(config, PollRequest(page_size=1), http=http))
+        self.assertEqual(pages[0].upserts[0].metadata["author"], "Mia Chen")
+
+    def test_jira_author_falls_back_to_reporter_when_unassigned(self):
+        http = FakeHttp(
+            [
+                {
+                    "issues": [
+                        {
+                            "key": "MARI-5",
+                            "fields": {
+                                "summary": "Unassigned issue",
+                                "description": {"content": []},
+                                "status": {"name": "Backlog"},
+                                "updated": "2026-01-01T00:00:00.000+0000",
+                                "reporter": {"displayName": "Ana Ruiz"},
+                            },
+                        }
+                    ],
+                    "isLast": True,
+                },
+            ]
+        )
+        config = JiraConfig("https://example.atlassian.net", "me@example.com", "secret", project_key="MARI")
+        pages = list(poll_jira(config, PollRequest(page_size=1), http=http))
+        self.assertEqual(pages[0].upserts[0].metadata["author"], "Ana Ruiz")
+
+    def test_jira_author_is_empty_when_no_person_is_exposed(self):
+        http = FakeHttp(
+            [
+                {
+                    "issues": [
+                        {
+                            "key": "MARI-6",
+                            "fields": {
+                                "summary": "No one",
+                                "description": {"content": []},
+                                "status": {"name": "Backlog"},
+                                "updated": "2026-01-01T00:00:00.000+0000",
+                            },
+                        }
+                    ],
+                    "isLast": True,
+                },
+            ]
+        )
+        config = JiraConfig("https://example.atlassian.net", "me@example.com", "secret", project_key="MARI")
+        pages = list(poll_jira(config, PollRequest(page_size=1), http=http))
+        self.assertEqual(pages[0].upserts[0].metadata["author"], "")
 
     def test_google_drive_snapshot_then_changes_tombstone(self):
         config = GoogleDriveConfig("token")

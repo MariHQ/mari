@@ -229,8 +229,9 @@ async def confluence_webhook(source_id: int, request: Request):
     if not source:
         raise HTTPException(404, "Confluence source not found")
     cfg = _json(source.get("config"))
-    if not _signed(raw, request.headers.get("X-Mari-Signature-256", ""),
-                   str(cfg.get("webhook_secret") or "")):
+    supplied = (request.headers.get("X-Hub-Signature")
+                or request.headers.get("X-Mari-Signature-256", ""))
+    if not _signed(raw, supplied, str(cfg.get("webhook_secret") or "")):
         raise HTTPException(401, "bad Confluence signature")
     hint = _confluence_hint(payload)
     configured_space = str(cfg.get("space_key") or "").strip()
@@ -263,7 +264,8 @@ def confluence_webhook_setup(
     configured = bool(str(_json(source.get("config")).get("webhook_secret") or ""))
     return {
         "url": str(request.base_url).rstrip("/") + f"/webhooks/confluence/{source_id}",
-        "signature_header": "X-Mari-Signature-256",
+        "signature_header": "X-Hub-Signature",
+        "signature_header_fallback": "X-Mari-Signature-256",
         "delivery_header": "X-Atlassian-Webhook-Identifier",
         "algorithm": "HMAC-SHA256",
         "configured": configured,

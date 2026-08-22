@@ -155,6 +155,11 @@ def _document(page: Mapping[str, Any], site: str) -> KnowledgeDocument:
     updated = (((page.get("history") or {}).get("lastUpdated") or {}).get("when")) or (
         (page.get("version") or {}).get("when") or ""
     )
+    # The last editor is the more useful owner; a page nobody has edited since
+    # creation falls back to who created it. Never the connector's own name.
+    author = str(((page.get("version") or {}).get("by") or {}).get("displayName") or "") or str(
+        ((page.get("history") or {}).get("createdBy") or {}).get("displayName") or ""
+    )
     links = page.get("_links") or {}
     webui = str(links.get("webui") or "")
     return KnowledgeDocument(
@@ -165,7 +170,7 @@ def _document(page: Mapping[str, Any], site: str) -> KnowledgeDocument:
         updated_at=str(updated),
         source_url=site + webui if webui.startswith("/") else webui,
         acl=DocumentACL("connector_scope"),
-        metadata={"space_key": str((page.get("space") or {}).get("key") or "")},
+        metadata={"space_key": str((page.get("space") or {}).get("key") or ""), "author": author},
     )
 
 
@@ -178,7 +183,7 @@ def fetch_confluence_page(
         page = _get(
             config,
             f"/wiki/rest/api/content/{urllib.parse.quote(page_id, safe='')}",
-            {"expand": "body.storage,version,history.lastUpdated,space"},
+            {"expand": "body.storage,version,history.lastUpdated,history.createdBy,space"},
             http=http,
         )
     except PermanentFailure as error:
@@ -207,7 +212,7 @@ def poll_confluence(
     for page_number in range(request.page_limit):
         params: dict[str, Any] = {
             "type": "page",
-            "expand": "body.storage,version,history.lastUpdated,space,_links",
+            "expand": "body.storage,version,history.lastUpdated,history.createdBy,space,_links",
             "limit": request.page_size,
             "start": start,
             # No "orderby": live Confluence sites now reject it on this

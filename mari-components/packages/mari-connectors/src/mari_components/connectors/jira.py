@@ -54,7 +54,7 @@ def _text(value: Any) -> str:
     return ""
 
 
-_FIELDS = "summary,description,comment,status,updated,issuetype,assignee,reporter,labels"
+_FIELDS = "summary,description,comment,status,updated,created,issuetype,assignee,reporter,labels"
 
 
 def poll_jira(config: JiraConfig, request: PollRequest, *, http: HttpTransport) -> Iterator[PollPage]:
@@ -101,8 +101,17 @@ def poll_jira(config: JiraConfig, request: PollRequest, *, http: HttpTransport) 
             body = _text(issue_fields.get("description"))
             for comment in comments:
                 body += f"\n\nComment by {(comment.get('author') or {}).get('displayName', 'unknown')}:\n{_text(comment.get('body'))}"
-            updated = str(issue_fields.get("updated") or "")
+            # Jira always sets `updated`; `created` is only a fallback for
+            # feeds/mocks that omit it, matching the freshness field Confluence
+            # uses (history.lastUpdated / version.when, never the create date).
+            updated = str(issue_fields.get("updated") or issue_fields.get("created") or "")
             newest = max(newest, updated)
+            # The assignee is the person actually working the issue; a
+            # backlog issue nobody has picked up falls back to the reporter.
+            # Never the connector's own name.
+            author = str((issue_fields.get("assignee") or {}).get("displayName") or "") or str(
+                (issue_fields.get("reporter") or {}).get("displayName") or ""
+            )
             documents.append(
                 KnowledgeDocument(
                     key,
@@ -112,7 +121,8 @@ def poll_jira(config: JiraConfig, request: PollRequest, *, http: HttpTransport) 
                     updated_at=updated,
                     source_url=f"{_site(config)}/browse/{urllib.parse.quote(key, safe='')}",
                     acl=DocumentACL("connector_scope"),
-                    metadata={"status": str((issue_fields.get("status") or {}).get("name") or "")},
+                    metadata={"status": str((issue_fields.get("status") or {}).get("name") or ""),
+                              "author": author},
                 )
             )
         page_token = value.get("nextPageToken")

@@ -82,6 +82,15 @@ def _checkpoint(conn, provider: str, item: str, stage: str, done: int, total: in
          time.strftime("%H:%M:%S", time.gmtime(time.time() - started)), status))
 
 
+def document_author(document) -> str:
+    """The real person behind one connector document, when the connector's
+    page metadata exposes one (Confluence's version.by/history.createdBy,
+    Jira's assignee/reporter, ...) — never the connector's own display name.
+    Lineage and the Knowledge inspector show no owner rather than "Confluence"
+    or "Jira" for a document nothing maps a person to."""
+    return str((document.metadata or {}).get("author") or "").strip()
+
+
 def deletion_ids(rows: list[dict], provider_key: str, seen_paths: set[str],
                  tombstones: set[str], *, full: bool,
                  snapshot_complete: bool) -> list[int]:
@@ -189,7 +198,7 @@ def sync_source(source_id: int, full: bool, *, update_status, fire_document_trig
                         "source_id": source_id,
                         "external_id": f"{key}:{source_id}:{path}",
                         "title": title, "body": body, "source_path": f"{key}/{path}",
-                        "content_hash": fingerprint, "author": author, "source": key,
+                        "content_hash": fingerprint, "author": document_author(document), "source": key,
                         "initials": initials, "acl_visibility": document.acl.visibility,
                         "acl_principals": principals, "source_updated_at": document.updated_at,
                     })
