@@ -95,6 +95,8 @@ class FakeGitHub:
     tombstones. Only GitHub's remote HTTP service is replaced.
     """
 
+    repository = "acme/knowledge"
+
     def __init__(self) -> None:
         self.head = "head-1"
         self.files = {

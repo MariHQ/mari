@@ -22,3 +22,8 @@ python -m examples.github_pipeline.main
 Live mode requires `MARI_EXAMPLE_MODE=live`, real connector/model variables,
 and the exact received `GITHUB_WEBHOOK_JSON`, `GITHUB_WEBHOOK_SIGNATURE`, and
 `GITHUB_WEBHOOK_EVENT`. The example never reads a default repository or token.
+
+`GITHUB_REPOSITORY` is only read in live mode. Fake mode pins the fixture
+repository (`acme/knowledge`) because GitHub Actions resets
+`GITHUB_REPOSITORY` to the workflow's own repository and ignores `env:`
+overrides, which would otherwise make the deterministic run fail.

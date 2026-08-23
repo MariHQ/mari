@@ -69,10 +69,13 @@ def run(environment: Mapping[str, str] | None = None) -> dict[str, object]:
     env = os.environ if environment is None else environment
     mode = selected_mode(env)
     token = required(env, "GITHUB_TOKEN")
-    repository = required(env, "GITHUB_REPOSITORY")
     paths = required(env, "GITHUB_PATHS")
     webhook_secret = required(env, "GITHUB_WEBHOOK_SECRET")
     provider = FakeGitHub() if mode == "fake" else urllib_transport
+    # GitHub Actions always resets GITHUB_REPOSITORY to the workflow's own
+    # repository, ignoring `env:` overrides, so fake mode pins the fixture
+    # repository instead of trusting the ambient environment.
+    repository = provider.repository if mode == "fake" else required(env, "GITHUB_REPOSITORY")
     config = GitHubConfig(
         token, repository,
         paths=tuple(value.strip() for value in paths.split(",") if value.strip()),
