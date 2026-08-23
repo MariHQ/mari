@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import datetime
+import email.utils
 import json
 from typing import Any, Mapping
 
@@ -25,10 +27,20 @@ def send(http: HttpTransport, request: HttpRequest) -> HttpResponse:
         raw = next(
             (value for key, value in response.headers.items() if key.casefold() == "retry-after"), None
         )
-        try:
-            delay = float(raw) if raw is not None else None
-        except ValueError:
-            delay = None
+        delay = None
+        if raw is not None:
+            try:
+                delay = float(raw)
+            except ValueError:
+                # Retry-After is also allowed as an HTTP-date.
+                try:
+                    moment = email.utils.parsedate_to_datetime(raw)
+                except (TypeError, ValueError):
+                    moment = None
+                if moment is not None:
+                    if moment.tzinfo is None:
+                        moment = moment.replace(tzinfo=datetime.timezone.utc)
+                    delay = max(0.0, (moment - datetime.datetime.now(datetime.timezone.utc)).total_seconds())
         raise RateLimitFailure("provider rate limit exceeded", retry_after=delay)
     if response.status in {408, 425} or response.status >= 500:
         raise TransientFailure(f"provider request failed (HTTP {response.status})")

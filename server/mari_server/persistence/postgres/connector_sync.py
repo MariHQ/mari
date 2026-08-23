@@ -23,6 +23,11 @@ from mari_server.persistence.postgres import document_index
 from mari_server.identity import context as access
 from mari_server.persistence.postgres import lineage as links
 from mari_components import IncompleteSnapshot, SyncMode
+from mari_components.errors import (
+    AuthenticationFailure,
+    RateLimitFailure,
+    TransientFailure,
+)
 from mari_components.sync import ManifestEntry, SyncState
 from mari_components.connectors import CONNECTOR_CATALOG, call_with_retry, connector_definition
 from mari_components.sync.ingestion import AppliedPage, consume_connector_pages
@@ -111,6 +116,21 @@ def deletion_ids(rows: list[dict], provider_key: str, seen_paths: set[str],
     return gone
 
 
+def validation_failure(result) -> Exception:
+    """The exception a failed ValidationResult deserves. Stringifying every
+    failure into ValueError made classify_error read a network blip as
+    permanent, so call_with_retry never retried validation."""
+    kind = str(getattr(result, "kind", "") or "")
+    message = str(getattr(result, "message", "") or "connector validation failed")
+    if kind == "transient":
+        return TransientFailure(message)
+    if kind == "rate_limit":
+        return RateLimitFailure(message)
+    if kind == "auth":
+        return AuthenticationFailure(message)
+    return ValueError(message)
+
+
 def sweep_inputs(cfg: dict, full: bool) -> tuple[str | None, str | None, bool]:
     """The (cursor, checkpoint, authoritative_full) a sweep may honestly use.
 
@@ -173,7 +193,7 @@ def sync_source(source_id: int, full: bool, *, update_status, fire_document_trig
         def validate_once() -> None:
             result = definition.validate(cfg, http=connector_provider.http_transport)
             if not result.ok:
-                raise ValueError(result.message)
+                raise validation_failure(result)
         call_with_retry(validate_once, sleep=time.sleep)
 
         # —— poll and apply one page at a time ——

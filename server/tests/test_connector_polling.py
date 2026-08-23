@@ -76,5 +76,18 @@ class SweepInputTests(unittest.TestCase):
         self.assertTrue(authoritative)
 
 
+class ValidationFailureTests(unittest.TestCase):
+    def test_transient_validation_failures_raise_retryable_exceptions(self) -> None:
+        # A network blip during validate must classify transient so
+        # call_with_retry retries it instead of failing the sync run.
+        from mari_components.connectors.protocol import ErrorKind, ValidationResult, classify_error
+        for kind, expected in (("transient", ErrorKind.TRANSIENT),
+                               ("rate_limit", ErrorKind.RATE_LIMIT),
+                               ("auth", ErrorKind.AUTH),
+                               ("", ErrorKind.PERMANENT)):
+            error = connect_sync.validation_failure(ValidationResult(False, "boom", kind=kind))
+            self.assertEqual(classify_error(error), expected, kind)
+
+
 if __name__ == "__main__":
     unittest.main()

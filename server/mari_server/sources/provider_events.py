@@ -24,6 +24,8 @@ from mari_server.persistence.postgres import documents as document_repository
 from mari_server.search.service import invalidate_search
 from mari_server.persistence.postgres.event_inbox import DEFAULT_INBOX
 from mari_components.connectors import ConfluenceConfig, fetch_confluence_page
+from mari_components.sync import document_fingerprint
+from mari_server.persistence.postgres.connector_sync import document_author
 from mari_components.destinations import requests_fact_validation
 from mari_components.connectors.events import (
     MAX_DIRTY_PATHS, confluence_change_hint, github_change_hint,
@@ -339,10 +341,13 @@ def _sync_confluence_page(source: dict[str, t.Any], page_id: str) -> None:
         else:
             title = document.title or path
             body = document.body
-            content_hash = document.revision or document_index.content_hash(f"{title}\n\n{body}")
+            # The poll manifest stores document_fingerprint(); writing the raw
+            # Confluence version number here made every webhook-synced page
+            # re-chunk, re-embed, and fire document_changed on the next poll.
+            content_hash = document_fingerprint(document)
             doc_id, _ = document_index.upsert_document(
                 conn, int(source["id"]), f"confluence:{source['id']}:{path}", title, body,
-                f"confluence/{path}", "page", content_hash, "Confluence",
+                f"confluence/{path}", "page", content_hash, document_author(document) or "Confluence",
                 source="confluence", initials="CO", acl_visibility="connector_scope",
                 source_updated_at=document.updated_at,
             )

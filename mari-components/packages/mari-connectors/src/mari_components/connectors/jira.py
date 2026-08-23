@@ -10,7 +10,7 @@ from typing import Any, Iterator
 import urllib.parse
 
 from mari_components.connectors._shared import json_response
-from mari_components.connectors.protocol import ValidationResult
+from mari_components.connectors.protocol import ValidationResult, classify_error
 from mari_components.http import HttpRequest, HttpTransport
 from mari_components.types import DocumentACL, KnowledgeDocument, PollPage, PollRequest
 
@@ -32,27 +32,51 @@ def _headers(config: JiraConfig) -> dict[str, str]:
 
 
 def _site(config: JiraConfig) -> str:
-    return config.site_url.strip().rstrip("/")
+    site = config.site_url.strip().rstrip("/")
+    return site if site.startswith(("http://", "https://")) else f"https://{site}"
 
 
 def validate_jira(config: JiraConfig, *, http: HttpTransport) -> ValidationResult:
     try:
         value = json_response(http, HttpRequest("GET", _site(config) + "/rest/api/3/myself", _headers(config)))
     except Exception as error:
-        return ValidationResult(False, str(error))
+        return ValidationResult(False, str(error), kind=classify_error(error).value)
     return ValidationResult(True, identity=str(value.get("emailAddress") or value.get("displayName") or ""))
 
 
 def _text(value: Any) -> str:
+    """Plain text from an ADF node tree. Every node kind that carries visible
+    content must surface it, separated the way a reader would separate it."""
     if isinstance(value, str):
         return value
     if isinstance(value, list):
         return "".join(_text(item) for item in value)
-    if isinstance(value, dict):
-        own = str(value.get("text") or "")
-        children = _text(value.get("content") or [])
-        return own + children + ("\n" if value.get("type") in {"paragraph", "heading", "listItem"} else "")
-    return ""
+    if not isinstance(value, dict):
+        return ""
+    kind = str(value.get("type") or "")
+    if kind == "hardBreak":
+        return "\n"
+    if kind in {"mention", "emoji"}:
+        return str((value.get("attrs") or {}).get("text") or "")
+    own = str(value.get("text") or "")
+    if own:
+        for mark in value.get("marks") or []:
+            if isinstance(mark, dict) and mark.get("type") == "link":
+                href = str((mark.get("attrs") or {}).get("href") or "")
+                if href and href not in own:
+                    own = f"{own} ({href})"
+                break
+    children = _text(value.get("content") or [])
+    combined = own + children
+    if kind == "codeBlock":
+        return combined.rstrip("\n") + "\n"
+    if kind in {"tableCell", "tableHeader"}:
+        return combined.strip() + " | "
+    if kind == "tableRow":
+        return combined + "\n"
+    if kind == "listItem":
+        return "- " + combined + ("" if combined.endswith("\n") else "\n")
+    return combined + ("\n" if kind in {"paragraph", "heading"} else "")
 
 
 _FIELDS = "summary,description,comment,status,updated,created,issuetype,assignee,reporter,labels"
@@ -163,11 +187,24 @@ def poll_jira(config: JiraConfig, request: PollRequest, *, http: HttpTransport) 
                               "author": author},
                 )
             )
+        sent_token = page_token
         page_token = value.get("nextPageToken")
         is_last = value.get("isLast")
         if is_last is None:
             is_last = not page_token
         terminal = bool(is_last) or not issues
+        if not terminal and (not page_token or page_token == sent_token):
+            # isLast=false with no advancing token cannot make progress;
+            # re-requesting the same page until page_limit is not a sweep.
+            # Hold the cursor and report the snapshot honestly incomplete.
+            yield PollPage(
+                tuple(documents),
+                next_cursor=request.cursor,
+                next_checkpoint=None,
+                snapshot_complete=False,
+                provider_metadata={"reason": "stuck_pagination"},
+            )
+            return
         yield PollPage(
             tuple(documents),
             next_cursor=newest if terminal else request.cursor,

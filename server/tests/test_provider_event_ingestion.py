@@ -11,6 +11,7 @@ from fastapi import HTTPException, Request
 
 from mari_server.sources import provider_events
 from mari_components import KnowledgeDocument
+from mari_components.sync import document_fingerprint
 
 
 def request_for(payload: dict, headers: dict[str, str]) -> Request:
@@ -344,7 +345,10 @@ class ConfluenceEventTests(unittest.TestCase):
         chunks.assert_called_once_with(conn, 91, "Canonical", "Trusted", 100, 10)
         saved = finalize.call_args.args[3]
         self.assertEqual(saved["cursor"], "durable-poll-cursor")
-        self.assertEqual(saved["item_hashes"]["123"], "9")
+        # The webhook path must store the same fingerprint the poll manifest
+        # computes, or the next scheduled poll re-upserts the page it just
+        # synced (2026-08-23 connector sweep, finding 11).
+        self.assertEqual(saved["item_hashes"]["123"], document_fingerprint(canonical))
 
 
 class _Context:

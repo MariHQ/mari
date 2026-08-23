@@ -27,6 +27,10 @@ class ValidationResult:
     ok: bool
     message: str = ""
     identity: str = ""
+    # ErrorKind.value of the underlying failure, when validation failed on an
+    # exception. Lets callers retry transient blips instead of reading every
+    # stringified error as permanent.
+    kind: str = ""
 
 
 def classify_error(error: BaseException) -> ErrorKind:

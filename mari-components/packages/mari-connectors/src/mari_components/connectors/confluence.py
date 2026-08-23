@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 from dataclasses import dataclass
+import datetime as dt
 import html
 from html.parser import HTMLParser
 import json
@@ -11,7 +12,7 @@ from typing import Any, Iterator, Mapping
 import urllib.parse
 
 from mari_components.connectors._shared import json_response
-from mari_components.connectors.protocol import ValidationResult
+from mari_components.connectors.protocol import ValidationResult, classify_error
 from mari_components.errors import AuthenticationFailure, PermanentFailure
 from mari_components.http import HttpRequest, HttpTransport
 from mari_components.types import DocumentACL, KnowledgeDocument, PollPage, PollRequest
@@ -36,42 +37,106 @@ class _StorageText(HTMLParser):
         super().__init__(convert_charrefs=True)
         self.output: list[str] = []
         self.list_depth = 0
-        self.code_depth = 0
+        self.skip_depth = 0
+        self.code_opener: str | None = None
+        self.macro_names: list[str] = []
+        self.param_keeps: list[bool] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag in {"h1", "h2", "h3", "h4", "h5", "h6"}:
+        mapping = dict(attrs)
+        if tag == "ac:parameter":
+            # Macro parameters are configuration, not content, and glued
+            # straight into the body they read as garbage ("Team directorytrue").
+            # The one exception is the title parameter, which is the visible
+            # text of panels and status lozenges.
+            keep = str(mapping.get("ac:name") or "") == "title"
+            self.param_keeps.append(keep)
+            if not keep:
+                self.skip_depth += 1
+            return
+        if tag == "ac:task-status":
+            self.skip_depth += 1
+            return
+        if self.skip_depth:
+            return
+        if tag == "ac:structured-macro":
+            name = str(mapping.get("ac:name") or "")
+            self.macro_names.append(name)
+            if name == "code" and self.code_opener is None:
+                self.code_opener = tag
+                self.output.append("\n```\n")
+        elif tag == "ac:image":
+            alt = str(mapping.get("ac:alt") or "")
+            if alt:
+                self.output.append(alt + " ")
+        elif tag == "ri:page":
+            title = str(mapping.get("ri:content-title") or "")
+            if title:
+                self.output.append(title + " ")
+        elif tag in {"h1", "h2", "h3", "h4", "h5", "h6"}:
             self.output.append("\n\n" + "#" * int(tag[1]) + " ")
         elif tag in {"ul", "ol"}:
             self.list_depth += 1
         elif tag == "li":
             self.output.append("\n" + "  " * max(self.list_depth - 1, 0) + "- ")
-        elif tag in {"pre", "code"} and not self.code_depth:
-            self.code_depth += 1
-            self.output.append("\n```\n" if tag == "pre" else "`")
+        elif tag == "pre":
+            if self.code_opener is None:
+                self.code_opener = tag
+                self.output.append("\n```\n")
+        elif tag == "code":
+            if self.code_opener is None:
+                self.code_opener = tag
+                self.output.append("`")
         elif tag == "br":
             self.output.append("\n")
         elif tag in {"td", "th"}:
             self.output.append(" | ")
-        elif tag == "ac:structured-macro" and dict(attrs).get("ac:name") == "code":
-            self.code_depth += 1
-            self.output.append("\n```\n")
 
     def handle_endtag(self, tag: str) -> None:
-        if tag in {"h1", "h2", "h3", "h4", "h5", "h6"}:
+        if tag == "ac:parameter":
+            keep = self.param_keeps.pop() if self.param_keeps else False
+            if keep:
+                self.output.append("\n")
+            else:
+                self.skip_depth = max(0, self.skip_depth - 1)
+            return
+        if tag == "ac:task-status":
+            self.skip_depth = max(0, self.skip_depth - 1)
+            return
+        if self.skip_depth:
+            return
+        if tag == "ac:structured-macro":
+            # Only the macro that opened the fence may close it; an info panel
+            # inside inline code must not emit a stray fence.
+            name = self.macro_names.pop() if self.macro_names else ""
+            if name == "code" and self.code_opener == tag:
+                self.code_opener = None
+                self.output.append("\n```\n")
+        elif tag in {"h1", "h2", "h3", "h4", "h5", "h6"}:
             self.output.append("\n")
         elif tag in {"ul", "ol"}:
             self.list_depth = max(0, self.list_depth - 1)
-        elif tag in {"pre", "code"} and self.code_depth:
-            self.code_depth -= 1
-            self.output.append("\n```\n" if tag == "pre" else "`")
-        elif tag == "ac:structured-macro" and self.code_depth:
-            self.code_depth -= 1
-            self.output.append("\n```\n")
+        elif tag == "pre":
+            if self.code_opener == tag:
+                self.code_opener = None
+                self.output.append("\n```\n")
+        elif tag == "code":
+            if self.code_opener == tag:
+                self.code_opener = None
+                self.output.append("`")
         elif tag in self._BLOCK_END:
             self.output.append("\n")
 
     def handle_data(self, data: str) -> None:
-        self.output.append(data)
+        if not self.skip_depth:
+            self.output.append(data)
+
+    def unknown_decl(self, data: str) -> None:
+        # CDATA sections hold code samples verbatim; stripping the guards and
+        # parsing the payload as HTML ate the markup a knowledge base exists
+        # to index.
+        if not self.skip_depth and data.startswith("CDATA["):
+            self.output.append(data[len("CDATA["):])
 
     def text(self) -> str:
         lines = [line.rstrip() for line in "".join(self.output).split("\n")]
@@ -93,13 +158,39 @@ def storage_to_text(xhtml: str) -> str:
         return ""
     parser = _StorageText()
     try:
-        parser.feed(xhtml.replace("<![CDATA[", "").replace("]]>", ""))
+        parser.feed(xhtml)
         parser.close()
         return parser.text()
     except Exception:
         import re
 
         return html.unescape(re.sub(r"<[^>]+>", " ", xhtml)).strip()
+
+
+def _when(value: str) -> dt.datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = dt.datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=dt.timezone.utc)
+
+
+def _order_key(time_str: str, id_str: str) -> tuple:
+    """A total order over (updated_at, page id) cursor pairs.
+
+    Timestamps compare as instants (string compare misorders "…07Z" against
+    "…07.500000Z"), and numeric page ids compare as numbers (a new page with
+    id 1000 must not sort below a stored id of 999)."""
+    when = _when(time_str)
+    time_part = (1, when, "") if when is not None else (0, dt.datetime.min.replace(tzinfo=dt.timezone.utc), time_str)
+    id_text = str(id_str or "")
+    id_part = (0, int(id_text), "") if id_text.isdigit() else (1, 0, id_text)
+    return (time_part, id_part)
 
 
 def _site(config: ConfluenceConfig) -> str:
@@ -138,9 +229,9 @@ def validate_confluence(config: ConfluenceConfig, *, http: HttpTransport) -> Val
     try:
         data = _get(config, "/wiki/rest/api/space", {"limit": 1}, http=http)
     except AuthenticationFailure as error:
-        return ValidationResult(False, str(error))
+        return ValidationResult(False, str(error), kind=classify_error(error).value)
     except Exception as error:
-        return ValidationResult(False, str(error))
+        return ValidationResult(False, str(error), kind=classify_error(error).value)
     if "results" not in data:
         return ValidationResult(False, "Confluence space API returned an unexpected response")
     return ValidationResult(True, identity=config.email.strip())
@@ -168,7 +259,9 @@ def _document(page: Mapping[str, Any], site: str) -> KnowledgeDocument:
         storage_to_text(str(body)),
         revision=version,
         updated_at=str(updated),
-        source_url=site + webui if webui.startswith("/") else webui,
+        # The web UI lives under /wiki on Cloud; _site() strips it for REST
+        # calls, so it must come back here or every citation link 404s.
+        source_url=site + "/wiki" + webui if webui.startswith("/") else webui,
         acl=DocumentACL("connector_scope"),
         metadata={"space_key": str((page.get("space") or {}).get("key") or ""), "author": author},
     )
@@ -234,15 +327,16 @@ def poll_confluence(
         data = _get(config, "/wiki/rest/api/content", params, http=http)
         documents = sorted(
             (_document(page, _site(config)) for page in data.get("results") or []),
-            key=lambda document: (document.updated_at, document.external_id),
+            key=lambda document: _order_key(document.updated_at, document.external_id),
         )
         emitted: list[KnowledgeDocument] = []
         for document in documents:
             key = (document.updated_at, document.external_id)
-            if request.cursor and key <= filter_key:
+            if request.cursor and _order_key(*key) <= _order_key(*filter_key):
                 continue
             emitted.append(document)
-            last_key = max(last_key, key)
+            if _order_key(*key) > _order_key(*last_key):
+                last_key = key
         size = int(data.get("size", len(documents)) or 0)
         # Confluence applies `limit` before permission filtering and silently
         # caps it at a server maximum, so a short window proves nothing. When
