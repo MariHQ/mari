@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 from dataclasses import dataclass
+import datetime as dt
 import json
 from typing import Any, Iterator
 import urllib.parse
@@ -57,6 +58,31 @@ def _text(value: Any) -> str:
 _FIELDS = "summary,description,comment,status,updated,created,issuetype,assignee,reporter,labels"
 
 
+def _parse_time(value: str) -> dt.datetime | None:
+    """Jira renders ``updated`` as ``2026-05-09T22:24:06.157-0400`` in the
+    requesting user's profile timezone. None when the value is not a time."""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = dt.datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=dt.timezone.utc)
+
+
+def _jql_time(moment: dt.datetime) -> str:
+    """JQL date literals are ``yyyy-MM-dd HH:mm`` (minute precision, no
+    offset) interpreted in the requesting user's profile timezone. Jira
+    rendered the source timestamp in that same timezone, so its wall-clock
+    reading is the literal to send; the minute is floored and the query uses
+    ``>=`` so nothing updated inside the cursor minute is skipped (the
+    manifest hash turns the overlap into unchanged rows)."""
+    return moment.strftime("%Y-%m-%d %H:%M")
+
+
 def poll_jira(config: JiraConfig, request: PollRequest, *, http: HttpTransport) -> Iterator[PollPage]:
     # /rest/api/3/search was removed by Atlassian; /search/jql pages by an
     # opaque nextPageToken instead of startAt/total, and rejects an unbounded
@@ -67,15 +93,21 @@ def poll_jira(config: JiraConfig, request: PollRequest, *, http: HttpTransport) 
         f"project = {config.project_key.strip()}" if config.project_key.strip() else "updated >= -365d"
     )
     where_parts = [config.jql.strip() or default_bound]
-    if request.cursor:
-        escaped = str(request.cursor).replace('"', '\\"')
-        where_parts.append(f'updated > "{escaped}"')
+    # The cursor is the raw Jira timestamp of the newest issue seen. JQL does
+    # not accept that ISO form (it silently matches nothing: HTTP 200, zero
+    # issues), so it is re-rendered as a JQL date literal. Anything that is
+    # not a timestamp (an older release persisted page tokens here) is
+    # ignored rather than sent, which falls back to the bounded default sweep.
+    cursor_time = _parse_time(request.cursor or "")
+    if cursor_time is not None:
+        where_parts.append(f'updated >= "{_jql_time(cursor_time)}"')
     where_clause = " AND ".join(part for part in where_parts if part)
     # ORDER BY is a clause suffix, not a boolean condition: it must not be
     # AND-joined into the WHERE clause (that is a JQL parse error: "Expecting
     # a field name but got 'ORDER'").
     jql = f"{where_clause} ORDER BY updated ASC, key ASC"
-    newest = str(request.cursor or "")
+    newest = str(request.cursor or "") if cursor_time is not None else ""
+    newest_time = cursor_time
     for _ in range(request.page_limit):
         params: dict[str, Any] = {
             "jql": jql,
@@ -105,7 +137,13 @@ def poll_jira(config: JiraConfig, request: PollRequest, *, http: HttpTransport) 
             # feeds/mocks that omit it, matching the freshness field Confluence
             # uses (history.lastUpdated / version.when, never the create date).
             updated = str(issue_fields.get("updated") or issue_fields.get("created") or "")
-            newest = max(newest, updated)
+            # Compare as instants, not strings: offsets flip across DST
+            # (-0400/-0500) and break lexical order.
+            updated_time = _parse_time(updated)
+            if updated_time is not None and (newest_time is None or updated_time > newest_time):
+                newest, newest_time = updated, updated_time
+            elif updated_time is None and newest_time is None:
+                newest = max(newest, updated)
             # The assignee is the person actually working the issue; a
             # backlog issue nobody has picked up falls back to the reporter.
             # Never the connector's own name.

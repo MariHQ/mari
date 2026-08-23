@@ -200,15 +200,21 @@ def poll_confluence(
 ) -> Iterator[PollPage]:
     start = 0
     cursor_time, _, cursor_id = str(request.cursor or "").partition("|")
+    # The caller's cursor is the change filter for the whole sweep; the
+    # checkpoint's cursor_time/cursor_id is only the high-water mark of the
+    # batches already seen. Reusing the high-water mark as the filter on
+    # resume dropped every document in later windows (the sweep is unordered,
+    # so a later window can hold keys below the mark).
+    filter_key = (cursor_time, cursor_id)
+    last_key = filter_key
     if request.checkpoint:
         try:
             checkpoint = json.loads(request.checkpoint)
             start = max(0, int(checkpoint.get("start", 0)))
-            cursor_time = str(checkpoint.get("cursor_time") or cursor_time)
-            cursor_id = str(checkpoint.get("cursor_id") or cursor_id)
+            last_key = (str(checkpoint.get("cursor_time") or cursor_time),
+                        str(checkpoint.get("cursor_id") or cursor_id))
         except (TypeError, ValueError, json.JSONDecodeError) as error:
             raise ValueError("invalid Confluence checkpoint") from error
-    last_key = (cursor_time, cursor_id)
     for page_number in range(request.page_limit):
         params: dict[str, Any] = {
             "type": "page",
@@ -233,13 +239,35 @@ def poll_confluence(
         emitted: list[KnowledgeDocument] = []
         for document in documents:
             key = (document.updated_at, document.external_id)
-            if request.cursor and key <= (cursor_time, cursor_id):
+            if request.cursor and key <= filter_key:
                 continue
             emitted.append(document)
             last_key = max(last_key, key)
         size = int(data.get("size", len(documents)) or 0)
-        terminal = not documents or size < request.page_size
-        start += size
+        # Confluence applies `limit` before permission filtering and silently
+        # caps it at a server maximum, so a short window proves nothing. When
+        # the response carries a _links object, its `next` link is the only
+        # honest signal that the sweep is done; the size heuristic stays as a
+        # fallback for feeds that do not send _links at all.
+        links = data.get("_links")
+        if isinstance(links, dict):
+            next_link = str(links.get("next") or "")
+            terminal = not next_link
+        else:
+            next_link = ""
+            terminal = not documents or size < request.page_size
+        applied_limit = int(data.get("limit", request.page_size) or 0) or request.page_size
+        next_start = None
+        if next_link:
+            with_query = urllib.parse.parse_qs(urllib.parse.urlsplit(next_link).query)
+            if with_query.get("start"):
+                try:
+                    next_start = int(with_query["start"][0])
+                except ValueError:
+                    next_start = None
+        # Advance by the window the server actually applied, not by the
+        # (possibly filtered) result count, or a short window re-reads rows.
+        start = next_start if next_start is not None else start + max(size, applied_limit)
         next_cursor = "|".join(last_key) if terminal and last_key[0] else request.cursor
         checkpoint = None if terminal else json.dumps(
             {"start": start, "cursor_time": last_key[0], "cursor_id": last_key[1]},

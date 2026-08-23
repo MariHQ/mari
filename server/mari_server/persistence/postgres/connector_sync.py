@@ -111,6 +111,24 @@ def deletion_ids(rows: list[dict], provider_key: str, seen_paths: set[str],
     return gone
 
 
+def sweep_inputs(cfg: dict, full: bool) -> tuple[str | None, str | None, bool]:
+    """The (cursor, checkpoint, authoritative_full) a sweep may honestly use.
+
+    The cursor is the provider's change watermark; the checkpoint is an opaque
+    resume token for an unfinished sweep. Three rules keep deletions safe:
+    an authoritative sweep (explicit resync, or a pending full snapshot being
+    finished) never filters by the stored cursor, because a cursor-filtered
+    listing treated as a complete snapshot tombstones everything the filter
+    excluded; an explicit resync never resumes a stale checkpoint, because the
+    authoritative snapshot would delete every document the skipped windows
+    held; a pending full snapshot does keep its checkpoint, so a page_limit
+    sweep finishes instead of restarting forever."""
+    authoritative_full = full or bool(cfg.get("full_snapshot_pending"))
+    cursor = None if authoritative_full else (cfg.get("cursor") or None)
+    checkpoint = None if full else (cfg.get("checkpoint") or None)
+    return cursor, checkpoint, authoritative_full
+
+
 def sync_source(source_id: int, full: bool, *, update_status, fire_document_triggers,
                 invalidate_search) -> dict:
     """Run one connector sync. Returns honest stats (plus 'error' on failure) —
@@ -143,17 +161,12 @@ def sync_source(source_id: int, full: bool, *, update_status, fire_document_trig
         max_tokens, overlap = document_index.chunk_settings()
         stored_hashes: dict = dict(cfg.get("item_hashes") or {})
         stored_cursor = cfg.get("cursor") or None
-        stored_checkpoint = cfg.get("checkpoint") or None
         hashes = dict(stored_hashes)
-        cursor = stored_cursor
-        authoritative_full = full or bool(cfg.get("full_snapshot_pending"))
+        # A rebuild is prepared in memory and becomes authoritative only
+        # after a complete listing succeeds. Clearing chunks/cursors first
+        # made a transient provider failure destroy the working index.
+        cursor, stored_checkpoint, authoritative_full = sweep_inputs(cfg, full)
         snapshot_seen_paths = (set() if full else set(cfg.get("full_snapshot_seen_paths") or []))
-
-        if full:
-            # A rebuild is prepared in memory and becomes authoritative only
-            # after a complete listing succeeds. Clearing chunks/cursors first
-            # made a transient provider failure destroy the working index.
-            cursor = None
 
         # —— validate (cheap, honest) ——
         update_status(source_id, state="running", phase="listing", done=0, total=0, error="")
@@ -235,7 +248,14 @@ def sync_source(source_id: int, full: bool, *, update_status, fire_document_trig
 
                 # Document mutations and this replay checkpoint are one
                 # transaction. A crash cannot advance beyond committed data.
-                durable_cursor = plan.state.checkpoint or plan.state.cursor or ""
+                # The cursor and the checkpoint are different things: the
+                # cursor is the provider's change watermark, the checkpoint is
+                # an opaque resume token for an unfinished sweep. Writing the
+                # checkpoint into cfg["cursor"] fed Jira page tokens back into
+                # JQL as date literals (HTTP 400 on every later run) and made
+                # Confluence resume with the wrong change filter.
+                durable_cursor = plan.state.cursor or ""
+                progress_marker = plan.state.checkpoint or durable_cursor
                 hashes = {
                     path: manifest.fingerprint for path, manifest in plan.state.manifest.items()
                 }
@@ -259,7 +279,7 @@ def sync_source(source_id: int, full: bool, *, update_status, fire_document_trig
                     (json.dumps(cfg), doc_count, str(doc_count), source_id),
                 )
                 _checkpoint(conn, provider_col, display, "embedded", done, total,
-                            durable_cursor, "running", started)
+                            progress_marker, "running", started)
                 conn.commit()
             update_status(source_id, done=done, total=total)
             return AppliedPage(

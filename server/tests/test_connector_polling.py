@@ -43,5 +43,38 @@ class ConnectorContractTests(unittest.TestCase):
         document = KnowledgeDocument("123", "Title", "Body", metadata={"status": "Backlog"})
         self.assertEqual(connect_sync.document_author(document), "")
 
+
+class SweepInputTests(unittest.TestCase):
+    """cursor/checkpoint hygiene for sync_source. Getting these wrong is how
+    a resync deleted live documents and how Jira sources wedged on a stale
+    page token (2026-08-23 connector sweep, findings 2-4)."""
+
+    CFG = {"cursor": "2026-05-09T22:24:06.157-0400", "checkpoint": '{"start":200}'}
+
+    def test_an_incremental_sync_uses_both_stored_values(self) -> None:
+        cursor, checkpoint, authoritative = connect_sync.sweep_inputs(dict(self.CFG), full=False)
+        self.assertEqual(cursor, self.CFG["cursor"])
+        self.assertEqual(checkpoint, self.CFG["checkpoint"])
+        self.assertFalse(authoritative)
+
+    def test_an_explicit_resync_drops_cursor_and_stale_checkpoint(self) -> None:
+        # Resuming a stale checkpoint mid-sweep makes the authoritative
+        # snapshot delete every document the skipped windows held.
+        cursor, checkpoint, authoritative = connect_sync.sweep_inputs(dict(self.CFG), full=True)
+        self.assertIsNone(cursor)
+        self.assertIsNone(checkpoint)
+        self.assertTrue(authoritative)
+
+    def test_a_pending_full_snapshot_is_unfiltered_but_resumes_its_checkpoint(self) -> None:
+        # A cursor-filtered listing treated as a complete snapshot tombstones
+        # everything the filter excluded; the checkpoint must survive so a
+        # page_limit sweep finishes instead of restarting forever.
+        cfg = dict(self.CFG, full_snapshot_pending=True)
+        cursor, checkpoint, authoritative = connect_sync.sweep_inputs(cfg, full=False)
+        self.assertIsNone(cursor)
+        self.assertEqual(checkpoint, self.CFG["checkpoint"])
+        self.assertTrue(authoritative)
+
+
 if __name__ == "__main__":
     unittest.main()
