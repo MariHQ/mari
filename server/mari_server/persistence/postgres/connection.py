@@ -40,6 +40,13 @@ def pool() -> ConnectionPool:
                 database_url(), min_size=1,
                 max_size=int(config.get("database", "pool_max", 10)),
                 kwargs={"row_factory": dict_row}, open=False, name="mari-api",
+                # Validate at checkout: after a database restart the pool's
+                # idle connections are dead, and handing one to a request
+                # surfaced as "terminating connection due to administrator
+                # command" on the first statement (integration resilience
+                # drill, 2026-08-23). The check replaces dead connections
+                # instead of serving them.
+                check=ConnectionPool.check_connection,
             )
         if _POOL.closed:
             _POOL.open()
