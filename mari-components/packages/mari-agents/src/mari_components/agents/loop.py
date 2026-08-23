@@ -70,6 +70,13 @@ def run_tool_loop(
     a tool, only to supply that tool's arguments, and the loop constructs
     ``{"action": "tool", "tool": required_first_tool, "arguments": ...}``
     itself. Once a tool observation exists, planning reverts to normal.
+
+    A model that cannot produce working arguments for the required tool is
+    given two forced attempts, then the requirement (and the observation
+    minimum with it) is released with a transcript note telling the model to
+    answer from the conversation and say what it could not check. Without the
+    release, a weak model spun through every step re-failing the same call
+    and the user got a step-limit error instead of an answer.
     """
     if maximum_steps < 1:
         raise ValueError("maximum_steps must be positive")
@@ -93,12 +100,28 @@ def run_tool_loop(
         return event
 
     observations = 0
+    forced_attempts = 0
+    forced_attempt_limit = 2
     for _step in range(1, maximum_steps + 1):
+        if (required_first_tool is not None and observations == 0
+                and forced_attempts >= forced_attempt_limit):
+            required_first_tool = None
+            minimum_tool_observations = 0
+            transcript.append({
+                "role": "system",
+                "content": (
+                    "The required tool could not be called successfully after "
+                    f"{forced_attempts} attempts. Stop calling tools. Answer from "
+                    "the conversation alone and say plainly what could not be checked."
+                ),
+            })
         forced_tool = (
             by_name[required_first_tool]
             if required_first_tool is not None and observations == 0
             else None
         )
+        if forced_tool is not None:
+            forced_attempts += 1
         if forced_tool is not None:
             version = "agent-loop-v2-forced-tool"
             prompt = (

@@ -82,7 +82,10 @@ test("agent streams a complete turn through the real model boundary", async ({ p
   await page.getByRole("button", { name: /Send/ }).click();
   const dock = page.getByRole("complementary", { name: "Mari agent" });
   await expect(dock.locator("div.flex.flex-col.gap-1").last()).not.toBeEmpty({ timeout: 90_000 });
-  await expect(dock.getByRole("button", { name: "Stop" })).toHaveCount(0);
+  // The turn is complete when the Stop control leaves. On CI's CPU-only
+  // model a turn spans several slow model calls, so this gets the same
+  // budget as the first content chunk.
+  await expect(dock.getByRole("button", { name: "Stop" })).toHaveCount(0, { timeout: 90_000 });
   await expect(dock).not.toContainText("I can't reach the Mari API");
   await expect(dock).not.toContainText("Agent execution stopped");
 });
@@ -127,6 +130,10 @@ test("knowledge chat is created, deployed, and answers from real indexed knowled
   );
   await expect(page.getByRole("button", { name: "Answering…" })).toHaveCount(0, { timeout: 90_000 });
   await expect(page.locator("article").last().locator("div").first()).not.toBeEmpty();
-  await page.getByRole("link", { name: /Retention runbook/ }).click();
-  await expect(page).toHaveURL(/\/knowledge\/doc\?id=1$/);
+  // The public chat renders sources as cards with a citation jump, not as
+  // links into the console: visitors have no access to /knowledge.
+  const source = page.getByRole("list", { name: "Sources" }).getByRole("listitem").first();
+  await expect(source).toContainText("Retention runbook");
+  await expect(source).toContainText("canonical");
+  await source.getByRole("button", { name: /Find citation 1/ }).click();
 });

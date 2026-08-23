@@ -122,6 +122,36 @@ class TrajectoryAgentTests(unittest.TestCase):
         self.assertEqual(tool_call.name, "search")
         self.assertEqual(dict(tool_call.arguments), {"query": "Mari"})
 
+    def test_failing_required_tool_is_released_after_two_attempts(self):
+        # A model that cannot produce working arguments for the forced tool
+        # must not spin through every step re-failing the same call (that is
+        # what a small local model did in CI: seven "search needs a query"
+        # calls, then a step-limit error instead of an answer).
+        class Failed:
+            ok = False
+
+            def __repr__(self):
+                return "search needs a query"
+
+        calls = []
+
+        def plan(_prompt, version):
+            if version == "agent-loop-v2-forced-tool":
+                return {"arguments": {}}
+            return {"action": "answer"}
+
+        events = tuple(run_tool_loop(
+            [{"role": "user", "content": "What can you do?"}],
+            [Tool("search", "Search knowledge", lambda args: calls.append(args) or Failed())],
+            generate_json=plan,
+            stream_answer=lambda _messages: ("I could not check the knowledge base.",),
+            authorize_write=lambda _tool, _args: False,
+            minimum_tool_observations=1,
+            required_first_tool="search",
+        ))
+        self.assertEqual(len(calls), 2, "exactly two forced attempts, then release")
+        self.assertEqual(events[-1].kind, "answer_complete")
+
     def test_agent_retries_one_malformed_structured_decision(self):
         decisions = iter([
             None,
