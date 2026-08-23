@@ -208,13 +208,32 @@ export async function installMockApi(page: Page, options: {
       return route.fulfill({ json: { errors: [{ message }] } });
     }
     let data: Record<string, any> = { ...state };
-    if (/query Trajectories/.test(query)) {
+    if (/query (Workflows|Trajectories)/.test(query)) {
+      // Mirrors the server contract the page relies on: every filter is
+      // applied here, so rows and total always describe the same set.
       const category = String(variables.category || "");
-      const matching = category ? state.trajectories.filter((row: any) => row.category === category) : state.trajectories;
+      const status = String(variables.status || "");
+      const failures = String(variables.failures || "");
+      const search = String(variables.search || "").toLowerCase();
+      const matching = state.trajectories.filter((row: any) => (
+        (!category || row.category === category)
+        && (!status || row.status === status)
+        && (failures !== "with" || row.failureCount > 0)
+        && (failures !== "none" || row.failureCount === 0)
+        && (!search || [row.prompt, row.macroIntent, row.category, row.layer1, row.layer2]
+          .some((text: any) => String(text || "").toLowerCase().includes(search)))
+      ));
       const offset = Number(variables.offset || 0);
       const limit = Number(variables.limit || 25);
-      data = { trajectories: matching.slice(offset, offset + limit), trajectoryTotal: matching.length,
-        trajectoryCategories: state.trajectoryCategories };
+      const focus = Number(variables.focus || 0);
+      data = { ...state,
+        trajectories: matching.slice(offset, offset + limit),
+        trajectory: focus ? state.trajectories.find((row: any) => row.id === focus) ?? null : null,
+        trajectoryTotal: matching.length,
+        trajectoryCategories: state.trajectoryCategories,
+        trajectoryStatuses: state.trajectoryStatuses
+          ?? [...new Set(state.trajectories.map((row: any) => String(row.status)))],
+      };
     } else if (/inviteMember/.test(query)) {
       state.members.push({
         id: state.members.length + 1,

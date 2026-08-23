@@ -100,6 +100,8 @@ export function KnowledgeChatDestination() {
       })}
       {error && <p role="alert" className="text-sm text-red-700">{error}</p>}
     </section>
-    <form onSubmit={ask} className="sticky bottom-0 flex gap-2 border-t border-ink/15 bg-paper py-4"><label className="sr-only" htmlFor="knowledge-question">Ask a question</label><input id="knowledge-question" value={question} onChange={(e) => setQuestion(e.target.value)} placeholder="Ask a question" className="min-w-0 flex-1 rounded-lg border border-ink/25 bg-white px-4 py-3" /><Button variant="primary" disabled={busy || !question.trim()}>{busy ? "Answering…" : "Ask"}</Button></form>
+    <form onSubmit={ask} className="sticky bottom-0 flex gap-2 border-t border-ink/15 bg-paper py-4"><label className="sr-only" htmlFor="knowledge-question">Ask a question</label><input id="knowledge-question" value={question} onChange={(e) => setQuestion(e.target.value)} placeholder="Ask a question" className="min-w-0 flex-1 rounded-lg border border-ink/25 bg-white px-4 py-3" />{/* The library Button defaults to type="button", which would make this a
+        button in a form that submits nothing. */}
+    <Button type="submit" variant="primary" disabled={busy || !question.trim()}>{busy ? "Answering…" : "Ask"}</Button></form>
   </main>;
 }

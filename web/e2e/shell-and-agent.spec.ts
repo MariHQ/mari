@@ -52,7 +52,10 @@ test("agent SSE renders tools and warnings, navigates, and survives route change
   await page.goto("/");
   await page.getByRole("button", { name: "Open the Mari agent" }).click();
   await expect(page.getByText("Mari agent", { exact: true })).toBeVisible();
-  await expect(page.getByText(/Governed changes happen in Review and Automations/)).toHaveCount(2);
+  // The dock explains itself twice: the empty-state blurb and the footer hint.
+  // Both must say the agent only reads and navigates, never that it edits.
+  await expect(page.getByText(/take you to the right screen/)).toHaveCount(2);
+  await expect(page.getByText(/It reads; it does not change anything on its own/)).toBeVisible();
   await expect(page.getByText(/edit and tag docs|run flows/)).toHaveCount(0);
   await page.getByPlaceholder("Ask Mari…").fill("Take me to the repository audit");
   await page.getByRole("button", { name: /Send/ }).click();

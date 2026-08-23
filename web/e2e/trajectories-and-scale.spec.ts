@@ -76,16 +76,20 @@ test("a human can tune evidence and tool calls before codifying a trajectory", a
 
   await page.getByLabel("Workflow name").fill("Retention answer workflow");
   await page.getByRole("button", { name: "Codify workflow" }).click();
-  await expect(page).toHaveURL("/workflows");
-  await expect(page.getByText("Enabled for assistants", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "Pause workflow" }).click();
+  // Promotion answers in place: the drawer stays open on the run and shows the
+  // codified workflow's panel. Nothing runs until a human enables it.
+  await expect(page).toHaveURL(/\/workflows\?trajectory=1$/);
+  const drawer = page.getByRole("dialog");
+  await expect(drawer.getByText("Paused", { exact: true })).toBeVisible();
+  await drawer.getByRole("button", { name: "Enable workflow" }).click();
   await expect.poll(() => api.calls.some((call) => call.query.includes("setAssistantWorkflowEnabled")
-    && call.variables.enabled === false)).toBeTruthy();
-  await expect(page.getByRole("button", { name: "Enable workflow" })).toBeVisible();
-  await page.getByRole("button", { name: "Cache reviewed answer" }).click();
+    && call.variables.enabled === true)).toBeTruthy();
+  await expect(drawer.getByText("Enabled for assistants", { exact: true })).toBeVisible();
+  await expect(drawer.getByRole("button", { name: "Pause workflow" })).toBeVisible();
+  await drawer.getByRole("button", { name: "Cache reviewed answer" }).click();
   await expect.poll(() => api.calls.some((call) => call.query.includes("setAssistantWorkflowCache")
     && call.variables.enabled === true)).toBeTruthy();
-  await expect(page.getByText("Current", { exact: true })).toBeVisible();
+  await expect(drawer.getByText("Current", { exact: true })).toBeVisible();
 });
 
 test("stale reviewed-answer workflows can be reconciled together", async ({ page }) => {
@@ -104,11 +108,13 @@ test("stale reviewed-answer workflows can be reconciled together", async ({ page
 test("a codified workflow can be deleted without deleting its observed trajectory", async ({ page }) => {
   const row = api.getData("trajectories")[0];
   api.setData("trajectories", [{
-    ...row, promotedWorkflowId: 44, promotedWorkflowStatus: "active",
+    ...row, promotedWorkflowId: 44, promotedWorkflowName: "Repair policy documentation",
+    promotedWorkflowStatus: "active",
+    promotedWorkflow: { id: 44, name: "Repair policy documentation", status: "active", nodeCount: 3 },
     promotedWorkflowCachePolicy: "none", promotedWorkflowCacheState: "disabled",
   }]);
   await page.goto("/workflows");
-  await page.getByRole("button", { name: "Inspect run" }).first().click();
+  // The codified workflow is managed in place on the run's card.
   await page.getByRole("button", { name: "Delete workflow" }).click();
   await page.getByRole("button", { name: "Confirm delete" }).click();
   await expect.poll(() => api.calls.some((call) => call.query.includes("deleteAssistantWorkflow")
@@ -129,11 +135,11 @@ test("trajectory taxonomy filter and pagination remain URL-addressable", async (
   api.setData("trajectoryCategories", ["Documentation maintenance", "Incident response"]);
   await page.goto("/workflows");
   await expect(page.locator("article")).toHaveCount(25);
-  await page.getByLabel("Trajectory category").selectOption("Incident response");
+  await page.getByLabel("Filter by category").selectOption("Incident response");
   await expect(page).toHaveURL(/category=Incident(?:\+|%20)response/);
-  await expect.poll(() => api.calls.some((call) => call.query.includes("query Trajectories") && call.variables.category === "Incident response")).toBeTruthy();
+  await expect.poll(() => api.calls.some((call) => call.query.includes("query Workflows") && call.variables.category === "Incident response")).toBeTruthy();
   await expect(page.locator("article")).toHaveCount(25);
-  await page.getByRole("button", { name: "Next" }).click();
+  await page.getByRole("button", { name: "Next page" }).click();
   await expect(page).toHaveURL(/offset=25/);
   await expect(page.locator("article")).toHaveCount(5);
 });
@@ -149,7 +155,7 @@ test("a 5,000-row trajectory archive renders only one bounded page", async ({ pa
   api.setData("trajectories", Array.from({ length: 5000 }, (_, index) => ({ ...base, id: index + 1 })));
   api.setData("trajectoryCategories", ["Investigation"]);
   await page.goto("/workflows");
-  await expect(page.getByText("Showing 1-25 of 5000", { exact: true })).toBeVisible();
+  await expect(page.getByText("Showing 1 to 25 of 5,000 workflows", { exact: true })).toBeVisible();
   await expect(page.locator("article")).toHaveCount(25);
   expect(await page.locator("article").count()).toBeLessThanOrEqual(25);
 });
@@ -187,7 +193,7 @@ test("large lineage opens as a comprehensible aggregate instead of a 35-node hai
 test("trajectory read failures replace the archive rather than masquerading as empty", async ({ page }) => {
   await page.route("**/graphql", async (route) => {
     const query = (route.request().postDataJSON() as { query?: string }).query ?? "";
-    if (query.includes("query Trajectories")) {
+    if (query.includes("query Workflows")) {
       await route.fulfill({ json: { errors: [{ message: "Iceberg catalog unavailable" }] } });
     } else {
       await route.fallback();
@@ -195,5 +201,5 @@ test("trajectory read failures replace the archive rather than masquerading as e
   });
   await page.goto("/workflows");
   await expect(page.getByText("Iceberg catalog unavailable", { exact: true })).toBeVisible();
-  await expect(page.getByText("No observed workflows yet", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("No workflows observed yet", { exact: true })).toHaveCount(0);
 });
