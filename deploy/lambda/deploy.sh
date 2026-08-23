@@ -60,7 +60,7 @@ IMAGE="$REPO:$TAG"
 
 echo "==> Checks (typecheck + server-render smoke)"
 ( cd web && npm run check )
-python3 -m py_compile server/*.py server/connectors/*.py
+python3 -m compileall -q server/mari_server mari-components/packages
 
 echo "==> Build + push $IMAGE"
 aws ecr get-login-password --region "$REGION" \
