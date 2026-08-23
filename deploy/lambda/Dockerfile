@@ -27,6 +27,11 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
+# The server imports the mari_components packages (connectors, retrieval,
+# knowledge, agents, destinations, trajectories, workflows); they live outside
+# server/ and are not in requirements.txt, so install them from source first.
+COPY mari-components/ /app/mari-components/
+RUN pip3 install --break-system-packages --no-cache-dir /app/mari-components/packages/*
 COPY server/requirements.txt /app/server/requirements.txt
 RUN pip3 install --break-system-packages --no-cache-dir -r /app/server/requirements.txt
 
