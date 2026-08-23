@@ -21,7 +21,7 @@ Where a search tool stops at "here are ten links," Mari keeps going:
 - **Which of these claims is still true?** Facts have owners, verification status, and freshness.
 - **Where did this answer come from?** Every answer cites the document, commit, or thread it came from.
 - **What changed, and what did it break?** A living lineage graph ties documents, commits, PRs, and decisions together with real extracted links — structural (`#123` references, markdown links) and semantic (embedding similarity).
-- **Now publish it.** Turn curated knowledge into a deployed docs site (native generator or Docusaurus) with one flow.
+- **Now put it to work.** Deploy an interactive knowledge chat, or expose the same corpus through MCP, the Search API, Slack, and GitHub bots.
 
 Everything runs on your infrastructure: Postgres for transactional state, Iceberg for durable knowledge snapshots, rebuildable MUVERA/PolarQuant retrieval artifacts on filesystem or S3, local LLMs via Ollama (with graceful degradation when they're offline), and a React front end with a hand-drawn "editorial notebook" design system.
 
@@ -30,7 +30,7 @@ Everything runs on your infrastructure: Postgres for transactional state, Iceber
 ## ✨ Features
 
 ### 🔌 Ingestion that stays fresh
-- **14 real connectors** (see below) feeding one pipeline: fetch → chunk → content-hash → embed. Unchanged content is never re-embedded — a no-op resync of a 200-doc repo takes seconds.
+- **12 real connectors** (see below), plus direct file uploads, feeding one pipeline: fetch → chunk → content-hash → embed. Unchanged content is never re-embedded — a no-op resync of a 200-doc repo takes seconds.
 - **Resumable, diff-based sync.** Cursors survive restarts; losing one is safe — sync falls back to a full tree diff by content hash and re-embeds nothing that hasn't actually changed.
 - **Live updates**: GitHub webhooks trigger instant re-syncs; scheduled syncs cover the rest, on a per-source cadence you set from the Sources page rather than in env vars.
 - GitHub ingestion goes beyond files: **commit messages, PR descriptions, issues, and comments** become searchable knowledge documents.
@@ -90,10 +90,10 @@ Every connector listed is real — genuine API client, honest credential validat
 
 | | | | |
 |---|---|---|---|
-| **GitHub** (files, commits, PRs, issues, comments) | **Slack** (channel history) | **Website** (same-origin crawler, sitemap-aware) | **File upload** (markdown/text) |
-| **Notion** | **Google Drive** | **Confluence** | **Jira** |
-| **Linear** | **Zendesk** (help center) | **Asana** | **Trello** |
-| **Airtable** | **Dropbox** | | |
+| **GitHub** (files, commits, PRs, issues, comments) | **Slack** (channel history) | **Google Drive** | **Confluence** |
+| **Notion** | **Jira** | **Airtable** | **Asana** |
+| **Dropbox** | **Linear** | **Trello** | **Zendesk** (help center) |
+| **File upload** (markdown/text) | | | |
 
 Connecting is self-serve: pick a provider, fill its credential fields, **Test connection** (vendor errors surfaced verbatim), connect — then watch the live sync progress. Every connected source automatically gets a scheduled sync flow.
 
@@ -167,7 +167,6 @@ Everything is env-driven (`.env.example` documents the full list; env overrides 
 | `MARI_S3_BUCKET` | Object storage for backups and derived artifacts |
 | `MARI_AUTH_BYPASS` | One-click demo login, off unless you set it to `true`. It signs anyone who can reach the port in as the workspace admin, with no credential — turn it on only for throwaway demo instances. The server logs a warning at startup while it is on |
 | `MARI_AUTH_REGISTRATION` | Open sign-up (default off — the workspace is invite-only). Invited people can always register whether or not this is set |
-| `MARI_CRAWL_ALLOW_LOOPBACK` | Allow the website connector to crawl localhost (dev only) |
 
 ### Desktop app
 
