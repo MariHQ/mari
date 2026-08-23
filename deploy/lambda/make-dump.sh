@@ -61,6 +61,20 @@ UPDATE settings
  WHERE key = 'llm' AND value ? 'keys';
 -- Per-account preferences are somebody's settings, not default data.
 DELETE FROM settings WHERE key LIKE 'user_prefs:%';
+-- Connector credentials live in sources.config since the connector move;
+-- strip every secret-bearing key and leave the rest of the config (cursor,
+-- checkpoint, repo, site) so the sources still describe themselves.
+UPDATE sources
+   SET config = config - 'api_token' - 'token' - 'bot_token' - 'user_token'
+                       - 'webhook_secret' - 'signing_secret' - 'access_token'
+                       - 'refresh_token' - 'client_secret' - 'password'
+ WHERE config IS NOT NULL;
+-- Bot settings carry signing material; keep the row, drop the secrets.
+UPDATE settings
+   SET value = value - 'webhook_secret' - 'bot_token' - 'signing_secret' - 'app_token'
+ WHERE key IN ('github_bot', 'slack_bot') AND jsonb_typeof(value) = 'object';
+-- API keys are bearer credentials for the REST surface; none should travel.
+TRUNCATE api_keys;
 SQL
 
 echo "==> verify the scrub actually happened"
@@ -73,6 +87,13 @@ BEGIN
        + (SELECT count(*) FROM pg_tables
            WHERE schemaname = 'public' AND tablename = 'magic_links')
        + (SELECT count(*) FROM users WHERE password_hash <> '')
+       + (SELECT count(*) FROM sources
+           WHERE config ?| array['api_token','token','bot_token','user_token','webhook_secret',
+                                 'signing_secret','access_token','refresh_token','client_secret','password'])
+       + (SELECT count(*) FROM settings
+           WHERE key IN ('github_bot','slack_bot')
+             AND value ?| array['webhook_secret','bot_token','signing_secret','app_token'])
+       + (SELECT count(*) FROM api_keys)
     INTO bad;
   IF bad <> 0 THEN
     RAISE EXCEPTION 'Refusing to ship: % row(s) of credential material remain', bad;
