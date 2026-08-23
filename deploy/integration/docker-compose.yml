@@ -100,8 +100,11 @@ services:
       AWS_SECRET_ACCESS_KEY: mari-ci-secret
       AWS_DEFAULT_REGION: us-east-1
       # An empty AWS_PROFILE still tells botocore to load a named profile and
-      # fails with ProfileNotFound. MinIO uses the explicit keys above.
-      AWS_PROFILE: null
+      # fails with ProfileNotFound, and a plain `AWS_PROFILE: null` only asks
+      # Compose to pass the host value through — a developer .env with
+      # AWS_PROFILE set would leak into the container. !reset removes the key
+      # from the merged config entirely. MinIO uses the explicit keys above.
+      AWS_PROFILE: !reset null
     volumes: !override
       - integration-api-data:/app/data
 

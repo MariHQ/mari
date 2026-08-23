@@ -10,12 +10,20 @@ FROM projects p, users u
 WHERE p.slug = 'default' AND u.name = 'CI Admin'
 ON CONFLICT (project_id, user_id) DO UPDATE SET role = 'owner', status = 'active';
 
-INSERT INTO settings (key, value) VALUES
+-- Settings are project-scoped since migration 0010 (settings_pkey dropped in
+-- favor of settings_project_key_uidx), so seed them against the default
+-- project with the same conflict target the server uses.
+INSERT INTO settings (project_id, key, value)
+SELECT p.id, v.key, v.value
+FROM projects p
+CROSS JOIN (VALUES
   ('setup_complete', 'true'::jsonb),
   ('workspace', '{"name":"Integration Workspace","slug":"integration","plan":"enterprise","timezone":"UTC","language":"English (US)"}'::jsonb),
   ('embedding', '{"provider":"ollama","model":"nomic-embed-text","dims":768,"options":["ollama:nomic-embed-text"]}'::jsonb),
   ('llm', '{"provider":"ollama","model":"qwen2.5:0.5b","options":["ollama:qwen2.5:0.5b"],"keys":{}}'::jsonb)
-ON CONFLICT (key) DO UPDATE SET value = excluded.value;
+) AS v(key, value)
+WHERE p.slug = 'default'
+ON CONFLICT (project_id, key) DO UPDATE SET value = excluded.value;
 
 INSERT INTO sources (provider, display_name, status, stat_num, stat_unit, docs_count, health, kind, project_id)
 SELECT 'integration', 'Production-like CI', 'active', '1', 'documents', 1, 'Healthy', 'connector', p.id
