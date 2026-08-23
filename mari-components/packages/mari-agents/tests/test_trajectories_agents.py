@@ -149,7 +149,33 @@ class TrajectoryAgentTests(unittest.TestCase):
             minimum_tool_observations=1,
             required_first_tool="search",
         ))
-        self.assertEqual(len(calls), 2, "exactly two forced attempts, then release")
+        # The identical second attempt is caught by the repeat guard, so the
+        # failing call runs exactly once before the requirement is released.
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(events[-1].kind, "answer_complete")
+
+    def test_a_model_that_repeats_one_search_still_ends_with_a_grounded_answer(self):
+        # CI's small model searched the same phrase over and over until the
+        # step limit raised PermanentFailure and the user saw "Agent execution
+        # stopped". Identical calls are not re-executed, and a spent step
+        # budget with real observations streams an answer instead of raising.
+        calls = []
+
+        def plan(_prompt, _version):
+            return {"action": "tool", "tool": "search",
+                    "arguments": {"query": "what can you do"}}
+
+        events = tuple(run_tool_loop(
+            [{"role": "user", "content": "What can you help me do?"}],
+            [Tool("search", "Search knowledge",
+                  lambda args: calls.append(args) or {"hits": 0})],
+            generate_json=plan,
+            stream_answer=lambda _messages: ("Nothing matched; here is what I offer.",),
+            authorize_write=lambda _tool, _args: False,
+            minimum_tool_observations=1,
+            maximum_steps=8,
+        ))
+        self.assertEqual(len(calls), 1, "the identical search must not re-execute")
         self.assertEqual(events[-1].kind, "answer_complete")
 
     def test_agent_retries_one_malformed_structured_decision(self):
