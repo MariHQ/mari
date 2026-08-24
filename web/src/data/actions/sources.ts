@@ -65,12 +65,14 @@ export async function uploadDocuments(files: File[]): Promise<void> {
 
 /* ── connect ────────────────────────────────────────────────────────────── */
 
-export async function connectAny(provider: string, config: Record<string, string>): Promise<void> {
+export async function connectAny(provider: string, config: Record<string, string>): Promise<string | void> {
   // 200 with {error} is this endpoint's refusal: validate ran, nothing was
   // created, and the reason is in the body.
   const r = await postJson<{ error?: string; sourceId?: number }>("/connectors/connect", { provider, config });
   if (r.error) throw new Error(r.error);
   clearQueryCache();
+  // The id is what lets the wizard follow the first sync it just started.
+  return r.sourceId != null ? String(r.sourceId) : undefined;
 }
 
 export async function testAny(provider: string, config: Record<string, string>): Promise<{ ok: boolean; error?: string }> {
@@ -92,6 +94,28 @@ export function sourcesActions(): SourcesActions {
   return {
     testConnection: ({ provider, config }) => testAny(provider, config),
     connectSource: ({ provider, config }) => connectAny(provider, config),
+
+    /* One reading of a running sync, from the in-memory ingest registry. The
+       card and the connect dialog poll this to completion — the server's
+       "listing" was previously the last thing the page ever learned. */
+    syncProgress: async (sourceId: string) => {
+      const r = await gqlResult<{ syncStatus: { state: string; phase: string; done: number; total: number } }>(
+        `query($id: Int!) { syncStatus(sourceId: $id) { state phase done total } }`, { id: Number(sourceId) });
+      if (!r.ok) throw new Error(r.error);
+      const st = r.data?.syncStatus;
+      if (!st) return { state: "done" as const };
+      if (st.state === "running") {
+        return { state: "running" as const, phase: st.phase || "listing", done: st.done, total: st.total };
+      }
+      if (st.state === "error") {
+        // syncStatus carries no message; the grid's next read of sourcePulse
+        // shows the stored last_error verbatim.
+        clearQueryCache();
+        return { state: "failed" as const, error: "The sync failed. The source card has the details." };
+      }
+      clearQueryCache();
+      return { state: "done" as const, done: st.done, total: st.total };
+    },
     uploadFiles: uploadDocuments,
 
     // Long-running by design: the mutation returns once the server has

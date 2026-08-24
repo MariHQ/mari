@@ -68,12 +68,17 @@ export function welcomeActions({ navigate }: { navigate: (href: string) => void 
       if (url) window.open(url, "_blank", "noopener,noreferrer");
     },
 
-    connectGithubRepo: ({ repo, paths }) =>
-      connectAny("github", { repo: repo.trim(), paths: paths.trim() }),
+    // Welcome does not follow the sync, so the id connectAny answers with is
+    // deliberately dropped here (the Sources wizard is the flow that polls).
+    connectGithubRepo: async ({ repo, paths }) => {
+      await connectAny("github", { repo: repo.trim(), paths: paths.trim() });
+    },
 
     testConnection: ({ provider, config }) => testAny(provider, config),
 
-    connectSource: ({ provider, config }) => connectAny(provider, config),
+    connectSource: async ({ provider, config }) => {
+      await connectAny(provider, config);
+    },
 
     uploadFiles: uploadDocuments,
 
