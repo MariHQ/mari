@@ -44,17 +44,21 @@ def answer_question(question: str, documents: Iterable[KnowledgeDocument], *, ge
     return GroundedAnswer(answer, evidence, evidence_confidence(answer, evidence))
 
 
-def mine_answers(documents: Iterable[KnowledgeDocument], *, generate_json: JsonGenerator, maximum_documents: int = 50, maximum_characters: int = 60_000) -> tuple[AnswerCandidate, ...]:
+def mine_answers(documents: Iterable[KnowledgeDocument], *, generate_json: JsonGenerator, maximum_documents: int = 50, maximum_characters: int = 60_000, maximum_answers: int = 8) -> tuple[AnswerCandidate, ...]:
     bounded = bounded_documents(documents, maximum_documents=maximum_documents, maximum_characters=maximum_characters)
     allowed = {document.external_id: document for document in bounded}
+    # The bound lives in the prompt, not only in a slice afterwards: an
+    # unbounded request lets the model write for as long as it likes, and on a
+    # local model that ran past any honest timeout before the JSON closed.
     prompt = (
         "Mine recurring product questions that the documents answer directly. Each answer must be independently useful and evidenced. "
+        f"Return AT MOST {max(1, maximum_answers)} answers, best first, each with one short evidence quote. "
         'Return JSON {"answers":[{"question":"...","answer":"...","evidence":[...]}]}.\nDocuments:\n'
         + documents_json(bounded)
     )
     rows = require_list(generate_json(prompt, FAQ_VERSION), "answers", recipe=FAQ_VERSION)
     output: list[AnswerCandidate] = []
-    for row in rows:
+    for row in rows[: max(1, maximum_answers)]:
         question, answer = str(row.get("question") or "").strip(), str(row.get("answer") or "").strip()
         if not question or not answer:
             raise MalformedModelOutput("FAQ question and answer are required")

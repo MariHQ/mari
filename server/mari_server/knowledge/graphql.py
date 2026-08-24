@@ -70,6 +70,10 @@ IMPACT_TIMEOUT_SECONDS = 240.0
 #: default for JSON is a paragraph and a few rows; past it the answer arrives
 #: cut off mid-row, and half a JSON object is no analysis at all.
 IMPACT_OUTPUT_TOKENS = 3_000
+# The FAQ harvest writes at most 8 bounded answers; the window is what a
+# local 27B model needs to process the corpus prompt and write them.
+FAQ_TIMEOUT_SECONDS = 480.0
+FAQ_OUTPUT_TOKENS = 2_000
 
 
 def _assess(*args, **kwargs):
@@ -669,11 +673,26 @@ class MutKnowledge:
                 components.append(KnowledgeDocument(
                     f"chat:{index}", "Recent user question", message[:200],
                     revision="recent-chat"))
-        mined = component_mine_answers(
-            components,
-            generate_json=lambda prompt, _version: llm.generate_json(
-                prompt, system="You mine team knowledge for FAQ answer candidates."),
-        ) if components else ()
+        # Real budgets, sized to a local model: the default 1500-token JSON
+        # budget cut the answer off mid-row (which parses as nothing and
+        # surfaced to the wizard as "faq-mine-v2 must return a JSON object"),
+        # and a 27B model on a laptop needs minutes, not the default 120
+        # seconds. The answer count is bounded in the prompt so the
+        # generation actually fits the window.
+        try:
+            mined = component_mine_answers(
+                components, maximum_answers=8,
+                generate_json=lambda prompt, _version: llm.generate_json(
+                    prompt, system="You mine team knowledge for FAQ answer candidates.",
+                    timeout=FAQ_TIMEOUT_SECONDS, max_tokens=FAQ_OUTPUT_TOKENS),
+            ) if components else ()
+        except MalformedModelOutput as error:
+            # The recipe's internals are not an error message a wizard user
+            # can act on. Say what happened and what to do.
+            raise ValueError(
+                "The workspace model returned no usable answer for the FAQ scan "
+                f"({error}). Try again, select fewer sources, or configure a "
+                "stronger model under Settings.") from error
         candidates: list[AnswerCandidate] = []
         titles = {str(doc["id"]): doc["title"] for doc in docs}
         for candidate in mined[:8]:
