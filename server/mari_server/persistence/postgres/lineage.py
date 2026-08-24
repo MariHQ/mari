@@ -8,7 +8,10 @@ Three edge rels written into the existing `edges` table:
 - `links_to`   — markdown relative links between page docs of the same source,
   resolved (./, ../, repo-root /) against the linking doc's source_path;
   #fragments and query strings stripped.
-- `similar`    — pgvector cosine over document embeddings ≥ 0.78, top 3 per
+- `similar`    — pgvector cosine over document embeddings, across the whole
+  project: same-source neighbours ≥ 0.78 top 3, plus each document's single
+  best other-source neighbour ≥ 0.55 (a Jira issue next to the Confluence
+  page it describes), top 3 per
   doc, page↔page and page↔(pr|issue) pairs only, deduped both directions,
   capped 1000 per source.
 
@@ -35,6 +38,12 @@ from mari_server.persistence.postgres import connection as postgres
 SIM_THRESHOLD = DEFAULT_SIMILARITY_THRESHOLD
 SIM_TOP_K = DEFAULT_SIMILARITY_LIMIT
 SIM_CAP_PER_SOURCE = 1000
+# Cross-source pairs (a Jira issue against the Confluence page it describes)
+# score structurally lower than page↔page prose: different genre, different
+# length. The flat threshold made cross-tool edges nearly impossible, so each
+# document also keeps its single best neighbour from ANOTHER source above a
+# lower floor — one honest "most related elsewhere" edge, score in meta.sim.
+SIM_CROSS_FLOOR = 0.55
 
 def _conn():
     return postgres.connect()
@@ -221,7 +230,11 @@ def _extract_similar(conn, source_id: int, project_id: int,
                      doc_ids: list[int] | None) -> int:
     """Top-K cosine neighbors ≥ threshold; page↔page and page↔(pr|issue) only.
     Incremental runs restrict the LEFT side to changed docs but always compare
-    against all docs of the source. Deduped both directions; capped per source.
+    against every embedded document in the PROJECT, not just this source's:
+    the graph exists to show a Jira issue standing next to the Confluence page
+    it describes, and a same-source constraint made that edge impossible (a
+    source whose documents are all issues could produce no edges at all).
+    Deduped both directions; the cap stays per source.
 
     On the cost of this (SQL-4): the SQL is unchanged, because it was already
     written in the one shape a vector index can serve — `JOIN LATERAL … ORDER BY
@@ -241,7 +254,8 @@ def _extract_similar(conn, source_id: int, project_id: int,
     room above the top 3 this asks for."""
     conn.execute("SET LOCAL hnsw.ef_search = 100")
     where, args = ("a.source_id = %(sid)s AND a.embedding IS NOT NULL "
-                   "AND a.kind IN ('page','pr','issue')"), {"sid": source_id, "k": SIM_TOP_K}
+                   "AND a.kind IN ('page','pr','issue')"), {
+        "sid": source_id, "k": SIM_TOP_K, "pid": project_id}
     if doc_ids is not None:
         where += " AND a.id = ANY(%(ids)s)"
         args["ids"] = doc_ids
@@ -251,7 +265,7 @@ def _extract_similar(conn, source_id: int, project_id: int,
         JOIN LATERAL (
           SELECT b.id, 1 - (a.embedding <=> b.embedding) AS sim
           FROM documents b
-          WHERE b.source_id = a.source_id AND b.id <> a.id AND b.embedding IS NOT NULL
+          WHERE b.project_id = %(pid)s AND b.id <> a.id AND b.embedding IS NOT NULL
             AND ((a.kind = 'page' AND b.kind IN ('page','pr','issue'))
                  OR (b.kind = 'page' AND a.kind IN ('pr','issue')))
           ORDER BY a.embedding <=> b.embedding
@@ -259,11 +273,29 @@ def _extract_similar(conn, source_id: int, project_id: int,
         ) b ON b.sim >= {SIM_THRESHOLD}
         WHERE {where}
         ORDER BY b.sim DESC""", args).fetchall()
+    cross = conn.execute(f"""
+        SELECT a.id AS src, b.id AS dst, b.sim
+        FROM documents a
+        JOIN LATERAL (
+          SELECT b.id, 1 - (a.embedding <=> b.embedding) AS sim
+          FROM documents b
+          WHERE b.project_id = %(pid)s AND b.embedding IS NOT NULL
+            AND b.source_id IS DISTINCT FROM a.source_id
+            AND ((a.kind = 'page' AND b.kind IN ('page','pr','issue'))
+                 OR (b.kind = 'page' AND a.kind IN ('pr','issue')))
+          ORDER BY a.embedding <=> b.embedding
+          LIMIT 1
+        ) b ON b.sim >= {SIM_CROSS_FLOOR}
+        WHERE {where}""", args).fetchall()
     # Apply the reusable threshold/top-k policy, then dedupe both directions.
     by_source: dict[int, dict[int, float]] = {}
     for row in rows:
         by_source.setdefault(int(row["src"]), {})[int(row["dst"])] = float(row["sim"])
     pairs: dict[tuple[int, int], float] = {}
+    for row in cross:
+        source, target = int(row["src"]), int(row["dst"])
+        key = (min(source, target), max(source, target))
+        pairs[key] = max(pairs.get(key, 0.0), float(row["sim"]))
     for source, candidates in by_source.items():
         selected = derive_links(
             str(source), (str(candidate) for candidate in candidates),
