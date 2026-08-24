@@ -43,6 +43,11 @@ export function knowledgeActions({ navigate, replace }: ActionContext): Knowledg
        with one entry per keystroke and make Back unusable. */
     setQuery: ({ query }) => replace(href({ q: query, k: null, doc: null })),
 
+    /* A new window is a new result set, exactly like a new query: paging
+       resets and the old selection is dropped rather than left describing a
+       document the feed may no longer list. */
+    setFreshness: ({ days }) => replace(href({ fresh: days ? String(days) : null, k: null, doc: null })),
+
     // "Show more" asks the server for a longer page of the same search. It is
     // in the URL for the same reason the query is: reload it and you get the
     // list you were looking at, not the first 40 rows of it.

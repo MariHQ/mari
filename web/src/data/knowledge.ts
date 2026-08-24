@@ -22,9 +22,9 @@ export const PAGE = 40;
 // updated, which is what an unsearched browser should show. `searchTotal`
 // answers for the same query with no limit, so the feed can say how many of
 // how many it is showing instead of calling the page the corpus.
-const QUERY = `query Knowledge($q: String!, $k: Int!) {
-  search(query: $q, k: $k) { id source title snippet kind author authorInitials date tags }
-  searchTotal(query: $q)
+const QUERY = `query Knowledge($q: String!, $k: Int!, $days: Int) {
+  search(query: $q, k: $k, days: $days) { id source title snippet kind author authorInitials date tags }
+  searchTotal(query: $q, days: $days)
 }`;
 
 type Res = {
@@ -151,16 +151,26 @@ function pageSize(raw: string | null): number {
   return Math.min(k, 1000);
 }
 
+/** The freshness window the URL asks for. Only the windows the rail offers:
+ *  `?fresh=` is typed by whoever holds the link. */
+function freshWindow(raw: string | null): number | null {
+  const days = Number(raw);
+  return days === 7 || days === 30 ? days : null;
+}
+
 export function useKnowledge(): PageData<KnowledgeData> {
-  /* Query, page size and selection are all ROUTE state. The browser used to
-     keep the query to itself, so the hybrid-search backend was unreachable
-     from the UI; in `?q=` it is the thing the server is actually asked. */
+  /* Query, page size, freshness and selection are all ROUTE state. The browser
+     used to keep the query to itself, so the hybrid-search backend was
+     unreachable from the UI; in `?q=` it is the thing the server is actually
+     asked — and `?fresh=` reaches the backend the same way, which is the only
+     place a freshness window over a paged corpus can be answered honestly. */
   const [params] = useSearchParams();
   const query = params.get("q") ?? "";
   const k = pageSize(params.get("k"));
+  const fresh = freshWindow(params.get("fresh"));
 
   const q = useQuery<{ results: KnowledgeResult[]; total: number }>(QUERY, {
-    variables: { q: query, k }, map: mapSearch,
+    variables: { q: query, k, days: fresh }, map: mapSearch,
   });
 
   const asked = Number(params.get("doc"));
@@ -185,6 +195,7 @@ export function useKnowledge(): PageData<KnowledgeData> {
       results: q.data?.results ?? [],
       doc: docQ.data ?? null,
       query,
+      freshness: fresh,
       // The corpus's answer, not the page's length. Undefined until the query
       // answers, so the feed never states a total nobody has counted.
       total: q.data?.total,

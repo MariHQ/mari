@@ -23,21 +23,25 @@ _DOCUMENT_SELECT = """SELECT d.id, d.source, d.external_id, d.title, d.snippet,
   FROM documents d LEFT JOIN tags t ON t.document_id = d.id AND t.project_id = d.project_id"""
 
 
-def recent(limit: int, offset: int) -> list[dict]:
+def recent(limit: int, offset: int, days: int | None = None) -> list[dict]:
     project_id = access.require_current_access().project_id
+    freshness = " AND d.updated_src >= current_date - %s" if days else ""
+    args = (project_id, days, limit, offset) if days else (project_id, limit, offset)
     with db.connect() as conn:
         return conn.execute(
-            _DOCUMENT_SELECT + """ WHERE d.project_id = %s GROUP BY d.id
+            _DOCUMENT_SELECT + f""" WHERE d.project_id = %s{freshness} GROUP BY d.id
               ORDER BY d.updated_src DESC NULLS LAST, d.id DESC LIMIT %s OFFSET %s""",
-            (project_id, limit, offset),
+            args,
         ).fetchall()
 
 
-def count() -> int:
+def count(days: int | None = None) -> int:
     project_id = access.require_current_access().project_id
+    freshness = " AND updated_src >= current_date - %s" if days else ""
+    args = (project_id, days) if days else (project_id,)
     with db.connect() as conn:
         row = conn.execute(
-            "SELECT count(*) AS n FROM documents WHERE project_id = %s", (project_id,),
+            f"SELECT count(*) AS n FROM documents WHERE project_id = %s{freshness}", args,
         ).fetchone()
     return int(row["n"])
 

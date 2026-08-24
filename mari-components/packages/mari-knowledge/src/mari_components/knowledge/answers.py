@@ -59,11 +59,20 @@ def mine_answers(documents: Iterable[KnowledgeDocument], *, generate_json: JsonG
     rows = require_list(generate_json(prompt, FAQ_VERSION), "answers", recipe=FAQ_VERSION)
     output: list[AnswerCandidate] = []
     for row in rows[: max(1, maximum_answers)]:
+        # Mining proposes candidates for a human review step; one row the
+        # model mangled (a missing field, a citation of a document it was
+        # never shown) drops that row, not the whole batch. A grounded
+        # answer stays strict — this leniency is mining-only.
         question, answer = str(row.get("question") or "").strip(), str(row.get("answer") or "").strip()
         if not question or not answer:
-            raise MalformedModelOutput("FAQ question and answer are required")
-        evidence = _evidence(row.get("evidence"), allowed, recipe=FAQ_VERSION)
+            continue
+        try:
+            evidence = _evidence(row.get("evidence"), allowed, recipe=FAQ_VERSION)
+        except MalformedModelOutput:
+            continue
         output.append(AnswerCandidate(
             question, answer, evidence, evidence_confidence(answer, evidence),
         ))
+    if rows and not output:
+        raise MalformedModelOutput("no usable FAQ rows survived validation")
     return tuple(output)

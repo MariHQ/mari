@@ -491,8 +491,8 @@ type Query {
   sourcePulse: [SourcePulse!]!
   githubRepos: [GithubRepo!]!
   syncStatus(sourceId: Int!): SyncStatus!
-  search(query: String! = "", k: Int! = 10, offset: Int! = 0): [Document!]!
-  searchTotal(query: String! = ""): Int!
+  search(query: String! = "", k: Int! = 10, offset: Int! = 0, days: Int = null): [Document!]!
+  searchTotal(query: String! = "", days: Int = null): Int!
   recentSearches(limit: Int! = 6): [String!]!
   relatedDocuments(documentId: Int!): [RelatedDoc!]!
   document(id: Int!): Document

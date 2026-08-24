@@ -560,28 +560,36 @@ class Query:
             embedded_count=int(counts["embedded"]))
 
     @strawberry.field
-    def search(self, query: str = "", k: int = 10, offset: int = 0) -> list[Document]:
+    def search(self, query: str = "", k: int = 10, offset: int = 0,
+               days: int | None = None) -> list[Document]:
         """One page of results. `offset` is a real SQL offset, so a browser can
         walk a corpus larger than one page instead of the caller pretending the
         first k rows are all there is (see search_total).
 
+        `days` is the freshness window: only documents updated within the last
+        N days. It filters the corpus, not the loaded page — a client-side
+        freshness facet over one page of the newest documents removed nothing
+        and read as a dead control.
+
         `k` is clamped to MAX_K: a page is a page, and a request for a million
         documents is a request for the whole corpus with the bodies attached."""
         offset, k = max(0, offset), max(1, min(k, MAX_K))
+        window = min(max(int(days), 1), 3650) if days else None
         if query.strip():
             log_search_once(query.strip())
-            rows = hybrid_search(query, k, offset)
+            rows = hybrid_search(query, k, offset, window)
         else:
-            rows = document_repository.recent(k, offset)
+            rows = document_repository.recent(k, offset, window)
         return [_doc(r) for r in rows]
 
     @strawberry.field
-    def search_total(self, query: str = "") -> int:
+    def search_total(self, query: str = "", days: int | None = None) -> int:
         """How many documents `search` would return for this query with no
         limit. The count the results feed puts above the list."""
+        window = min(max(int(days), 1), 3650) if days else None
         if query.strip():
-            return hybrid_count(query)
-        return document_repository.count()
+            return hybrid_count(query, window)
+        return document_repository.count(window)
 
     @strawberry.field
     def recent_searches(self, limit: int = 6) -> list[str]:

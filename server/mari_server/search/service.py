@@ -97,17 +97,37 @@ def _hybrid_args(query: str, k: int = 10, offset: int = 0) -> dict:
     }
 
 
-def hybrid_search(query: str, k: int = 10, offset: int = 0) -> list[dict]:
-    rows = _rank_hybrid(query)
+def _within_days(rows: list[dict], days: int | None) -> list[dict]:
+    """The rows whose own update date falls inside the freshness window. A row
+    with no readable date is never excluded — an unreadable date is not
+    evidence of age."""
+    if not days:
+        return rows
+    cutoff = dt.date.today() - dt.timedelta(days=int(days))
+    kept = []
+    for row in rows:
+        updated = row.get("updated_src")
+        if updated is None or updated >= cutoff:
+            kept.append(row)
+    return kept
+
+
+def hybrid_search(query: str, k: int = 10, offset: int = 0,
+                  days: int | None = None) -> list[dict]:
+    rows = _within_days(_rank_hybrid(query), days)
     start = max(0, int(offset))
     stop = start + max(1, min(int(k), MAX_K))
     return rows[start:stop]
 
 
-def hybrid_count(query: str) -> int:
+def hybrid_count(query: str, days: int | None = None) -> int:
     """How many documents this query matches, corpus-wide — not how many were
     returned. The console says "showing N of M" and M has to be the corpus's
     answer, or the sentence is a claim nobody can trace."""
+    if days:
+        # The freshness window is applied to the ranked candidate set, so this
+        # count describes exactly the rows `search` pages through.
+        return len(_within_days(_rank_hybrid(query), days))
     ranked_count = len(_rank_hybrid(query))
     ctx = access.require_current_access()
     if ctx.principal_type == "slack":
