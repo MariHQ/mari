@@ -33,12 +33,17 @@ if [[ -n "${MARI_LLM_DEFAULT:-}" ]]; then
   LLM_MODEL="${MARI_LLM_DEFAULT#*:}"
   psql -h 127.0.0.1 -U postgres -d mari_cloud -q \
     -v prov="$LLM_PROVIDER" -v model="$LLM_MODEL" -v key="${MARI_LLM_KEY:-}" <<'SQL'
-INSERT INTO settings (key, value)
-VALUES ('llm', jsonb_build_object(
+-- Settings are project-scoped (migration 0010) and the server reads only the
+-- current project's row, so the pin must land on every project. The old
+-- ON CONFLICT (key) matched no arbiter index after 0010 and this write
+-- silently failed on every boot, leaving the dump's dev model in charge.
+INSERT INTO settings (project_id, key, value)
+SELECT p.id, 'llm', jsonb_build_object(
   'provider', :'prov'::text,
   'model',    :'model'::text,
-  'keys',     jsonb_build_object(:'prov'::text, :'key'::text)))
-ON CONFLICT (key) DO UPDATE
+  'keys',     jsonb_build_object(:'prov'::text, :'key'::text))
+FROM projects p
+ON CONFLICT (project_id, key) DO UPDATE
   SET value = settings.value || EXCLUDED.value;
 SQL
 fi
