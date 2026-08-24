@@ -1,6 +1,7 @@
 /* Facts ledger adapter. */
 
 import { useEffect, useMemo } from "react";
+import { useSearchParams } from "react-router-dom";
 import type { FactsData, FactFilter } from "@mari-design/components/pages/FactsPage";
 import type { Fact } from "@mari-design/components/features/FactsVerificationAudit";
 import { useQuery } from "../lib/api";
@@ -64,10 +65,15 @@ export function mapBanner(res: Res): FactsData["banner"] {
 /** Pure: rows + the contradiction pairs → everything the page renders. The
  *  page owns which tab is selected (it filters the rows it was given), so the
  *  ledger hands over every row and the tab it opens on. */
-export function buildFacts(facts: Fact[], banner: FactsData["banner"]): FactsData {
+export function buildFacts(facts: Fact[], banner: FactsData["banner"], filter = "all"): FactsData {
+  const filters = tabsFor(facts);
   return {
-    filters: tabsFor(facts),
-    filter: "all",
+    filters,
+    // Deep links land on a real tab or fall back to All: the home page's
+    // "Facts to review" tile counts only needs-review claims, so it links
+    // straight to that filter instead of a page-wide list the number never
+    // described.
+    filter: filters.some((f) => f.id === filter) ? filter : "all",
     facts,
     banner,
     // The verification-audit card re-lists facts by staleness. It is a view
@@ -102,9 +108,11 @@ export function useFacts(): PageData<FactsData> {
      verified / retired / failed overlays whenever `facts` changes identity —
      that is how a fresh read supersedes an optimistic one — so remapping every
      render would erase the "verified" tick the moment after it was clicked. */
+  const [params] = useSearchParams();
+  const tab = params.get("tab") ?? "all";
   const data = useMemo(
-    () => buildFacts(q.data ? mapFacts(q.data) : [], q.data ? mapBanner(q.data) : null),
-    [q.data],
+    () => buildFacts(q.data ? mapFacts(q.data) : [], q.data ? mapBanner(q.data) : null, tab),
+    [q.data, tab],
   );
   return {
     data,

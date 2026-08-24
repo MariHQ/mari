@@ -11,7 +11,8 @@ import type { ActionContext } from "./index";
 
 const AREA_HREF: Record<string, string> = {
   knowledge: "/knowledge",
-  facts: "/facts",
+  // The tile counts needs-review claims, so it lands on that filter.
+  facts: "/facts?tab=needs-review",
   workflows: "/workflows",
 };
 
