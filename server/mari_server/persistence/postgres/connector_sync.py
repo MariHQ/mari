@@ -68,22 +68,26 @@ def masked_config(provider: str, cfg: dict) -> dict:
 
 
 def _event(conn, provider: str, event: str, detail: str) -> None:
+    # project_id from the ambient access context: every reader of this table
+    # filters by project, and rows written without one were invisible to them.
     conn.execute(
-        """INSERT INTO sync_events (provider, event, detail, at_label)
-           VALUES (%s, %s, %s, to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))""",
-        (provider, event, detail))
+        """INSERT INTO sync_events (project_id, provider, event, detail, at_label)
+           VALUES (%s, %s, %s, %s, to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))""",
+        (access.require_current_access().project_id, provider, event, detail))
 
 
 def _checkpoint(conn, provider: str, item: str, stage: str, done: int, total: int,
                 cursor: str, status: str, started: float) -> None:
     conn.execute(
-        """INSERT INTO ingest_checkpoints (provider, item, stage, progress, total, cursor_id,
-                                           duration, status, updated_at)
-           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, now())
-           ON CONFLICT (provider, item) DO UPDATE SET stage = EXCLUDED.stage,
+        """INSERT INTO ingest_checkpoints (project_id, provider, item, stage, progress, total,
+                                           cursor_id, duration, status, updated_at)
+           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, now())
+           ON CONFLICT (provider, item) DO UPDATE SET project_id = EXCLUDED.project_id,
+             stage = EXCLUDED.stage,
              progress = EXCLUDED.progress, total = EXCLUDED.total, cursor_id = EXCLUDED.cursor_id,
              duration = EXCLUDED.duration, status = EXCLUDED.status, updated_at = now()""",
-        (provider, item, stage, done, max(total, 1), (cursor or "")[:64],
+        (access.require_current_access().project_id, provider, item, stage, done, max(total, 1),
+         (cursor or "")[:64],
          time.strftime("%H:%M:%S", time.gmtime(time.time() - started)), status))
 
 

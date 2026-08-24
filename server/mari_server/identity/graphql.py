@@ -97,7 +97,7 @@ class MutAdmin:
         if not row:
             return False
         admin_store.pause_source(str(row["provider"]))
-        audit("paused source", str(row["name"]), actor["name"])
+        audit("paused source", str(row["display_name"]), actor["name"])
         return True
 
     # ——— members (admin-only; audit the real caller) ———

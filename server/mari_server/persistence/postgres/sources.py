@@ -123,7 +123,7 @@ def freshness() -> list[dict]:
 def connector_sources() -> list[dict]:
     project_id = access.require_current_access().project_id
     with db.connect() as conn:
-        return conn.execute("""SELECT id, kind, provider, config FROM sources
+        return conn.execute("""SELECT id, kind, provider, display_name, config FROM sources
           WHERE project_id = %s AND kind = 'connector' ORDER BY id""", (project_id,)).fetchall()
 
 
