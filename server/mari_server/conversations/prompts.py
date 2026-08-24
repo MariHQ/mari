@@ -36,6 +36,10 @@ CHAT_STYLE_RULES: tuple[str, ...] = (
     "Answer a lookup in one to three sentences, a how-to as numbered steps, and a "
     "comparison as a table or a short list.",
     "Put code in a fenced block with a language tag.",
+    "Prefer canonical and verified sources over unreviewed ones when they disagree, "
+    "and say which you used.",
+    "When a cited source is marked stale or needs review, or its age undercuts the "
+    "claim, say so in one clause instead of presenting it as settled.",
 )
 
 SURFACE_RULES: dict[str, tuple[str, ...]] = {

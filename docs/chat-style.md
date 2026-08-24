@@ -35,6 +35,13 @@ Three columns at most on chat surfaces.
 Put code in a fenced block with a language tag. Keep inline code to identifiers
 and short literals.
 
+## Trust
+
+Prefer canonical and verified sources over unreviewed ones when they disagree,
+and say which you used. When a cited source is marked stale or needs review,
+or its age undercuts the claim, say so in one clause instead of presenting it
+as settled: "per a stale doc from March" beats silence.
+
 ## Citations
 
 Cite every factual claim that came from the retrieved context. Place the

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import datetime as dt
+import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -29,6 +31,54 @@ class ToolDependencies:
     connector_definitions: Callable[[], Sequence[Any]]
 
 
+# The workspace tag vocabulary (mari tag): trust states first, lifecycle
+# states after, so "canonical" outranks "deprecated" on a doc carrying both.
+REVIEW_STATES = ("canonical", "canon", "verified", "needs-review", "stale", "deprecated", "draft", "internal")
+
+
+def _review_status(tags: Any) -> str:
+    """The record's verification state, from the review tags the workspace
+    actually uses. "unreviewed" is the honest default, not a judgment."""
+    names = {str(tag).lower() for tag in (tags or [])}
+    for state in REVIEW_STATES:
+        if state in names:
+            return state
+    return "unreviewed"
+
+
+def _age_days(updated: Any) -> int | None:
+    if updated is None:
+        return None
+    if isinstance(updated, dt.datetime):
+        updated = updated.date()
+    if isinstance(updated, dt.date):
+        return max(0, (dt.date.today() - updated).days)
+    try:
+        return max(0, (dt.date.today() - dt.date.fromisoformat(str(updated)[:10])).days)
+    except ValueError:
+        return None
+
+
+def _passage(body: str, query: str, radius: int = 400) -> str:
+    """The stretch of the document around the query's first matching term, or
+    the opening if nothing matches. Whitespace-collapsed so the excerpt spends
+    its budget on words."""
+    text = " ".join(str(body or "").split())
+    if not text:
+        return ""
+    lower = text.lower()
+    hit = -1
+    for term in re.findall(r"[a-z0-9][a-z0-9_-]+", query.lower()):
+        hit = lower.find(term)
+        if hit >= 0:
+            break
+    if hit < 0:
+        return text[: radius * 2]
+    start = max(0, hit - radius)
+    end = min(len(text), hit + radius)
+    return ("…" if start else "") + text[start:end] + ("…" if end < len(text) else "")
+
+
 def build_tool_bindings(deps: ToolDependencies) -> dict[str, ToolBinding]:
     """Build one project's tool registry from explicit infrastructure ports."""
 
@@ -38,10 +88,27 @@ def build_tool_bindings(deps: ToolDependencies) -> dict[str, ToolBinding]:
             return ToolOutcome(False, "search needs a query", "error: missing query")
         rows = deps.search(text, 8)
         deps.record_search(text)
-        hits = [{
-            "id": row["id"], "title": row["title"],
-            "snippet": str(row.get("snippet") or "")[:160],
-        } for row in rows]
+        # The top hits carry a real passage and the record's trust metadata,
+        # not a 160-character teaser. An answer written from teasers could
+        # never say more than the result list showed, and an answer that
+        # cannot see verification states cannot prefer a verified fact over a
+        # stale one — which is the whole difference between this assistant
+        # and a search box.
+        hits = []
+        for index, row in enumerate(rows):
+            hit: dict[str, Any] = {
+                "id": row["id"], "title": row["title"],
+                "status": _review_status(row.get("tags")),
+                "owner": str(row.get("author") or "") or None,
+                "age_days": _age_days(row.get("updated_src")),
+            }
+            if index < 3:
+                passage = _passage(str(row.get("body") or row.get("snippet") or ""), text)
+                if passage:
+                    hit["passage"] = untrusted_document(passage)
+            else:
+                hit["snippet"] = str(row.get("snippet") or "")[:160]
+            hits.append(hit)
         evidence = tuple({
             "document_id": int(row["id"]), "title": str(row["title"]),
             "reason": "retrieved by knowledge search", "rank": index + 1,

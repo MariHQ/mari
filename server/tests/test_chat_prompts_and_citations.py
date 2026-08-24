@@ -19,7 +19,12 @@ from mari_server.conversations.prompts import (
 
 ROOT = Path(__file__).resolve().parents[2]
 STYLE_DOC = ROOT / "docs" / "chat-style.md"
-MIGRATION = ROOT / "server" / "migrations" / "0024_chat_style_pack.sql"
+# The chat pack is seeded by 0024 and extended by later chat.* migrations;
+# the fallback must agree with their union, not with the first file alone.
+MIGRATIONS = (
+    ROOT / "server" / "migrations" / "0024_chat_style_pack.sql",
+    ROOT / "server" / "migrations" / "0027_chat_trust_rules.sql",
+)
 
 # One sentence that must reach the model on each surface, and nowhere else.
 SURFACE_MARKERS = {
@@ -88,7 +93,7 @@ class ChatPromptTests(unittest.TestCase):
 
 class ChatStylePackTests(unittest.TestCase):
     def test_the_shipped_pack_and_the_baked_fallback_say_the_same_thing(self):
-        sql = MIGRATION.read_text(encoding="utf-8").replace("''", "'")
+        sql = "\n".join(m.read_text(encoding="utf-8") for m in MIGRATIONS).replace("''", "'")
         for rule in CHAT_STYLE_RULES:
             self.assertIn(rule, sql, rule)
         self.assertIn("'chat', 'Chat answers'", sql)
