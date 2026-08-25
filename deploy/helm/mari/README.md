@@ -31,14 +31,21 @@ repository audit data under `/data/mari/repo-audit`, and caches under `/data/cac
 No object store is required.
 
 For production, use External Secrets or another secret controller to materialize
-the same keys, then install:
+the same keys. Install against the customer's existing ingress controller; no
+hostname is required:
 
 ```sh
 helm upgrade --install mari deploy/helm/mari \
   --namespace mari --create-namespace \
-  -f my-company-values.yaml \
+  --set secrets.existingSecret=mari-secrets \
+  --set ingress.enabled=true \
+  --set ingress.className=REPLACE_WITH_THE_CUSTOMER_INGRESS_CLASS \
   --wait --timeout 10m
 ```
+
+The Ingress accepts any Host header and is reachable at the address assigned by
+the customer's ingress controller. To use DNS, set `ingress.host` to a
+customer-owned hostname and configure TLS using that controller's normal values.
 
 For EKS, copy `values-aws-example.yaml` to a customer-owned values file and
 replace its example hostname and certificate ARN. AWS ingress requires the AWS

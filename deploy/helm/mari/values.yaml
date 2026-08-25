@@ -63,6 +63,7 @@ config:
 ingress:
   enabled: false
   className: ""
+  # Optional. Leave blank to accept every Host header at the ingress address.
   host: ""
   annotations: {}
   tls: []
