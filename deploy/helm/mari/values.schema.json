@@ -9,6 +9,16 @@
           "type": "integer",
           "const": 1,
           "description": "Mari v0.1.0 uses one API replica with its ReadWriteOnce data volume."
+        },
+        "persistence": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "const": true,
+              "description": "The self-contained v0.1.0 chart always persists application data."
+            }
+          }
         }
       }
     },
