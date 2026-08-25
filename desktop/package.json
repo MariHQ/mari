@@ -1,6 +1,6 @@
 {
   "name": "mari-cloud-desktop",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "Mari desktop client",
   "desktopName": "Mari",
   "main": "main.cjs",

@@ -19,7 +19,10 @@ let appUrl;
 
 // Keep development and packaged builds on the product's stable data path
 // instead of Electron's package-name-derived default.
-app.setPath("userData", path.join(app.getPath("appData"), "Mari"));
+app.setPath(
+  "userData",
+  process.env.MARI_DESKTOP_USER_DATA_DIR || path.join(app.getPath("appData"), "Mari"),
+);
 
 function resourcePath(...parts) {
   const root = app.isPackaged ? process.resourcesPath : __dirname;
