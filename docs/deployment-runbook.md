@@ -26,6 +26,13 @@ verify `/metrics` is scraped. Use a rolling deployment with `maxUnavailable: 0`.
 Do not raise API replicas above one until scheduler leadership exists (see the
 SLO document).
 
+Every pull request also builds both production images in a disposable kind
+cluster, runs the real migration init container, waits for both Deployments,
+and probes `/livez`, `/readyz`, and the SPA through the web Service. To run the
+same destructive smoke locally against Docker Desktop Kubernetes, use
+`make test-k8s`; it replaces objects in the local `mari` namespace and leaves
+them running for inspection.
+
 ### Live connector canaries
 
 The `Live connector canaries` workflow validates Confluence, Slack, Google

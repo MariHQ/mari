@@ -1,0 +1,27 @@
+name: Kubernetes deployment
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kubernetes-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: helm/kind-action@v1
+        with:
+          cluster_name: mari-k8s
+      - name: Build, migrate, deploy, and probe Mari
+        run: make test-k8s

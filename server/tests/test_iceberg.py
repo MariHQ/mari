@@ -2,13 +2,40 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from unittest.mock import Mock, patch
 
 from mari_components.documents import DocumentVersion
 from mari_server.persistence.iceberg.documents import IcebergDocumentStore
+from mari_server.persistence.iceberg.warehouse import IcebergWarehouse
 from tests.iceberg_fixture import temporary_warehouse
 
 
 class IcebergWarehouseTests(unittest.TestCase):
+    def test_object_store_uri_is_passed_to_catalog_without_local_path_conversion(self):
+        catalog = Mock()
+        with (
+            patch.dict("os.environ", {}, clear=True),
+            patch(
+                "mari_server.persistence.iceberg.warehouse.SqlCatalog",
+                return_value=catalog,
+            ) as sql_catalog,
+            patch(
+                "mari_server.persistence.postgres.connection.database_url",
+                return_value="postgresql://mari:secret@db/mari",
+            ),
+            patch("pathlib.Path.mkdir") as mkdir,
+        ):
+            warehouse = IcebergWarehouse("s3://mari-production/iceberg/")
+
+        self.assertEqual(warehouse.warehouse, "s3://mari-production/iceberg")
+        sql_catalog.assert_called_once_with(
+            "mari",
+            uri="postgresql+psycopg://mari:secret@db/mari",
+            warehouse="s3://mari-production/iceberg",
+        )
+        catalog.create_namespace_if_not_exists.assert_called_once_with("mari")
+        mkdir.assert_not_called()
+
     def test_warehouse_contains_only_canonical_document_versions(self):
         with tempfile.TemporaryDirectory() as directory:
             warehouse = temporary_warehouse(directory)

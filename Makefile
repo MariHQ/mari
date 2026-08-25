@@ -1,4 +1,4 @@
-.PHONY: test test-server test-web test-browser test-contracts test-agent-evals test-live-ollama test-live-deepseek test-live-connectors test-integration test-reliability test-restore test-fly-image
+.PHONY: test test-server test-web test-browser test-contracts test-agent-evals test-live-ollama test-live-deepseek test-live-connectors test-integration test-reliability test-restore test-fly-image test-k8s
 
 test: test-server test-web test-browser
 
@@ -37,3 +37,6 @@ test-restore:
 
 test-fly-image:
 	./deploy/fly/smoke.sh
+
+test-k8s:
+	./deploy/k8s/smoke.sh

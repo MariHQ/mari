@@ -25,12 +25,14 @@ COPY server/ /app/server/
 
 # app.py mkdirs builds/ at startup, but create it here too so the image
 # works read-only-ish out of the box.
-RUN addgroup --system mari \
-    && adduser --system --ingroup mari --home /app mari \
+RUN addgroup --system --gid 10001 mari \
+    && adduser --system --uid 10001 --ingroup mari --home /app mari \
     && mkdir -p /app/server/builds /app/data \
     && chown -R mari:mari /app
 
-USER mari
+# Keep the runtime identity numeric so Kubernetes can enforce runAsNonRoot
+# without having to resolve an image-local user name.
+USER 10001:10001
 
 EXPOSE 8000
 CMD ["uvicorn", "mari_server.app:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -30,11 +30,17 @@ class IcebergWarehouse:
             self.catalog = load_catalog(os.environ["MARI_ICEBERG_CATALOG"])
             self.warehouse = configured or ""
         else:
-            root = pathlib.Path(configured or _default_root()).expanduser().resolve()
-            root.mkdir(parents=True, exist_ok=True)
-            warehouse_path = root / "warehouse"
-            warehouse_path.mkdir(parents=True, exist_ok=True)
-            self.warehouse = warehouse_path.as_uri()
+            # Object-store locations are already valid Iceberg warehouse URIs.
+            # Treating ``s3://bucket/prefix`` as a pathlib value silently turns
+            # it into a local ``.../s3:/bucket/prefix`` directory in a pod.
+            if configured and "://" in configured:
+                self.warehouse = configured.rstrip("/")
+            else:
+                root = pathlib.Path(configured or _default_root()).expanduser().resolve()
+                root.mkdir(parents=True, exist_ok=True)
+                warehouse_path = root / "warehouse"
+                warehouse_path.mkdir(parents=True, exist_ok=True)
+                self.warehouse = warehouse_path.as_uri()
             catalog_uri = os.environ.get("MARI_ICEBERG_CATALOG_URI", "").strip()
             if not catalog_uri:
                 from mari_server.persistence.postgres.connection import database_url
