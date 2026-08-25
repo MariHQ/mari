@@ -16,7 +16,7 @@ deployment source; generated manifests must not be edited or committed.
 3. Configure source and model providers in Mari after installation. Their
    credentials are application data, not Kubernetes deployment secrets.
 4. Confirm that the immutable API and web digests in the chart match the v0.1.0
-   release published to GHCR.
+   release published to the public container registry.
 5. Set the customer-owned ingress hostname, application URL, and CORS origin.
 
 ## Rollout
@@ -24,26 +24,6 @@ deployment source; generated manifests must not be edited or committed.
 Install the chart and wait for `/readyz`, then run the smoke suite. The API uses
 the `Recreate` strategy because its filesystem volume is ReadWriteOnce. Keep the
 web replica count at exactly one for v0.1.0.
-
-Every pull request also builds both production images and installs the Helm
-chart in a disposable kind cluster, runs the real migration init container, waits for the workloads,
-and probes `/livez`, `/readyz`, and the SPA through the web Service. To run the
-same destructive smoke locally against Docker Desktop Kubernetes, use
-`make test-k8s`; it replaces objects in the local `mari` namespace and leaves
-them running for inspection.
-
-### Live connector canaries
-
-The `Live connector canaries` workflow validates Confluence, Slack, Google
-Drive, and GitHub against a dedicated sandbox every Tuesday without storing
-credentials or creating sources. Configure the protected GitHub environment
-`connector-canary` with the `MARI_E2E_*` secrets named in the workflow. The
-job intentionally fails when any priority credential is absent or expired, so
-a green schedule means all four vendor authentication contracts were actually
-exercised. A manual dispatch can opt into mutation-enabled sandbox workflows;
-scheduled runs are read-only validation.
-
-Live Playwright recording is disabled because forms contain real secrets.
 
 For rollback, deploy the previous immutable image digest. Schema changes must
 remain backward-compatible for at least one release. A rollback is complete only

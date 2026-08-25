@@ -3,7 +3,8 @@
 Mari v0.1.0 deploys one API pod, one web pod, PostgreSQL/pgvector, and persistent
 volumes for PostgreSQL and `/data`. The API migration init container brings a
 new database to the current schema before traffic starts. The images are public,
-multi-architecture releases in GHCR; customers do not need an image
+multi-architecture releases in Amazon ECR Public; customers do not need an AWS
+account or image
 pull credential.
 
 ## Required secret
