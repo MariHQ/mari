@@ -9,6 +9,7 @@ import json
 import time
 import typing as t
 
+from mari_server.automations import progress as step_progress
 from mari_server.providers import models as llm
 from mari_server.identity import context as access
 from mari_server.persistence.postgres import lineage as links
@@ -121,13 +122,22 @@ def _scan_concurrently(
         pool.submit(contextvars.copy_context().run, operation, document): document
         for document in docs
     }
-    done, pending = cf.wait(futures, timeout=SCAN_DEADLINE)
-    for future in done:
-        document = futures[future]
-        try:
-            results.append((document, future.result()))
-        except Exception:  # noqa: BLE001 — one bad document must not end the scan
-            failed += 1
+    # Collected as they land, not in one wait: each completion reports
+    # within-step progress, so a run's bar moves through the model pass
+    # instead of parking at the step boundary for the whole scan.
+    finished: set = set()
+    try:
+        for future in cf.as_completed(futures, timeout=SCAN_DEADLINE):
+            finished.add(future)
+            document = futures[future]
+            try:
+                results.append((document, future.result()))
+            except Exception:  # noqa: BLE001 — one bad document must not end the scan
+                failed += 1
+            step_progress.report(len(finished), len(docs))
+    except cf.TimeoutError:
+        pass
+    pending = [future for future in futures if future not in finished]
     for future in pending:
         future.cancel()
     pool.shutdown(wait=False, cancel_futures=True)

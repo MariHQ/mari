@@ -17,6 +17,7 @@ import typing as t
 
 from mari_server.providers import models as llm
 from mari_server import settings as config
+from mari_server.automations import progress
 from mari_server.identity import context as access
 from mari_server.persistence.postgres import workflows as workflow_store
 from mari_components.workflow_runtime import matching_documents, run_step
@@ -273,6 +274,25 @@ STEP_RETRIES = 1        # one extra attempt, not a loop
 STEP_RETRY_BACKOFF = 2.0  # seconds
 
 
+def _step_reporter(run_id: int, rows: list[dict], ctx: dict, start: float,
+                   step_index: int, step_count: int):
+    """A reporter that maps one step's (done, total) into the run's bar.
+
+    Persists only when the whole-run percentage changes, so a 50-document
+    scan writes tens of heartbeats, not thousands."""
+    last = {"pct": -1}
+
+    def report(done: int, total: int) -> None:
+        share = min(max(done, 0), total) / max(total, 1)
+        pct = int((step_index + share) / max(step_count, 1) * 100)
+        if pct <= last["pct"]:
+            return
+        last["pct"] = pct
+        _persist(run_id, rows, "running", pct, {"ctx": ctx}, start)
+
+    return report
+
+
 def _run_step(kind: str, impl: t.Callable | None, cfg: dict, ctx: dict) -> tuple[str, str, dict]:
     """Run one step, retrying an idempotent one once on an exception.
 
@@ -312,7 +332,11 @@ def execute_run(run_id: int, resume_from: int = 0) -> None:
         rows[i]["status"] = "running"
         _persist(run_id, rows, "running", int(i / max(len(steps), 1) * 100), {"ctx": ctx}, start)
         t0 = time.time()
-        status, detail, updates = _run_step(kind, STEP_IMPLS.get(kind), step.get("config", {}), ctx)
+        token = progress.arm(_step_reporter(run_id, rows, ctx, start, i, len(steps)))
+        try:
+            status, detail, updates = _run_step(kind, STEP_IMPLS.get(kind), step.get("config", {}), ctx)
+        finally:
+            progress.disarm(token)
         ctx.update({k: v for k, v in updates.items() if k != "pause"})
         rows[i].update({"status": status, "detail": detail, "duration": _elapsed(t0)})
         if status == "waiting":
