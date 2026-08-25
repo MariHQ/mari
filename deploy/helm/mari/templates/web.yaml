@@ -1,0 +1,55 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: web
+spec:
+  selector:
+    app.kubernetes.io/name: mari
+    app.kubernetes.io/component: web
+  ports:
+    - {name: http, port: 80, targetPort: http}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mari-web
+spec:
+  replicas: {{ .Values.web.replicaCount }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: {maxUnavailable: 0, maxSurge: 1}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mari
+      app.kubernetes.io/component: web
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mari
+        app.kubernetes.io/component: web
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101
+        runAsGroup: 101
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: web
+          image: {{ include "mari.webImage" . | quote }}
+          imagePullPolicy: {{ .Values.web.image.pullPolicy }}
+          ports:
+            - {name: http, containerPort: 8080}
+          readinessProbe:
+            httpGet: {path: /livez, port: http}
+            periodSeconds: 10
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet: {path: /, port: http}
+            periodSeconds: 20
+            timeoutSeconds: 3
+          resources:
+{{ toYaml .Values.web.resources | indent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: ["ALL"]}

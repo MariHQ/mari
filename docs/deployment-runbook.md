@@ -1,33 +1,32 @@
 # Kubernetes deployment runbook
 
-The manifests in `deploy/k8s` are a conservative baseline. Replace image names,
-hostnames, storage endpoints, and secret values through your normal deployment
-system; never commit a populated Secret.
+The Helm chart in `deploy/helm/mari` is the v0.1.0 deployment path. It starts
+PostgreSQL/pgvector, one API, exactly one web pod, and persistent volumes for
+the database and application data. Never commit a populated Secret; the exact
+required keys and install commands are in the chart README. Helm is the single
+deployment source; generated manifests must not be edited or committed.
 
 ## Preflight
 
-1. Provide a managed PostgreSQL/pgvector URL in `mari-secrets`. Verify backups,
-   point-in-time recovery, TLS, connection limits, and a restore rehearsal.
-2. Configure the PostgreSQL-backed Iceberg catalog/warehouse and S3 credentials through workload
-   identity. Derived vector snapshots use `MARI_VECTOR_URI`; they can be rebuilt.
-3. Confirm the required LLM gateway or Ollama endpoint and its network policy.
-   Enterprise gateways use `MARI_LLM_GATEWAY_URL` and the Secret-backed
-   `MARI_LLM_GATEWAY_TOKEN`; optional JSON headers/metadata support tenant and
-   policy routing. Select provider `gateway` in the model settings, then run the
-   prompt-free `testLlmGateway` health mutation before enabling traffic.
-4. Build immutable API and web image digests and replace the example tags.
-5. Set the ingress hostname, CORS origin, session secret, and OAuth callbacks.
+1. Create the two database keys documented in the chart README. The bundled
+   PostgreSQL/pgvector StatefulSet stores its database on a persistent volume.
+2. Size and back up both persistent volumes. All Iceberg, vector, audit, and
+   cache files stay below `/data` on the API volume; no object store or cloud
+   credentials are required.
+3. Configure source and model providers in Mari after installation. Their
+   credentials are application data, not Kubernetes deployment secrets.
+4. Confirm that the immutable API and web digests in the chart match the v0.1.0
+   release published to GHCR.
+5. Set the customer-owned ingress hostname, application URL, and CORS origin.
 
 ## Rollout
 
-Apply namespace/config/secret references, then API, web, services, disruption
-budgets, autoscaling, and ingress. Wait for `/readyz`, run the smoke suite, and
-verify `/metrics` is scraped. Use a rolling deployment with `maxUnavailable: 0`.
-Do not raise API replicas above one until scheduler leadership exists (see the
-SLO document).
+Install the chart and wait for `/readyz`, then run the smoke suite. The API uses
+the `Recreate` strategy because its filesystem volume is ReadWriteOnce. Keep the
+web replica count at exactly one for v0.1.0.
 
-Every pull request also builds both production images in a disposable kind
-cluster, runs the real migration init container, waits for both Deployments,
+Every pull request also builds both production images and installs the Helm
+chart in a disposable kind cluster, runs the real migration init container, waits for the workloads,
 and probes `/livez`, `/readyz`, and the SPA through the web Service. To run the
 same destructive smoke locally against Docker Desktop Kubernetes, use
 `make test-k8s`; it replaces objects in the local `mari` namespace and leaves
@@ -52,9 +51,8 @@ after readiness is green and connector lag resumes falling.
 
 ## Backup and restore
 
-- Back up the managed transactional database with daily snapshots and PITR.
-- Protect the Iceberg catalog and warehouse with bucket versioning, encryption,
-  and lifecycle rules. Back up catalog metadata on the same recovery schedule.
+- Back up the PostgreSQL and API persistent volumes on the same schedule.
+- Test restoring both volumes into an isolated namespace.
 - Published site artifacts can be regenerated, but retain release manifests.
 - Derived embeddings/vector snapshots are disposable; restore source documents
   and rebuild them rather than treating them as records of truth.
@@ -66,7 +64,7 @@ the browser smoke suite. Record recovery point and recovery time.
 Every pull request performs the same core recovery proof in the production-like
 Compose stack: `make test-restore` restores a `pg_dump` into an isolated database,
 compares representative tenant and control-state counts, reruns the migration ledger,
-and mirrors the versioned object artifacts into a clean bucket. This is a release gate, not a substitute
+and restores the versioned application artifacts. This is a release gate, not a substitute
 for the managed provider's point-in-time recovery exercise.
 
 ## Incident triage

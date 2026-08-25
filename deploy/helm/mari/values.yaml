@@ -1,0 +1,71 @@
+api:
+  replicaCount: 1
+  image:
+    repository: ghcr.io/marihq/mari-api
+    tag: v0.1.0
+    digest: ""
+    pullPolicy: IfNotPresent
+  persistence:
+    enabled: true
+    size: 20Gi
+    storageClass: ""
+  resources:
+    requests: {cpu: 250m, memory: 512Mi}
+    limits: {cpu: "2", memory: 2Gi}
+
+web:
+  # Mari v0.1.0 deliberately runs one web instance.
+  replicaCount: 1
+  image:
+    repository: ghcr.io/marihq/mari-web
+    tag: v0.1.0
+    digest: ""
+    pullPolicy: IfNotPresent
+  resources:
+    requests: {cpu: 50m, memory: 64Mi}
+    limits: {cpu: 500m, memory: 256Mi}
+
+postgresql:
+  enabled: true
+  # pg16 multi-architecture image pinned for repeatable customer installs.
+  image: pgvector/pgvector@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b
+  database: mari_cloud
+  username: mari
+  persistence:
+    size: 20Gi
+    storageClass: ""
+  resources:
+    requests: {cpu: 250m, memory: 256Mi}
+    limits: {cpu: "1", memory: 1Gi}
+
+secrets:
+  # RECOMMENDED: create this Secret with the keys listed in README.md, then set
+  # existingSecret. The chart never needs secret plaintext in a values file.
+  existingSecret: ""
+  # If existingSecret is empty, the chart creates a Secret. databasePassword
+  # is mandatory and Helm fails instead of deploying an insecure placeholder.
+  databasePassword: ""
+
+config:
+  MARI_LOG_LEVEL: INFO
+  MARI_CORS_ORIGINS: ""
+  MARI_APP_URL: ""
+  MARI_OAUTH_REDIRECT_BASE: ""
+  MARI_VECTOR_URI: /data/mari/vectors
+  MARI_VECTOR_CACHE: /data/cache/vectors
+  MARI_VECTOR_FLUSH_SECONDS: "30"
+  MARI_ICEBERG_WAREHOUSE: /data/mari/iceberg
+  MARI_REPO_AUDIT_DIR: /data/mari/repo-audit
+  MARI_AUTH_BYPASS: "false"
+  MARI_AUTH_BYPASS_DEV_MODE: "false"
+  MARI_AUTH_REGISTRATION: "false"
+
+ingress:
+  enabled: false
+  className: ""
+  host: ""
+  annotations: {}
+  tls: []
+
+podDisruptionBudget:
+  enabled: true

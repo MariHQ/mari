@@ -1,0 +1,25 @@
+# Customer-owned AWS EKS example. Replace the hostname and certificate ARN;
+# do not copy credentials into this file.
+secrets:
+  existingSecret: mari-secrets
+
+config:
+  MARI_CORS_ORIGINS: https://knowledge.acme.com
+  MARI_APP_URL: https://knowledge.acme.com
+  MARI_OAUTH_REDIRECT_BASE: https://knowledge.acme.com
+
+ingress:
+  enabled: true
+  className: alb
+  host: knowledge.acme.com
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80},{"HTTPS":443}]'
+    alb.ingress.kubernetes.io/ssl-redirect: "443"
+    alb.ingress.kubernetes.io/healthcheck-path: /readyz
+    alb.ingress.kubernetes.io/healthcheck-port: traffic-port
+    # REQUIRED: certificate must exist in the same region as the EKS cluster.
+    alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:REGION:ACCOUNT_ID:certificate/CERTIFICATE_ID
+    # Optional; requires external-dns with access to the customer's hosted zone.
+    external-dns.alpha.kubernetes.io/hostname: knowledge.acme.com

@@ -1,0 +1,61 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "api": {
+      "type": "object",
+      "properties": {
+        "replicaCount": {
+          "type": "integer",
+          "const": 1,
+          "description": "Mari v0.1.0 uses one API replica with its ReadWriteOnce data volume."
+        }
+      }
+    },
+    "web": {
+      "type": "object",
+      "properties": {
+        "replicaCount": {
+          "type": "integer",
+          "const": 1,
+          "description": "Mari v0.1.0 supports exactly one web replica."
+        }
+      }
+    },
+    "secrets": {
+      "type": "object",
+      "properties": {
+        "existingSecret": {
+          "type": "string",
+          "description": "Recommended: name of a Secret containing only POSTGRES_PASSWORD and MARI_DB."
+        },
+        "databasePassword": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._~-]*$",
+          "description": "Required when existingSecret is empty. Use a long URL-safe value; never commit it."
+        }
+      }
+    },
+    "postgresql": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "const": true,
+          "description": "The self-contained v0.1.0 chart always deploys PostgreSQL/pgvector."
+        }
+      }
+    },
+    "ingress": {
+      "type": "object",
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "className": {"type": "string"},
+        "host": {
+          "type": "string",
+          "description": "Customer-owned DNS hostname; required when ingress is enabled."
+        }
+      }
+    }
+  }
+}

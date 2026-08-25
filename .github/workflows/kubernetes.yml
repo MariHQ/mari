@@ -23,5 +23,6 @@ jobs:
       - uses: helm/kind-action@v1
         with:
           cluster_name: mari-k8s
+      - uses: azure/setup-helm@v4
       - name: Build, migrate, deploy, and probe Mari
         run: make test-k8s
