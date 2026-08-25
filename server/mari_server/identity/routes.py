@@ -56,7 +56,7 @@ from mari_server.identity.actor import SERVICE_ACTOR, actor_name, caller, set_ca
 
 
 def _conn():
-    return postgres.connect()
+    return postgres.request_connection()
 
 
 # ————— rate limiting —————

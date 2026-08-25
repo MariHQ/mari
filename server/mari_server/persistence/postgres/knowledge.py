@@ -291,7 +291,7 @@ def task_summary() -> tuple[dict | None, list[str], list[str]]:
 
 def digest_topics() -> list[dict]:
     project_id = access.require_current_access().project_id
-    with db.connect() as conn:
+    with db.request_connection() as conn:
         return conn.execute(
             "SELECT * FROM digest_topics WHERE project_id = %s ORDER BY id", (project_id,),
         ).fetchall()

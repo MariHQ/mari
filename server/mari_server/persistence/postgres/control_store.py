@@ -2,8 +2,8 @@
 
 Sessions are operational records rather than enterprise knowledge, but using
 the same managed PostgreSQL service gives them the same HA, backup, and restore
-path as the rest of the product. Connections are intentionally independent of
-``db.py`` because auth imports this module before the shared pool is created.
+path as the rest of the product. These operations are short request/control-
+plane queries, so they borrow from the pool instead of opening a new socket.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from mari_server.persistence.postgres import connection as postgres
 
 
 def _connect():
-    return postgres.connect()
+    return postgres.request_connection()
 
 
 def _instant(value: int | float | None = None) -> dt.datetime:

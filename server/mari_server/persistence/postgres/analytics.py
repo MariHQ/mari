@@ -6,7 +6,7 @@ from mari_server.identity import context as access
 
 def overview(since: str | None) -> dict:
     project_id = access.require_current_access().project_id
-    with db.connect() as conn:
+    with db.request_connection() as conn:
         changes = conn.execute(
             "SELECT count(*) AS n FROM changes WHERE project_id = %s AND created_at >= %s" if since else
             "SELECT count(*) AS n FROM changes WHERE project_id = %s AND created_at >= now() - interval '7 days'",

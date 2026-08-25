@@ -28,7 +28,10 @@ from mari_server.persistence.postgres import connection as postgres
 # (ingest/connect_sync/flowengine) keep their own dedicated connections — they
 # hold transactions open for minutes and must not starve the pool.
 def open_pool() -> None:
-    postgres.pool()
+    # Do not report the application ready while the pool's minimum connection
+    # is still being established in its background worker. The first browser
+    # request should borrow a warm connection instead of paying startup cost.
+    postgres.pool().wait()
 
 
 def close_pool() -> None:

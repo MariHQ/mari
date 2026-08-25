@@ -195,15 +195,39 @@ _DEFINITIONS = (
         lambda v: NotionConfig(_text(v, "token")), validate_notion, poll_notion, priority=50,
     ),
     ConnectorDefinition(
-        "jira", "Jira", "Issues and discussions selected by a JQL query.",
+        "jira", "Jira",
+        "Jira Cloud issues and comments selected by project key or JQL. Use a regular "
+        "unscoped Atlassian API token owned by an account that can browse those issues.",
         (
-            _field("site_url", "Site URL", placeholder="https://company.atlassian.net"),
-            _field("email", "Atlassian account email"),
-            _field("api_token", "API token", secret=True, placeholder="ATATT…"),
-            _field("project_key", "Project key", required=False),
-            _field("jql", "JQL filter", required=False),
+            _field(
+                "site_url", "Site URL", placeholder="https://company.atlassian.net",
+                help="Your Jira Cloud root URL, not a project or issue URL.",
+            ),
+            _field(
+                "email", "Atlassian account email",
+                help="Email for the token owner. Prefer a dedicated read-only account with Browse Projects access.",
+            ),
+            _field(
+                "api_token", "API token", secret=True, placeholder="ATATT…",
+                help=(
+                    "Create a regular API token, not an API token with scopes. Scoped tokens use an "
+                    "Atlassian API URL this connector does not support. Record its expiration date."
+                ),
+            ),
+            _field(
+                "project_key", "Project key", required=False, placeholder="MARI",
+                help="Optional. For issue MARI-123, the project key is MARI.",
+            ),
+            _field(
+                "jql", "JQL filter", required=False,
+                placeholder="project = MARI AND statusCategory != Done",
+                help=(
+                    "Optional; when set, this selects issues instead of Project key. Enter only the filter—"
+                    "do not include ORDER BY. If both fields are blank, issues updated in the last 365 days sync."
+                ),
+            ),
         ),
-        "https://developer.atlassian.com/cloud/jira/platform/rest/v3/",
+        "https://support.atlassian.com/atlassian-account/docs/manage-api-tokens-for-your-atlassian-account/",
         lambda v: JiraConfig(
             _text(v, "site_url"), _text(v, "email"), _text(v, "api_token"),
             _text(v, "project_key"), _text(v, "jql"),

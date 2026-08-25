@@ -27,7 +27,7 @@ def recent(limit: int, offset: int, days: int | None = None) -> list[dict]:
     project_id = access.require_current_access().project_id
     freshness = " AND d.updated_src >= current_date - %s" if days else ""
     args = (project_id, days, limit, offset) if days else (project_id, limit, offset)
-    with db.connect() as conn:
+    with db.request_connection() as conn:
         return conn.execute(
             _DOCUMENT_SELECT + f""" WHERE d.project_id = %s{freshness} GROUP BY d.id
               ORDER BY d.updated_src DESC NULLS LAST, d.id DESC LIMIT %s OFFSET %s""",
@@ -48,7 +48,7 @@ def count(days: int | None = None) -> int:
 
 def recent_searches(limit: int) -> list[str]:
     project_id = access.require_current_access().project_id
-    with db.connect() as conn:
+    with db.request_connection() as conn:
         rows = conn.execute(
             """SELECT detail, max(at) AS last FROM usage_log
                  WHERE project_id = %s AND kind = 'search' AND detail <> ''

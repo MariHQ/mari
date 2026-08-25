@@ -8,6 +8,7 @@ importing this module never opens a socket.
 from __future__ import annotations
 
 import atexit
+import contextlib
 import threading
 import typing as t
 
@@ -29,6 +30,13 @@ def database_url() -> str:
 def connect() -> psycopg.Connection:
     """Open a dedicated connection for a long transaction/background job."""
     return psycopg.connect(database_url(), row_factory=dict_row)
+
+
+@contextlib.contextmanager
+def request_connection() -> t.Iterator[psycopg.Connection]:
+    """Borrow one pooled connection for a short request/control operation."""
+    with pool().connection() as connection:
+        yield connection
 
 
 def pool() -> ConnectionPool:

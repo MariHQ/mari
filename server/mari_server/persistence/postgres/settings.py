@@ -6,7 +6,7 @@ from mari_server.identity import context as access
 
 def notifications(user_name: str) -> list[dict]:
     project_id = access.require_current_access().project_id
-    with db.connect() as conn:
+    with db.request_connection() as conn:
         return conn.execute("""SELECT * FROM notifications
           WHERE project_id = %s AND user_name = %s ORDER BY id""", (project_id, user_name)).fetchall()
 

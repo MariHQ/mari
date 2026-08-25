@@ -40,7 +40,7 @@ def event_count(query: str, date_from: str | None, date_to: str | None) -> int:
 
 def activity(limit: int) -> list[dict]:
     project_id = access.require_current_access().project_id
-    with db.connect() as conn:
+    with db.request_connection() as conn:
         return conn.execute("""SELECT id, actor, verb, target, to_char(occurred_at, 'HH24:MI') AS at,
           greatest(0, extract(epoch FROM now() - occurred_at))::int AS seconds_ago,
           CASE WHEN verb LIKE '%%run%%' OR verb LIKE 'started%%' THEN 'run'
