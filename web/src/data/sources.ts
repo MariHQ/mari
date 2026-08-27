@@ -28,7 +28,10 @@ type Res = {
     id: number; provider: string; name: string; status: string; docsCount: number;
     health: string; kind: string; lastSyncAt: string; bars: number[];
     syncIntervalMinutes: number | null; syncFlowId: number | null;
-    config: { last_error?: string } | null;
+    /* The MASKED config (connector_sync.masked_config): non-secret values in
+       the clear, secret values as "••••••", internal maps dropped. Plus
+       runtime keys like last_error that are state, not settings. */
+    config: { last_error?: string; [key: string]: unknown } | null;
   }[];
   connectorCatalog: {
     key: string; name: string; blurb: string; docsUrl?: string; connected?: boolean;
@@ -55,6 +58,19 @@ const STATE: Record<string, SyncState> = {
   paused: "paused",
 };
 
+/** The stored settings the edit-connection dialog may prefill: exactly what
+ *  the API reported, scalar values only, coerced to the strings the form
+ *  holds. Secrets arrive already masked and the dialog never prefills a
+ *  masked value, so nothing here decides what is safe to show. */
+function configOf(cfg: Record<string, unknown> | null): Record<string, string> | undefined {
+  if (!cfg) return undefined;
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(cfg)) {
+    if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") out[k] = String(v);
+  }
+  return out;
+}
+
 export function mapSources(res: Res): Source[] {
   return (res.sourcePulse ?? []).map<Source>((s) => {
     const tier = tierOf(s.kind);
@@ -74,6 +90,7 @@ export function mapSources(res: Res): Source[] {
       // [] when a source has had no recent document changes — never a curve.
       bars: s.bars ?? [],
       lastError: s.config?.last_error || undefined,
+      config: configOf(s.config),
       /* A source's cadence is the trigger of the "Sync <name>" flow the engine
          creates alongside it, which is why it can be absent in two different
          ways and the card treats them differently:

@@ -132,6 +132,21 @@ export function sourcesActions(): SourcesActions {
       if (d?.resyncSource === false) throw new Error("A sync is already running for this source, so it cannot be rebuilt yet.");
     },
 
+    /* Corrects stored connector settings in place. `updateSourceConfig` MERGES
+       the given keys into the config jsonb, which is why the dialog sends only
+       the fields the user changed: an untouched secret stays stored. The
+       server refuses the identity keys (`repo`, `provider_key`) with its own
+       words, and those reach the dialog verbatim. The corrected settings only
+       matter after a rebuild, so the full resync is started here too. Unlike
+       `fullResync`, a `false` answer is tolerated: the save already succeeded,
+       and false means a run is in flight on this source anyway. */
+    updateConfig: async (s, config) => {
+      await mutate(
+        `mutation($provider: String!, $config: JSON!) { updateSourceConfig(provider: $provider, config: $config) }`,
+        { provider: s.provider, config });
+      await mutate(`mutation($id: Int!) { resyncSource(sourceId: $id) }`, { id: idOf(s) });
+    },
+
     // Destructive; the page puts it behind a ConfirmButton. The server pauses
     // the source and its running checkpoint rather than deleting documents,
     // which is what "disconnect" has always meant here.
