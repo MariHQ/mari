@@ -44,6 +44,102 @@ class ConnectorContractTests(unittest.TestCase):
         self.assertEqual(connect_sync.document_author(document), "")
 
 
+class MultiInstanceCatalogTests(unittest.TestCase):
+    """Two Confluence sites are two source rows under `key:qualifier` provider
+    columns; the catalog must surface both, not silently show only the newest."""
+
+    ROWS = [
+        {"id": 3, "kind": "connector", "provider": "confluence:rippling.atlassian.net",
+         "display_name": "Confluence · rippling.atlassian.net",
+         "config": {"provider_key": "confluence"}},
+        {"id": 5, "kind": "connector", "provider": "github",
+         "display_name": "GitHub", "config": {"provider_key": "github"}},
+        {"id": 9, "kind": "connector", "provider": "confluence:legal.atlassian.net",
+         "display_name": "Legal wiki", "config": {"provider_key": "confluence"}},
+    ]
+
+    def _catalog(self):
+        with patch.object(connectors_api.source_store, "connector_sources",
+                          return_value=self.ROWS):
+            return {item["key"]: item for item in connectors_api.catalog()}
+
+    def test_catalog_lists_every_instance_with_name_and_qualifier(self) -> None:
+        entries = self._catalog()
+        self.assertEqual(entries["confluence"]["instances"], [
+            {"sourceId": 3, "name": "Confluence · rippling.atlassian.net",
+             "qualifier": "rippling.atlassian.net"},
+            {"sourceId": 9, "name": "Legal wiki", "qualifier": "legal.atlassian.net"},
+        ])
+        # an unqualified provider column means a single default instance
+        self.assertEqual(entries["github"]["instances"],
+                         [{"sourceId": 5, "name": "GitHub", "qualifier": ""}])
+
+    def test_connected_and_source_id_keep_the_old_single_value_shape(self) -> None:
+        # consoles built before instances existed read these two fields only
+        entries = self._catalog()
+        self.assertTrue(entries["confluence"]["connected"])
+        self.assertEqual(entries["confluence"]["sourceId"], 9)  # newest row wins
+        self.assertFalse(entries["slack"]["connected"])
+        self.assertIsNone(entries["slack"]["sourceId"])
+        self.assertEqual(entries["slack"]["instances"], [])
+
+
+class ConnectNamedInstanceTests(unittest.TestCase):
+    """connect gained an optional caller-chosen name so a second instance of a
+    provider is tellable apart, and a refused duplicate now names the row that
+    blocks instead of answering only prose."""
+
+    CONFIG = {"site_url": "https://rippling.atlassian.net/",
+              "email": "ana@rippling.com", "api_token": "tok"}
+
+    def _connect(self, name="", add_result=17, blocking=None):
+        body = connectors_api.ProviderIn(provider="confluence",
+                                         config=dict(self.CONFIG), name=name)
+        with patch.object(connectors_api, "validate",
+                          return_value={"ok": True, "error": ""}), \
+             patch.object(connectors_api.source_store, "add_connector",
+                          return_value=add_result) as add, \
+             patch.object(connectors_api.source_store, "connector_source_for",
+                          return_value=blocking) as lookup, \
+             patch.object(connectors_api, "audit"), \
+             patch.object(connectors_api.flowengine, "ensure_sync_flow"), \
+             patch.object(connectors_api.ingest, "start_sync"):
+            result = connectors_api.connect(body)
+        return result, add, lookup
+
+    def test_a_custom_name_replaces_the_derived_display(self) -> None:
+        result, add, _ = self._connect(name="  Legal wiki  ")
+        provider_col, display, _cfg = add.call_args[0]
+        self.assertEqual(provider_col, "confluence:rippling.atlassian.net")
+        self.assertEqual(display, "Legal wiki")  # stripped, replaces the derived name
+        self.assertEqual(result, {"sourceId": 17})
+
+    def test_a_long_custom_name_is_capped_at_80_characters(self) -> None:
+        _, add, _ = self._connect(name="w" * 200)
+        self.assertEqual(add.call_args[0][1], "w" * 80)
+
+    def test_an_empty_name_keeps_the_derived_display(self) -> None:
+        _, add, _ = self._connect(name="   ")
+        self.assertEqual(add.call_args[0][1], "Confluence · rippling.atlassian.net")
+
+    def test_a_refused_duplicate_names_the_blocking_row(self) -> None:
+        result, _, lookup = self._connect(
+            add_result=None,
+            blocking={"id": 9, "display_name": "Legal wiki", "status": "active"})
+        lookup.assert_called_once_with("confluence:rippling.atlassian.net")
+        self.assertEqual(result, {
+            "error": "Confluence · rippling.atlassian.net is already connected",
+            "existing": {"sourceId": 9, "name": "Legal wiki"},
+        })
+
+    def test_a_refusal_without_a_findable_row_stays_prose_only(self) -> None:
+        # the blocking row vanished between refusal and lookup (a race with
+        # removeSource) — the old prose-only answer is still an honest one
+        result, _, _ = self._connect(add_result=None, blocking=None)
+        self.assertEqual(
+            result, {"error": "Confluence · rippling.atlassian.net is already connected"})
+
+
 class SweepInputTests(unittest.TestCase):
     """cursor/checkpoint hygiene for sync_source. Getting these wrong is how
     a resync deleted live documents and how Jira sources wedged on a stale

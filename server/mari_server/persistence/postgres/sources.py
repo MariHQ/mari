@@ -127,6 +127,16 @@ def connector_sources() -> list[dict]:
           WHERE project_id = %s AND kind = 'connector' ORDER BY id""", (project_id,)).fetchall()
 
 
+def connector_source_for(provider: str) -> dict | None:
+    """The row occupying this exact provider column (`key` or `key:qualifier`),
+    so a refused duplicate connect can point the admin at the blocking source."""
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn:
+        return conn.execute("""SELECT id, display_name, status FROM sources
+          WHERE project_id = %s AND kind = 'connector' AND provider = %s""",
+          (project_id, provider)).fetchone()
+
+
 def add_connector(provider: str, display_name: str, config: dict) -> int | None:
     project_id = access.require_current_access().project_id
     with db.connect() as conn, conn.transaction():

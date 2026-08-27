@@ -42,6 +42,10 @@ _admin = [Depends(auth.require_admin)]
 class ProviderIn(BaseModel):
     provider: str
     config: dict = {}
+    # optional caller-chosen display name, so a second instance of the same
+    # provider can be told apart in the console ("Confluence · legal" vs the
+    # derived "Confluence · rippling.atlassian.net")
+    name: str = ""
 
 
 def _field_specs(definition) -> list[dict]:
@@ -51,13 +55,26 @@ def _field_specs(definition) -> list[dict]:
              "required": field.required} for field in definition.fields]
 
 
-def _connected_map() -> dict[str, int]:
-    """provider key → newest live source id."""
-    out: dict[str, int] = {}
+def _connected_map() -> dict[str, dict]:
+    """provider key → {sourceId: newest live id, instances: every live row}.
+
+    One pass over connector_sources(), which orders by id — so the last row
+    seen per key is the newest (the old single-sourceId behaviour), and the
+    instances list comes out id-ordered for free."""
+    out: dict[str, dict] = {}
     for r in source_store.connector_sources():
         cfg = r["config"] if isinstance(r["config"], dict) else json.loads(r["config"] or "{}")
         if r["kind"] == "connector":
-            out[connector_sync.provider_key_of(r["provider"], cfg)] = r["id"]
+            key = connector_sync.provider_key_of(r["provider"], cfg)
+            state = out.setdefault(key, {"sourceId": None, "instances": []})
+            state["sourceId"] = r["id"]
+            state["instances"].append({
+                "sourceId": r["id"],
+                "name": r["display_name"],
+                # the part after "key:" in the provider column, "" for a
+                # single-instance provider stored under the bare key
+                "qualifier": r["provider"].split(":", 1)[1] if ":" in r["provider"] else "",
+            })
     return out
 
 
@@ -76,8 +93,10 @@ def catalog() -> list[dict]:
     }
     connected = _connected_map()
     for key, item in entries.items():
-        item["connected"] = key in connected
-        item["sourceId"] = connected.get(key)
+        state = connected.get(key)
+        item["connected"] = state is not None
+        item["sourceId"] = state["sourceId"] if state else None
+        item["instances"] = state["instances"] if state else []
     return list(entries.values())
 
 
@@ -167,12 +186,23 @@ def connect(body: ProviderIn) -> dict:
     qual = _qualifier(definition, body.config or {})
     provider_col = f"{key}:{qual}" if qual else key
     display = f"{definition.name} · {qual}" if qual else definition.name
+    # a caller-chosen name replaces the derived one; empty keeps the default
+    custom = (body.name or "").strip()[:80]
+    if custom:
+        display = custom
     cfg = dict(body.config or {})
     cfg.update({"provider_key": key, "cursor": "", "item_hashes": {},
                 "last_sync_at": "", "last_error": ""})
     source_id = source_store.add_connector(provider_col, display, cfg)
     if source_id is None:
-        return {"error": f"{display} is already connected"}
+        # name the row that blocks, so the console can offer "go to it"
+        # instead of a dead-end prose answer
+        answer = {"error": f"{display} is already connected"}
+        blocking = source_store.connector_source_for(provider_col)
+        if blocking:
+            answer["existing"] = {"sourceId": int(blocking["id"]),
+                                  "name": blocking["display_name"]}
+        return answer
     audit("connected source", display)
     # every connected source gets a scheduled sync flow (Flows UI owns cadence)
     flowengine.ensure_sync_flow(source_id, display)
