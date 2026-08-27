@@ -5,7 +5,7 @@ api:
     tag: v0.1.2
     # A digest wins over the tag. Filled from the release push, clear it
     # to pull by tag.
-    digest: ""
+    digest: sha256:4d64a993f2b88a78087f482a8fbb16a46d24a32cfb0ff44ebb68cf2be8ec2df5
     pullPolicy: IfNotPresent
   persistence:
     enabled: true
@@ -23,7 +23,7 @@ web:
     tag: v0.1.2
     # A digest wins over the tag. Filled from the release push, clear it
     # to pull by tag.
-    digest: ""
+    digest: sha256:d1cbd7b5b53381caccd88e04405b8bcdacb97df9977c0b027eac171161028030
     pullPolicy: IfNotPresent
   resources:
     requests: {cpu: 50m, memory: 64Mi}
