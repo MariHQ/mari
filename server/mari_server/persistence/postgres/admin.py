@@ -34,6 +34,69 @@ def pause_source(provider: str) -> None:
           to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))""", (project_id, provider))
 
 
+def remove_source(source_id: int) -> dict | None:
+    """Delete a connector source outright, in one transaction: the row, its
+    documents and everything hanging off them, its ingest checkpoints, and its
+    scheduled "Sync <name>" flow. Returns the deleted row's provider and
+    display_name, or None when no source with this id exists in the project.
+    Raises ValueError for a non-connector row — GitHub and legacy sources have
+    no removal story yet, and silently deleting one would be a lie.
+
+    What init.sql actually cascades from documents: only chunks
+    (ON DELETE CASCADE). facts.document_id and glossary.evidence_doc_id are
+    ON DELETE SET NULL. tags, edges, findings, changes, and watches reference
+    documents with no action at all, so they are deleted explicitly here or
+    the documents delete would refuse.
+
+    sync_events stays untouched on purpose: it is keyed by provider string,
+    not source id, and it is the workspace's sync history. Deleting it would
+    erase the past of a provider that gets re-added later. A "removed" event
+    is appended instead, so the history says what happened."""
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn, conn.transaction():
+        row = conn.execute(
+            """SELECT id, kind, provider, display_name FROM sources
+               WHERE project_id = %s AND id = %s FOR UPDATE""",
+            (project_id, source_id)).fetchone()
+        if not row:
+            return None
+        if row["kind"] != "connector":
+            raise ValueError("Only connector sources can be removed.")
+        docs = "SELECT id FROM documents WHERE project_id = %s AND source_id = %s"
+        for sql in (
+            f"DELETE FROM tags WHERE document_id IN ({docs})",
+            f"DELETE FROM edges WHERE from_doc IN ({docs}) OR to_doc IN ({docs})",
+            f"DELETE FROM findings WHERE document_id IN ({docs})",
+            f"DELETE FROM changes WHERE document_id IN ({docs})",
+            f"DELETE FROM watches WHERE document_id IN ({docs})",
+        ):
+            args = (project_id, source_id) * sql.count("SELECT id FROM documents")
+            conn.execute(sql, args)
+        # chunks cascade from documents; facts/glossary references become NULL
+        conn.execute("DELETE FROM documents WHERE project_id = %s AND source_id = %s",
+                     (project_id, source_id))
+        conn.execute("DELETE FROM ingest_checkpoints WHERE project_id = %s AND provider = %s",
+                     (project_id, row["provider"]))
+        conn.execute("DELETE FROM sources WHERE project_id = %s AND id = %s",
+                     (project_id, source_id))
+        # The scheduled "Sync <name>" flow: seeded with project_id NULL
+        # (ensure_sync_flow → create_default_workflow(project_scoped=False)),
+        # so it is found by its sync_source step's source_id, not by project.
+        flows = conn.execute("SELECT id, nodes FROM workflows").fetchall()
+        for flow in flows:
+            nodes = flow["nodes"] if isinstance(flow["nodes"], list) else json.loads(flow["nodes"] or "[]")
+            if any(isinstance(step, dict) and step.get("kind") == "sync_source"
+                   and int((step.get("config") or {}).get("source_id") or 0) == source_id
+                   for step in nodes):
+                conn.execute("DELETE FROM workflow_runs WHERE workflow_id = %s", (flow["id"],))
+                conn.execute("DELETE FROM workflows WHERE id = %s", (flow["id"],))
+        conn.execute("""INSERT INTO sync_events (project_id, provider, event, detail, at_label)
+          VALUES (%s, %s, %s, 'Removed by admin, documents deleted',
+          to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))""",
+          (project_id, row["provider"], f"removed: {row['display_name']}"))
+    return row
+
+
 def change_member_role(user_id: int, role: str) -> dict | None:
     project_id = access.require_current_access().project_id
     with db.connect() as conn, conn.transaction():

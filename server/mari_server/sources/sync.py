@@ -36,6 +36,15 @@ _REINDEX_RUNNING: set[int] = set()
 log = logging.getLogger(__name__)
 
 
+def is_running(source_id: int) -> bool:
+    """True while a sync worker holds this source's running slot. The slot,
+    not the status registry: the registry keeps a terminal 'running' snapshot
+    for a beat while _run_guarded is still unwinding, and removeSource must
+    refuse exactly as long as a worker could still write documents."""
+    with _LOCK:
+        return source_id in _RUNNING
+
+
 def _worker_for(source_id: int):
     """Dispatch connector sources through the shared component-backed worker."""
     if source_store.source_kind(source_id) != "connector":

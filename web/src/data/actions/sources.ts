@@ -153,6 +153,17 @@ export function sourcesActions(): SourcesActions {
     // which is what "disconnect" has always meant here.
     disconnect: (s) => mutate(`mutation($id: Int!) { pauseSource(sourceId: $id) }`, { id: idOf(s) }),
 
+    /* The real delete disconnect never was: the server drops the source row,
+       its documents and everything hanging off them, its checkpoints, and its
+       scheduled sync flow, in one transaction. Refusals are the server's own
+       words — "Only connector sources can be removed.", "A sync for this
+       source is still running." — and they reach the confirm dialog verbatim.
+       `false` is the row already being gone, which is what removing wanted. */
+    removeSource: async (s) => {
+      await mutate(`mutation($id: Int!) { removeSource(sourceId: $id) }`, { id: idOf(s) });
+      clearQueryCache();
+    },
+
     /* A first sync that failed left a real `sources` row behind — the connect
        succeeded, the ingest did not — so retrying is starting that row's sync
        again. The failed panel carries only the provider key, which is what

@@ -156,5 +156,104 @@ class _FakeSourcesConn:
         return result
 
 
+class RemoveSourceTests(unittest.TestCase):
+    """removeSource is the real delete Disconnect never was: the row, its
+    documents, its checkpoints, and its scheduled sync flow, refused while a
+    worker could still be writing documents for the source."""
+
+    class _Info:
+        context = {"user": {"id": 1, "name": "Admin", "role": "admin"}}
+
+    def _remove(self, source_row, flows=(), running=False):
+        from types import SimpleNamespace
+        from mari_server.identity import graphql as mutations_admin
+        from mari_server.persistence.postgres import admin as admin_store
+
+        conn = _FakeRemoveConn(source_row, flows)
+        with patch.object(mutations_admin.ingest, "is_running", return_value=running), \
+             patch.object(mutations_admin, "audit"), \
+             patch.object(admin_store.db, "connect", return_value=conn), \
+             patch.object(admin_store.access, "require_current_access",
+                          return_value=SimpleNamespace(project_id=1)):
+            result = mutations_admin.MutAdmin().remove_source(self._Info(), 42)
+        return result, conn
+
+    def test_refuses_while_a_sync_is_running(self) -> None:
+        with self.assertRaisesRegex(ValueError, "still running"):
+            self._remove({"id": 42, "kind": "connector", "provider": "confluence",
+                          "display_name": "Confluence"}, running=True)
+
+    def test_refuses_a_non_connector_kind(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Only connector sources"):
+            self._remove({"id": 42, "kind": "legacy", "provider": "notion",
+                          "display_name": "Notion"})
+
+    def test_a_missing_row_answers_false_without_deleting(self) -> None:
+        result, conn = self._remove(None)
+        self.assertFalse(result)
+        self.assertFalse(any(sql.startswith("DELETE") for sql, _ in conn.executed))
+
+    def test_deletes_source_checkpoints_and_flow_on_success(self) -> None:
+        flows = [
+            {"id": 9, "nodes": [{"kind": "trigger", "config": {}},
+                                {"kind": "sync_source", "config": {"source_id": 42}}]},
+            {"id": 10, "nodes": [{"kind": "sync_source", "config": {"source_id": 7}}]},
+        ]
+        result, conn = self._remove(
+            {"id": 42, "kind": "connector", "provider": "confluence",
+             "display_name": "Confluence"}, flows=flows)
+        self.assertTrue(result)
+        deletes = [(sql, args) for sql, args in conn.executed if sql.startswith("DELETE")]
+        tables = [sql.split()[2] for sql, _ in deletes]
+        # documents and the rows that hang off them without a cascade
+        for table in ("tags", "edges", "findings", "changes", "watches", "documents"):
+            self.assertIn(table, tables)
+        self.assertIn(("DELETE FROM ingest_checkpoints WHERE project_id = %s AND provider = %s",
+                       (1, "confluence")), deletes)
+        self.assertIn(("DELETE FROM sources WHERE project_id = %s AND id = %s", (1, 42)), deletes)
+        # only the flow whose sync_source step names source 42 goes, runs first
+        self.assertIn(("DELETE FROM workflow_runs WHERE workflow_id = %s", (9,)), deletes)
+        self.assertIn(("DELETE FROM workflows WHERE id = %s", (9,)), deletes)
+        self.assertNotIn(("DELETE FROM workflows WHERE id = %s", (10,)), deletes)
+        # sync history stays; a "removed" event is appended to it
+        event_args = next(args for sql, args in conn.executed
+                          if sql.startswith("INSERT INTO sync_events"))
+        self.assertEqual(event_args[2], "removed: Confluence")
+        self.assertFalse(any(sql.startswith("DELETE FROM sync_events") for sql, _ in conn.executed))
+
+
+class _FakeRemoveConn:
+    """Just enough connection for remove_source: the FOR UPDATE probe answers
+    with the configured source row, the workflows scan answers with the
+    configured flows, every statement is logged."""
+
+    def __init__(self, source_row, flows=()):
+        self.source_row = source_row
+        self.flows = list(flows)
+        self.executed = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        return False
+
+    def transaction(self):
+        return self
+
+    def execute(self, sql, args=()):
+        normalized = " ".join(sql.split())
+        self.executed.append((normalized, args))
+        result = unittest.mock.Mock()
+        if normalized.startswith("SELECT id, kind, provider, display_name FROM sources"):
+            result.fetchone.return_value = self.source_row
+        elif normalized.startswith("SELECT id, nodes FROM workflows"):
+            result.fetchall.return_value = self.flows
+        else:
+            result.fetchone.return_value = None
+            result.fetchall.return_value = []
+        return result
+
+
 if __name__ == "__main__":
     unittest.main()
