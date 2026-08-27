@@ -8,7 +8,7 @@
         "replicaCount": {
           "type": "integer",
           "const": 1,
-          "description": "Mari v0.1.2 uses one API replica with its ReadWriteOnce data volume."
+          "description": "Mari v0.1.3 uses one API replica with its ReadWriteOnce data volume."
         },
         "persistence": {
           "type": "object",
@@ -16,7 +16,7 @@
             "enabled": {
               "type": "boolean",
               "const": true,
-              "description": "The self-contained v0.1.2 chart always persists application data."
+              "description": "The self-contained v0.1.3 chart always persists application data."
             }
           }
         }
@@ -28,7 +28,7 @@
         "replicaCount": {
           "type": "integer",
           "const": 1,
-          "description": "Mari v0.1.2 supports exactly one web replica."
+          "description": "Mari v0.1.3 supports exactly one web replica."
         }
       }
     },
@@ -52,7 +52,7 @@
         "enabled": {
           "type": "boolean",
           "const": true,
-          "description": "The self-contained v0.1.2 chart always deploys PostgreSQL/pgvector."
+          "description": "The self-contained v0.1.3 chart always deploys PostgreSQL/pgvector."
         }
       }
     },
