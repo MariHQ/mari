@@ -130,9 +130,23 @@ def connector_sources() -> list[dict]:
 def add_connector(provider: str, display_name: str, config: dict) -> int | None:
     project_id = access.require_current_access().project_id
     with db.connect() as conn, conn.transaction():
-        if conn.execute("""SELECT id FROM sources WHERE project_id = %s
-          AND kind = 'connector' AND provider = %s""", (project_id, provider)).fetchone():
-            return None
+        existing = conn.execute("""SELECT id, status FROM sources WHERE project_id = %s
+          AND kind = 'connector' AND provider = %s""", (project_id, provider)).fetchone()
+        if existing:
+            if existing["status"] != "paused":
+                return None
+            # Disconnect pauses rather than deletes, so connecting the same
+            # provider again is a reconnect: the freshly validated config (its
+            # cursor and hashes already reset by the caller) replaces the old
+            # one wholesale, and the paused row comes back to life under its
+            # existing id, keeping its documents and sync flow.
+            conn.execute("""UPDATE sources SET display_name = %s, status = 'active',
+              health = 'Syncing', config = %s WHERE id = %s""",
+              (display_name, json.dumps(config), existing["id"]))
+            conn.execute("""INSERT INTO sync_events (project_id, provider, event, detail, at_label)
+              VALUES (%s, %s, %s, '', to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))""",
+              (project_id, provider, f"reconnected: {display_name}"))
+            return int(existing["id"])
         row = conn.execute("""INSERT INTO sources
           (project_id, provider, display_name, kind, status, stat_num, stat_unit, bars, config, docs_count, health)
           VALUES (%s, %s, %s, 'connector', 'active', '0', 'docs', '{}', %s, 0, 'Syncing') RETURNING id""",

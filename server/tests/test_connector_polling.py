@@ -89,5 +89,72 @@ class ValidationFailureTests(unittest.TestCase):
             self.assertEqual(classify_error(error), expected, kind)
 
 
+class ReconnectPausedSourceTests(unittest.TestCase):
+    """Disconnect pauses the source row, so connecting the same provider again
+    must revive it — refusing left admins with no path back at all (no edit,
+    no delete): the 2026-08-27 customer dead end."""
+
+    def _add(self, existing):
+        from types import SimpleNamespace
+        from mari_server.persistence.postgres import sources as source_store
+
+        conn = _FakeSourcesConn(existing)
+        with patch.object(source_store.db, "connect", return_value=conn), \
+             patch.object(source_store.access, "require_current_access",
+                          return_value=SimpleNamespace(project_id=1)):
+            result = source_store.add_connector(
+                "confluence", "Confluence", {"space_key": "FERN", "cursor": ""})
+        return result, conn
+
+    def test_a_paused_row_is_revived_with_the_new_config(self) -> None:
+        source_id, conn = self._add({"id": 42, "status": "paused"})
+        self.assertEqual(source_id, 42)
+        update = next(sql for sql, _ in conn.executed if sql.startswith("UPDATE sources"))
+        self.assertIn("status = 'active'", update)
+        event_args = next(args for sql, args in conn.executed
+                          if sql.startswith("INSERT INTO sync_events"))
+        self.assertEqual(event_args[2], "reconnected: Confluence")
+
+    def test_an_active_row_still_refuses_a_duplicate(self) -> None:
+        source_id, conn = self._add({"id": 42, "status": "active"})
+        self.assertIsNone(source_id)
+        self.assertFalse(any(sql.startswith(("UPDATE", "INSERT")) for sql, _ in conn.executed))
+
+    def test_no_row_inserts_as_before(self) -> None:
+        source_id, conn = self._add(None)
+        self.assertEqual(source_id, 7)
+        self.assertTrue(any(sql.startswith("INSERT INTO sources") for sql, _ in conn.executed))
+
+
+class _FakeSourcesConn:
+    """Just enough connection for add_connector: the duplicate probe answers
+    with the configured row, an INSERT hands back id 7, everything is logged."""
+
+    def __init__(self, existing):
+        self.existing = existing
+        self.executed = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        return False
+
+    def transaction(self):
+        return self
+
+    def execute(self, sql, args=()):
+        normalized = " ".join(sql.split())
+        self.executed.append((normalized, args))
+        row = None
+        if normalized.startswith("SELECT id, status FROM sources"):
+            row = self.existing
+        elif normalized.startswith("INSERT INTO sources"):
+            row = {"id": 7}
+        result = unittest.mock.Mock()
+        result.fetchone.return_value = row
+        return result
+
+
 if __name__ == "__main__":
     unittest.main()
