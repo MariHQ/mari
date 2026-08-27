@@ -1,6 +1,6 @@
 # Mari Helm chart
 
-Mari v0.1.1 deploys one API pod, one web pod, PostgreSQL/pgvector, and persistent
+Mari v0.1.2 deploys one API pod, one web pod, PostgreSQL/pgvector, and persistent
 volumes for PostgreSQL and `/data`. The API migration init container brings a
 new database to the current schema before traffic starts. The images are public,
 multi-architecture releases in Amazon ECR Public; customers do not need an AWS
@@ -27,7 +27,7 @@ URL-safe password. No cloud or object-storage credentials are required.
 Provider and source credentials are configured in Mari after installation; do
 not add them to the Kubernetes Secret.
 
-All v0.1.1 application files stay on the `mari-api-data` persistent volume:
+All v0.1.2 application files stay on the `mari-api-data` persistent volume:
 vectors under `/data/mari/vectors`, Iceberg data under `/data/mari/iceberg`,
 repository audit data under `/data/mari/repo-audit`, and caches under `/data/cache`.
 No object store is required.

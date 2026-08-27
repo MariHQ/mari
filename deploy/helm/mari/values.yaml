@@ -2,10 +2,10 @@ api:
   replicaCount: 1
   image:
     repository: public.ecr.aws/k1b8z8i5/mari-api
-    tag: v0.1.1
+    tag: v0.1.2
     # A digest wins over the tag. Filled from the release push, clear it
     # to pull by tag.
-    digest: sha256:c5851acbc75123b88c035ea7c069a3940d0a718bc3f3c10719f252442829ef8b
+    digest: ""
     pullPolicy: IfNotPresent
   persistence:
     enabled: true
@@ -16,14 +16,14 @@ api:
     limits: {cpu: "2", memory: 2Gi}
 
 web:
-  # Mari v0.1.1 deliberately runs one web instance.
+  # Mari v0.1.2 deliberately runs one web instance.
   replicaCount: 1
   image:
     repository: public.ecr.aws/k1b8z8i5/mari-web
-    tag: v0.1.1
+    tag: v0.1.2
     # A digest wins over the tag. Filled from the release push, clear it
     # to pull by tag.
-    digest: sha256:905eccf751b7cb82c492236121d1b37a47518e836afb90968399712b206a397b
+    digest: ""
     pullPolicy: IfNotPresent
   resources:
     requests: {cpu: 50m, memory: 64Mi}
