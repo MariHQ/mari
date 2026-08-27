@@ -18,6 +18,7 @@
  */
 
 import type { SourcesActions } from "@mari-design/components/pages/SourcesPage";
+import { DuplicateSourceError } from "@mari-design/components/features/SourcesConnectorWizard";
 import type { Source } from "@mari-design/components/features/SourcesConnectorCard";
 import { clearQueryCache, gqlResult, projectHeaders } from "../../lib/api";
 import { mutate } from "./index";
@@ -65,11 +66,24 @@ export async function uploadDocuments(files: File[]): Promise<void> {
 
 /* ── connect ────────────────────────────────────────────────────────────── */
 
-export async function connectAny(provider: string, config: Record<string, string>): Promise<string | void> {
+export async function connectAny(provider: string, config: Record<string, string>, name?: string): Promise<string | void> {
   // 200 with {error} is this endpoint's refusal: validate ran, nothing was
-  // created, and the reason is in the body.
-  const r = await postJson<{ error?: string; sourceId?: number }>("/connectors/connect", { provider, config });
-  if (r.error) throw new Error(r.error);
+  // created, and the reason is in the body. `name` is the optional display
+  // name typed in the wizard, sent only when the user gave one.
+  const r = await postJson<{ error?: string; sourceId?: number; existing?: { sourceId: number; name: string } }>(
+    "/connectors/connect", { provider, config, ...(name ? { name } : {}) });
+  if (r.error) {
+    /* A duplicate-active refusal also names the live source it collided with.
+       The prose still travels as the thrown message, exactly like every other
+       refusal; the structured `existing` rides on DuplicateSourceError (the
+       library duck-types its shape), which is what lets the wizard offer
+       "Edit the existing source" instead of a dead end. Ids become the
+       opaque strings the library carries. */
+    if (r.existing?.sourceId != null) {
+      throw new DuplicateSourceError(r.error, { sourceId: String(r.existing.sourceId), name: r.existing.name ?? "" });
+    }
+    throw new Error(r.error);
+  }
   clearQueryCache();
   // The id is what lets the wizard follow the first sync it just started.
   return r.sourceId != null ? String(r.sourceId) : undefined;
@@ -93,7 +107,7 @@ const idOf = (s: Source): number => {
 export function sourcesActions(): SourcesActions {
   return {
     testConnection: ({ provider, config }) => testAny(provider, config),
-    connectSource: ({ provider, config }) => connectAny(provider, config),
+    connectSource: ({ provider, config, name }) => connectAny(provider, config, name),
 
     /* One reading of a running sync, from the in-memory ingest registry. The
        card and the connect dialog poll this to completion — the server's

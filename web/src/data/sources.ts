@@ -35,6 +35,10 @@ type Res = {
   }[];
   connectorCatalog: {
     key: string; name: string; blurb: string; docsUrl?: string; connected?: boolean;
+    /* Every live instance of the provider. `qualifier` scopes site-bound
+       instances ("rippling.atlassian.net") and is "" otherwise; older servers
+       omit the array entirely. */
+    instances?: { sourceId: number; name: string; qualifier: string }[];
     fields: { key: string; label: string; secret?: boolean; placeholder?: string; help?: string; multiline?: boolean; required?: boolean }[];
   }[];
 };
@@ -113,6 +117,12 @@ export function mapCatalog(res: Res): WizardProviderSpec[] {
     blurb: p.blurb,
     docsUrl: p.docsUrl || undefined,
     connected: p.connected,
+    // Ids become the opaque strings the library carries everywhere else.
+    // A server that reports no instances maps to none, never to an empty
+    // list that would claim "connected, zero instances" as a fact.
+    instances: p.instances
+      ? p.instances.map((i) => ({ sourceId: String(i.sourceId), name: i.name ?? "", qualifier: i.qualifier ?? "" }))
+      : undefined,
     // Field SPECS only — the catalog endpoint never returns stored values.
     fields: (p.fields ?? []).map((f) => ({
       key: f.key, label: f.label, secret: f.secret,
