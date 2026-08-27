@@ -3,9 +3,9 @@ api:
   image:
     repository: public.ecr.aws/k1b8z8i5/mari-api
     tag: v0.1.1
-    # A digest wins over the tag. Fill it in from the v0.1.1 push before
-    # release, or leave it empty to pull by tag.
-    digest: ""
+    # A digest wins over the tag. Filled from the release push, clear it
+    # to pull by tag.
+    digest: sha256:c5851acbc75123b88c035ea7c069a3940d0a718bc3f3c10719f252442829ef8b
     pullPolicy: IfNotPresent
   persistence:
     enabled: true
@@ -21,9 +21,9 @@ web:
   image:
     repository: public.ecr.aws/k1b8z8i5/mari-web
     tag: v0.1.1
-    # A digest wins over the tag. Fill it in from the v0.1.1 push before
-    # release, or leave it empty to pull by tag.
-    digest: ""
+    # A digest wins over the tag. Filled from the release push, clear it
+    # to pull by tag.
+    digest: sha256:905eccf751b7cb82c492236121d1b37a47518e836afb90968399712b206a397b
     pullPolicy: IfNotPresent
   resources:
     requests: {cpu: 50m, memory: 64Mi}
