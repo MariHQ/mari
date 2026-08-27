@@ -432,8 +432,6 @@ type Mutation {
   promoteTrajectoryToAnswer(trajectoryId: Int!): Int!
   rejectTrajectory(trajectoryId: Int!, rejected: Boolean! = true): Boolean!
   deleteTrajectory(trajectoryId: Int!): Boolean!
-  connectSource(provider: String!, displayName: String!, config: JSON!): Boolean!
-  disconnectSource(provider: String!): Boolean!
   pauseSource(sourceId: Int!): Boolean!
   removeSource(sourceId: Int!): Boolean!
   inviteMember(name: String!, email: String!, role: String! = "user"): Boolean!

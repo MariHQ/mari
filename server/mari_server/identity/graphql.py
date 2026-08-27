@@ -71,23 +71,12 @@ def _require_manager(info: strawberry.Info) -> dict:
 
 @strawberry.type
 class MutAdmin:
-    @strawberry.mutation
-    def connect_source(self, info: strawberry.Info, provider: str, display_name: str, config: JSON) -> bool:
-        """Connector setup wizard completion: create the source and log the
-        connection — no fabricated backfill progress, sparkline, or checkpoint
-        theater. Real connectors plug in behind this seam (DESIGN.md §7)."""
-        actor = _require_admin(info)
-        admin_store.connect_source(provider, display_name, config)
-        audit("connected source", display_name, actor["name"], detail=[("Provider", provider),
-              ("Settings", ", ".join(sorted(config)) if isinstance(config, dict) else "")])
-        return True
-
-    @strawberry.mutation
-    def disconnect_source(self, info: strawberry.Info, provider: str) -> bool:
-        actor = _require_admin(info)
-        admin_store.pause_source(provider)
-        audit("paused source", provider, actor["name"])
-        return True
+    # connectSource and disconnectSource, the provider-string twins, are gone
+    # on purpose. Connecting is REST /connectors/connect only: it validates the
+    # credential, derives the qualified provider column, and refuses or revives
+    # duplicates coherently, none of which the raw upsert did — a bare-provider
+    # connectSource call once handed a customer a second half-configured
+    # source. Pausing is pauseSource(sourceId) below.
 
     @strawberry.mutation
     def pause_source(self, info: strawberry.Info, source_id: int) -> bool:

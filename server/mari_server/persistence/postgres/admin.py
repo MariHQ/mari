@@ -9,19 +9,6 @@ from mari_server.persistence.postgres import connection as db
 from mari_server.identity import context as access
 
 
-def connect_source(provider: str, name: str, config: dict) -> None:
-    project_id = access.require_current_access().project_id
-    with db.connect() as conn, conn.transaction():
-        conn.execute("""INSERT INTO sources
-          (project_id, provider, display_name, status, stat_num, stat_unit, bars, config, docs_count, health)
-          VALUES (%s, %s, %s, 'active', '0', 'items', '{}', %s, 0, 'Never synced')
-          ON CONFLICT (project_id, provider) DO UPDATE SET config = sources.config || EXCLUDED.config,
-          status = 'active'""", (project_id, provider, name, json.dumps(config)))
-        conn.execute("""INSERT INTO sync_events (project_id, provider, event, detail, at_label)
-          VALUES (%s, %s, %s, '', to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))""",
-          (project_id, provider, f"connected: {name}"))
-
-
 def pause_source(provider: str) -> None:
     project_id = access.require_current_access().project_id
     with db.connect() as conn, conn.transaction():
