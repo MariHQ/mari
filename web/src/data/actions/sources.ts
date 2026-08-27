@@ -99,8 +99,8 @@ export function sourcesActions(): SourcesActions {
        card and the connect dialog poll this to completion — the server's
        "listing" was previously the last thing the page ever learned. */
     syncProgress: async (sourceId: string) => {
-      const r = await gqlResult<{ syncStatus: { state: string; phase: string; done: number; total: number } }>(
-        `query($id: Int!) { syncStatus(sourceId: $id) { state phase done total } }`, { id: Number(sourceId) });
+      const r = await gqlResult<{ syncStatus: { state: string; phase: string; done: number; total: number; lastError: string } }>(
+        `query($id: Int!) { syncStatus(sourceId: $id) { state phase done total lastError } }`, { id: Number(sourceId) });
       if (!r.ok) throw new Error(r.error);
       const st = r.data?.syncStatus;
       if (!st) return { state: "done" as const };
@@ -108,10 +108,11 @@ export function sourcesActions(): SourcesActions {
         return { state: "running" as const, phase: st.phase || "listing", done: st.done, total: st.total };
       }
       if (st.state === "error") {
-        // syncStatus carries no message; the grid's next read of sourcePulse
-        // shows the stored last_error verbatim.
+        // lastError is the live registry message, falling back server-side to
+        // the stored config value. A crash before anything was stored has no
+        // words anywhere, so only then does a generic line stand in.
         clearQueryCache();
-        return { state: "failed" as const, error: "The sync failed. The source card has the details." };
+        return { state: "failed" as const, error: st.lastError || "The sync failed without reporting a reason." };
       }
       clearQueryCache();
       return { state: "done" as const, done: st.done, total: st.total };
