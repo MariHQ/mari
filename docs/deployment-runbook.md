@@ -1,10 +1,23 @@
 # Kubernetes deployment runbook
 
-The Helm chart in `deploy/helm/mari` is the v0.1.0 deployment path. It starts
+The Helm chart in `deploy/helm/mari` is the v0.1.1 deployment path. It starts
 PostgreSQL/pgvector, one API, exactly one web pod, and persistent volumes for
 the database and application data. Never commit a populated Secret; the exact
 required keys and install commands are in the chart README. Helm is the single
 deployment source; generated manifests must not be edited or committed.
+
+## Publishing images
+
+Each release publishes `mari-api` and `mari-web` as multi-architecture images
+to two registries. The GitHub workflow
+`.github/workflows/container-release.yml` pushes to `ghcr.io/marihq` using the
+built-in `GITHUB_TOKEN`. The chart pulls from Amazon ECR Public
+(`public.ecr.aws/k1b8z8i5`), which the workflow cannot reach, so push there
+with `./deploy/publish-images.sh vX.Y.Z` from a checkout with the
+`vendor/mari-design` submodule populated and a live AWS session. Both paths
+build the same Dockerfiles from the repo root and tag the version plus
+`latest`. After the ECR push, copy the new image digests into
+`deploy/helm/mari/values.yaml` so the chart pins the release immutably.
 
 ## Preflight
 
@@ -15,7 +28,7 @@ deployment source; generated manifests must not be edited or committed.
    credentials are required.
 3. Configure source and model providers in Mari after installation. Their
    credentials are application data, not Kubernetes deployment secrets.
-4. Confirm that the immutable API and web digests in the chart match the v0.1.0
+4. Confirm that the immutable API and web digests in the chart match the v0.1.1
    release published to the public container registry.
 5. Set the customer-owned ingress hostname, application URL, and CORS origin.
 
@@ -23,7 +36,7 @@ deployment source; generated manifests must not be edited or committed.
 
 Install the chart and wait for `/readyz`, then run the smoke suite. The API uses
 the `Recreate` strategy because its filesystem volume is ReadWriteOnce. Keep the
-web replica count at exactly one for v0.1.0.
+web replica count at exactly one for v0.1.1.
 
 For rollback, deploy the previous immutable image digest. Schema changes must
 remain backward-compatible for at least one release. A rollback is complete only
