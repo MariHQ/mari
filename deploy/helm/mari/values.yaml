@@ -14,6 +14,10 @@ api:
   resources:
     requests: {cpu: 250m, memory: 512Mi}
     limits: {cpu: "2", memory: 2Gi}
+  nodeSelector: {}
+  affinity: {}
+  tolerations: []
+  topologySpreadConstraints: []
 
 web:
   # Mari v0.1.3 deliberately runs one web instance.
@@ -28,6 +32,10 @@ web:
   resources:
     requests: {cpu: 50m, memory: 64Mi}
     limits: {cpu: 500m, memory: 256Mi}
+  nodeSelector: {}
+  affinity: {}
+  tolerations: []
+  topologySpreadConstraints: []
 
 postgresql:
   enabled: true
@@ -41,6 +49,10 @@ postgresql:
   resources:
     requests: {cpu: 250m, memory: 256Mi}
     limits: {cpu: "1", memory: 1Gi}
+  nodeSelector: {}
+  affinity: {}
+  tolerations: []
+  topologySpreadConstraints: []
 
 secrets:
   # RECOMMENDED: create this Secret with the keys listed in README.md, then set
