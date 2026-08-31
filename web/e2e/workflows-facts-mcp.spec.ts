@@ -42,12 +42,19 @@ test("LLM fact scan starts a workflow and reports its grounded result", async ({
   const config = page.getByRole("dialog", { name: "Configure fact extraction" });
   await config.getByLabel("Search within documents").fill("infrastructure");
   await config.getByLabel("Documents per run").fill("25");
+  await config.getByLabel("Review strategy").selectOption("guided");
+  await expect(config.getByText("AI recommendations, confidence, and rationale appear beside each candidate"))
+    .toBeVisible();
   await config.getByRole("button", { name: "Save & run now" }).click();
   await expect(page.getByText(/Fact scan · run #1900/)).toBeVisible();
-  await expect(page.getByText(/2 new claims captured/)).toBeVisible();
+  await expect(page.getByText("2 new claims captured", { exact: true })).toBeVisible();
+  await expect(page.getByText("AI recommendation", { exact: true })).toBeVisible();
+  await expect(page.getByText("Accept as a new fact", { exact: true })).toBeVisible();
   expect(api.calls.some((c) => c.query.includes("startFactScan")
     && c.variables.config.query === "infrastructure"
-    && c.variables.config.limit === 25)).toBeTruthy();
+    && c.variables.config.limit === 25
+    && c.variables.config.adjudication_mode === "llm"
+    && c.variables.config.review_mode === "human")).toBeTruthy();
   expect(api.calls.some((c) => c.query.includes("workflowRun"))).toBeTruthy();
 });
 

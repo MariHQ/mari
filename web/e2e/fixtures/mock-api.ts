@@ -303,7 +303,25 @@ export async function installMockApi(page: Page, options: {
     } else if (/deleteAssistantWorkflow/.test(query)) {
       data = { deleteAssistantWorkflow: true };
     } else if (/workflowRun\(/.test(query)) {
-      data = { workflowRun: { id: 99, number: 1900, workflowName: "Fact scan", status: "passed", progress: 100, stats: { facts: 2 }, rows: [{ step: "Scan facts", status: "passed", detail: "2 claims", duration: "00:00:01" }] } };
+      data = {
+        workflowRun: { id: 99, number: 1900, workflowName: "Fact scan", status: "passed", progress: 100,
+          stats: { facts: 2 }, rows: [{ step: "Scan facts", status: "passed", detail: "2 new claims captured", duration: "00:00:01" }] },
+        factExtractionCandidates: [{
+          id: 501, runId: 99, documentId: 11, documentTitle: "Infrastructure runbook",
+          claim: "Production clusters use Kubernetes.", source: "Confluence", evidence: "Production runs on Kubernetes.",
+          confidence: .94, reviewStatus: "accepted", reviewKind: "human", reviewReason: "Grounded in the runbook",
+          reviewer: "Dana", reviewedAt: "2026-08-31", publishedFactId: 41, impactScore: .86, highImpact: true,
+          semanticLinks: [],
+        }],
+        factLlmBudgets: [{ stage: "adjudicate_facts", purpose: "temporal evidence and relation proposals",
+          model: "gateway:model", maxCalls: 10, maxInputTokens: 24000, maxOutputTokens: 8000,
+          callsUsed: 1, inputTokens: 420, outputTokens: 120, status: "completed" }],
+        factRunIntelligence: [{
+          candidateId: 501, structuredClaim: {}, validFrom: "", validTo: "", components: [], relations: [],
+          evidenceGroups: [], clusters: [], adjudication: { recommendation: "new_fact", relation: "supports",
+            confidence: .94, reason: "The cited runbook directly supports this durable claim.", needs_human_review: false },
+        }],
+      };
     } else if (/approveRun/.test(query)) {
       data = { approveRun: true };
     } else if (/runWorkflow/.test(query)) {

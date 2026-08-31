@@ -29,6 +29,8 @@ export type FactScanConfig = {
   publish_status: "needs_review" | "verified";
 };
 
+type ReviewStrategy = "human" | "guided" | "auto";
+
 type RequestDetail = { finish: (config: FactScanConfig | null) => void };
 const EVENT = "mari:configure-fact-scan";
 
@@ -64,7 +66,7 @@ export function FactScanConfiguration() {
   const [maxComponents, setMaxComponents] = useState(12);
   const [factSimilarity, setFactSimilarity] = useState(.72);
   const [evidenceSimilarity, setEvidenceSimilarity] = useState(.68);
-  const [adjudicationMode, setAdjudicationMode] = useState<"off" | "llm">("off");
+  const [reviewStrategy, setReviewStrategy] = useState<ReviewStrategy>("human");
   const [adjudicationCalls, setAdjudicationCalls] = useState(10);
   const [adjudicationInput, setAdjudicationInput] = useState(24000);
   const [adjudicationOutput, setAdjudicationOutput] = useState(8000);
@@ -72,7 +74,6 @@ export function FactScanConfiguration() {
   const [clusterSimilarity, setClusterSimilarity] = useState(.78);
   const [clusterCalls, setClusterCalls] = useState(5);
   const [schedule, setSchedule] = useState(60);
-  const [reviewMode, setReviewMode] = useState<"human" | "ai">("human");
   const [reviewInstructions, setReviewInstructions] = useState("");
   const [publishStatus, setPublishStatus] = useState<"needs_review" | "verified">("needs_review");
 
@@ -100,14 +101,15 @@ export function FactScanConfiguration() {
       setMaxComponents(Number(retrieval.max_components ?? 12));
       setFactSimilarity(Number(retrieval.minimum_fact_similarity ?? .72));
       setEvidenceSimilarity(Number(retrieval.minimum_evidence_similarity ?? .68));
-      setAdjudicationMode(adjudication.mode === "llm" ? "llm" : "off");
+      setReviewStrategy(adjudication.mode !== "llm"
+        ? "human"
+        : review.mode === "ai" ? "auto" : "guided");
       setAdjudicationCalls(Number(adjudication.max_calls ?? 10));
       setAdjudicationInput(Number(adjudication.max_input_tokens ?? 24000));
       setAdjudicationOutput(Number(adjudication.max_output_tokens ?? 8000));
       setClusterLabelMode(cluster.label_mode === "llm" ? "llm" : "off");
       setClusterSimilarity(Number(cluster.minimum_similarity ?? .78));
       setClusterCalls(Number(cluster.max_llm_clusters ?? 5));
-      setReviewMode(review.mode === "ai" ? "ai" : "human");
       setReviewInstructions(String(review.instructions ?? scan.instructions ?? ""));
       setPublishStatus(publish.status === "verified" ? "verified" : "needs_review");
       // Opening the dialog can race the workflow query. A missing row while
@@ -181,12 +183,18 @@ export function FactScanConfiguration() {
             </select>
           </label>
           <label className="text-[12px] font-medium text-ink">
-            Review gate
+            Review strategy
             <select className="mt-1 w-full rounded border border-ink/20 bg-white px-3 py-2 font-normal"
-              value={reviewMode} onChange={(event) => setReviewMode(event.target.value as "human" | "ai")}>
-              <option value="human">Human review before publishing</option>
-              <option value="ai">Apply bounded AI proposals; defer uncertainty</option>
+              value={reviewStrategy} onChange={(event) => setReviewStrategy(event.target.value as ReviewStrategy)}>
+              <option value="human">Human only — embedding evidence</option>
+              <option value="guided">AI-guided — AI proposes, you decide</option>
+              <option value="auto">Bounded AI — apply confident proposals</option>
             </select>
+            <span className="mt-1 block text-[10.5px] font-normal leading-4 text-ink/60">
+              {reviewStrategy === "human" && "No review LLM calls. Every candidate waits for your verdict."}
+              {reviewStrategy === "guided" && "AI recommendations, confidence, and rationale appear beside each candidate; you retain the gate."}
+              {reviewStrategy === "auto" && "High-confidence recommendations are applied; uncertain candidates still wait for you."}
+            </span>
           </label>
           <label className="text-[12px] font-medium text-ink">
             Accepted facts enter as
@@ -272,24 +280,22 @@ export function FactScanConfiguration() {
               <input type="number" min={0} max={400000} className="mt-1 w-full rounded border border-ink/20 bg-white px-3 py-2 font-normal"
                 value={extractionOutput} onChange={(event) => setExtractionOutput(Number(event.target.value))} />
             </label>
-            <label className="text-[12px] font-medium text-ink">AI evidence adjudication
-              <select className="mt-1 w-full rounded border border-ink/20 bg-white px-3 py-2 font-normal" value={adjudicationMode}
-                onChange={(event) => setAdjudicationMode(event.target.value as "off" | "llm")}>
-                <option value="off">Off — embedding context only</option>
-                <option value="llm">On — propose relations</option>
-              </select>
-            </label>
+            <div className="text-[12px] font-medium text-ink">AI evidence adjudication
+              <div className="mt-1 rounded border border-ink/12 bg-ink/[0.025] px-3 py-2 font-normal text-ink/70">
+                {reviewStrategy === "human" ? "Off — embedding context only" : "On — grounded recommendations"}
+              </div>
+            </div>
             <label className="text-[12px] font-medium text-ink">Adjudication calls
-              <input type="number" min={0} max={100} disabled={adjudicationMode === "off"}
+              <input type="number" min={0} max={100} disabled={reviewStrategy === "human"}
                 className="mt-1 w-full rounded border border-ink/20 bg-white px-3 py-2 font-normal disabled:opacity-50"
                 value={adjudicationCalls} onChange={(event) => setAdjudicationCalls(Number(event.target.value))} />
             </label>
             <label className="text-[12px] font-medium text-ink">Adjudication input / output
               <div className="mt-1 grid grid-cols-2 gap-1">
-                <input aria-label="Adjudication input-token cap" type="number" min={0} disabled={adjudicationMode === "off"}
+                <input aria-label="Adjudication input-token cap" type="number" min={0} disabled={reviewStrategy === "human"}
                   className="w-full rounded border border-ink/20 bg-white px-2 py-2 font-normal disabled:opacity-50" value={adjudicationInput}
                   onChange={(event) => setAdjudicationInput(Number(event.target.value))} />
-                <input aria-label="Adjudication output-token cap" type="number" min={0} disabled={adjudicationMode === "off"}
+                <input aria-label="Adjudication output-token cap" type="number" min={0} disabled={reviewStrategy === "human"}
                   className="w-full rounded border border-ink/20 bg-white px-2 py-2 font-normal disabled:opacity-50" value={adjudicationOutput}
                   onChange={(event) => setAdjudicationOutput(Number(event.target.value))} />
               </div>
@@ -309,7 +315,7 @@ export function FactScanConfiguration() {
           </div>
           <div className="mt-3 rounded bg-ink/[0.04] px-3 py-2 font-term text-[11px] text-ink/65">
             Per-run ceiling: {Math.max(0, extractionCalls)} extraction call{extractionCalls === 1 ? "" : "s"}
-            {adjudicationMode === "llm" ? ` + ${Math.max(0, adjudicationCalls)} adjudication` : ""}
+            {reviewStrategy !== "human" ? ` + ${Math.max(0, adjudicationCalls)} adjudication` : ""}
             {clusterLabelMode === "llm" ? ` + ${Math.max(0, clusterCalls)} cluster labels` : ""}.
           </div>
         </fieldset>
@@ -331,7 +337,7 @@ export function FactScanConfiguration() {
             max_components: Math.max(1, Math.min(maxComponents || 1, 32)),
             minimum_fact_similarity: Math.max(-1, Math.min(factSimilarity, 1)),
             minimum_evidence_similarity: Math.max(-1, Math.min(evidenceSimilarity, 1)),
-            adjudication_mode: adjudicationMode,
+            adjudication_mode: reviewStrategy === "human" ? "off" : "llm",
             adjudication_max_calls: Math.max(0, Math.min(adjudicationCalls || 0, 100)),
             adjudication_max_input_tokens: Math.max(0, adjudicationInput || 0),
             adjudication_max_output_tokens: Math.max(0, adjudicationOutput || 0),
@@ -339,7 +345,7 @@ export function FactScanConfiguration() {
             cluster_minimum_similarity: Math.max(-1, Math.min(clusterSimilarity, 1)),
             cluster_max_llm_calls: Math.max(0, Math.min(clusterCalls || 0, 50)),
             schedule_minutes: schedule,
-            review_mode: reviewMode,
+            review_mode: reviewStrategy === "auto" ? "ai" : "human",
             review_instructions: reviewInstructions.trim(),
             publish_status: publishStatus,
           })}>Save &amp; run now</button>
