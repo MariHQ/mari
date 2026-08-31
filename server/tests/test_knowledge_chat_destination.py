@@ -16,7 +16,7 @@ def info(project_id: int = 7):
 
 
 class KnowledgeChatDestinationTests(unittest.TestCase):
-    def test_terse_entity_prompt_is_a_question_for_retrieval_and_generation(self):
+    def test_terse_entity_prompt_is_not_rewritten_for_retrieval_or_generation(self):
         project = SimpleNamespace(project_id=7, user_id=0)
         document = {"id": 4, "title": "Mari README", "source": "github",
                     "body": "Mari manages product knowledge.", "snippet": "Mari manages"}
@@ -29,8 +29,8 @@ class KnowledgeChatDestinationTests(unittest.TestCase):
             context = conversation_chat.ports(project, "test", frozenset({"search"})).prepare(
                 None, "mari",
             )
-        search.assert_called_once_with("what is mari?", 8)
-        self.assertIn("Question: what is mari?", context.messages[-1]["content"])
+        search.assert_called_once_with("mari", 8)
+        self.assertIn("Question: mari", context.messages[-1]["content"])
 
     def test_create_validates_slug_and_calls_application_port(self):
         ports = knowledge_chat.KnowledgeChatPorts(

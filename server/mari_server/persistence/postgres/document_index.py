@@ -121,7 +121,7 @@ def sync_chunks(conn, doc_id: int, title: str, body: str,
         if (prior and prior["content_hash"] == h
                 and prior["embedding_profile"] == profile and prior["embedded"]):
             continue
-        vec = llm.embed(piece)
+        vec = llm.embed(piece, purpose="document")
         if vec:
             embedded += 1
         conn.execute("""

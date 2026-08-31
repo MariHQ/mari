@@ -518,7 +518,7 @@ class MutKnowledge:
             return False
         vec = None
         if status == "approved":
-            vec = llm.embed(row["question"] + " " + row["answer"])
+            vec = llm.embed(row["question"] + " " + row["answer"], purpose="document")
         knowledge_store.set_answer_status(id, status, vec)
         audit(f"{status} answer", row["question"])
         return True

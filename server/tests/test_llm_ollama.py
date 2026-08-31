@@ -23,7 +23,22 @@ class OllamaContractTests(unittest.TestCase):
             self.assertEqual(llm.embed("policy text"), vector)
         url, payload = post.call_args.args[:2]
         self.assertEqual(url, "http://ollama:11434/api/embeddings")
-        self.assertEqual(payload, {"model": "nomic-embed-text", "prompt": "policy text"})
+        self.assertEqual(payload, {
+            "model": "nomic-embed-text", "prompt": "search_query: policy text",
+        })
+
+    def test_nomic_uses_asymmetric_document_and_query_instructions(self) -> None:
+        vector = [0.25] * llm.EMBED_DIMS
+        with patch.object(llm, "embedding_model", return_value=("ollama", "nomic-embed-text")), \
+             patch.object(llm, "ollama_host", return_value="http://ollama:11434"), \
+             patch.object(llm, "_post", return_value={"embedding": vector}) as post:
+            llm.embed("cluster runbook", purpose="document")
+            self.assertEqual(post.call_args.args[1]["prompt"],
+                             "search_document: cluster runbook")
+            llm.embed("how do clusters work?")
+            self.assertEqual(post.call_args.args[1]["prompt"],
+                             "search_query: how do clusters work?")
+            self.assertIn("asymmetric-search-v1", llm.embedding_profile())
 
         with patch.object(llm, "embedding_model", return_value=("ollama", "wrong-width")), \
              patch.object(llm, "_post", return_value={"embedding": [1.0, 2.0]}):

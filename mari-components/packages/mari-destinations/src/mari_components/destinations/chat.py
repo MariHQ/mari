@@ -8,12 +8,8 @@ from typing import Any
 
 
 def answer_search_query(message: str) -> str:
-    """Turn terse entity prompts into useful, non-generative retrieval queries."""
-    clean = " ".join((message or "").strip().split())
-    words = clean.rstrip("?.!").split()
-    if clean and len(words) <= 3 and not clean.endswith("?"):
-        return f"what is {clean}?"
-    return clean
+    """Normalize whitespace without rewriting the user's retrieval intent."""
+    return " ".join((message or "").strip().split())
 
 
 @dataclass(frozen=True, slots=True)

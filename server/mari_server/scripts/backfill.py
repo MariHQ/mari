@@ -17,7 +17,7 @@ def main() -> None:
         ).fetchall()
         print(f"{len(rows)} documents to embed")
         for doc_id, title, snippet, body in rows:
-            vec = llm.embed(f"{title}\n{snippet}\n{body}")
+            vec = llm.embed(f"{title}\n{snippet}\n{body}", purpose="document")
             if vec is None:
                 print(f"  doc {doc_id}: ollama unavailable, stopping")
                 return

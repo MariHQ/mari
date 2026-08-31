@@ -8,7 +8,8 @@ import re
 
 _LIKE_ESCAPE = str.maketrans({"\\": "\\\\", "%": "\\%", "_": "\\_"})
 _STOP_WORDS = frozenset({
-    "and", "are", "can", "does", "for", "from", "how", "into", "our",
+    "and", "are", "can", "company", "does", "for", "from", "how", "into", "our",
+    "please", "tell", "work",
     "the", "their", "this", "was", "what", "when", "where", "which", "who",
     "why", "with", "you", "your",
 })
@@ -18,12 +19,17 @@ def like_pattern(query: str) -> str:
     return f"%{query.translate(_LIKE_ESCAPE)}%"
 
 
-def keyword_patterns(query: str) -> list[str]:
-    words = [
+def keyword_terms(query: str) -> list[str]:
+    """Meaningful lexical terms shared by candidate selection and scoring."""
+    return list(dict.fromkeys(
         word for word in re.findall(r"[a-z0-9][a-z0-9_-]*", query.lower())
         if len(word) > 2 and word not in _STOP_WORDS
-    ]
-    return [like_pattern(word) for word in dict.fromkeys(words)] or [like_pattern(query.strip())]
+    ))
+
+
+def keyword_patterns(query: str) -> list[str]:
+    words = keyword_terms(query)
+    return [like_pattern(word) for word in words] or [like_pattern(query.strip())]
 
 
 def document_count(project_id: int, patterns: list[str] | None = None) -> int:

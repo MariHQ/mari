@@ -4,12 +4,19 @@ import unittest
 from unittest.mock import patch
 
 from mari_server.persistence.postgres import connector_sync as connect_sync
+from mari_server.providers import connectors as connector_provider
 from mari_server.sources import routes as connectors_api
 from mari_components.connectors import CONNECTOR_CATALOG
 from mari_components.types import KnowledgeDocument
 
 
 class ConnectorContractTests(unittest.TestCase):
+    def test_confluence_gets_a_larger_bounded_sweep_budget(self) -> None:
+        confluence = connector_provider.request("confluence", None, None, {})
+        slack = connector_provider.request("slack", None, None, {})
+        self.assertEqual(confluence.page_limit, 100)
+        self.assertEqual(slack.page_limit, 20)
+
     def test_catalog_hides_upload_and_website(self) -> None:
         with patch.object(connectors_api, "_connected_map", return_value={}):
             keys = [item["key"] for item in connectors_api.catalog()]

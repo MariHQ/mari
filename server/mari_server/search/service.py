@@ -17,7 +17,7 @@ from mari_server.persistence.postgres.database import jload
 from mari_server.persistence.postgres import search as search_store
 from mari_components.acl import document_visible
 from mari_components.retrieval import keyword_score
-from mari_server.persistence.postgres.search import keyword_patterns, like_pattern
+from mari_server.persistence.postgres.search import keyword_patterns, keyword_terms, like_pattern
 
 # ————————————————— hybrid search ranking constants —————————————————
 
@@ -211,7 +211,11 @@ def _rank_hybrid(query: str) -> list[dict]:
         for row in search_store.documents_by_id(project_id, missing):
             rows_by_id[int(row["id"])] = row
 
-    terms = [word for word in re.findall(r"[a-z0-9][a-z0-9_-]*", query.lower()) if len(word) > 1]
+    # Candidate selection and scoring must use the same vocabulary. Scoring
+    # conversational filler ("how", "work", "company") after SQL correctly
+    # ignored it promoted unrelated documents that happened to contain those
+    # common words.
+    terms = keyword_terms(query)
     ranked = []
     for doc_id, row in rows_by_id.items():
         if not _document_visible(row, ctx):

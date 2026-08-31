@@ -279,9 +279,25 @@ def _response_format(gateway: dict[str, t.Any] | None,
             **_thinking_control(gateway),
         }
     if isinstance(requested, dict):
+        def strict_schema(value: t.Any) -> t.Any:
+            """Make object schemas valid for OpenAI strict structured output."""
+            if isinstance(value, list):
+                return [strict_schema(item) for item in value]
+            if not isinstance(value, dict):
+                return value
+            out = {key: strict_schema(item) for key, item in value.items()}
+            if out.get("type") == "object":
+                properties = out.get("properties") or {}
+                out["additionalProperties"] = False
+                out["required"] = list(properties)
+            return out
+
         return {"response_format": {
             "type": "json_schema",
-            "json_schema": {"name": "mari_response", "strict": True, "schema": requested},
+            "json_schema": {
+                "name": "mari_response", "strict": True,
+                "schema": strict_schema(requested),
+            },
         }}
     return {"response_format": {"type": "json_object"}}
 
@@ -465,7 +481,18 @@ def _stream(url: str, payload: dict, headers: dict | None = None,
 def embedding_profile() -> str:
     """Stable, secret-free identity for cached derived vectors."""
     provider, model = embedding_model()
-    return f"{provider}:{model}:dimensions={EMBED_DIMS}:muvera-unit-v1"
+    task_mode = ":asymmetric-search-v1" if "nomic-embed-text" in model.lower() else ""
+    return f"{provider}:{model}:dimensions={EMBED_DIMS}:muvera-unit-v1{task_mode}"
+
+
+def _embedding_input(text: str, model: str, purpose: str) -> str:
+    """Apply model-native asymmetric retrieval instructions when required."""
+    value = str(text or "")
+    if "nomic-embed-text" not in model.lower():
+        return value
+    if purpose not in {"query", "document"}:
+        raise ValueError("embedding purpose must be query or document")
+    return f"search_{purpose}: {value}"
 
 
 def _http_embeddings(values: list[str], provider: str, model: str) -> list[list[float] | None]:
@@ -510,7 +537,7 @@ def _http_embeddings(values: list[str], provider: str, model: str) -> list[list[
     return result
 
 
-def embed(text: str) -> list[float] | None:
+def embed(text: str, *, purpose: str = "query") -> list[float] | None:
     """A vector for `text`, or None with `last_error()` explaining why.
 
     The vector is always EMBED_DIMS long, because that is the width of the
@@ -518,7 +545,7 @@ def embed(text: str) -> list[float] | None:
     refused here rather than at INSERT time, where the failure would read as a
     database error instead of a configuration one."""
     provider, model = embedding_model()
-    body = text[:4000]
+    body = _embedding_input(text, model, purpose)[:4000]
 
     if not provider or not model:
         _fail("embedding provider and model must both be configured")
@@ -547,14 +574,17 @@ def embed(text: str) -> list[float] | None:
     return vec
 
 
-def embed_many(texts: t.Iterable[str]) -> list[list[float] | None]:
+def embed_many(texts: t.Iterable[str], *, purpose: str = "document") -> list[list[float] | None]:
     """Embed a batch while preserving input order."""
-    values = list(texts)
+    raw_values = list(texts)
+    provider, model = embedding_model()
+    values = [_embedding_input(value, model, purpose) for value in raw_values]
     if not values:
         return []
-    provider, model = embedding_model()
     if provider == "ollama":
-        return [embed(value) for value in values]
+        # Values are already task-prefixed; avoid applying the prefix twice.
+        return [embed(value.removeprefix(f"search_{purpose}: "), purpose=purpose)
+                for value in values]
     if provider not in {"openai", "gateway"} or not model:
         _fail("embedding provider and model must both be configured")
         return [None] * len(values)
