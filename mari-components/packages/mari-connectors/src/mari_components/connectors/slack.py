@@ -242,7 +242,10 @@ def poll_slack(
     # Accept either the channel name people see in Slack or the stable channel
     # ID Slack shows in "About -> Copy channel ID". IDs are especially useful
     # for private channels, where renames should not silently stop ingestion.
-    wanted = {name.lstrip("#").casefold() for name in config.channels}
+    # The casefolded key matches; the original spelling is kept for errors,
+    # so an admin who typed C0123ABCD is not asked about c0123abcd.
+    configured = {name.lstrip("#").casefold(): name.lstrip("#") for name in config.channels}
+    wanted = set(configured)
     matched: set[str] = set()
     previous = float(request.cursor or 0)
     newest = previous
@@ -300,17 +303,22 @@ def poll_slack(
             if document is not None:
                 documents.append(document)
             complete = complete and thread_complete
-    missing = sorted(wanted - matched)
+    missing = sorted(configured[key] for key in wanted - matched)
     if missing:
         # Slack omits private channels the bot is not a member of from
-        # conversations.list. Returning a successful empty snapshot in that
-        # case made the source card look healthy forever at zero documents.
-        # Name the exact remediation and the scopes used by the two API calls.
+        # conversations.list, and a public channel it has not joined fails the
+        # is_member check above, so both land here. Returning a successful
+        # empty snapshot in either case made the source card look healthy
+        # forever at zero documents. Name the remediation for both, and bound
+        # the channel list (three names, thirty characters each) so the
+        # card's 300-character error budget never truncates the remediation
+        # off the end.
+        listed = ", ".join(name[:30] for name in missing[:3]) + (
+            f" and {len(missing) - 3} more" if len(missing) > 3 else "")
         raise PermanentFailure(
-            "Slack could not access configured channel(s): "
-            + ", ".join(missing)
-            + ". For a private channel, invite the app to the channel and reinstall it "
-              "with groups:read and groups:history (plus users:read)."
+            "Slack could not access configured channel(s): " + listed
+            + ". Invite the app to each channel. A private channel also needs the app "
+              "reinstalled with groups:read and groups:history (plus users:read)."
         )
     yield PollPage(
         tuple(documents),

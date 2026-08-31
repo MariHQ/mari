@@ -400,12 +400,41 @@ class PriorityConnectorTests(unittest.TestCase):
             {"ok": True, "channels": []},
         ])
         with self.assertRaisesRegex(
-            PermanentFailure, "invite the app.*groups:read.*groups:history"
+            PermanentFailure,
+            "private-platform.*Invite the app to each channel.*groups:read.*groups:history",
         ):
             list(poll_slack(
                 SlackConfig("xoxb-token", channels=("private-platform",)),
                 PollRequest(), http=api,
             ))
+
+    def test_slack_access_error_keeps_the_admins_own_spelling(self):
+        api = FakeHttp([
+            {"ok": True, "members": []},
+            {"ok": True, "channels": []},
+        ])
+        with self.assertRaisesRegex(PermanentFailure, "C0123ABCD"):
+            list(poll_slack(
+                SlackConfig("xoxb-token", channels=("C0123ABCD",)),
+                PollRequest(), http=api,
+            ))
+
+    def test_slack_access_error_caps_the_channel_list_under_the_card_budget(self):
+        api = FakeHttp([
+            {"ok": True, "members": []},
+            {"ok": True, "channels": []},
+        ])
+        channels = tuple(f"missing-channel-number-{index}" for index in range(9))
+        with self.assertRaises(PermanentFailure) as caught:
+            list(poll_slack(
+                SlackConfig("xoxb-token", channels=channels),
+                PollRequest(), http=api,
+            ))
+        message = str(caught.exception)
+        self.assertIn("and 6 more", message)
+        # the card truncates errors at 300 characters; the remediation must fit
+        self.assertLess(len(message), 300)
+        self.assertIn("groups:history (plus users:read).", message)
 
     def test_slack_channel_id_can_select_a_private_channel(self):
         api = FakeHttp([

@@ -90,6 +90,17 @@ test("removing a source lets the admin retain its indexed documents", async ({ p
     && call.variables.deleteDocuments === false)).toBeTruthy();
 });
 
+test("removing a source deletes its documents by default", async ({ page }) => {
+  await openSources(page);
+  await page.getByRole("button", { name: "Actions for Confluence — ENG" }).click();
+  await page.getByRole("menuitem", { name: "Remove…" }).click();
+  const dialog = page.getByRole("dialog", { name: "Remove source" });
+  await expect(dialog.getByLabel("Delete indexed documents")).toBeChecked();
+  await dialog.getByRole("button", { name: "Remove source" }).click();
+  await expect.poll(() => api.calls.some((call) => call.query.includes("removeSource")
+    && call.variables.deleteDocuments === true)).toBeTruthy();
+});
+
 test("Sources exposes connector ingestion without a Bots tab", async ({ page }) => {
   await openSources(page);
   await expect(page.getByRole("button", { name: "Add source" })).toBeVisible();

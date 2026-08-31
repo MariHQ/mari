@@ -235,9 +235,21 @@ export async function installMockApi(page: Page, options: {
           ?? [...new Set(state.trajectories.map((row: any) => String(row.status)))],
       };
     } else if (/setWorkflowStatus/.test(query)) {
+      // Mutate the fixture the way the server would: a reload must show the
+      // written state, or a no-op mutation passes the persistence tests.
+      const workflow = state.workflows.find((row: any) =>
+        row.id === Number(variables.taskId ?? variables.id ?? variables.workflowId));
+      if (workflow) workflow.status = String(variables.status);
       data = { setWorkflowStatus: true };
     } else if (/setWorkflowTrigger/.test(query)) {
+      const workflow = state.workflows.find((row: any) =>
+        row.id === Number(variables.workflowId ?? variables.taskId ?? variables.id));
+      if (workflow) workflow.trigger = JSON.parse(String(variables.trigger || "{}"));
       data = { setWorkflowTrigger: true };
+    } else if (/removeScheduledTask/.test(query)) {
+      state.workflows = state.workflows.filter((row: any) =>
+        row.id !== Number(variables.taskId));
+      data = { removeScheduledTask: true };
     } else if (/runWorkflow/.test(query)) {
       data = { runWorkflow: 1802 };
     } else if (/inviteMember/.test(query)) {
@@ -273,11 +285,18 @@ export async function installMockApi(page: Page, options: {
       state.facts.push({ id: state.facts.length + 1, claim: variables.claim, source: variables.source, owner: variables.owner, status: "Needs review", verified: "" });
       data = { addFact: true };
     } else if (/startFactScan/.test(query)) {
+      state.factScanRunStarted = true;
       data = { startFactScan: 99 };
     } else if (/dismissWorkflowRun/.test(query)) {
+      state.dismissedRuns = [...(state.dismissedRuns ?? []), Number(variables.runId)];
       data = { dismissWorkflowRun: true };
     } else if (/latestWorkflowRun/.test(query)) {
-      data = { latestWorkflowRun: null };
+      // The Facts recovery path: a started scan survives reloads until this
+      // user dismisses it. Hardcoding null here made the dismissal reload
+      // assertion pass even when the mutation was a no-op.
+      const dismissed = (state.dismissedRuns ?? []).includes(99);
+      data = { latestWorkflowRun: state.factScanRunStarted && !dismissed
+        ? { id: 99, status: "passed" } : null };
     } else if (/tuneTrajectoryStep/.test(query)) {
       data = { tuneTrajectoryStep: true };
     } else if (/tuneTrajectoryEvidence/.test(query)) {

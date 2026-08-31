@@ -131,6 +131,13 @@ test("scheduled tasks can be paused, rescheduled, and run without losing their c
   await page.getByRole("button", { name: "Run now" }).click();
   await expect.poll(() => api.calls.some((call) => call.query.includes("runWorkflow"))).toBeTruthy();
   await expect(page.getByText("Run #1802 started.", { exact: false })).toBeVisible();
+
+  // The mock persists the writes, so a reload proves the page renders the
+  // stored state rather than its own optimistic memory of it.
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "Fact review" })).toBeVisible();
+  await expect(page.getByText("Manual", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("Fact review cadence")).toHaveValue("");
 });
 
 test("a scheduled task can be removed from the task manager", async ({ page }) => {
@@ -141,6 +148,24 @@ test("a scheduled task can be removed from the task manager", async ({ page }) =
   await expect.poll(() => api.calls.some((call) => call.query.includes("removeScheduledTask")
     && call.variables.taskId === 1)).toBeTruthy();
   await expect(page.getByRole("heading", { name: "Fact review" })).toHaveCount(0);
+  // Server-driven, not the row's local removed flag: the mock deleted it.
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "Fact review" })).toHaveCount(0);
+  await expect(page.getByText("No scheduled tasks", { exact: true })).toBeVisible();
+});
+
+test("scheduled tasks read failures replace the list rather than masquerading as empty", async ({ page }) => {
+  await page.route("**/graphql", async (route) => {
+    const query = (route.request().postDataJSON() as { query?: string }).query ?? "";
+    if (query.includes("query ScheduledTasks")) {
+      await route.fulfill({ json: { errors: [{ message: "Scheduled tasks are temporarily unavailable." }] } });
+    } else {
+      await route.fallback();
+    }
+  });
+  await page.goto("/scheduled-tasks");
+  await expect(page.getByText("Scheduled tasks are temporarily unavailable.", { exact: false })).toBeVisible();
+  await expect(page.getByText("No scheduled tasks", { exact: true })).toHaveCount(0);
 });
 
 test("a codified workflow can be deleted without deleting its observed trajectory", async ({ page }) => {

@@ -56,6 +56,10 @@ test("LLM fact scan starts a workflow and reports its grounded result", async ({
     && c.variables.config.adjudication_mode === "llm"
     && c.variables.config.review_mode === "ai")).toBeTruthy();
   expect(api.calls.some((c) => c.query.includes("workflowRun"))).toBeTruthy();
+  // The run must survive a reload through the recovery path before a
+  // dismissal, or the "stays dismissed" assertion below proves nothing.
+  await page.reload();
+  await expect(page.getByText(/Fact scan · run #1900/)).toBeVisible();
   await page.getByRole("button", { name: "Dismiss" }).click();
   await expect(page.getByText(/Fact scan · run #1900/)).toHaveCount(0);
   expect(api.calls.some((c) => c.query.includes("dismissWorkflowRun") && c.variables.runId === 99)).toBeTruthy();
