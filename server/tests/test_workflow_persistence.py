@@ -8,6 +8,16 @@ from mari_server.persistence.postgres import workflows
 
 
 class WorkflowPersistenceTests(unittest.TestCase):
+    def test_scheduler_never_runs_legacy_unscoped_workflows(self) -> None:
+        connection = MagicMock()
+        connection.execute.return_value.fetchall.return_value = []
+        manager = MagicMock()
+        manager.__enter__.return_value = connection
+        with patch.object(workflows.db, "connect", return_value=manager):
+            self.assertEqual(workflows.scheduled_workflows(), [])
+        sql = connection.execute.call_args.args[0]
+        self.assertIn("project_id IS NOT NULL", sql)
+
     def test_setting_schedule_keeps_trigger_node_label_in_sync(self) -> None:
         context = access.AccessContext(
             user_id=2, project_id=7, project_slug="acme", project_name="Acme",

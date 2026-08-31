@@ -377,7 +377,8 @@ def scheduled_workflows() -> list[dict]:
     with db.connect() as conn:
         return conn.execute(
             """SELECT id, project_id, name, trigger FROM workflows
-               WHERE status = 'active' AND trigger->>'on' = 'schedule' ORDER BY id""",
+               WHERE project_id IS NOT NULL AND status = 'active'
+                 AND trigger->>'on' = 'schedule' ORDER BY id""",
         ).fetchall()
 
 
@@ -437,7 +438,8 @@ def active_projects() -> list[dict]:
         ).fetchall()
 
 
-def find_by_step(step_kind: str, *, project_scoped: bool = True) -> dict | None:
+def find_by_step(step_kind: str, *, project_scoped: bool = True,
+                 config: dict | None = None) -> dict | None:
     project_id = access.require_current_access().project_id if project_scoped else None
     with db.connect() as conn:
         rows = conn.execute(
@@ -448,7 +450,12 @@ def find_by_step(step_kind: str, *, project_scoped: bool = True) -> dict | None:
         ).fetchall()
     for row in rows:
         nodes = row["nodes"] if isinstance(row["nodes"], list) else json.loads(row["nodes"] or "[]")
-        if any(isinstance(step, dict) and step.get("kind") == step_kind for step in nodes):
+        if any(
+            isinstance(step, dict) and step.get("kind") == step_kind
+            and all((step.get("config") or {}).get(key) == value
+                    for key, value in (config or {}).items())
+            for step in nodes
+        ):
             return {**row, "nodes": nodes}
     return None
 
@@ -503,7 +510,10 @@ def setting(key: str) -> dict:
 def connector_sources() -> list[dict]:
     with db.connect() as conn:
         return conn.execute(
-            "SELECT id, display_name, config FROM sources WHERE kind = 'connector'",
+            """SELECT s.id, s.display_name, s.config, p.id AS project_id,
+                      p.slug AS project_slug, p.name AS project_name
+                 FROM sources s JOIN projects p ON p.id = s.project_id
+                WHERE s.kind = 'connector' AND p.status = 'active'""",
         ).fetchall()
 
 

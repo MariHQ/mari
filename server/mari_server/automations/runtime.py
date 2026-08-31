@@ -703,11 +703,10 @@ def _wf_nodes(row: dict) -> list[dict]:
 def ensure_sync_flow(source_id: int, repo: str) -> int | None:
     """Idempotently create the scheduled 'Sync <label>' flow for a github or
     connector source. Returns the new workflow id, or None if one exists."""
-    existing = workflow_store.find_by_step("sync_source", project_scoped=False)
-    if existing and any(
-        int((step.get("config") or {}).get("source_id") or 0) == source_id
-        for step in existing["nodes"] if isinstance(step, dict)
-    ):
+    existing = workflow_store.find_by_step(
+        "sync_source", config={"source_id": source_id},
+    )
+    if existing:
         return None
     nodes = [
         {"kind": "trigger", "label": "Every 10 min", "config": {"label": "Scheduled · every 10 min"}},
@@ -717,7 +716,7 @@ def ensure_sync_flow(source_id: int, repo: str) -> int | None:
         name=f"Sync {repo}"[:120],
         description=f"Keeps {repo} indexed — incremental sync on a schedule.",
         color="#5c7a4c", status="active", nodes=nodes,
-        trigger={"on": "schedule", "every_minutes": 10}, project_scoped=False,
+        trigger={"on": "schedule", "every_minutes": 10},
     )
 
 
@@ -725,7 +724,7 @@ def ensure_digest_flow() -> int | None:
     """Idempotently create the 'Weekly digest refresh' flow (schedule: every
     10080 min == weekly). The old settings.digest_schedule.enabled decides
     whether it starts active or paused. Returns the new id or None."""
-    if workflow_store.find_by_step("refresh_digest", project_scoped=False):
+    if workflow_store.find_by_step("refresh_digest"):
         return None
     status = "active" if workflow_store.setting("digest_schedule").get("enabled", True) else "paused"
     nodes = [
@@ -736,7 +735,7 @@ def ensure_digest_flow() -> int | None:
         name="Weekly digest refresh",
         description="Regenerates the Overview digest from recent documents and facts.",
         color="#c8973a", status=status, nodes=nodes,
-        trigger={"on": "schedule", "every_minutes": 10080}, project_scoped=False,
+        trigger={"on": "schedule", "every_minutes": 10080},
     )
 
 
@@ -1073,8 +1072,13 @@ def seed_scheduled_flows() -> None:
     flow; the weekly digest gets a refresh flow. Idempotent — existing kept."""
     for s in workflow_store.connector_sources():
         cfg = s["config"] if isinstance(s["config"], dict) else json.loads(s["config"] or "{}")
-        ensure_sync_flow(s["id"], cfg.get("repo") or s["display_name"])
-    ensure_digest_flow()
+        project_access = access.external_access(
+            int(s["project_id"]), str(s["project_slug"]), str(s["project_name"]),
+            "automation", "connector-sync-seed",
+            frozenset({"knowledge.read", "knowledge.write", "automation.run"}),
+        )
+        with access.use_access(project_access):
+            ensure_sync_flow(s["id"], cfg.get("repo") or s["display_name"])
     for project in workflow_store.active_projects():
         project_access = access.external_access(
             int(project["id"]), str(project["slug"]), str(project["name"]),
@@ -1082,6 +1086,7 @@ def seed_scheduled_flows() -> None:
             frozenset({"knowledge.read", "knowledge.write", "automation.run"}),
         )
         with access.use_access(project_access):
+            ensure_digest_flow()
             ensure_fact_scan_flow()
             # A deployment can change the embedding input contract without an
             # administrator touching Settings (for example, enabling Nomic's

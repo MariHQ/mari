@@ -8,6 +8,25 @@ from mari_server.identity import context as access
 
 
 class WorkflowStepTests(unittest.TestCase):
+    def test_sync_flow_is_keyed_by_source_inside_the_current_project(self) -> None:
+        context = access.external_access(3, "acme", "Acme", "test", "seed")
+        existing = {"id": 12, "nodes": [{"kind": "sync_source", "config": {"source_id": 7}}]}
+        with access.use_access(context), \
+             patch.object(flowengine.workflow_store, "find_by_step", return_value=existing) as find, \
+             patch.object(flowengine.workflow_store, "create_default_workflow") as create:
+            self.assertIsNone(flowengine.ensure_sync_flow(7, "Slack · test"))
+        find.assert_called_once_with("sync_source", config={"source_id": 7})
+        create.assert_not_called()
+
+    def test_sync_flow_creation_is_project_scoped(self) -> None:
+        context = access.external_access(3, "acme", "Acme", "test", "seed")
+        with access.use_access(context), \
+             patch.object(flowengine.workflow_store, "find_by_step", return_value=None), \
+             patch.object(flowengine.workflow_store, "create_default_workflow", return_value=18) as create:
+            self.assertEqual(flowengine.ensure_sync_flow(7, "Slack · test"), 18)
+        self.assertNotIn("project_scoped", create.call_args.kwargs)
+        self.assertEqual(create.call_args.kwargs["nodes"][1]["config"]["source_id"], 7)
+
     def test_idempotent_step_retries_once_and_records_recovery(self) -> None:
         impl = Mock(side_effect=[ConnectionError("temporary"), ("passed", "done", {"facts": 2})])
         with patch.object(flowengine.time, "sleep"):
