@@ -139,6 +139,26 @@ class WorkflowStepTests(unittest.TestCase):
         saved = update.call_args.args[1]
         self.assertEqual(saved[3]["kind"], "map_fact_impact")
 
+    def test_waiting_run_rows_survive_a_new_workflow_stage(self) -> None:
+        run = {"rows_data": [
+            {"step": "Trigger", "status": "passed", "detail": "manual"},
+            {"step": "Review", "status": "passed", "detail": "approved"},
+            {"step": "Publish", "status": "pending", "detail": ""},
+        ], "stats": {"ctx": {"run_id": 9}}}
+        workflow = {"nodes": [
+            {"kind": "trigger", "label": "Trigger", "config": {}},
+            {"kind": "map_fact_impact", "label": "Map impact", "config": {}},
+            {"kind": "review_facts", "label": "Review", "config": {}},
+            {"kind": "publish_facts", "label": "Publish", "config": {}},
+        ]}
+        persisted: list[list[dict]] = []
+        with patch.object(flowengine.workflow_store, "load_run", return_value=(run, workflow)), \
+             patch.object(flowengine, "_run_step", return_value=("passed", "done", {})), \
+             patch.object(flowengine, "_persist", side_effect=lambda _id, rows, *_args: persisted.append([dict(row) for row in rows])):
+            flowengine.execute_run(9, resume_from=3)
+        self.assertEqual([row["step"] for row in persisted[-1]],
+                         ["Trigger", "Map impact", "Review", "Publish"])
+
     def test_human_fact_review_waits_until_every_candidate_has_a_verdict(self) -> None:
         with patch("mari_server.persistence.postgres.knowledge.fact_candidate_counts",
                    return_value={"pending": 2, "accepted": 1, "rejected": 0}):

@@ -375,8 +375,26 @@ def execute_run(run_id: int, resume_from: int = 0) -> None:
     ctx.setdefault("run_id", run_id)
     start = time.time()
 
+    templates = [{"step": s.get("label", s.get("kind", "step")),
+                  "status": "pending", "detail": ""} for s in steps]
     if not rows:
-        rows = [{"step": s.get("label", s.get("kind", "step")), "status": "pending", "detail": ""} for s in steps]
+        rows = templates
+    elif len(rows) != len(steps) or any(
+            row.get("step") != template["step"] for row, template in zip(rows, templates)):
+        # Workflow defaults can gain a stage while an approval run is waiting.
+        # Align persisted rows by their stable display label so resume has one
+        # row per current step; unmatched new stages start pending, while the
+        # old completed/review rows keep their evidence and duration.
+        unused = list(rows)
+        aligned: list[dict] = []
+        for template in templates:
+            match = next((row for row in unused if row.get("step") == template["step"]), None)
+            if match is None:
+                aligned.append(template)
+            else:
+                aligned.append(match)
+                unused.remove(match)
+        rows = aligned
 
     for i in range(resume_from, len(steps)):
         step = steps[i]
