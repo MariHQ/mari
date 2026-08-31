@@ -6,7 +6,7 @@ const PRODUCTION_ROUTES = [
   ["/knowledge/doc?id=1", "Retention runbook"], ["/workflows?tab=answers", "Approved answers"],
   ["/insights", "Insights"], ["/audit", "Repository audit"], ["/lineage", "Lineage"],
   ["/library", "Library"], ["/publish", "Destinations"],
-  ["/workflows", "Workflows"], ["/sources", "Sources"],
+  ["/workflows", "Workflows"], ["/scheduled-tasks", "Scheduled tasks"], ["/sources", "Sources"],
   ["/settings/general", "General"], ["/settings/models", "Models"],
   ["/settings/design", "Design & brand"], ["/settings/members", "Members"],
   ["/settings/api-keys", "API keys"], ["/settings/audit", "Audit log"],

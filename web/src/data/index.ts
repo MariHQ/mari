@@ -19,6 +19,7 @@ import { useSettingsDesign } from "./settings-design";
 import { useSettingsGeneral } from "./settings-general";
 import { useSettingsModels } from "./settings-models";
 import { useSources } from "./sources";
+import { useScheduledTasks } from "./scheduled-tasks";
 import { stub } from "./stubs";
 import { useWorkflows } from "./workflows";
 import type { Adapter } from "./types";
@@ -45,6 +46,7 @@ const ADAPTERS: Record<string, Adapter<any>> = {
   "settings-members": useSettingsMembers,
   "settings-models": useSettingsModels,
   sources: useSources,
+  "scheduled-tasks": useScheduledTasks,
   welcome: useWelcome,
   workflows: useWorkflows,
 };

@@ -106,8 +106,8 @@ test("stale reviewed-answer workflows can be reconciled together", async ({ page
 });
 
 test("scheduled tasks can be paused, rescheduled, and run without losing their cadence", async ({ page }) => {
-  await page.goto("/workflows?tab=scheduled");
-  await expect(page.getByRole("button", { name: /Scheduled tasks/ })).toHaveAttribute("aria-pressed", "true");
+  await page.goto("/scheduled-tasks");
+  await expect(page.getByRole("heading", { name: "Scheduled tasks" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Fact review" })).toBeVisible();
   await expect(page.getByText("#1801 waiting", { exact: false })).toBeVisible();
 
