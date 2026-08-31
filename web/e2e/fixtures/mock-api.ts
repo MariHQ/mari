@@ -60,8 +60,8 @@ function initialData() {
       { step: "Approve", status: "waiting", detail: "awaiting Dana", duration: "00:00:00" },
     ] }],
     facts: [
-      { id: 1, claim: "Retention is 30 days.", source: "Retention runbook", owner: "Dana", status: "Verified", verified: "2026-08-18" },
-      { id: 2, claim: "Retention is 10 days.", source: "Old handbook", owner: "Dana", status: "Needs review", verified: "" },
+      { id: 1, claim: "Retention is 30 days.", source: "Retention runbook", owner: "Dana", status: "Verified", verified: "2026-08-18", validFrom: "2026-01-01", impactCount: 3, highImpact: true },
+      { id: 2, claim: "Retention is 10 days.", source: "Old handbook", owner: "Dana", status: "Needs review", verified: "", validFrom: "2025-01-01", impactCount: 0, highImpact: false },
     ],
     factContradictions: [{ factId: 1, claim: "Retention is 30 days.", otherFactId: 2, otherClaim: "Retention is 10 days.", reason: "numeric conflict", detail: "30 versus 10 days" }],
     decisions: [{ id: 1, statement: "Use Postgres for metadata", context: "Queryable state stays relational.", status: "ratified", sourceLabel: "GitHub · ADR-14", owners: ["Dana"], decidedOn: "2026-08-18", supersededBy: null, supersededByStatement: "", impactSummary: "Affects storage design", impactCount: 2 }],
@@ -248,6 +248,17 @@ export async function installMockApi(page: Page, options: {
         provider: "invite",
       });
       data = { inviteMember: true };
+    } else if (/invalidateFact/.test(query)) {
+      const fact = state.facts.find((f: any) => f.id === variables.id);
+      if (fact) fact.status = "Invalidated";
+      data = { invalidateFact: true };
+    } else if (/factSemanticLinks/.test(query)) {
+      data = { factSemanticLinks: [
+        { targetType: "document", targetId: 1, relation: "source", similarity: 1,
+          targetLabel: "Retention runbook", targetUpdatedAt: "2026-01-01", observedAt: "2026-08-31" },
+        { targetType: "fact", targetId: 2, relation: "contradicts", similarity: .94,
+          targetLabel: "Retention is 10 days.", targetUpdatedAt: "2026-08-20", observedAt: "2026-08-31" },
+      ] };
     } else if (/verifyFact/.test(query)) {
       const fact = state.facts.find((f: any) => f.id === variables.id);
       if (fact) { fact.status = "Verified"; fact.verified = "2026-08-19"; }

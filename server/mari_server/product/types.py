@@ -158,6 +158,9 @@ class Fact:
     owner_tint: int
     status: str
     verified: str  # ISO date of the last verification, "" when never verified
+    valid_from: str
+    impact_count: int
+    high_impact: bool
 
 
 @strawberry.type

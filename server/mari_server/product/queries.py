@@ -710,7 +710,9 @@ class Query:
         # and whose '—' placeholder parses as an invalid date.
         return [Fact(id=r["id"], claim=r["claim"], source=r["source"], owner=r["owner_name"],
                      owner_tint=r["owner_tint"], status=r["status"],
-                     verified=r["verified_at"].isoformat() if r["verified_at"] else "")
+                     verified=r["verified_at"].isoformat() if r["verified_at"] else "",
+                     valid_from=r["valid_from"].isoformat() if r.get("valid_from") else "",
+                     impact_count=int(r.get("impact_count") or 0), high_impact=bool(r.get("high_impact")))
                 for r in knowledge_store.facts()]
 
     @strawberry.field
@@ -724,7 +726,9 @@ class Query:
         rows = knowledge_store.facts(document_id)
         return [Fact(id=r["id"], claim=r["claim"], source=r["source"], owner=r["owner_name"],
                      owner_tint=r["owner_tint"], status=r["status"],
-                     verified=r["verified_at"].isoformat() if r["verified_at"] else "")
+                     verified=r["verified_at"].isoformat() if r["verified_at"] else "",
+                     valid_from=r["valid_from"].isoformat() if r.get("valid_from") else "",
+                     impact_count=int(r.get("impact_count") or 0), high_impact=bool(r.get("high_impact")))
                 for r in rows]
 
     @strawberry.field

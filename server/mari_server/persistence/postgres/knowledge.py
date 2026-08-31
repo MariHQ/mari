@@ -82,8 +82,8 @@ def add_fact(claim: str, source: str, owner: str, document_id: int | None) -> bo
     with db.connect() as conn, conn.transaction():
         row = conn.execute(
             """INSERT INTO facts
-               (project_id, claim, source, owner_name, owner_tint, status, verified, document_id)
-               VALUES (%s, %s, %s, %s, 1, 'Needs review', '—', %s)
+               (project_id, claim, source, owner_name, owner_tint, status, verified, document_id, valid_from)
+               VALUES (%s, %s, %s, %s, 1, 'Needs review', '—', %s, now())
                ON CONFLICT (project_id, claim) DO NOTHING RETURNING id""",
             (project_id, claim, source, owner, document_id),
         ).fetchone()
@@ -445,7 +445,8 @@ def verify_fact(fact_id: int) -> str | None:
     with db.connect() as conn, conn.transaction():
         row = conn.execute(
             """UPDATE facts SET status = 'Verified', verified_at = current_date
-                 WHERE project_id = %s AND id = %s RETURNING claim""",
+                 WHERE project_id = %s AND id = %s
+                   AND status NOT IN ('Invalidated', 'Retired') RETURNING claim""",
             (project_id, fact_id),
         ).fetchone()
     return str(row["claim"]) if row else None
@@ -531,12 +532,38 @@ def graph_views() -> list[dict]:
 
 def facts(document_id: int | None = None) -> list[dict]:
     project_id = access.require_current_access().project_id
-    clause = " AND document_id = %s" if document_id is not None else ""
-    args = (project_id, document_id) if document_id is not None else (project_id,)
+    profile = llm.embedding_profile()
+    clause = " AND f.document_id = %s" if document_id is not None else ""
     with db.connect() as conn:
         return conn.execute(
-            f"SELECT * FROM facts WHERE project_id = %s{clause} ORDER BY id", args,
+            f"""SELECT f.*, impact.impact_count,
+                       (impact.has_contradiction OR impact.impact_count >= 3) AS high_impact
+                  FROM facts f
+                  LEFT JOIN LATERAL (
+                    SELECT count(*)::integer AS impact_count,
+                           coalesce(bool_or(relation = 'contradicts'), false) AS has_contradiction
+                      FROM fact_semantic_links link
+                     WHERE link.project_id = f.project_id AND link.subject_type = 'fact'
+                       AND link.subject_id = f.id AND link.embedding_profile = %s AND link.active
+                  ) impact ON true
+                 WHERE f.project_id = %s{clause} ORDER BY f.id""",
+            # SQL reads profile inside the lateral before the outer project.
+            ((profile, project_id, document_id) if document_id is not None else (profile, project_id)),
         ).fetchall()
+
+
+def invalidate_fact(fact_id: int, reason: str) -> dict | None:
+    """Close a fact's validity interval without deleting its impact history."""
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn, conn.transaction():
+        return conn.execute(
+            """UPDATE facts SET status = 'Invalidated', invalidated_at = now(),
+                              invalidation_reason = %s
+                WHERE project_id = %s AND id = %s
+                  AND status NOT IN ('Invalidated', 'Retired')
+                RETURNING id, claim""",
+            (reason[:1000], project_id, fact_id),
+        ).fetchone()
 
 
 def tasks() -> list[dict]:

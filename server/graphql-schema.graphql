@@ -183,6 +183,9 @@ type Fact {
   ownerTint: Int!
   status: String!
   verified: String!
+  validFrom: String!
+  impactCount: Int!
+  highImpact: Boolean!
 }
 
 type FactContradiction {
@@ -393,6 +396,7 @@ type Mutation {
   clearDoneTasks: Int! @deprecated(reason: "The Review page was removed. The review projection stays one more release as the backend for policy auto-approval and inline approvals.")
   verifyFact(id: Int!): Boolean!
   reviewFactCandidate(id: Int!, accept: Boolean!, reason: String! = ""): Boolean!
+  invalidateFact(id: Int!, reason: String! = "Business context changed"): Boolean!
   createTask(title: String!, kind: String! = "factcheck", kindLabel: String! = "Fact check", assignee: String! = "", due: String = null, subjectType: String! = "", subjectId: String! = "", subjectTitle: String! = "", subjectHref: String! = ""): Boolean! @deprecated(reason: "The Review page was removed. The review projection stays one more release as the backend for policy auto-approval and inline approvals.")
   setTaskDue(id: Int!, due: String = null): Boolean!
   addFact(claim: String!, source: String!, owner: String! = "", documentId: Int = null): Boolean!

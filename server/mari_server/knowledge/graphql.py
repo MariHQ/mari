@@ -188,6 +188,15 @@ class MutKnowledge:
             audit("accepted" if accept else "rejected", f"fact candidate #{id}")
         return ok
 
+    @strawberry.mutation
+    def invalidate_fact(self, id: int, reason: str = "Business context changed") -> bool:
+        """End a fact's validity interval while retaining its impact cluster."""
+        row = knowledge_store.invalidate_fact(id, reason)
+        if not row:
+            return False
+        audit("invalidated fact", row["claim"])
+        return True
+
     @strawberry.mutation(deprecation_reason=DEPRECATED_REVIEW)
     def create_task(self, title: str, kind: str = "factcheck", kind_label: str = "Fact check",
                     assignee: str = "", due: str | None = None,

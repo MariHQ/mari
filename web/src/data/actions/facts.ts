@@ -10,7 +10,7 @@
  * and no Retire rather than a control that would report success and change
  * nothing. */
 
-import type { FactScan, FactsActions } from "@mari-design/components/pages/FactsPage";
+import type { FactScan, FactsActions, FactSemanticImpactLink } from "@mari-design/components/pages/FactsPage";
 import type { RunStatus } from "@mari-design/components/workflow/RunHistory";
 import { gqlResult } from "../../lib/api";
 import { mutate, type ActionContext } from "../actions";
@@ -22,7 +22,8 @@ const RUN_QUERY = `query($id: Int!) {
   workflowRun(id: $id) { id number workflowName status progress stats rows }
   factExtractionCandidates(runId: $id) {
     id runId documentId documentTitle claim source evidence confidence reviewStatus
-    reviewKind reviewReason reviewer reviewedAt publishedFactId
+    reviewKind reviewReason reviewer reviewedAt publishedFactId impactScore highImpact
+    semanticLinks { targetType targetId relation similarity targetLabel targetUpdatedAt observedAt }
   }
 }`;
 
@@ -37,6 +38,11 @@ type RunRes = {
     claim: string; source: string; evidence: string; confidence: number;
     reviewStatus: string; reviewKind: string; reviewReason: string; reviewer: string;
     reviewedAt: string; publishedFactId: number | null;
+    impactScore: number; highImpact: boolean;
+    semanticLinks: {
+      targetType: "fact" | "document"; targetId: number; relation: string;
+      similarity: number; targetLabel: string; targetUpdatedAt: string; observedAt: string;
+    }[];
   }[];
 };
 
@@ -81,7 +87,10 @@ function mapRun(res: RunRes | null, id: string): FactScan {
       status: candidate.reviewStatus as "pending" | "accepted" | "rejected",
       reviewReason: candidate.reviewReason,
       reviewer: candidate.reviewer,
-    })),
+      impactScore: candidate.impactScore,
+      highImpact: candidate.highImpact,
+      semanticLinks: candidate.semanticLinks ?? [],
+    })).sort((a, b) => Number(b.highImpact) - Number(a.highImpact) || b.impactScore - a.impactScore),
   };
 }
 
@@ -111,6 +120,25 @@ export function factsActions({ currentUserName }: ActionContext): FactsActions {
   return {
     verifyFact: async (id: number) => {
       await mutate("mutation($id: Int!) { verifyFact(id: $id) }", { id });
+    },
+    retireFact: async (id: number) => {
+      await mutate(
+        "mutation($id: Int!) { invalidateFact(id: $id, reason: \"Invalidated from the fact ledger\") }",
+        { id },
+      );
+      factsChanged();
+    },
+    inspectFactImpact: async (id: number): Promise<FactSemanticImpactLink[]> => {
+      const result = await gqlResult<{ factSemanticLinks: FactSemanticImpactLink[] }>(
+        `query($id: Int!) {
+          factSemanticLinks(factId: $id) {
+            targetType targetId relation similarity targetLabel targetUpdatedAt observedAt
+          }
+        }`,
+        { id },
+      );
+      if (!result.ok) throw new Error(result.error);
+      return result.data?.factSemanticLinks ?? [];
     },
     addFact: async ({ claim, source, owner }) => {
       // `owner` defaults server-side, so an unowned claim is still accepted

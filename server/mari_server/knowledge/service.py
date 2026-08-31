@@ -392,20 +392,32 @@ def ai_review_fact_candidates(run_id: int, instructions: str = "") -> dict[str, 
     for candidate in candidates:
         if candidate["review_status"] != "pending":
             continue
-        doc = knowledge_store.document(candidate["document_id"]) if candidate.get("document_id") else None
-        if not doc:
+        document_ids: list[int] = []
+        if candidate.get("document_id"):
+            document_ids.append(int(candidate["document_id"]))
+        for link in knowledge_store.semantic_links("candidate", candidate["id"]):
+            if link["target_type"] == "document" and int(link["target_id"]) not in document_ids:
+                document_ids.append(int(link["target_id"]))
+        docs = [doc for document_id in document_ids[:7]
+                if (doc := knowledge_store.document(document_id))]
+        if not docs:
             knowledge_store.review_fact_candidate(
                 candidate["id"], accepted=False, reviewer=reviewer,
                 reason="Source document is no longer available.", kind="ai",
             )
             continue
-        system = "You are Mari, a rigorous fact reviewer. Accept only claims directly supported by source evidence."
+        system = (
+            "You are Mari, a rigorous temporal fact reviewer. Accept only claims directly supported "
+            "by the supplied evidence neighborhood. Document revisions are dates: when the business "
+            "has evolved, newer authoritative evidence may supersede older statements. Reject a claim "
+            "when newer evidence contradicts it; explain the temporal conflict."
+        )
         if instructions:
             system += f" Review policy: {instructions[:1000]}"
         assessments = component_check_claims(
-            [candidate["claim"]], [_component_document(doc)],
+            [candidate["claim"]], [_component_document(doc) for doc in docs],
             generate_json=lambda prompt, _version: llm.generate_json(prompt, system=system),
-            maximum_claims=1, maximum_documents=1, maximum_characters=10_000,
+            maximum_claims=1, maximum_documents=len(docs), maximum_characters=30_000,
         )
         assessment = assessments[0]
         knowledge_store.review_fact_candidate(

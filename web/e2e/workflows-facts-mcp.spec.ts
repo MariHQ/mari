@@ -21,6 +21,21 @@ test("facts can be verified and captured through the ledger", async ({ page }) =
   expect(api.calls.some((c) => c.query.includes("addFact") && c.variables.claim === "Deletion requests finish within 7 days.")).toBeTruthy();
 });
 
+test("high-impact facts expose temporal evidence before invalidation", async ({ page }) => {
+  await page.goto("/facts");
+  const row = page.getByRole("row").filter({ hasText: "Retention is 30 days." });
+  await expect(row.getByText("High impact", { exact: true })).toBeVisible();
+  await row.getByRole("button", { name: "Impact" }).click();
+  const drawer = page.getByRole("dialog", { name: "Fact impact neighborhood" });
+  await expect(drawer.getByText("Retention is 10 days.", { exact: true })).toBeVisible();
+  await expect(drawer.getByText("contradicts", { exact: true })).toBeVisible();
+  await drawer.getByRole("button", { name: "Close" }).click();
+  await row.getByRole("button", { name: "Invalidate" }).click();
+  await page.getByRole("button", { name: "Invalidate this claim and preserve its impact history?" }).click();
+  await expect(row.getByText("Invalidated", { exact: true })).toBeVisible();
+  expect(api.calls.some((call) => call.query.includes("invalidateFact"))).toBeTruthy();
+});
+
 test("LLM fact scan starts a workflow and reports its grounded result", async ({ page }) => {
   await page.goto("/facts");
   await page.getByRole("button", { name: "Scan for facts" }).click();
