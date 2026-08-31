@@ -241,8 +241,17 @@ def _step_map_fact_impact(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
     from mari_server.knowledge.service import map_fact_candidate_impact
     if ctx.get("dry_run"):
         return "passed", "would map related facts and temporal evidence (dry run)", {}
-    stats = map_fact_candidate_impact(int(ctx["run_id"]))
-    detail = (f"{stats['impact_links']} evidence links · "
+    stats = map_fact_candidate_impact(
+        int(ctx["run_id"]),
+        retrieval_backend=str(cfg.get("retrieval_backend") or "postgres"),
+        fact_neighbors=max(1, min(int(cfg.get("fact_neighbors") or 8), 50)),
+        evidence_neighbors=max(1, min(int(cfg.get("evidence_neighbors") or 8), 50)),
+        minimum_fact_similarity=float(cfg.get("minimum_fact_similarity") or .72),
+        minimum_evidence_similarity=float(cfg.get("minimum_evidence_similarity") or .68),
+        max_components=max(1, min(int(cfg.get("max_components") or 12), 32)),
+    )
+    detail = (f"{stats.get('embedded_components', 0)} component vectors · "
+              f"{stats['impact_links']} evidence links · "
               f"{stats['high_impact_facts']} high-impact candidates")
     return "passed", detail, stats
 
@@ -305,7 +314,7 @@ STEP_IMPLS: dict[str, t.Callable] = {
 }
 
 # steps that call the local LLM (shown as slow in the UI)
-LLM_STEPS = {"refine", "fact_check", "derive_links", "summarize", "refresh_digest", "scan_facts", "map_fact_impact", "review_facts", "scan_decisions"}
+LLM_STEPS = {"refine", "fact_check", "derive_links", "summarize", "refresh_digest", "scan_facts", "review_facts", "scan_decisions"}
 
 # Steps that are safe to run a second time after a transient failure (FLOW-3).
 # A failed step used to end the run outright, with no retry and no way to tell a

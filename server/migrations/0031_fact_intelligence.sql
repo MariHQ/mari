@@ -13,6 +13,10 @@ ALTER TABLE facts ALTER COLUMN canonical_key SET NOT NULL;
 CREATE UNIQUE INDEX facts_project_canonical_key_idx
   ON facts (project_id, canonical_key);
 
+ALTER TABLE fact_extraction_candidates
+  ADD COLUMN structured_claim jsonb NOT NULL DEFAULT '{}'::jsonb,
+  ADD COLUMN extraction_recipe text NOT NULL DEFAULT 'facts-extract-v3';
+
 CREATE TABLE fact_assertions (
   id                  bigserial PRIMARY KEY,
   project_id          integer NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -72,10 +76,11 @@ UPDATE facts f
  WHERE a.fact_id = f.id AND a.project_id = f.project_id;
 
 INSERT INTO fact_assertions (
-  project_id, candidate_id, run_id, source_document_id, claim, status,
-  confidence, confidence_reason, actor, content_hash, recorded_from
+  project_id, candidate_id, run_id, source_document_id, claim, structured_claim,
+  extraction_recipe, status, confidence, confidence_reason, actor, content_hash, recorded_from
 )
-SELECT project_id, id, run_id, document_id, claim,
+SELECT project_id, id, run_id, document_id, claim, structured_claim,
+       extraction_recipe,
        CASE review_status WHEN 'accepted' THEN 'pending_review'
                           WHEN 'rejected' THEN 'rejected' ELSE 'proposed' END,
        greatest(0, least(1, confidence)), review_reason, reviewer,
@@ -126,8 +131,8 @@ CREATE TABLE evidence_spans (
   project_id         integer NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
   document_id        integer NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
   chunk_id           integer REFERENCES chunks(id) ON DELETE SET NULL,
-  start_offset       integer,
-  end_offset         integer,
+  start_offset       integer NOT NULL DEFAULT 0,
+  end_offset         integer NOT NULL,
   quote              text NOT NULL,
   content_hash       text NOT NULL,
   acl                 jsonb NOT NULL DEFAULT '{}'::jsonb,
@@ -139,7 +144,7 @@ CREATE TABLE evidence_spans (
   ingested_at        timestamptz NOT NULL DEFAULT now(),
   observed_at        timestamptz NOT NULL DEFAULT now(),
   created_at         timestamptz NOT NULL DEFAULT now(),
-  CHECK (end_offset IS NULL OR start_offset IS NULL OR end_offset > start_offset),
+  CHECK (end_offset > start_offset),
   UNIQUE (project_id, document_id, content_hash, start_offset, end_offset)
 );
 

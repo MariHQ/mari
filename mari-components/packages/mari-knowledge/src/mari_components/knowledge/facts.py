@@ -11,7 +11,7 @@ from .prompting import JsonGenerator, bounded_documents, documents_json, require
 from .scoring import evidence_confidence
 
 
-FACT_EXTRACTION_VERSION = "facts-extract-v2"
+FACT_EXTRACTION_VERSION = "facts-extract-v3"
 FACT_CHECK_VERSION = "facts-check-v2"
 
 
@@ -52,7 +52,11 @@ def extract_facts(
     prompt = (
         "Extract durable, atomic product facts from the supplied documents. "
         "Do not infer beyond the text. Every fact must cite at least one exact document id and quote. "
-        'Return JSON {"facts":[{"claim":"...",'
+        "Also decompose each fact into inspectable semantic components for embedding retrieval. "
+        "Use null for an unknown validity boundary and preserve business scope such as environment or region. "
+        'Return JSON {"facts":[{"claim":"...","atomic_claims":["..."],'
+        '"subject":{"canonical":"...","aliases":["..."]},"relation":"...","object":"...",'
+        '"scopes":["environment:production"],"valid_from":null,"valid_to":null,"conditions":[],'
         '"evidence":[{"document_id":"...","quote":"..."}]}]}.\nDocuments:\n'
         + documents_json(bounded)
     )
@@ -63,7 +67,17 @@ def extract_facts(
         if not claim:
             raise MalformedModelOutput("fact claim is required")
         evidence = _evidence(row.get("evidence"), allowed, recipe=FACT_EXTRACTION_VERSION)
-        output.append(FactCandidate(claim, evidence, evidence_confidence(claim, evidence)))
+        qualifiers = {
+            key: row.get(key)
+            for key in (
+                "atomic_claims", "subject", "relation", "object", "scopes",
+                "valid_from", "valid_to", "conditions",
+            )
+            if key in row
+        }
+        output.append(FactCandidate(
+            claim, evidence, evidence_confidence(claim, evidence), qualifiers,
+        ))
     return tuple(output)
 
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import concurrent.futures as cf
 import contextvars
+import datetime as dt
 import hashlib
 import json
 import time
@@ -15,6 +16,7 @@ from mari_server.providers import models as llm
 from mari_server.identity import context as access
 from mari_server.persistence.postgres import lineage as links
 from mari_server.persistence.postgres import knowledge as knowledge_store
+from mari_server.persistence.postgres import fact_intelligence as fact_store
 from mari_server.persistence.postgres.database import actor_name, audit
 from mari_components import KnowledgeDocument
 from mari_components.connectors import (
@@ -68,6 +70,7 @@ CLAIMS_PER_DOC = 2       # ceiling per document — never a shared, racing budge
 SCAN_WORKERS = 4         # concurrent model calls; the pool is bounded on purpose
 SCAN_CALL_TIMEOUT = 60.0  # per model call
 SCAN_DEADLINE = 180.0    # wall clock for the whole scan, however many documents
+FACT_REPRESENTATION_PROFILE = "fact-components-v1"
 
 _EVIDENCE_SCHEMA = {
     "type": "array", "items": {"type": "object", "properties": {
@@ -76,7 +79,19 @@ _EVIDENCE_SCHEMA = {
 }
 _FACT_SCHEMA = {"type": "object", "properties": {"facts": {
     "type": "array", "items": {"type": "object", "properties": {
-        "claim": {"type": "string"}, "evidence": _EVIDENCE_SCHEMA,
+        "claim": {"type": "string"},
+        "atomic_claims": {"type": "array", "items": {"type": "string"}},
+        "subject": {"type": "object", "properties": {
+            "canonical": {"type": "string"},
+            "aliases": {"type": "array", "items": {"type": "string"}},
+        }, "required": ["canonical", "aliases"]},
+        "relation": {"type": "string"},
+        "object": {"type": "string"},
+        "scopes": {"type": "array", "items": {"type": "string"}},
+        "valid_from": {"type": ["string", "null"]},
+        "valid_to": {"type": ["string", "null"]},
+        "conditions": {"type": "array", "items": {"type": "string"}},
+        "evidence": _EVIDENCE_SCHEMA,
     }, "required": ["claim", "evidence"]},
 }}, "required": ["facts"]}
 _DECISION_SCHEMA = {"type": "object", "properties": {"decisions": {
@@ -359,6 +374,8 @@ def extract_fact_candidates_for(doc_ids: list[int] | None = None,
                 "document_id": doc["id"],
                 "evidence": evidence[:1000],
                 "confidence": confidence,
+                "structured_claim": dict(getattr(item, "qualifiers", {}) or {}),
+                "extraction_recipe": "facts-extract-v3",
             })
             seen.add(claim.lower())
 
@@ -427,7 +444,107 @@ def ai_review_fact_candidates(run_id: int, instructions: str = "") -> dict[str, 
     return knowledge_store.fact_candidate_counts(run_id)
 
 
-def map_fact_candidate_impact(run_id: int) -> dict[str, int]:
+def _temporal_value(value: t.Any) -> dt.datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = dt.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=dt.timezone.utc)
+        return parsed
+    except ValueError:
+        return None
+
+
+def _fact_component_texts(claim: str, structured: dict, *, limit: int) -> list[dict[str, str]]:
+    """Render inspectable semantic components for ordinary provider embeddings."""
+    output: list[dict[str, str]] = [{"role": "claim", "text": claim.strip()}]
+
+    def add(role: str, text: t.Any) -> None:
+        value = str(text or "").strip()
+        if value:
+            output.append({"role": role, "text": value})
+
+    for atomic in structured.get("atomic_claims") or ():
+        add("atomic_claim", atomic)
+    subject = structured.get("subject")
+    if isinstance(subject, dict):
+        canonical = str(subject.get("canonical") or "").strip()
+        aliases = [str(value).strip() for value in subject.get("aliases") or () if str(value).strip()]
+        add("subject", canonical + (f" (also: {', '.join(aliases)})" if aliases else ""))
+    else:
+        add("subject", subject)
+    add("relation", structured.get("relation"))
+    add("object", structured.get("object"))
+    for scope in structured.get("scopes") or ():
+        add("scope", scope)
+    valid_from, valid_to = structured.get("valid_from"), structured.get("valid_to")
+    if valid_from or valid_to:
+        add("time", f"Valid from {valid_from or 'unknown'} to {valid_to or 'open'}")
+    for condition in structured.get("conditions") or ():
+        add("condition", condition)
+
+    deduplicated: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for component in output:
+        key = component["text"].casefold()
+        if key and key not in seen:
+            seen.add(key)
+            deduplicated.append(component)
+    return deduplicated[:max(1, limit)]
+
+
+def build_fact_representations(run_id: int, *, max_components: int = 12) -> dict[str, int]:
+    """Persist reconstructible embedding sets for active and proposed assertions."""
+    provider, model = llm.embedding_model()
+    profile = llm.embedding_profile()
+    generation_provider, generation_model = llm.generation_model()
+    fact_store.ensure_run_assertions(
+        run_id, model=f"{generation_provider}:{generation_model}".strip(":"),
+    )
+    subjects = fact_store.representation_subjects(run_id)
+    stored = fact_store.component_hashes(profile, FACT_REPRESENTATION_PROFILE)
+    embedded_assertions = 0
+    embedded_components = 0
+    for subject in subjects:
+        structured = subject.get("structured_claim") or {}
+        if subject.get("candidate_id"):
+            fact_store.update_assertion_structure(
+                int(subject["assertion_id"]), structured,
+                valid_from=_temporal_value(structured.get("valid_from")),
+                valid_to=_temporal_value(structured.get("valid_to")),
+            )
+        components = _fact_component_texts(
+            str(subject["claim"]), structured, limit=max(1, min(max_components, 32)),
+        )
+        combined = ":".join(hashlib.sha256(item["text"].encode()).hexdigest()
+                            for item in components)
+        if stored.get(int(subject["assertion_id"])) == combined:
+            continue
+        vectors = llm.embed_many([item["text"] for item in components], purpose="document")
+        if len(vectors) != len(components) or any(vector is None for vector in vectors):
+            raise RuntimeError(
+                f"Fact component embedding failed: {llm.last_error() or 'provider returned no vector'}"
+            )
+        fact_store.replace_components(
+            int(subject["assertion_id"]), embedding_profile=profile,
+            representation_profile=FACT_REPRESENTATION_PROFILE,
+            provider=provider, model=model,
+            components=[{**item, "embedding": vector}
+                        for item, vector in zip(components, vectors, strict=True)],
+        )
+        embedded_assertions += 1
+        embedded_components += len(components)
+    return {"embedded_assertions": embedded_assertions,
+            "embedded_components": embedded_components}
+
+
+def map_fact_candidate_impact(run_id: int, *, retrieval_backend: str = "postgres",
+                              fact_neighbors: int = 8, evidence_neighbors: int = 8,
+                              minimum_fact_similarity: float = .72,
+                              minimum_evidence_similarity: float = .68,
+                              max_components: int = 12) -> dict[str, int]:
     """Embed candidates and map their temporal fact/document neighborhood.
 
     Fact-to-document lookup deliberately uses chunk MaxSim in persistence: a
@@ -435,26 +552,17 @@ def map_fact_candidate_impact(run_id: int) -> dict[str, int]:
     centroid. Links snapshot source timestamps and hashes so an invalidation
     report remains explainable after the corpus evolves.
     """
-    subjects = knowledge_store.fact_embedding_subjects(run_id)
+    if retrieval_backend not in {"postgres", "muvera"}:
+        raise ValueError("Fact retrieval backend must be postgres or muvera")
+    # The optional MUVERA adapter is introduced behind this contract; Postgres
+    # is the safe default and exact scoring source of truth.
+    representation_stats = build_fact_representations(
+        run_id, max_components=max_components,
+    )
     profile = llm.embedding_profile()
-    provider, model = llm.embedding_model()
-    hashes = {(
-        str(subject["subject_type"]), int(subject["id"]),
-    ): hashlib.sha256(str(subject["claim"]).encode("utf-8")).hexdigest() for subject in subjects}
-    stored = knowledge_store.current_fact_embedding_hashes(profile)
-    missing = [subject for subject in subjects
-               if stored.get((str(subject["subject_type"]), int(subject["id"]))) !=
-               hashes[(str(subject["subject_type"]), int(subject["id"]))]]
-    vectors = llm.embed_many([str(subject["claim"]) for subject in missing], purpose="document")
-    for subject, vector in zip(missing, vectors):
-        if vector is None:
-            raise RuntimeError(f"Fact embedding failed: {llm.last_error() or 'provider returned no vector'}")
-        key = (str(subject["subject_type"]), int(subject["id"]))
-        knowledge_store.upsert_fact_embedding(
-            key[0], key[1], profile=profile, provider=provider, model=model,
-            content_hash=hashes[key], embedding=vector,
-        )
-
+    assertions = {int(row["candidate_id"]): row
+                  for row in fact_store.representation_subjects(run_id)
+                  if row.get("candidate_id")}
     candidates = knowledge_store.fact_candidates(run_id)
     high_impact = 0
     linked = 0
@@ -463,9 +571,23 @@ def map_fact_candidate_impact(run_id: int) -> dict[str, int]:
     # GraphQL service cycle.
     from mari_server.product.queries import detect_contradictions
     for candidate in candidates:
-        fact_neighbors = knowledge_store.candidate_fact_neighbors(candidate["id"], profile)
-        document_neighbors = knowledge_store.candidate_document_neighbors(
-            candidate["id"], profile, source_document_id=candidate.get("document_id"),
+        assertion = assertions.get(int(candidate["id"]))
+        if not assertion:
+            continue
+        nearby_facts = fact_store.assertion_neighbors(
+            int(assertion["assertion_id"]), profile, FACT_REPRESENTATION_PROFILE,
+            limit=max(1, min(fact_neighbors, 50)),
+            minimum_similarity=max(-1.0, min(minimum_fact_similarity, 1.0)),
+        )
+        nearby_evidence = fact_store.evidence_neighbors(
+            int(assertion["assertion_id"]), profile, FACT_REPRESENTATION_PROFILE,
+            limit=max(1, min(evidence_neighbors, 50)),
+            minimum_similarity=max(-1.0, min(minimum_evidence_similarity, 1.0)),
+            exclude_document_id=candidate.get("document_id"),
+        )
+        fact_store.replace_embedding_relations(
+            int(assertion["assertion_id"]), nearby_facts,
+            retrieval_profile=f"{retrieval_backend}:{profile}:{FACT_REPRESENTATION_PROFILE}",
         )
         links: list[dict] = []
         contradictions = 0
@@ -478,34 +600,40 @@ def map_fact_candidate_impact(run_id: int) -> dict[str, int]:
                     "target_updated_at": source.get("updated_src"),
                     "target_content_hash": source.get("content_hash") or "",
                 })
-        for neighbor in fact_neighbors:
+        for neighbor in nearby_facts:
             relation = "related"
-            if detect_contradictions([{"claim": candidate["claim"]}, {"claim": neighbor["label"]}]):
+            if detect_contradictions([{"claim": candidate["claim"]}, {"claim": neighbor["claim"]}]):
                 relation = "contradicts"
                 contradictions += 1
             links.append({
-                "target_type": "fact", "target_id": neighbor["id"],
+                "target_type": "fact", "target_id": neighbor["fact_id"],
                 "similarity": float(neighbor["similarity"]), "relation": relation,
-                "target_label": neighbor["label"],
-                "target_updated_at": neighbor.get("target_updated_at"),
-                "target_content_hash": neighbor.get("target_content_hash") or "",
+                "target_label": neighbor["claim"],
+                "target_updated_at": neighbor.get("recorded_from"),
+                "target_content_hash": "",
             })
-        for neighbor in document_neighbors:
+        for neighbor in nearby_evidence:
+            fact_store.upsert_evidence_span({
+                **neighbor,
+                "acl": neighbor.get("acl") or {},
+                "revised_at": neighbor.get("updated_src"),
+            })
             links.append({
-                "target_type": "document", "target_id": neighbor["id"],
+                "target_type": "document", "target_id": neighbor["document_id"],
                 "similarity": float(neighbor["similarity"]), "relation": "related",
-                "target_label": neighbor["label"],
-                "target_updated_at": neighbor.get("target_updated_at"),
-                "target_content_hash": neighbor.get("target_content_hash") or "",
+                "target_label": neighbor["title"],
+                "target_updated_at": neighbor.get("updated_src"),
+                "target_content_hash": neighbor.get("content_hash") or "",
             })
-        score = len(fact_neighbors) * 2 + len(document_neighbors) + contradictions * 5
+        score = len(nearby_facts) * 2 + len(nearby_evidence) + contradictions * 5
         high = contradictions > 0 or score >= 6
         knowledge_store.replace_candidate_semantic_links(
             candidate["id"], profile, links, impact_score=score, high_impact=high,
         )
         linked += len(links)
         high_impact += int(high)
-    return {"impact_links": linked, "high_impact_facts": high_impact}
+    return {"impact_links": linked, "high_impact_facts": high_impact,
+            **representation_stats}
 
 
 def fact_check_document(document_id: int) -> int:

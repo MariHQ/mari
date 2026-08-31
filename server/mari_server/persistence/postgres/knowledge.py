@@ -100,14 +100,18 @@ def stage_fact_candidates(run_id: int, candidates: list[dict]) -> int:
         for candidate in candidates:
             row = conn.execute(
                 """INSERT INTO fact_extraction_candidates
-                     (project_id, run_id, document_id, claim, source_label, evidence, confidence)
-                   SELECT %s, r.id, %s, %s, %s, %s, %s
+                     (project_id, run_id, document_id, claim, source_label, evidence, confidence,
+                      structured_claim, extraction_recipe)
+                   SELECT %s, r.id, %s, %s, %s, %s, %s, %s, %s
                      FROM workflow_runs r
                     WHERE r.project_id = %s AND r.id = %s
                    ON CONFLICT (run_id, claim) DO NOTHING RETURNING id""",
                 (project_id, candidate.get("document_id"), candidate["claim"],
                  candidate.get("source") or "", candidate.get("evidence") or "",
-                 float(candidate.get("confidence") or 0), project_id, run_id),
+                 float(candidate.get("confidence") or 0),
+                 json.dumps(candidate.get("structured_claim") or {}),
+                 str(candidate.get("extraction_recipe") or "facts-extract-v3"),
+                 project_id, run_id),
             ).fetchone()
             added += bool(row)
     return added
