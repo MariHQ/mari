@@ -6,6 +6,7 @@ import json
 
 from mari_server.persistence.postgres import connection as db
 from mari_server.identity import context as access
+from mari_server.providers import models as llm
 
 
 _SCAN_COLUMNS = {"facts": "facts_scanned_at", "decisions": "decisions_scanned_at"}
@@ -360,15 +361,20 @@ def document_templates() -> list[dict]:
 
 def upload_manifest() -> list[dict]:
     project_id = access.require_current_access().project_id
+    profile = llm.embedding_profile()
     with db.connect() as conn:
         return conn.execute(
             """SELECT d.id, d.source_path, d.external_id, d.updated_src,
-                      count(c.id) AS chunks, count(c.embedding) AS embedded
+                      count(DISTINCT c.id) AS chunks, count(DISTINCT e.chunk_id) AS embedded
                  FROM documents d
                  JOIN sources s ON s.project_id = d.project_id AND s.id = d.source_id
                                AND s.provider = 'upload'
                  LEFT JOIN chunks c ON c.project_id = d.project_id AND c.document_id = d.id
-                WHERE d.project_id = %s GROUP BY d.id ORDER BY d.id""", (project_id,),
+                 LEFT JOIN chunk_embeddings e
+                   ON e.project_id = c.project_id AND e.chunk_id = c.id
+                  AND e.embedding_profile = %s AND e.purpose = 'document'
+                  AND e.content_hash = c.content_hash
+                WHERE d.project_id = %s GROUP BY d.id ORDER BY d.id""", (profile, project_id),
         ).fetchall()
 
 
@@ -415,10 +421,15 @@ def harvest_source_counts() -> tuple[list[dict], int]:
 
 def index_stats() -> dict:
     project_id = access.require_current_access().project_id
+    profile = llm.embedding_profile()
     with db.connect() as conn:
         return conn.execute("""SELECT (SELECT count(*) FROM documents WHERE project_id = %s) AS docs,
-          count(*) AS chunks, count(*) FILTER (WHERE embedding IS NOT NULL) AS embedded
-          FROM chunks WHERE project_id = %s""", (project_id, project_id)).fetchone()
+          count(DISTINCT c.id) AS chunks, count(DISTINCT e.chunk_id) AS embedded
+          FROM chunks c LEFT JOIN chunk_embeddings e
+            ON e.project_id = c.project_id AND e.chunk_id = c.id
+           AND e.embedding_profile = %s AND e.purpose = 'document'
+           AND e.content_hash = c.content_hash
+          WHERE c.project_id = %s""", (project_id, profile, project_id)).fetchone()
 
 
 def decisions_with_supersession() -> list[dict]:

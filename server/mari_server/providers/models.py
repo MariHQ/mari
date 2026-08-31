@@ -56,11 +56,11 @@ DEFAULT_OLLAMA = "http://localhost:11434"
 DEFAULT_EMBED_MODEL = "nomic-embed-text"
 DEFAULT_GEN_MODEL = "gemma3:4b"
 
-# The width of `documents.embedding` and `chunks.embedding` (init.sql:
-# vector(768)). A vector of any other length cannot be stored, so a provider
-# that cannot produce this width is refused with a reason rather than left to
-# fail deep inside an INSERT. OpenAI's text-embedding-3-* models take a
-# `dimensions` argument, which is why they can serve this schema at all.
+# The active retrieval width. Versioned vectors are canonical in
+# `chunk_embeddings`, while `documents.embedding` and `chunks.embedding`
+# remain 768-wide compatibility projections during the rolling migration.
+# OpenAI's text-embedding-3-* models take a `dimensions` argument, which is why
+# they can serve this profile without an extra dimensionality reduction step.
 EMBED_DIMS = 768
 
 #: Ollama context window bounds. The floor is its own default, so short calls

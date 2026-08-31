@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from mari_server.persistence.postgres import connection as db
 from mari_server.identity import context as access
+from mari_server.providers import models as llm
 import json
 
 
@@ -76,13 +77,19 @@ def github_configs() -> tuple[dict | None, list[dict]]:
 
 def sync_summary(source_id: int) -> tuple[dict | None, dict]:
     project_id = access.require_current_access().project_id
+    profile = llm.embedding_profile()
     with db.connect() as conn:
         source = conn.execute("""SELECT kind, config, last_sync_at FROM sources
           WHERE project_id = %s AND id = %s""", (project_id, source_id)).fetchone()
-        counts = conn.execute("""SELECT count(DISTINCT d.id) AS docs, count(c.id) AS chunks,
-          count(c.id) FILTER (WHERE c.embedding IS NOT NULL) AS embedded
+        counts = conn.execute("""SELECT count(DISTINCT d.id) AS docs, count(DISTINCT c.id) AS chunks,
+          count(DISTINCT e.chunk_id) AS embedded
           FROM documents d LEFT JOIN chunks c ON c.project_id = d.project_id AND c.document_id = d.id
-          WHERE d.project_id = %s AND d.source_id = %s""", (project_id, source_id)).fetchone()
+          LEFT JOIN chunk_embeddings e
+            ON e.project_id = c.project_id AND e.chunk_id = c.id
+           AND e.embedding_profile = %s AND e.purpose = 'document'
+           AND e.content_hash = c.content_hash
+          WHERE d.project_id = %s AND d.source_id = %s""",
+          (profile, project_id, source_id)).fetchone()
     return source, counts or {"docs": 0, "chunks": 0, "embedded": 0}
 
 
