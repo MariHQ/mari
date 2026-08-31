@@ -127,6 +127,16 @@ test("scheduled tasks can be paused, rescheduled, and run without losing their c
   await expect(page.getByText("Run #1802 started.", { exact: false })).toBeVisible();
 });
 
+test("a scheduled task can be removed from the task manager", async ({ page }) => {
+  await page.goto("/scheduled-tasks");
+  await expect(page.getByRole("heading", { name: "Fact review" })).toBeVisible();
+  await page.getByRole("button", { name: "Remove" }).click();
+  await page.getByRole("button", { name: "Really remove?" }).click();
+  await expect.poll(() => api.calls.some((call) => call.query.includes("removeScheduledTask")
+    && call.variables.taskId === 1)).toBeTruthy();
+  await expect(page.getByRole("heading", { name: "Fact review" })).toHaveCount(0);
+});
+
 test("a codified workflow can be deleted without deleting its observed trajectory", async ({ page }) => {
   const row = api.getData("trajectories")[0];
   api.setData("trajectories", [{

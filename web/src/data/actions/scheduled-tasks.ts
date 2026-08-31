@@ -18,5 +18,8 @@ export function scheduledTasksActions(): ScheduledTasksActions {
       const data = await mutate(`mutation($taskId: Int!) { runWorkflow(workflowId: $taskId) }`, { taskId });
       return Number(data.runWorkflow);
     },
+    remove: async (taskId) => {
+      await mutate(`mutation($taskId: Int!) { removeScheduledTask(taskId: $taskId) }`, { taskId });
+    },
   };
 }
