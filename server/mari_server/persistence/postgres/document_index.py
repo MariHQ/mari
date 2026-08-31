@@ -240,6 +240,22 @@ def reindex_all(batch_size: int = 100) -> tuple[int, int]:
     return documents, embedded
 
 
+def needs_reindex() -> bool:
+    """Whether any projected chunk is missing the active embedding profile."""
+    project_id = access.require_current_access().project_id
+    profile = llm.embedding_profile()
+    with connection() as conn:
+        row = conn.execute(
+            """SELECT EXISTS (
+                   SELECT 1 FROM chunks
+                    WHERE project_id = %s
+                      AND (embedding IS NULL OR embedding_profile IS DISTINCT FROM %s)
+               ) AS stale""",
+            (project_id, profile),
+        ).fetchone()
+    return bool(row and row["stale"])
+
+
 def delete_documents(conn, doc_ids: list[int]) -> None:
     if not doc_ids:
         return

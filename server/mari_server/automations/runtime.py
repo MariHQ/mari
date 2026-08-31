@@ -722,3 +722,11 @@ def seed_scheduled_flows() -> None:
         )
         with access.use_access(project_access):
             ensure_fact_scan_flow()
+            # A deployment can change the embedding input contract without an
+            # administrator touching Settings (for example, enabling Nomic's
+            # asymmetric search tasks). Refresh stale chunks in the existing
+            # guarded worker so the corpus does not silently stay keyword-only.
+            from mari_server.persistence.postgres import document_index
+            from mari_server.sources import sync as source_sync
+            if document_index.needs_reindex():
+                source_sync.start_reindex()
