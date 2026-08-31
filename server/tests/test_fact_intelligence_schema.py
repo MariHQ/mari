@@ -49,6 +49,10 @@ class FactIntelligenceSchemaTests(unittest.TestCase):
         self.assertIn("output_tokens", section)
         self.assertIn("visible_config", section)
 
+    def test_fact_key_remains_rollout_compatible(self):
+        self.assertNotIn("ALTER COLUMN canonical_key SET NOT NULL", MIGRATION)
+        self.assertIn("WHERE canonical_key IS NOT NULL", MIGRATION)
+
 
 if __name__ == "__main__":
     unittest.main()

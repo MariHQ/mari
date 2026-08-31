@@ -163,9 +163,12 @@ def _scan_concurrently(
     return results, len(pending), failed, errors
 
 
-def _extraction_json(prompt: str, system: str, schema: dict[str, t.Any]) -> t.Any:
+def _extraction_json(prompt: str, system: str, schema: dict[str, t.Any],
+                     max_tokens: int | None = None) -> t.Any:
     """Generate extraction JSON without losing the provider's real failure."""
-    value = llm.generate_json(prompt, system, SCAN_CALL_TIMEOUT, schema=schema)
+    value = llm.generate_json(
+        prompt, system, SCAN_CALL_TIMEOUT, schema=schema, max_tokens=max_tokens,
+    )
     if value is None:
         raise RuntimeError(llm.last_error() or "the model returned no structured output")
     return value
@@ -311,7 +314,10 @@ def scan_decisions_for(doc_ids: list[int] | None = None,
 def extract_fact_candidates_for(doc_ids: list[int] | None = None,
                                 limit: int = SCAN_DOCS,
                                 claims_per_document: int = CLAIMS_PER_DOC,
-                                instructions: str = "") -> tuple[list[dict], int, str]:
+                                instructions: str = "", *, run_id: int | None = None,
+                                max_llm_calls: int | None = None,
+                                max_input_tokens: int = 100_000,
+                                max_output_tokens: int = 20_000) -> tuple[list[dict], int, str]:
     """Mine documents into evidence-bearing candidates without publishing.
 
     One document per model call, not one call over a pasted-together
@@ -327,9 +333,40 @@ def extract_fact_candidates_for(doc_ids: list[int] | None = None,
             if (d["body"] or d["snippet"] or "").strip()]
     if not docs:
         return 0, 0, ""
+    extraction_purpose = "structured fact extraction"
+    call_limit = max(0, min(int(max_llm_calls if max_llm_calls is not None else len(docs)), 200))
+    output_per_call = max(200, min(2000, max_output_tokens // max(1, call_limit)))
+    if run_id is not None:
+        provider, model = llm.generation_model()
+        fact_store.configure_llm_budget(
+            run_id, stage="scan_facts", purpose=extraction_purpose,
+            provider=provider, model=model, recipe="facts-extract-v3",
+            max_calls=call_limit, max_input_tokens=max(0, min(max_input_tokens, 2_000_000)),
+            max_output_tokens=max(0, min(max_output_tokens, 400_000)),
+            visible_config={
+                "documents_selected": len(docs), "maximum_calls": call_limit,
+                "claims_per_document": claims_per_document,
+                "output_tokens_per_call": output_per_call,
+                "instructions": instructions[:1000],
+            },
+        )
+    budget_omitted = max(0, len(docs) - call_limit)
+    docs = docs[:call_limit]
+    if not docs:
+        if run_id is not None:
+            fact_store.complete_llm_budget(
+                run_id, stage="scan_facts", purpose=extraction_purpose, status="skipped",
+            )
+        return [], 0, f"{budget_omitted} documents not read because the configured LLM call budget is zero"
     existing = knowledge_store.fact_claims()
 
     def extract(doc: dict):
+        if run_id is not None and not fact_store.reserve_llm_call(
+            run_id, stage="scan_facts", purpose=extraction_purpose,
+            estimated_input_tokens=max(1, len(str(doc.get("body") or doc.get("snippet") or "")) // 3 + 300),
+            output_tokens=output_per_call,
+        ):
+            return ()
         document = _component_document(doc)
         return component_extract_facts(
             [document],
@@ -337,7 +374,7 @@ def extract_fact_candidates_for(doc_ids: list[int] | None = None,
                 _extraction_json(
                     prompt, "You extract verifiable facts from documentation."
                     + (f" Reviewer instructions: {instructions[:1000]}" if instructions else ""),
-                    _FACT_SCHEMA),
+                    _FACT_SCHEMA, output_per_call),
                 document, "facts", "claim",
             ),
             maximum_documents=1, maximum_characters=1500,
@@ -381,6 +418,15 @@ def extract_fact_candidates_for(doc_ids: list[int] | None = None,
 
     _mark_scanned("facts", [doc["id"] for doc, _ in results])
     note = _scan_note(unread, failed)
+    if budget_omitted:
+        note = "; ".join(part for part in (
+            note,
+            f"{budget_omitted} document{'s' if budget_omitted != 1 else ''} deferred by the configured LLM call budget",
+        ) if part)
+    if run_id is not None:
+        fact_store.complete_llm_budget(
+            run_id, stage="scan_facts", purpose=extraction_purpose, status="completed",
+        )
     audit("scanned for facts", f"{len(candidates)} candidates from {len(results)} documents"
                                + (f" ({note})" if note else ""))
     return candidates, len(results), note
@@ -552,10 +598,8 @@ def map_fact_candidate_impact(run_id: int, *, retrieval_backend: str = "postgres
     centroid. Links snapshot source timestamps and hashes so an invalidation
     report remains explainable after the corpus evolves.
     """
-    if retrieval_backend not in {"postgres", "muvera"}:
-        raise ValueError("Fact retrieval backend must be postgres or muvera")
-    # The optional MUVERA adapter is introduced behind this contract; Postgres
-    # is the safe default and exact scoring source of truth.
+    if retrieval_backend != "postgres":
+        raise ValueError("The active fact retrieval backend must be postgres")
     representation_stats = build_fact_representations(
         run_id, max_components=max_components,
     )
@@ -589,6 +633,10 @@ def map_fact_candidate_impact(run_id: int, *, retrieval_backend: str = "postgres
             int(assertion["assertion_id"]), nearby_facts,
             retrieval_profile=f"{retrieval_backend}:{profile}:{FACT_REPRESENTATION_PROFILE}",
         )
+        fact_store.replace_embedding_evidence(
+            int(assertion["assertion_id"]), nearby_evidence,
+            retrieval_profile=f"{retrieval_backend}:{profile}:{FACT_REPRESENTATION_PROFILE}",
+        )
         links: list[dict] = []
         contradictions = 0
         if candidate.get("document_id"):
@@ -613,11 +661,6 @@ def map_fact_candidate_impact(run_id: int, *, retrieval_backend: str = "postgres
                 "target_content_hash": "",
             })
         for neighbor in nearby_evidence:
-            fact_store.upsert_evidence_span({
-                **neighbor,
-                "acl": neighbor.get("acl") or {},
-                "revised_at": neighbor.get("updated_src"),
-            })
             links.append({
                 "target_type": "document", "target_id": neighbor["document_id"],
                 "similarity": float(neighbor["similarity"]), "relation": "related",
@@ -634,6 +677,281 @@ def map_fact_candidate_impact(run_id: int, *, retrieval_backend: str = "postgres
         high_impact += int(high)
     return {"impact_links": linked, "high_impact_facts": high_impact,
             **representation_stats}
+
+
+_ADJUDICATION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "recommendation": {"type": "string", "enum": [
+            "new_fact", "supersede", "qualify", "duplicate", "reject", "needs_review",
+        ]},
+        "relation": {"type": "string", "enum": [
+            "supports", "contradicts", "supersedes", "qualifies", "duplicate",
+            "related", "insufficient",
+        ]},
+        "target_assertion_id": {"type": ["integer", "null"]},
+        "valid_from": {"type": ["string", "null"]},
+        "valid_to": {"type": ["string", "null"]},
+        "confidence": {"type": "number"},
+        "reason": {"type": "string"},
+        "needs_human_review": {"type": "boolean"},
+        "evidence_groups": {"type": "array", "items": {
+            "type": "object", "properties": {
+                "span_ids": {"type": "array", "items": {"type": "integer"}},
+                "verdict": {"type": "string", "enum": [
+                    "supports", "contradicts", "qualifies", "insufficient",
+                ]},
+                "sufficient": {"type": "boolean"},
+                "confidence": {"type": "number"},
+                "explanation": {"type": "string"},
+            }, "required": ["span_ids", "verdict", "sufficient", "confidence", "explanation"],
+        }},
+    },
+    "required": ["recommendation", "relation", "target_assertion_id", "valid_from",
+                 "valid_to", "confidence", "reason", "needs_human_review", "evidence_groups"],
+}
+
+
+def _jsonable_packet(packet: dict, *, relation_limit: int, evidence_limit: int) -> dict:
+    assertion = packet["assertion"]
+    return {
+        "assertion": {
+            "id": assertion["id"], "claim": assertion["claim"],
+            "structured_claim": assertion.get("structured_claim") or {},
+            "valid_from": str(assertion.get("valid_from") or ""),
+            "valid_to": str(assertion.get("valid_to") or ""),
+        },
+        "related_assertions": [{
+            "assertion_id": row["target_assertion_id"], "claim": row["claim"],
+            "structured_claim": row.get("structured_claim") or {},
+            "valid_from": str(row.get("valid_from") or ""),
+            "valid_to": str(row.get("valid_to") or ""),
+            "recorded_from": str(row.get("recorded_from") or ""),
+            "similarity": float(row.get("exact_score") or 0),
+            "criticality": row.get("criticality") or "normal",
+        } for row in packet["relations"][:relation_limit]],
+        "evidence": [{
+            "span_id": row["span_id"], "document_id": row["document_id"],
+            "title": row["title"], "source": row["source"], "quote": row["quote"],
+            "source_authority": row["source_authority"],
+            "published_at": str(row.get("published_at") or ""),
+            "effective_from": str(row.get("effective_from") or ""),
+            "effective_to": str(row.get("effective_to") or ""),
+            "revised_at": str(row.get("revised_at") or ""),
+            "ingested_at": str(row.get("ingested_at") or ""),
+            "similarity": float(row.get("similarity") or 0),
+        } for row in packet["evidence"][:evidence_limit]],
+    }
+
+
+def adjudicate_fact_candidates(run_id: int, *, enabled: bool, max_calls: int = 10,
+                               max_input_tokens: int = 24_000,
+                               max_output_tokens: int = 8_000,
+                               output_tokens_per_call: int = 800,
+                               related_assertions: int = 8, evidence_spans: int = 12,
+                               instructions: str = "") -> dict[str, int]:
+    """Optionally ask the configured LLM to adjudicate embedding candidates.
+
+    The durable budget row is created before any call and every call reserves
+    its visible allowance atomically. Exhaustion is a review outcome, not an
+    unbounded retry condition.
+    """
+    provider, model = llm.generation_model()
+    purpose = "temporal evidence and relation proposals"
+    recipe = "fact-adjudication-v1"
+    fact_store.configure_llm_budget(
+        run_id, stage="adjudicate_facts", purpose=purpose, provider=provider,
+        model=model, recipe=recipe, max_calls=max(0, min(max_calls, 100)),
+        max_input_tokens=max(0, min(max_input_tokens, 1_000_000)),
+        max_output_tokens=max(0, min(max_output_tokens, 200_000)),
+        visible_config={
+            "enabled": enabled, "related_assertions": related_assertions,
+            "evidence_spans": evidence_spans,
+            "output_tokens_per_call": output_tokens_per_call,
+            "instructions": instructions[:1000],
+        },
+    )
+    if not enabled:
+        fact_store.complete_llm_budget(
+            run_id, stage="adjudicate_facts", purpose=purpose, status="skipped",
+        )
+        return {"llm_calls": 0, "adjudicated_facts": 0, "llm_abstentions": 0,
+                "llm_budget_exhausted": 0}
+
+    adjudicated = abstentions = calls = exhausted = 0
+    retrieval_profile = (
+        f"postgres:{llm.embedding_profile()}:{FACT_REPRESENTATION_PROFILE}"
+    )
+    for assertion_id in fact_store.run_assertion_ids(run_id):
+        packet = fact_store.adjudication_packet(assertion_id)
+        if not packet:
+            continue
+        visible = _jsonable_packet(
+            packet, relation_limit=max(1, min(related_assertions, 20)),
+            evidence_limit=max(1, min(evidence_spans, 30)),
+        )
+        prompt = json.dumps(visible, sort_keys=True, default=str)
+        estimated_input = max(1, len(prompt) // 3)
+        per_call = max(100, min(output_tokens_per_call, 4000))
+        if not fact_store.reserve_llm_call(
+            run_id, stage="adjudicate_facts", purpose=purpose,
+            estimated_input_tokens=estimated_input, output_tokens=per_call,
+        ):
+            exhausted = 1
+            break
+        calls += 1
+        system = (
+            "You adjudicate evolving business facts using only the supplied assertion, related "
+            "assertions, and evidence spans. Similarity is discovery context, not proof. Distinguish "
+            "business scope and effective time. A newer source does not automatically override a more "
+            "authoritative source. Return insufficient or needs_review when evidence is incomplete. "
+            "Never cite a span or assertion id absent from the packet."
+        )
+        if instructions:
+            system += f" Workspace review policy: {instructions[:1000]}"
+        result = llm.generate_json(
+            prompt, system=system, timeout=90, schema=_ADJUDICATION_SCHEMA,
+            max_tokens=per_call,
+        )
+        if not isinstance(result, dict):
+            abstentions += 1
+            continue
+        allowed_targets = {int(row["target_assertion_id"]) for row in packet["relations"]}
+        target_id = int(result.get("target_assertion_id") or 0)
+        if target_id not in allowed_targets:
+            result["target_assertion_id"] = None
+            if result.get("relation") not in {"supports", "insufficient"}:
+                result["relation"] = "insufficient"
+        allowed_spans = {int(row["span_id"]) for row in packet["evidence"]}
+        for group in result.get("evidence_groups") or ():
+            if isinstance(group, dict):
+                group["span_ids"] = [int(value) for value in group.get("span_ids") or ()
+                                     if str(value).isdigit() and int(value) in allowed_spans]
+        result["valid_from"] = _temporal_value(result.get("valid_from"))
+        result["valid_to"] = _temporal_value(result.get("valid_to"))
+        context_hash = hashlib.sha256(prompt.encode()).hexdigest()
+        fact_store.save_adjudication(
+            assertion_id, result, model=f"{provider}:{model}".strip(":"), recipe=recipe,
+            context_hash=context_hash, retrieval_profile=retrieval_profile,
+        )
+        adjudicated += 1
+        abstentions += int(result.get("relation") == "insufficient")
+    fact_store.complete_llm_budget(
+        run_id, stage="adjudicate_facts", purpose=purpose,
+        status="exhausted" if exhausted else "completed",
+    )
+    return {"llm_calls": calls, "adjudicated_facts": adjudicated,
+            "llm_abstentions": abstentions, "llm_budget_exhausted": exhausted}
+
+
+def build_fact_clusters(run_id: int, *, minimum_similarity: float = .78,
+                        label_mode: str = "off", max_llm_clusters: int = 5,
+                        max_input_tokens: int = 8_000,
+                        max_output_tokens: int = 2_000,
+                        instructions: str = "") -> dict[str, int]:
+    """Build embedding-driven connected neighborhoods and optionally label them."""
+    if label_mode not in {"off", "llm"}:
+        raise ValueError("Fact cluster label mode must be off or llm")
+    nodes, edges = fact_store.cluster_graph(
+        run_id, minimum_similarity=max(-1.0, min(minimum_similarity, 1.0)),
+    )
+    by_id = {int(row["id"]): row for row in nodes}
+    parent = {node_id: node_id for node_id in by_id}
+
+    def find(value: int) -> int:
+        while parent[value] != value:
+            parent[value] = parent[parent[value]]
+            value = parent[value]
+        return value
+
+    scores: dict[tuple[int, int], float] = {}
+    for edge in edges:
+        source, target = int(edge["source"]), int(edge["target"])
+        if source not in parent or target not in parent:
+            continue
+        left, right = find(source), find(target)
+        if left != right:
+            parent[right] = left
+        scores[(source, target)] = float(edge["score"])
+    groups: dict[int, list[dict]] = {}
+    for node_id, node in by_id.items():
+        groups.setdefault(find(node_id), []).append(node)
+
+    provider, model = llm.generation_model()
+    purpose = "fact cluster labels"
+    fact_store.configure_llm_budget(
+        run_id, stage="cluster_facts", purpose=purpose, provider=provider, model=model,
+        recipe="fact-cluster-label-v1", max_calls=max_llm_clusters if label_mode == "llm" else 0,
+        max_input_tokens=max_input_tokens if label_mode == "llm" else 0,
+        max_output_tokens=max_output_tokens if label_mode == "llm" else 0,
+        visible_config={"mode": label_mode, "maximum_clusters": max_llm_clusters,
+                        "minimum_similarity": minimum_similarity,
+                        "instructions": instructions[:1000]},
+    )
+    clusters: list[dict] = []
+    calls = exhausted = 0
+    for members in sorted(groups.values(), key=lambda rows: (-len(rows), min(int(r["id"]) for r in rows))):
+        member_ids = sorted(int(row["id"]) for row in members)
+        fact_ids = sorted(int(row["fact_id"]) for row in members if row.get("fact_id"))
+        stable_key = f"fact:{fact_ids[0]}" if fact_ids else (
+            "assertions:" + hashlib.sha256(
+                "|".join(sorted(str(row["claim"]) for row in members)).encode()
+            ).hexdigest()[:20]
+        )
+        label = str(members[0]["claim"])[:120]
+        summary = f"{len(members)} semantically related assertion{'s' if len(members) != 1 else ''}."
+        label_kind = "none"
+        if label_mode == "llm" and calls < max_llm_clusters:
+            prompt = json.dumps({"claims": [row["claim"] for row in members[:20]]})
+            output_budget = max(100, min(400, max_output_tokens))
+            if fact_store.reserve_llm_call(
+                run_id, stage="cluster_facts", purpose=purpose,
+                estimated_input_tokens=max(1, len(prompt) // 3), output_tokens=output_budget,
+            ):
+                calls += 1
+                result = llm.generate_json(
+                    prompt,
+                    system=("Label this embedding-derived business fact cluster in at most eight words "
+                            "and summarize its shared subject without deciding which claim is true. "
+                            + instructions[:1000]),
+                    timeout=60,
+                    schema={"type": "object", "properties": {
+                        "label": {"type": "string"}, "summary": {"type": "string"},
+                    }, "required": ["label", "summary"]},
+                    max_tokens=output_budget,
+                )
+                if isinstance(result, dict):
+                    label = str(result.get("label") or label)[:120]
+                    summary = str(result.get("summary") or summary)[:1000]
+                    label_kind = "llm"
+            else:
+                exhausted = 1
+        clusters.append({
+            "stable_key": stable_key, "label": label, "summary": summary,
+            "label_kind": label_kind,
+            "label_model": f"{provider}:{model}".strip(":") if label_kind == "llm" else "",
+            "members": [{
+                "assertion_id": row["id"],
+                "score": max([score for (source, target), score in scores.items()
+                              if int(row["id"]) in {source, target}] or [1.0]),
+                "explanation": "Embedding neighborhood",
+            } for row in members],
+        })
+    generation = hashlib.sha256(
+        json.dumps([[row["stable_key"], [m["assertion_id"] for m in row["members"]]]
+                    for row in clusters], sort_keys=True).encode()
+    ).hexdigest()[:32]
+    fact_store.replace_clusters(
+        run_id, clusters, embedding_profile=llm.embedding_profile(),
+        retrieval_profile=f"postgres:{llm.embedding_profile()}:{FACT_REPRESENTATION_PROFILE}",
+        generation=generation,
+    )
+    fact_store.complete_llm_budget(
+        run_id, stage="cluster_facts", purpose=purpose,
+        status="exhausted" if exhausted else ("completed" if label_mode == "llm" else "skipped"),
+    )
+    return {"fact_clusters": len(clusters), "cluster_llm_calls": calls,
+            "cluster_llm_budget_exhausted": exhausted}
 
 
 def fact_check_document(document_id: int) -> int:

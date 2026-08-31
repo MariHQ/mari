@@ -51,7 +51,10 @@ class WorkflowStepTests(unittest.TestCase):
             status, _, updates = flowengine._step_scan_facts({}, {"doc_ids": [7, 8], "run_id": 91})
         self.assertEqual(status, "passed")
         self.assertEqual(updates["facts"], 1)
-        scan.assert_called_once_with([7, 8], claims_per_document=2, instructions="")
+        scan.assert_called_once_with(
+            [7, 8], claims_per_document=2, instructions="", run_id=91,
+            max_llm_calls=50, max_input_tokens=100000, max_output_tokens=20000,
+        )
         stage.assert_called_once_with(91, candidates)
 
     def test_fact_extraction_is_registered_hourly_for_each_project(self) -> None:
@@ -92,6 +95,8 @@ class WorkflowStepTests(unittest.TestCase):
         self.assertEqual(saved[1]["config"]["query"], "platform")
         self.assertEqual(saved[2]["config"], {
             "claims_per_document": 10, "instructions": "Only durable limits.",
+            "max_llm_calls": 200, "max_input_tokens": 100000,
+            "max_output_tokens": 20000,
         })
         self.assertEqual(saved[3]["config"], {
             "mode": "ai", "instructions": "Only durable limits.",
@@ -114,7 +119,8 @@ class WorkflowStepTests(unittest.TestCase):
              patch.object(flowengine.workflow_store, "update_metadata") as update, \
              patch.object(flowengine, "_adopt_rotation"), \
              patch.object(flowengine, "_adopt_fact_review"), \
-             patch.object(flowengine, "_adopt_fact_impact"):
+             patch.object(flowengine, "_adopt_fact_impact"), \
+             patch.object(flowengine, "_adopt_fact_intelligence"):
             self.assertEqual(flowengine.ensure_fact_scan_flow(), 17)
         update.assert_called_once_with(
             17, "Fact extraction", flowengine.FACT_SCAN_DESCRIPTION,

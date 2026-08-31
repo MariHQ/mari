@@ -188,6 +188,34 @@ type Fact {
   highImpact: Boolean!
 }
 
+type FactAssertionRelation {
+  targetAssertionId: Int!
+  targetFactId: Int
+  targetClaim: String!
+  relation: String!
+  approximateScore: Float
+  exactScore: Float
+  decisionKind: String!
+  decisionModel: String!
+  confidence: Float!
+  rationale: String!
+  observedAt: String!
+  targetValidFrom: String!
+  targetValidTo: String!
+}
+
+type FactClusterMembership {
+  id: Int!
+  stableKey: String!
+  label: String!
+  summary: String!
+  generation: String!
+  lifecycle: String!
+  labelKind: String!
+  membershipScore: Float!
+  explanation: String!
+}
+
 type FactContradiction {
   factId: Int!
   claim: String!
@@ -197,6 +225,36 @@ type FactContradiction {
   otherStatus: String!
   reason: String!
   detail: String!
+}
+
+type FactEvidenceGroup {
+  id: Int!
+  verdict: String!
+  sufficient: Boolean!
+  confidence: Float!
+  rationale: String!
+  decisionKind: String!
+  decisionModel: String!
+  reviewer: String!
+  reviewedAt: String!
+  spans: [FactEvidenceSpan!]!
+}
+
+type FactEvidenceSpan {
+  id: Int!
+  documentId: Int!
+  documentTitle: String!
+  source: String!
+  quote: String!
+  contentHash: String!
+  sourceAuthority: String!
+  publishedAt: String!
+  effectiveFrom: String!
+  effectiveTo: String!
+  revisedAt: String!
+  ingestedAt: String!
+  role: String!
+  similarity: Float
 }
 
 type FactExtractionCandidate {
@@ -217,6 +275,76 @@ type FactExtractionCandidate {
   impactScore: Int!
   highImpact: Boolean!
   semanticLinks: [FactSemanticLink!]!
+}
+
+type FactImpactItem {
+  impactKind: String!
+  targetType: String!
+  targetId: String!
+  targetLabel: String!
+  severity: Int!
+  dependencyType: String!
+  depth: Int!
+  similarity: Float
+}
+
+type FactImpactPreview {
+  factId: Int!
+  assertionId: Int!
+  claim: String!
+  score: Int!
+  items: [FactImpactItem!]!
+}
+
+type FactIntelligence {
+  assertionId: Int!
+  factId: Int
+  candidateId: Int
+  claim: String!
+  structuredClaim: JSON!
+  adjudication: JSON!
+  status: String!
+  confidence: Float!
+  confidenceReason: String!
+  validFrom: String!
+  validTo: String!
+  recordedFrom: String!
+  recordedTo: String!
+  criticality: String!
+  owner: String!
+  components: [FactRepresentationComponent!]!
+  relations: [FactAssertionRelation!]!
+  evidenceGroups: [FactEvidenceGroup!]!
+  clusters: [FactClusterMembership!]!
+}
+
+type FactLlmBudget {
+  stage: String!
+  purpose: String!
+  provider: String!
+  model: String!
+  recipe: String!
+  maxCalls: Int!
+  maxInputTokens: Int!
+  maxOutputTokens: Int!
+  callsUsed: Int!
+  inputTokens: Int!
+  outputTokens: Int!
+  costUsd: Float!
+  status: String!
+  visibleConfig: JSON!
+}
+
+type FactRepresentationComponent {
+  ordinal: Int!
+  role: String!
+  text: String!
+  contentHash: String!
+  embeddingProfile: String!
+  representationProfile: String!
+  provider: String!
+  model: String!
+  dimensions: Int!
 }
 
 type FactSemanticLink {
@@ -566,6 +694,10 @@ type Query {
   workflowRun(id: Int!): WorkflowRun
   factExtractionCandidates(runId: Int!): [FactExtractionCandidate!]!
   factSemanticLinks(factId: Int!): [FactSemanticLink!]!
+  factCandidateIntelligence(candidateId: Int!): FactIntelligence
+  factIntelligence(factId: Int!): FactIntelligence
+  factLlmBudgets(runId: Int!): [FactLlmBudget!]!
+  factImpactPreview(factId: Int!): FactImpactPreview
   knowledgeChatDestinations: [KnowledgeChatDestination!]!
   notifications: [Notification!]!
   workspace: Workspace!

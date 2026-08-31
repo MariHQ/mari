@@ -191,7 +191,11 @@ class MutKnowledge:
     @strawberry.mutation
     def invalidate_fact(self, id: int, reason: str = "Business context changed") -> bool:
         """End a fact's validity interval while retaining its impact cluster."""
-        row = knowledge_store.invalidate_fact(id, reason)
+        from mari_server.persistence.postgres import fact_intelligence as fact_store
+        row = fact_store.invalidate_fact(
+            id, reason=reason, actor=actor_name(),
+            effective_at=dt.datetime.now(dt.timezone.utc),
+        )
         if not row:
             return False
         audit("invalidated fact", row["claim"])

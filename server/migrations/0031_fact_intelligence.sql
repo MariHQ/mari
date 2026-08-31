@@ -9,9 +9,8 @@ ALTER TABLE facts
   ADD COLUMN current_assertion_id bigint;
 
 UPDATE facts SET canonical_key = 'fact:' || id WHERE canonical_key IS NULL;
-ALTER TABLE facts ALTER COLUMN canonical_key SET NOT NULL;
 CREATE UNIQUE INDEX facts_project_canonical_key_idx
-  ON facts (project_id, canonical_key);
+  ON facts (project_id, canonical_key) WHERE canonical_key IS NOT NULL;
 
 ALTER TABLE fact_extraction_candidates
   ADD COLUMN structured_claim jsonb NOT NULL DEFAULT '{}'::jsonb,
@@ -26,6 +25,7 @@ CREATE TABLE fact_assertions (
   source_document_id  integer REFERENCES documents(id) ON DELETE SET NULL,
   claim               text NOT NULL,
   structured_claim    jsonb NOT NULL DEFAULT '{}'::jsonb,
+  adjudication        jsonb NOT NULL DEFAULT '{}'::jsonb,
   extraction_schema   text NOT NULL DEFAULT 'fact-assertion-v1',
   valid_from          timestamptz,
   valid_to            timestamptz,
@@ -165,10 +165,15 @@ CREATE TABLE fact_evidence_groups (
   decision_model     text NOT NULL DEFAULT '',
   decision_recipe    text NOT NULL DEFAULT '',
   context_hash       text NOT NULL DEFAULT '',
+  retrieval_profile  text NOT NULL DEFAULT '',
+  active             boolean NOT NULL DEFAULT true,
   reviewer           text NOT NULL DEFAULT '',
   reviewed_at        timestamptz,
   created_at         timestamptz NOT NULL DEFAULT now()
 );
+
+CREATE INDEX fact_evidence_groups_assertion_idx
+  ON fact_evidence_groups (project_id, assertion_id, active, decision_kind, id);
 
 CREATE TABLE fact_evidence_group_members (
   group_id           bigint NOT NULL REFERENCES fact_evidence_groups(id) ON DELETE CASCADE,
@@ -249,6 +254,7 @@ CREATE TABLE fact_dependencies (
                                'used_by_answer', 'used_by_workflow',
                                'required_by_playbook')),
   provenance         jsonb NOT NULL DEFAULT '{}'::jsonb,
+  parent_dependency_id bigint REFERENCES fact_dependencies(id) ON DELETE CASCADE,
   active_from        timestamptz NOT NULL DEFAULT now(),
   active_to          timestamptz,
   created_by         text NOT NULL DEFAULT '',

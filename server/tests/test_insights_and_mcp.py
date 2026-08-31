@@ -59,7 +59,7 @@ class FactInsightTests(unittest.TestCase):
              patch.object(knowledge_service.fact_store, "evidence_neighbors",
                           return_value=[doc_neighbor]) as docs, \
              patch.object(knowledge_service.fact_store, "replace_embedding_relations") as relations, \
-             patch.object(knowledge_service.fact_store, "upsert_evidence_span") as span, \
+             patch.object(knowledge_service.fact_store, "replace_embedding_evidence") as evidence, \
              patch.object(knowledge_service.knowledge_store, "document", return_value=source), \
              patch.object(knowledge_service.knowledge_store, "replace_candidate_semantic_links") as replace, \
              patch.object(knowledge_service.llm, "embedding_profile", return_value="openai:model:profile"):
@@ -67,7 +67,7 @@ class FactInsightTests(unittest.TestCase):
         facts.assert_called_once()
         docs.assert_called_once()
         relations.assert_called_once()
-        span.assert_called_once()
+        evidence.assert_called_once()
         links = replace.call_args.args[2]
         self.assertEqual([link["relation"] for link in links], ["source", "contradicts", "related"])
         self.assertTrue(replace.call_args.kwargs["high_impact"])

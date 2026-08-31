@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import time
+from datetime import datetime, timezone
 
 from mari_server.persistence.postgres import connection as db
 from mari_server.identity import context as access
@@ -82,10 +84,12 @@ def add_fact(claim: str, source: str, owner: str, document_id: int | None) -> bo
     with db.connect() as conn, conn.transaction():
         row = conn.execute(
             """INSERT INTO facts
-               (project_id, claim, source, owner_name, owner_tint, status, verified, document_id, valid_from)
-               VALUES (%s, %s, %s, %s, 1, 'Needs review', '—', %s, now())
+               (project_id, canonical_key, claim, source, owner_name, owner_tint,
+                status, verified, document_id, valid_from)
+               VALUES (%s, %s, %s, %s, %s, 1, 'Needs review', '—', %s, now())
                ON CONFLICT (project_id, claim) DO NOTHING RETURNING id""",
-            (project_id, claim, source, owner, document_id),
+            (project_id, "claim:" + hashlib.sha256(claim.casefold().encode()).hexdigest(),
+             claim, source, owner, document_id),
         ).fetchone()
     return bool(row)
 
@@ -318,20 +322,105 @@ def publish_fact_candidates(run_id: int, owner: str, *, verified: bool = False) 
             (project_id, run_id),
         ).fetchall()
         for candidate in rows:
-            fact = conn.execute(
-                """INSERT INTO facts
-                     (project_id, claim, source, owner_name, owner_tint, status,
-                      verified, verified_at, document_id, valid_from)
-                   VALUES (%s, %s, %s, %s, 1, %s, %s,
-                           CASE WHEN %s THEN current_date ELSE NULL END, %s,
-                           COALESCE((SELECT updated_src FROM documents
-                                      WHERE project_id = %s AND id = %s), now()))
-                   ON CONFLICT (project_id, claim) DO UPDATE SET claim = EXCLUDED.claim
-                   RETURNING id""",
-                (project_id, candidate["claim"], candidate["source_label"], owner,
-                 status, time.strftime("%b %d, %Y") if verified else "—", verified,
-                 candidate["document_id"], project_id, candidate["document_id"]),
+            assertion = conn.execute(
+                """SELECT * FROM fact_assertions
+                    WHERE project_id = %s AND candidate_id = %s FOR UPDATE""",
+                (project_id, candidate["id"]),
             ).fetchone()
+            adjudication = assertion.get("adjudication") if assertion else {}
+            if isinstance(adjudication, str):
+                adjudication = json.loads(adjudication or "{}")
+            recommendation = str((adjudication or {}).get("recommendation") or "new_fact")
+            target_assertion_id = int((adjudication or {}).get("target_assertion_id") or 0)
+            target = None
+            if target_assertion_id and recommendation in {"supersede", "duplicate"}:
+                target = conn.execute(
+                    """SELECT a.id AS assertion_id, a.fact_id
+                         FROM fact_assertions a
+                         JOIN facts f ON f.project_id = a.project_id AND f.id = a.fact_id
+                        WHERE a.project_id = %s AND a.id = %s FOR UPDATE""",
+                    (project_id, target_assertion_id),
+                ).fetchone()
+            if target and recommendation == "duplicate":
+                fact = {"id": int(target["fact_id"])}
+                conn.execute(
+                    """UPDATE fact_assertions SET fact_id = %s, status = 'superseded',
+                              recorded_to = now()
+                        WHERE project_id = %s AND id = %s""",
+                    (fact["id"], project_id, assertion["id"]),
+                )
+            elif target and recommendation == "supersede":
+                fact = {"id": int(target["fact_id"])}
+                boundary = assertion.get("valid_from") or datetime.now(timezone.utc)
+                conn.execute(
+                    """UPDATE fact_assertions SET status = 'superseded',
+                              valid_to = COALESCE(valid_to, %s), recorded_to = COALESCE(recorded_to, now())
+                        WHERE project_id = %s AND id = %s""",
+                    (boundary, project_id, target["assertion_id"]),
+                )
+                conn.execute(
+                    """UPDATE fact_assertions SET fact_id = %s, status = 'active',
+                              valid_from = COALESCE(valid_from, %s), recorded_to = NULL
+                        WHERE project_id = %s AND id = %s""",
+                    (fact["id"], boundary, project_id, assertion["id"]),
+                )
+                conn.execute(
+                    """UPDATE facts SET claim = %s, source = %s, status = %s,
+                              verified = %s, verified_at = CASE WHEN %s THEN current_date ELSE verified_at END,
+                              document_id = %s, valid_from = %s, invalidated_at = NULL,
+                              invalidation_reason = '', current_assertion_id = %s
+                        WHERE project_id = %s AND id = %s""",
+                    (candidate["claim"], candidate["source_label"], status,
+                     time.strftime("%b %d, %Y") if verified else "—", verified,
+                     candidate["document_id"], boundary, assertion["id"], project_id, fact["id"]),
+                )
+            else:
+                canonical_key = "claim:" + hashlib.sha256(
+                    candidate["claim"].casefold().encode()
+                ).hexdigest()
+                fact = conn.execute(
+                    """INSERT INTO facts
+                         (project_id, canonical_key, claim, source, owner_name, owner_tint, status,
+                          verified, verified_at, document_id, valid_from)
+                       VALUES (%s, %s, %s, %s, %s, 1, %s, %s,
+                               CASE WHEN %s THEN current_date ELSE NULL END, %s,
+                               COALESCE((SELECT updated_src FROM documents
+                                          WHERE project_id = %s AND id = %s), now()))
+                       ON CONFLICT DO NOTHING
+                       RETURNING id, current_assertion_id""",
+                    (project_id, canonical_key, candidate["claim"], candidate["source_label"], owner,
+                     status, time.strftime("%b %d, %Y") if verified else "—", verified,
+                     candidate["document_id"], project_id, candidate["document_id"]),
+                ).fetchone()
+                created = bool(fact)
+                if not fact:
+                    fact = conn.execute(
+                        """SELECT id, current_assertion_id FROM facts
+                            WHERE project_id = %s AND (claim = %s OR canonical_key = %s)
+                            ORDER BY CASE WHEN claim = %s THEN 0 ELSE 1 END LIMIT 1 FOR UPDATE""",
+                        (project_id, candidate["claim"], canonical_key, candidate["claim"]),
+                    ).fetchone()
+                if fact and assertion:
+                    if created or not fact.get("current_assertion_id"):
+                        conn.execute(
+                            """UPDATE fact_assertions SET fact_id = %s, status = 'active',
+                                      valid_from = COALESCE(valid_from,
+                                        (SELECT valid_from FROM facts WHERE project_id = %s AND id = %s))
+                                WHERE project_id = %s AND id = %s""",
+                            (fact["id"], project_id, fact["id"], project_id, assertion["id"]),
+                        )
+                        conn.execute(
+                            """UPDATE facts SET current_assertion_id = %s
+                                WHERE project_id = %s AND id = %s""",
+                            (assertion["id"], project_id, fact["id"]),
+                        )
+                    else:
+                        conn.execute(
+                            """UPDATE fact_assertions SET fact_id = %s, status = 'superseded',
+                                      recorded_to = COALESCE(recorded_to, now())
+                                WHERE project_id = %s AND id = %s""",
+                            (fact["id"], project_id, assertion["id"]),
+                        )
             if fact:
                 conn.execute(
                     """INSERT INTO fact_embeddings

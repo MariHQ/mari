@@ -3,7 +3,7 @@ from __future__ import annotations
 from contextlib import nullcontext
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from mari_server.knowledge import service
 from mari_server.persistence.postgres import fact_intelligence as store
@@ -125,6 +125,135 @@ class FactRepresentationTests(unittest.TestCase):
         self.assertIn("input_tokens + %s <= max_input_tokens", sql)
         self.assertIn("output_tokens + %s <= max_output_tokens", sql)
         self.assertEqual(args, (800, 300, 7, 22, "adjudicate_facts", "relations", 800, 300))
+
+    def test_adjudication_is_bounded_visible_and_can_abstain(self):
+        packet = {
+            "assertion": {"id": 41, "claim": "Retention is 10 days.",
+                          "structured_claim": {}, "valid_from": None, "valid_to": None},
+            "relations": [{"target_assertion_id": 12, "claim": "Retention is 30 days.",
+                           "structured_claim": {}, "valid_from": None, "valid_to": None,
+                           "recorded_from": None, "exact_score": .94,
+                           "criticality": "high"}],
+            "evidence": [{"span_id": 90, "document_id": 7, "title": "Policy",
+                          "source": "confluence", "quote": "Retention is 10 days.",
+                          "source_authority": "approved", "published_at": None,
+                          "effective_from": None, "effective_to": None,
+                          "revised_at": None, "ingested_at": None, "similarity": .9}],
+        }
+        result = {
+            "recommendation": "needs_review", "relation": "insufficient",
+            "target_assertion_id": 12, "valid_from": None, "valid_to": None,
+            "confidence": .55, "reason": "Authority conflict", "needs_human_review": True,
+            "evidence_groups": [{"span_ids": [90, 999], "verdict": "insufficient",
+                                 "sufficient": False, "confidence": .55,
+                                 "explanation": "One source is not enough."}],
+        }
+        configure = Mock()
+        complete = Mock()
+        save = Mock()
+        with patch.object(service.fact_store, "configure_llm_budget", configure), \
+             patch.object(service.fact_store, "run_assertion_ids", return_value=[41]), \
+             patch.object(service.fact_store, "adjudication_packet", return_value=packet), \
+             patch.object(service.fact_store, "reserve_llm_call", return_value=True) as reserve, \
+             patch.object(service.fact_store, "save_adjudication", save), \
+             patch.object(service.fact_store, "complete_llm_budget", complete), \
+             patch.object(service.llm, "generation_model", return_value=("gateway", "model")), \
+             patch.object(service.llm, "embedding_profile", return_value="embed-profile"), \
+             patch.object(service.llm, "generate_json", return_value=result) as generate:
+            stats = service.adjudicate_fact_candidates(
+                22, enabled=True, max_calls=1, max_input_tokens=5000,
+                max_output_tokens=800, output_tokens_per_call=800,
+            )
+
+        self.assertEqual(stats, {"llm_calls": 1, "adjudicated_facts": 1,
+                                 "llm_abstentions": 1, "llm_budget_exhausted": 0})
+        self.assertEqual(configure.call_args.kwargs["max_calls"], 1)
+        reserve.assert_called_once()
+        generate.assert_called_once()
+        saved = save.call_args.args[1]
+        self.assertEqual(saved["evidence_groups"][0]["span_ids"], [90])
+        complete.assert_called_once_with(
+            22, stage="adjudicate_facts",
+            purpose="temporal evidence and relation proposals", status="completed",
+        )
+
+    def test_embedding_clusters_need_no_llm_and_keep_related_members_together(self):
+        nodes = [
+            {"id": 1, "fact_id": 10, "candidate_id": None, "claim": "Prod uses Kubernetes."},
+            {"id": 2, "fact_id": None, "candidate_id": 20, "claim": "Prod clusters use k8s."},
+        ]
+        edges = [{"source": 2, "target": 1, "score": .91}]
+        replace = Mock(return_value=[7])
+        with patch.object(service.fact_store, "cluster_graph", return_value=(nodes, edges)), \
+             patch.object(service.fact_store, "configure_llm_budget") as configure, \
+             patch.object(service.fact_store, "replace_clusters", replace), \
+             patch.object(service.fact_store, "complete_llm_budget") as complete, \
+             patch.object(service.llm, "generation_model", return_value=("gateway", "model")), \
+             patch.object(service.llm, "embedding_profile", return_value="embed-profile"), \
+             patch.object(service.llm, "generate_json") as generate:
+            stats = service.build_fact_clusters(22, label_mode="off")
+
+        self.assertEqual(stats["fact_clusters"], 1)
+        generate.assert_not_called()
+        self.assertEqual(configure.call_args.kwargs["max_calls"], 0)
+        cluster = replace.call_args.args[1][0]
+        self.assertEqual(cluster["stable_key"], "fact:10")
+        self.assertEqual({member["assertion_id"] for member in cluster["members"]}, {1, 2})
+        complete.assert_called_once_with(
+            22, stage="cluster_facts", purpose="fact cluster labels", status="skipped",
+        )
+
+    def test_impact_preview_separates_dependencies_from_embedding_neighbors(self):
+        conn = RecordingConnection([
+            RecordingResult(row={"id": 5, "claim": "Platform owns production Kubernetes.",
+                                 "current_assertion_id": 41, "criticality": "high"}),
+            RecordingResult(rows=[
+                {"id": 1, "downstream_type": "decision", "downstream_id": "adr-7",
+                 "downstream_label": "Move ingress", "dependency_type": "used_by_decision",
+                 "depth": 1},
+                {"id": 2, "downstream_type": "workflow", "downstream_id": "deploy",
+                 "downstream_label": "Production deploy", "dependency_type": "used_by_workflow",
+                 "depth": 2},
+            ]),
+            RecordingResult(rows=[
+                {"assertion_id": 52, "fact_id": 8, "claim": "Platform owns the cluster fleet.",
+                 "similarity": .91},
+            ]),
+        ])
+        context = SimpleNamespace(project_id=7)
+        with patch.object(store.access, "require_current_access", return_value=context), \
+             patch.object(store.db, "connect", return_value=conn):
+            preview = store.impact_preview(5)
+
+        self.assertEqual(preview["score"], 24)  # 10 + 8 + possible neighbor + high criticality
+        self.assertEqual([row["impact_kind"] for row in preview["items"]],
+                         ["direct", "transitive", "possible"])
+        self.assertEqual(preview["items"][-1]["dependency_type"], "embedding_neighbor")
+        self.assertIn("WITH RECURSIVE impacted", conn.calls[1][0])
+
+    def test_invalidation_closes_time_and_materializes_impact_snapshot(self):
+        conn = RecordingConnection([
+            RecordingResult(row={"id": 5, "claim": "Platform owns production Kubernetes.",
+                                 "current_assertion_id": 41}),
+            RecordingResult(rows=[]),
+            RecordingResult(rows=[]),
+            RecordingResult(),
+            RecordingResult(),
+            RecordingResult(row={"id": 77}),
+        ])
+        context = SimpleNamespace(project_id=7)
+        with patch.object(store.access, "require_current_access", return_value=context), \
+             patch.object(store.db, "connect", return_value=conn):
+            result = store.invalidate_fact(
+                5, reason="Ownership changed", actor="Raphael",
+                effective_at="2026-04-15T00:00:00Z",
+            )
+
+        self.assertEqual(result["event_id"], 77)
+        assertion_sql, assertion_args = conn.calls[3]
+        self.assertIn("status = 'invalidated'", assertion_sql)
+        self.assertEqual(assertion_args, ("2026-04-15T00:00:00Z", 7, 41))
+        self.assertIn("fact_invalidation_events", conn.calls[5][0])
 
 
 if __name__ == "__main__":

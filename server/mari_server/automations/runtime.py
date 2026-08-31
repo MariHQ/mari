@@ -214,6 +214,10 @@ def _step_scan_facts(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
         doc_ids,
         claims_per_document=max(1, min(int(cfg.get("claims_per_document") or 2), 10)),
         instructions=str(cfg.get("instructions") or ""),
+        run_id=int(ctx["run_id"]),
+        max_llm_calls=max(0, min(int(cfg.get("max_llm_calls") or 50), 200)),
+        max_input_tokens=max(0, min(int(cfg.get("max_input_tokens") or 100000), 2_000_000)),
+        max_output_tokens=max(0, min(int(cfg.get("max_output_tokens") or 20000), 400_000)),
     )
     added = knowledge_store.stage_fact_candidates(int(ctx["run_id"]), candidates)
     return "passed", _scan_detail(added, scanned, note, "claim"), {"facts": added}
@@ -253,6 +257,52 @@ def _step_map_fact_impact(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
     detail = (f"{stats.get('embedded_components', 0)} component vectors · "
               f"{stats['impact_links']} evidence links · "
               f"{stats['high_impact_facts']} high-impact candidates")
+    return "passed", detail, stats
+
+
+def _step_adjudicate_facts(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
+    from mari_server.knowledge.service import adjudicate_fact_candidates
+    if ctx.get("dry_run"):
+        mode = str(cfg.get("mode") or "off")
+        return "passed", f"would use {mode} temporal evidence adjudication (dry run)", {}
+    stats = adjudicate_fact_candidates(
+        int(ctx["run_id"]), enabled=str(cfg.get("mode") or "off") == "llm",
+        max_calls=max(0, min(int(cfg.get("max_calls") or 10), 100)),
+        max_input_tokens=max(0, min(int(cfg.get("max_input_tokens") or 24000), 1_000_000)),
+        max_output_tokens=max(0, min(int(cfg.get("max_output_tokens") or 8000), 200_000)),
+        output_tokens_per_call=max(100, min(int(cfg.get("output_tokens_per_call") or 800), 4000)),
+        related_assertions=max(1, min(int(cfg.get("related_assertions") or 8), 20)),
+        evidence_spans=max(1, min(int(cfg.get("evidence_spans") or 12), 30)),
+        instructions=str(cfg.get("instructions") or ""),
+    )
+    if str(cfg.get("mode") or "off") != "llm":
+        return "passed", "LLM adjudication disabled · human review retains embedding context", stats
+    detail = (f"{stats['adjudicated_facts']} candidates adjudicated · "
+              f"{stats['llm_calls']} bounded LLM calls · "
+              f"{stats['llm_abstentions']} abstentions")
+    if stats["llm_budget_exhausted"]:
+        detail += " · budget exhausted; remaining candidates require human review"
+    return "passed", detail, stats
+
+
+def _step_cluster_facts(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
+    from mari_server.knowledge.service import build_fact_clusters
+    if ctx.get("dry_run"):
+        mode = str(cfg.get("label_mode") or "off")
+        return "passed", f"would build embedding clusters with {mode} labels (dry run)", {}
+    stats = build_fact_clusters(
+        int(ctx["run_id"]),
+        minimum_similarity=float(cfg.get("minimum_similarity") or .78),
+        label_mode=str(cfg.get("label_mode") or "off"),
+        max_llm_clusters=max(0, min(int(cfg.get("max_llm_clusters") or 5), 50)),
+        max_input_tokens=max(0, min(int(cfg.get("max_input_tokens") or 8000), 500_000)),
+        max_output_tokens=max(0, min(int(cfg.get("max_output_tokens") or 2000), 100_000)),
+        instructions=str(cfg.get("instructions") or ""),
+    )
+    detail = (f"{stats['fact_clusters']} embedding clusters · "
+              f"{stats['cluster_llm_calls']} visible label calls")
+    if stats["cluster_llm_budget_exhausted"]:
+        detail += " · label budget exhausted"
     return "passed", detail, stats
 
 
@@ -308,13 +358,15 @@ STEP_IMPLS: dict[str, t.Callable] = {
     "refresh_digest": _step_refresh_digest,
     "scan_facts": _step_scan_facts,
     "map_fact_impact": _step_map_fact_impact,
+    "adjudicate_facts": _step_adjudicate_facts,
+    "cluster_facts": _step_cluster_facts,
     "review_facts": _step_review_facts,
     "publish_facts": _step_publish_facts,
     "scan_decisions": _step_scan_decisions,
 }
 
 # steps that call the local LLM (shown as slow in the UI)
-LLM_STEPS = {"refine", "fact_check", "derive_links", "summarize", "refresh_digest", "scan_facts", "review_facts", "scan_decisions"}
+LLM_STEPS = {"refine", "fact_check", "derive_links", "summarize", "refresh_digest", "scan_facts", "adjudicate_facts", "cluster_facts", "review_facts", "scan_decisions"}
 
 # Steps that are safe to run a second time after a transient failure (FLOW-3).
 # A failed step used to end the run outright, with no retry and no way to tell a
@@ -328,7 +380,7 @@ LLM_STEPS = {"refine", "fact_check", "derive_links", "summarize", "refresh_diges
 # Deliberately absent: `approval` (pauses rather than fails) and `condition`
 # (cannot fail transiently).
 RETRYABLE_STEPS = {"fetch_docs", "tag", "create_task", "notify", "summarize",
-                   "derive_links", "sync_source", "scan_facts", "map_fact_impact", "review_facts", "publish_facts", "scan_decisions",
+                   "derive_links", "sync_source", "scan_facts", "map_fact_impact", "adjudicate_facts", "cluster_facts", "review_facts", "publish_facts", "scan_decisions",
                    "fact_check", "refine", "refresh_digest"}
 STEP_RETRIES = 1        # one extra attempt, not a loop
 STEP_RETRY_BACKOFF = 2.0  # seconds
@@ -749,6 +801,35 @@ def _adopt_fact_impact(workflow_id: int) -> None:
     workflow_store.update_nodes(workflow_id, nodes)
 
 
+def _adopt_fact_intelligence(workflow_id: int) -> None:
+    """Add bounded adjudication and clustering to the shipped six-stage flow."""
+    nodes = workflow_store.workflow_nodes(workflow_id)
+    if [node.get("kind") for node in nodes] != [
+        "trigger", "fetch_docs", "scan_facts", "map_fact_impact",
+        "review_facts", "publish_facts",
+    ]:
+        return
+    nodes[3]["label"] = "Embed facts and retrieve evidence"
+    nodes[3]["config"] = {
+        "retrieval_backend": "postgres", "fact_neighbors": 8,
+        "evidence_neighbors": 8, "minimum_fact_similarity": .72,
+        "minimum_evidence_similarity": .68, "max_components": 12,
+    }
+    nodes.insert(4, {
+        "kind": "adjudicate_facts", "label": "Optional AI evidence review",
+        "config": {"mode": "off", "max_calls": 10, "max_input_tokens": 24000,
+                   "max_output_tokens": 8000, "output_tokens_per_call": 800,
+                   "related_assertions": 8, "evidence_spans": 12},
+    })
+    nodes.insert(5, {
+        "kind": "cluster_facts", "label": "Build fact clusters",
+        "config": {"label_mode": "off", "minimum_similarity": .78,
+                   "max_llm_clusters": 5, "max_input_tokens": 8000,
+                   "max_output_tokens": 2000},
+    })
+    workflow_store.update_nodes(workflow_id, nodes)
+
+
 def ensure_fact_scan_flow() -> int:
     """Get or create the scheduled fact extraction flow for this project."""
     existing = workflow_store.find_by_step("scan_facts")
@@ -762,13 +843,31 @@ def ensure_fact_scan_flow() -> int:
         _adopt_rotation(existing, "scan_facts", "facts")
         _adopt_fact_review(existing["id"])
         _adopt_fact_impact(existing["id"])
+        _adopt_fact_intelligence(existing["id"])
         return existing["id"]
     nodes = [
             {"kind": "trigger", "label": "Every hour", "config": {"label": "Scheduled · hourly"}},
             {"kind": "fetch_docs", "label": "Read new and changed documents",
              "config": {"k": 50, "rotate": "facts"}},
-            {"kind": "scan_facts", "label": "Extract checkable claims", "config": {}},
-            {"kind": "map_fact_impact", "label": "Map related facts and evidence", "config": {}},
+            {"kind": "scan_facts", "label": "Extract checkable claims", "config": {
+                "max_llm_calls": 50, "max_input_tokens": 100000,
+                "max_output_tokens": 20000,
+            }},
+            {"kind": "map_fact_impact", "label": "Embed facts and retrieve evidence", "config": {
+                "retrieval_backend": "postgres", "fact_neighbors": 8,
+                "evidence_neighbors": 8, "minimum_fact_similarity": .72,
+                "minimum_evidence_similarity": .68, "max_components": 12,
+            }},
+            {"kind": "adjudicate_facts", "label": "Optional AI evidence review", "config": {
+                "mode": "off", "max_calls": 10, "max_input_tokens": 24000,
+                "max_output_tokens": 8000, "output_tokens_per_call": 800,
+                "related_assertions": 8, "evidence_spans": 12,
+            }},
+            {"kind": "cluster_facts", "label": "Build fact clusters", "config": {
+                "label_mode": "off", "minimum_similarity": .78,
+                "max_llm_clusters": 5, "max_input_tokens": 8000,
+                "max_output_tokens": 2000,
+            }},
             {"kind": "review_facts", "label": "Review candidates", "config": {"mode": "human"}},
             {"kind": "publish_facts", "label": "Publish accepted facts", "config": {"status": "needs_review"}},
         ]
@@ -798,6 +897,28 @@ def configure_fact_scan_flow(workflow_id: int, raw: dict | None) -> dict:
         raise ValueError("Published facts must need review or be verified.")
     if schedule not in {0, 60, 360, 1440, 10080}:
         raise ValueError("Fact scan schedule must be manual, hourly, every 6 hours, daily, or weekly.")
+    retrieval_backend = str(raw.get("retrieval_backend") or "postgres")
+    if retrieval_backend != "postgres":
+        raise ValueError("Fact retrieval currently uses Postgres vectors.")
+    fact_neighbors = max(1, min(int(raw.get("fact_neighbors") or 8), 50))
+    evidence_neighbors = max(1, min(int(raw.get("evidence_neighbors") or 8), 50))
+    max_components = max(1, min(int(raw.get("max_components") or 12), 32))
+    fact_similarity = max(-1.0, min(float(raw.get("minimum_fact_similarity") or .72), 1.0))
+    evidence_similarity = max(-1.0, min(float(raw.get("minimum_evidence_similarity") or .68), 1.0))
+    extraction_calls = max(0, min(int(raw.get("extraction_max_calls") or limit), 200))
+    extraction_input = max(0, min(int(raw.get("extraction_max_input_tokens") or 100000), 2_000_000))
+    extraction_output = max(0, min(int(raw.get("extraction_max_output_tokens") or 20000), 400_000))
+    adjudication_mode = str(raw.get("adjudication_mode") or "off")
+    if adjudication_mode not in {"off", "llm"}:
+        raise ValueError("Fact adjudication must be off or use the configured LLM.")
+    adjudication_calls = max(0, min(int(raw.get("adjudication_max_calls") or 10), 100))
+    adjudication_input = max(0, min(int(raw.get("adjudication_max_input_tokens") or 24000), 1_000_000))
+    adjudication_output = max(0, min(int(raw.get("adjudication_max_output_tokens") or 8000), 200_000))
+    cluster_label_mode = str(raw.get("cluster_label_mode") or "off")
+    if cluster_label_mode not in {"off", "llm"}:
+        raise ValueError("Fact cluster labels must be off or use the configured LLM.")
+    cluster_similarity = max(-1.0, min(float(raw.get("cluster_minimum_similarity") or .78), 1.0))
+    cluster_calls = max(0, min(int(raw.get("cluster_max_llm_calls") or 5), 50))
     schedule_labels = {
         0: ("Manual", "Started manually"),
         60: ("Every hour", "Scheduled · hourly"),
@@ -818,7 +939,37 @@ def configure_fact_scan_flow(workflow_id: int, raw: dict | None) -> dict:
             node["config"] = fetch_config
             node["label"] = "Read configured document scope"
         elif node.get("kind") == "scan_facts":
-            node["config"] = {"claims_per_document": claims, "instructions": instructions}
+            node["config"] = {
+                "claims_per_document": claims, "instructions": instructions,
+                "max_llm_calls": extraction_calls,
+                "max_input_tokens": extraction_input,
+                "max_output_tokens": extraction_output,
+            }
+        elif node.get("kind") == "map_fact_impact":
+            node["config"] = {
+                "retrieval_backend": retrieval_backend, "fact_neighbors": fact_neighbors,
+                "evidence_neighbors": evidence_neighbors,
+                "minimum_fact_similarity": fact_similarity,
+                "minimum_evidence_similarity": evidence_similarity,
+                "max_components": max_components,
+            }
+        elif node.get("kind") == "adjudicate_facts":
+            node["config"] = {
+                "mode": adjudication_mode, "max_calls": adjudication_calls,
+                "max_input_tokens": adjudication_input,
+                "max_output_tokens": adjudication_output,
+                "output_tokens_per_call": min(4000, max(100, adjudication_output or 800)),
+                "related_assertions": fact_neighbors, "evidence_spans": evidence_neighbors,
+                "instructions": instructions,
+            }
+        elif node.get("kind") == "cluster_facts":
+            node["config"] = {
+                "label_mode": cluster_label_mode, "minimum_similarity": cluster_similarity,
+                "max_llm_clusters": cluster_calls,
+                "max_input_tokens": max(0, cluster_calls * 1600),
+                "max_output_tokens": max(0, cluster_calls * 400),
+                "instructions": instructions,
+            }
         elif node.get("kind") == "review_facts":
             node["config"] = {"mode": review_mode, "instructions": instructions}
         elif node.get("kind") == "publish_facts":
@@ -830,7 +981,21 @@ def configure_fact_scan_flow(workflow_id: int, raw: dict | None) -> dict:
     )
     return {**fetch_config, "claims_per_document": claims, "schedule_minutes": schedule,
             "review_mode": review_mode, "review_instructions": instructions,
-            "publish_status": publish_status}
+            "publish_status": publish_status, "retrieval_backend": retrieval_backend,
+            "fact_neighbors": fact_neighbors, "evidence_neighbors": evidence_neighbors,
+            "max_components": max_components,
+            "minimum_fact_similarity": fact_similarity,
+            "minimum_evidence_similarity": evidence_similarity,
+            "extraction_max_calls": extraction_calls,
+            "extraction_max_input_tokens": extraction_input,
+            "extraction_max_output_tokens": extraction_output,
+            "adjudication_mode": adjudication_mode,
+            "adjudication_max_calls": adjudication_calls,
+            "adjudication_max_input_tokens": adjudication_input,
+            "adjudication_max_output_tokens": adjudication_output,
+            "cluster_label_mode": cluster_label_mode,
+            "cluster_minimum_similarity": cluster_similarity,
+            "cluster_max_llm_calls": cluster_calls}
 
 
 def ensure_decision_scan_flow() -> int:
