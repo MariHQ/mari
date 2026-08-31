@@ -133,13 +133,17 @@ def latest_visible_run(workflow_id: int) -> dict | None:
     context = access.require_current_access()
     with db.connect() as conn:
         return conn.execute(
-            """SELECT r.*, w.name AS wf_name FROM workflow_runs r
+            """WITH latest AS (
+                 SELECT * FROM workflow_runs
+                  WHERE project_id = %s AND workflow_id = %s
+                  ORDER BY number DESC LIMIT 1
+               )
+               SELECT r.*, w.name AS wf_name FROM latest r
                JOIN workflows w ON w.project_id = r.project_id AND w.id = r.workflow_id
                LEFT JOIN workflow_run_dismissals d
                  ON d.project_id = r.project_id AND d.run_id = r.id AND d.user_id = %s
-              WHERE r.project_id = %s AND r.workflow_id = %s AND d.run_id IS NULL
-              ORDER BY r.number DESC LIMIT 1""",
-            (context.user_id, context.project_id, workflow_id),
+              WHERE d.run_id IS NULL""",
+            (context.project_id, workflow_id, context.user_id),
         ).fetchone()
 
 
