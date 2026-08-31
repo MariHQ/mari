@@ -66,10 +66,10 @@ export function FactScanConfiguration() {
   const [maxComponents, setMaxComponents] = useState(12);
   const [factSimilarity, setFactSimilarity] = useState(.72);
   const [evidenceSimilarity, setEvidenceSimilarity] = useState(.68);
-  const [reviewStrategy, setReviewStrategy] = useState<ReviewStrategy>("human");
-  const [adjudicationCalls, setAdjudicationCalls] = useState(10);
-  const [adjudicationInput, setAdjudicationInput] = useState(24000);
-  const [adjudicationOutput, setAdjudicationOutput] = useState(8000);
+  const [reviewStrategy, setReviewStrategy] = useState<ReviewStrategy>("auto");
+  const [adjudicationCalls, setAdjudicationCalls] = useState(50);
+  const [adjudicationInput, setAdjudicationInput] = useState(120000);
+  const [adjudicationOutput, setAdjudicationOutput] = useState(40000);
   const [clusterLabelMode, setClusterLabelMode] = useState<"off" | "llm">("off");
   const [clusterSimilarity, setClusterSimilarity] = useState(.78);
   const [clusterCalls, setClusterCalls] = useState(5);
@@ -104,9 +104,9 @@ export function FactScanConfiguration() {
       setReviewStrategy(adjudication.mode !== "llm"
         ? "human"
         : review.mode === "ai" ? "auto" : "guided");
-      setAdjudicationCalls(Number(adjudication.max_calls ?? 10));
-      setAdjudicationInput(Number(adjudication.max_input_tokens ?? 24000));
-      setAdjudicationOutput(Number(adjudication.max_output_tokens ?? 8000));
+      setAdjudicationCalls(Number(adjudication.max_calls ?? 50));
+      setAdjudicationInput(Number(adjudication.max_input_tokens ?? 120000));
+      setAdjudicationOutput(Number(adjudication.max_output_tokens ?? 40000));
       setClusterLabelMode(cluster.label_mode === "llm" ? "llm" : "off");
       setClusterSimilarity(Number(cluster.minimum_similarity ?? .78));
       setClusterCalls(Number(cluster.max_llm_clusters ?? 5));

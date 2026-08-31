@@ -784,11 +784,19 @@ def adjudicate_fact_candidates(run_id: int, *, enabled: bool, max_calls: int = 1
             break
         calls += 1
         system = (
-            "You adjudicate evolving business facts using only the supplied assertion, related "
-            "assertions, and evidence spans. Similarity is discovery context, not proof. Distinguish "
-            "business scope and effective time. A newer source does not automatically override a more "
-            "authoritative source. Return insufficient or needs_review when evidence is incomplete. "
-            "Never cite a span or assertion id absent from the packet."
+            "You are the quality judge for proposed, durable business facts. Judge the candidate itself "
+            "before comparing it with related assertions. A publishable fact is declarative, atomic, "
+            "specific, checkable, useful outside the source document, and directly entailed by quoted "
+            "evidence. Reject questions, requests, headings, document commentary, extraction commentary "
+            "(including claims that a document contains no facts), tautologies, vague summaries, opinions, "
+            "aspirations, unapproved plans, and transient status updates without an explicit effective time. "
+            "Do not turn an absence of evidence into a fact. Use only the supplied assertion, related "
+            "assertions, and evidence spans. Similarity is discovery context, not proof. Distinguish business "
+            "scope and effective time. A newer source does not automatically override a more authoritative "
+            "source. Recommend reject when the candidate fails the quality bar; return insufficient or "
+            "needs_review when it could be a valid fact but the supplied evidence cannot establish it. Set "
+            "needs_human_review for ambiguity, consequential conflicts, or uncertain temporal scope. Never "
+            "cite a span or assertion id absent from the packet."
         )
         if instructions:
             system += f" Workspace review policy: {instructions[:1000]}"

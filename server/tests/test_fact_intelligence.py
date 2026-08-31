@@ -170,6 +170,9 @@ class FactRepresentationTests(unittest.TestCase):
         self.assertEqual(configure.call_args.kwargs["max_calls"], 1)
         reserve.assert_called_once()
         generate.assert_called_once()
+        judge_prompt = generate.call_args.kwargs["system"]
+        self.assertIn("Reject questions, requests, headings, document commentary", judge_prompt)
+        self.assertIn("Do not turn an absence of evidence into a fact", judge_prompt)
         saved = save.call_args.args[1]
         self.assertEqual(saved["evidence_groups"][0]["span_ids"], [90])
         complete.assert_called_once_with(

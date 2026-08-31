@@ -823,9 +823,9 @@ def _adopt_fact_intelligence(workflow_id: int) -> None:
         "minimum_evidence_similarity": .68, "max_components": 12,
     }
     nodes.insert(4, {
-        "kind": "adjudicate_facts", "label": "Optional AI evidence review",
-        "config": {"mode": "off", "max_calls": 10, "max_input_tokens": 24000,
-                   "max_output_tokens": 8000, "output_tokens_per_call": 800,
+        "kind": "adjudicate_facts", "label": "Judge candidate quality and evidence",
+        "config": {"mode": "llm", "max_calls": 50, "max_input_tokens": 120000,
+                   "max_output_tokens": 40000, "output_tokens_per_call": 800,
                    "related_assertions": 8, "evidence_spans": 12},
     })
     nodes.insert(5, {
@@ -834,6 +834,8 @@ def _adopt_fact_intelligence(workflow_id: int) -> None:
                    "max_llm_clusters": 5, "max_input_tokens": 8000,
                    "max_output_tokens": 2000},
     })
+    nodes[6]["label"] = "Apply judge verdicts; review uncertainty"
+    nodes[6]["config"] = {"mode": "ai", "minimum_confidence": .85}
     workflow_store.update_nodes(workflow_id, nodes)
 
 
@@ -851,8 +853,8 @@ def _normalize_fact_intelligence_config(workflow_id: int) -> None:
         "map_fact_impact": {"retrieval_backend": "postgres", "fact_neighbors": 8,
                             "evidence_neighbors": 8, "minimum_fact_similarity": .72,
                             "minimum_evidence_similarity": .68, "max_components": 12},
-        "adjudicate_facts": {"mode": "off", "max_calls": 10,
-                             "max_input_tokens": 24000, "max_output_tokens": 8000,
+        "adjudicate_facts": {"mode": "llm", "max_calls": 50,
+                             "max_input_tokens": 120000, "max_output_tokens": 40000,
                              "output_tokens_per_call": 800, "related_assertions": 8,
                              "evidence_spans": 12},
         "cluster_facts": {"label_mode": "off", "minimum_similarity": .78,
@@ -901,9 +903,9 @@ def ensure_fact_scan_flow() -> int:
                 "evidence_neighbors": 8, "minimum_fact_similarity": .72,
                 "minimum_evidence_similarity": .68, "max_components": 12,
             }},
-            {"kind": "adjudicate_facts", "label": "Optional AI evidence review", "config": {
-                "mode": "off", "max_calls": 10, "max_input_tokens": 24000,
-                "max_output_tokens": 8000, "output_tokens_per_call": 800,
+            {"kind": "adjudicate_facts", "label": "Judge candidate quality and evidence", "config": {
+                "mode": "llm", "max_calls": 50, "max_input_tokens": 120000,
+                "max_output_tokens": 40000, "output_tokens_per_call": 800,
                 "related_assertions": 8, "evidence_spans": 12,
             }},
             {"kind": "cluster_facts", "label": "Build fact clusters", "config": {
@@ -911,7 +913,9 @@ def ensure_fact_scan_flow() -> int:
                 "max_llm_clusters": 5, "max_input_tokens": 8000,
                 "max_output_tokens": 2000,
             }},
-            {"kind": "review_facts", "label": "Review candidates", "config": {"mode": "human"}},
+            {"kind": "review_facts", "label": "Apply judge verdicts; review uncertainty", "config": {
+                "mode": "ai", "minimum_confidence": .85,
+            }},
             {"kind": "publish_facts", "label": "Publish accepted facts", "config": {"status": "needs_review"}},
         ]
     return workflow_store.create_default_workflow(
@@ -931,7 +935,7 @@ def configure_fact_scan_flow(workflow_id: int, raw: dict | None) -> dict:
     query = str(raw.get("query") or "").strip()[:200]
     tag = str(raw.get("tag") or "").strip()[:80]
     schedule = int(raw.get("schedule_minutes") or 0)
-    review_mode = str(raw.get("review_mode") or "human")
+    review_mode = str(raw.get("review_mode") or "ai")
     if review_mode not in {"human", "ai"}:
         raise ValueError("Fact review mode must be human or AI.")
     instructions = str(raw.get("review_instructions") or "").strip()[:1000]
@@ -951,12 +955,12 @@ def configure_fact_scan_flow(workflow_id: int, raw: dict | None) -> dict:
     extraction_calls = max(0, min(int(raw.get("extraction_max_calls") or limit), 200))
     extraction_input = max(0, min(int(raw.get("extraction_max_input_tokens") or 100000), 2_000_000))
     extraction_output = max(0, min(int(raw.get("extraction_max_output_tokens") or 20000), 400_000))
-    adjudication_mode = str(raw.get("adjudication_mode") or "off")
+    adjudication_mode = str(raw.get("adjudication_mode") or "llm")
     if adjudication_mode not in {"off", "llm"}:
         raise ValueError("Fact adjudication must be off or use the configured LLM.")
-    adjudication_calls = max(0, min(int(raw.get("adjudication_max_calls") or 10), 100))
-    adjudication_input = max(0, min(int(raw.get("adjudication_max_input_tokens") or 24000), 1_000_000))
-    adjudication_output = max(0, min(int(raw.get("adjudication_max_output_tokens") or 8000), 200_000))
+    adjudication_calls = max(0, min(int(raw.get("adjudication_max_calls") or 50), 100))
+    adjudication_input = max(0, min(int(raw.get("adjudication_max_input_tokens") or 120000), 1_000_000))
+    adjudication_output = max(0, min(int(raw.get("adjudication_max_output_tokens") or 40000), 200_000))
     cluster_label_mode = str(raw.get("cluster_label_mode") or "off")
     if cluster_label_mode not in {"off", "llm"}:
         raise ValueError("Fact cluster labels must be off or use the configured LLM.")
@@ -1014,7 +1018,10 @@ def configure_fact_scan_flow(workflow_id: int, raw: dict | None) -> dict:
                 "instructions": instructions,
             }
         elif node.get("kind") == "review_facts":
-            node["config"] = {"mode": review_mode, "instructions": instructions}
+            node["config"] = {
+                "mode": review_mode, "minimum_confidence": .85,
+                "instructions": instructions,
+            }
         elif node.get("kind") == "publish_facts":
             node["config"] = {"status": publish_status}
     workflow_store.update_nodes(workflow_id, nodes)

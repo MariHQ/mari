@@ -64,7 +64,11 @@ class WorkflowStepTests(unittest.TestCase):
              patch.object(flowengine.workflow_store, "create_default_workflow", return_value=17) as create:
             self.assertEqual(flowengine.ensure_fact_scan_flow(), 17)
         self.assertEqual(create.call_args.kwargs["trigger"], {"on": "schedule", "every_minutes": 60})
-        self.assertEqual(create.call_args.kwargs["nodes"][1]["config"], {"k": 50, "rotate": "facts"})
+        nodes = create.call_args.kwargs["nodes"]
+        self.assertEqual(nodes[1]["config"], {"k": 50, "rotate": "facts"})
+        self.assertEqual(nodes[4]["config"]["mode"], "llm")
+        self.assertEqual(nodes[4]["config"]["max_calls"], 50)
+        self.assertEqual(nodes[6]["config"], {"mode": "ai", "minimum_confidence": .85})
 
     def test_fact_scan_configuration_is_bounded_and_persisted_on_the_workflow(self) -> None:
         nodes = [
@@ -99,7 +103,8 @@ class WorkflowStepTests(unittest.TestCase):
             "max_output_tokens": 20000,
         })
         self.assertEqual(saved[3]["config"], {
-            "mode": "ai", "instructions": "Only durable limits.",
+            "mode": "ai", "minimum_confidence": .85,
+            "instructions": "Only durable limits.",
         })
         self.assertEqual(saved[4]["config"], {"status": "verified"})
         trigger.assert_called_once_with(17, {"on": "schedule", "every_minutes": 360})
