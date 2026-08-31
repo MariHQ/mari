@@ -79,6 +79,17 @@ test("pausing a source is labelled as a pause, not a destructive disconnect", as
   await expect.poll(() => api.calls.some((c) => c.query.includes("pauseSource"))).toBeTruthy();
 });
 
+test("removing a source lets the admin retain its indexed documents", async ({ page }) => {
+  await openSources(page);
+  await page.getByRole("button", { name: "Actions for Confluence — ENG" }).click();
+  await page.getByRole("menuitem", { name: "Remove…" }).click();
+  const dialog = page.getByRole("dialog", { name: "Remove source" });
+  await dialog.getByLabel("Keep indexed documents").check();
+  await dialog.getByRole("button", { name: "Remove source" }).click();
+  await expect.poll(() => api.calls.some((call) => call.query.includes("removeSource")
+    && call.variables.deleteDocuments === false)).toBeTruthy();
+});
+
 test("Sources exposes connector ingestion without a Bots tab", async ({ page }) => {
   await openSources(page);
   await expect(page.getByRole("button", { name: "Add source" })).toBeVisible();

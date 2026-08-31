@@ -173,8 +173,10 @@ export function sourcesActions(): SourcesActions {
        words — "Only connector sources can be removed.", "A sync for this
        source is still running." — and they reach the confirm dialog verbatim.
        `false` is the row already being gone, which is what removing wanted. */
-    removeSource: async (s) => {
-      await mutate(`mutation($id: Int!) { removeSource(sourceId: $id) }`, { id: idOf(s) });
+    removeSource: async (s, deleteDocuments) => {
+      await mutate(`mutation($id: Int!, $deleteDocuments: Boolean!) {
+        removeSource(sourceId: $id, deleteDocuments: $deleteDocuments)
+      }`, { id: idOf(s), deleteDocuments });
       clearQueryCache();
     },
 
