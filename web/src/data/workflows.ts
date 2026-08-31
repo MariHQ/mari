@@ -13,7 +13,7 @@
 import { useMemo } from "react";
 import { useSearchParams } from "react-router-dom";
 import type {
-  ObservedData, TrajectoryRow, WorkflowsData, WorkflowsTab,
+  ObservedData, ScheduledTask, TrajectoryRow, WorkflowsData, WorkflowsTab,
 } from "@mari-design/components/pages/WorkflowsPage";
 import type {
   AnswerStat, AnswersData, HarvestSource,
@@ -56,6 +56,10 @@ const QUERY = `query Workflows(
   }
   answerCoverageGaps(limit: 8)
   answerHarvestSources
+  workflows {
+    id name description status trigger scheduleCapable
+    lastRunNumber lastRunStatus lastRunStarted
+  }
 }`;
 
 type AnswerRes = {
@@ -74,6 +78,12 @@ type Res = {
   approvedAnswers: AnswerRes[];
   answerCoverageGaps: string[];
   answerHarvestSources: { key: string; label: string; count: number }[] | null;
+  workflows: Array<{
+    id: number; name: string; description: string; status: string;
+    trigger: { on?: string; every_minutes?: number } | null;
+    scheduleCapable: boolean; lastRunNumber: number | null;
+    lastRunStatus: string; lastRunStarted: string;
+  }>;
 };
 
 /* ── observed ───────────────────────────────────────────────────────────── */
@@ -255,6 +265,19 @@ export function buildWorkflows(
       "all",
       res ? mapHarvestSources(res) : [],
     ),
+    scheduled: (res?.workflows ?? [])
+      .filter((workflow) => workflow.scheduleCapable)
+      .map<ScheduledTask>((workflow) => ({
+        id: workflow.id,
+        name: workflow.name,
+        description: workflow.description,
+        status: workflow.status,
+        scheduleMinutes: workflow.trigger?.on === "schedule"
+          ? Number(workflow.trigger.every_minutes) : null,
+        lastRunNumber: workflow.lastRunNumber,
+        lastRunStatus: workflow.lastRunStatus,
+        lastRunStarted: workflow.lastRunStarted,
+      })),
   };
 }
 
@@ -264,7 +287,7 @@ export const EMPTY: WorkflowsData = buildWorkflows(null, "observed", {
 
 /** Only these two narrow anything. A `?tab=` this build does not know opens
     the tab the page opens by default rather than a blank one. */
-const TABS = new Set<WorkflowsTab>(["observed", "answers"]);
+const TABS = new Set<WorkflowsTab>(["observed", "answers", "scheduled"]);
 
 /** "with" or "none". Anything else is ignored, so a stale link cannot filter
     the list down to a rule the toolbar has no way to show or undo. */

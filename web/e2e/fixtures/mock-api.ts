@@ -49,7 +49,7 @@ function initialData() {
       { id: 1, provider: "github", name: "acme/handbook", status: "active", stat: "1", unit: "docs", docsCount: 1, health: "Healthy", kind: "github", lastSyncAt: now, bars: [1, 2, 1], syncIntervalMinutes: 10, syncFlowId: 11 },
       { id: 2, provider: "confluence", name: "Confluence — ENG", status: "active", stat: "1", unit: "docs", docsCount: 1, health: "Healthy", kind: "connector", lastSyncAt: now, bars: [1], syncIntervalMinutes: 60, syncFlowId: 12 },
     ],
-    workflows: [{ id: 1, name: "Fact review", description: "Scan and approve facts", color: "#5c7a4c", pinned: true, status: "active", trigger: { on: "schedule", every_minutes: 60 }, nodes: [
+    workflows: [{ id: 1, name: "Fact review", description: "Scan and approve facts", color: "#5c7a4c", pinned: true, status: "active", trigger: { on: "schedule", every_minutes: 60 }, scheduleCapable: true, lastRunNumber: 1801, lastRunStatus: "waiting", lastRunStarted: now, nodes: [
       { kind: "trigger", label: "Every hour", config: {} },
       { kind: "scan_facts", label: "Scan facts", config: {} },
       { kind: "approval", label: "Approve", config: { assignee: "Dana" } },
@@ -234,6 +234,12 @@ export async function installMockApi(page: Page, options: {
         trajectoryStatuses: state.trajectoryStatuses
           ?? [...new Set(state.trajectories.map((row: any) => String(row.status)))],
       };
+    } else if (/setWorkflowStatus/.test(query)) {
+      data = { setWorkflowStatus: true };
+    } else if (/setWorkflowTrigger/.test(query)) {
+      data = { setWorkflowTrigger: true };
+    } else if (/runWorkflow/.test(query)) {
+      data = { runWorkflow: 1802 };
     } else if (/inviteMember/.test(query)) {
       state.members.push({
         id: state.members.length + 1,

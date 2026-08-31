@@ -105,6 +105,28 @@ test("stale reviewed-answer workflows can be reconciled together", async ({ page
     call.query.includes("reconcileStaleAssistantWorkflows"))).toBeTruthy();
 });
 
+test("scheduled tasks can be paused, rescheduled, and run without losing their cadence", async ({ page }) => {
+  await page.goto("/workflows?tab=scheduled");
+  await expect(page.getByRole("button", { name: /Scheduled tasks/ })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByRole("heading", { name: "Fact review" })).toBeVisible();
+  await expect(page.getByText("#1801 waiting", { exact: false })).toBeVisible();
+
+  await page.getByRole("button", { name: "Pause" }).click();
+  await expect.poll(() => api.calls.some((call) => call.query.includes("setWorkflowStatus")
+    && call.variables.status === "paused")).toBeTruthy();
+  await expect(page.getByRole("button", { name: "Resume" })).toBeVisible();
+  await expect(page.getByLabel("Fact review cadence")).toHaveValue("60");
+
+  await page.getByLabel("Fact review cadence").selectOption("");
+  await expect.poll(() => api.calls.some((call) => call.query.includes("setWorkflowTrigger")
+    && String(call.variables.trigger).includes('"on":""'))).toBeTruthy();
+  await expect(page.getByText("Manual", { exact: true })).toBeVisible();
+
+  await page.getByRole("button", { name: "Run now" }).click();
+  await expect.poll(() => api.calls.some((call) => call.query.includes("runWorkflow"))).toBeTruthy();
+  await expect(page.getByText("Run #1802 started.", { exact: false })).toBeVisible();
+});
+
 test("a codified workflow can be deleted without deleting its observed trajectory", async ({ page }) => {
   const row = api.getData("trajectories")[0];
   api.setData("trajectories", [{

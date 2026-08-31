@@ -53,7 +53,7 @@ const CONFIDENCE: Record<string, number> = { high: 90, medium: 60, low: 30 };
 
 /** Every piece of view state this page keeps in the URL. */
 type Route = {
-  tab?: "observed" | "answers";
+  tab?: "observed" | "answers" | "scheduled";
   category?: string | null;
   status?: string | null;
   failures?: string | null;
@@ -72,7 +72,7 @@ export function workflowsActions({ replace }: ActionContext): WorkflowsActions {
       if (value) params.set(key, value);
       else params.delete(key);
     };
-    if ("tab" in changes) set("tab", changes.tab === "answers" ? "answers" : null);
+    if ("tab" in changes) set("tab", changes.tab === "observed" ? null : changes.tab);
     // Every filter change resets paging: page 4 of the old filter is not page 4
     // of the new one, and landing on an empty page reads as "no results".
     for (const key of ["category", "status", "failures", "q"] as const) {
@@ -90,7 +90,26 @@ export function workflowsActions({ replace }: ActionContext): WorkflowsActions {
 
   return {
     /* ── view state ── */
-    setTab: (tab) => route({ tab, trajectory: tab === "answers" ? null : undefined }),
+    setTab: (tab) => route({ tab, trajectory: tab === "observed" ? undefined : null }),
+    setScheduledTaskStatus: async (workflowId, status) => {
+      await mutate(`mutation($workflowId: Int!, $status: String!) {
+        setWorkflowStatus(id: $workflowId, status: $status)
+      }`, { workflowId, status });
+    },
+    setScheduledTaskSchedule: async (workflowId, everyMinutes) => {
+      const trigger = everyMinutes === null
+        ? { on: "" }
+        : { on: "schedule", every_minutes: everyMinutes };
+      await mutate(`mutation($workflowId: Int!, $trigger: String!) {
+        setWorkflowTrigger(workflowId: $workflowId, trigger: $trigger)
+      }`, { workflowId, trigger: JSON.stringify(trigger) });
+    },
+    runScheduledTask: async (workflowId) => {
+      const data = await mutate(`mutation($workflowId: Int!) {
+        runWorkflow(workflowId: $workflowId)
+      }`, { workflowId });
+      return Number(data.runWorkflow);
+    },
     setCategory: (category) => route({ category }),
     setStatusFilter: (status) => route({ status }),
     setFailures: (failures) => route({ failures }),
