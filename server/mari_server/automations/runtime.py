@@ -1017,8 +1017,13 @@ def configure_fact_scan_flow(workflow_id: int, raw: dict | None) -> dict:
                 "instructions": instructions,
             }
         elif node.get("kind") == "review_facts":
+            # The dialog has no threshold field, so whatever the workflow
+            # already carries is the user's tuned value. Reconfiguring the
+            # scan used to reset it to .85 every time.
+            prior = (node.get("config") or {}).get("minimum_confidence")
             node["config"] = {
-                "mode": review_mode, "minimum_confidence": .85,
+                "mode": review_mode,
+                "minimum_confidence": max(0.0, min(float(prior or .85), 1.0)),
                 "instructions": instructions,
             }
         elif node.get("kind") == "publish_facts":

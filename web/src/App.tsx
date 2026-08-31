@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, type ReactNode } from "react";
 import { BrowserRouter, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { PAGES, type PageModule } from "@mari-design/components/pages";
 import { landingPageFor, type ShellChrome } from "@mari-design/components/pages/PageFrame";
@@ -161,6 +161,19 @@ function PublicOnly({ id, children }: { id: string; children: React.ReactNode })
  *  hold are `/answers?answer=4` (a Review item, a chat citation) and
  *  `/trajectories?category=…` (a bookmark). Everything the old route carried
  *  is carried through, with `tab` set to the half that used to be the page. */
+/** The retired ?tab=scheduled half of Workflows is /scheduled-tasks now.
+ *
+ *  Old notifications and bookmarks still carry the query. Without this the
+ *  unknown tab falls back to Observed, which reads like the schedule vanished
+ *  rather than moved. */
+function LegacyScheduledTab({ children }: { children: ReactNode }) {
+  const { search } = useLocation();
+  if (new URLSearchParams(search).get("tab") === "scheduled") {
+    return <Navigate to="/scheduled-tasks" replace />;
+  }
+  return <>{children}</>;
+}
+
 function MovedToWorkflows({ tab }: { tab: "observed" | "answers" }) {
   const { search } = useLocation();
   const params = new URLSearchParams(search);
@@ -189,7 +202,9 @@ function Routed() {
               path={page.route}
               element={PUBLIC.has(page.id)
                 ? <PublicOnly id={page.id}><Element /></PublicOnly>
-                : <Gate><Element /></Gate>}
+                : page.id === "workflows"
+                  ? <Gate><LegacyScheduledTab><Element /></LegacyScheduledTab></Gate>
+                  : <Gate><Element /></Gate>}
             />
           ))}
         {/* Retired surfaces. The Flows pipeline editor and the Review page

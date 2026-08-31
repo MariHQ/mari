@@ -180,6 +180,33 @@ class FactRepresentationTests(unittest.TestCase):
             purpose="temporal evidence and relation proposals", status="completed",
         )
 
+    def test_review_gate_reads_candidates_that_never_got_an_assertion(self):
+        conn = RecordingConnection([RecordingResult(rows=[])])
+        context = SimpleNamespace(project_id=7)
+        with patch.object(store.access, "require_current_access", return_value=context), \
+             patch.object(store.db, "connect", return_value=conn):
+            store.adjudication_reviews(91)
+
+        sql, args = conn.calls[0]
+        # LEFT JOIN: a candidate whose impact stage was skipped or whose
+        # embedding failed still reaches the review pass as a deferral,
+        # instead of silently staying pending outside the loop.
+        self.assertIn("LEFT JOIN fact_assertions", sql)
+        self.assertEqual(args, (7, 91))
+
+    def test_candidate_without_adjudication_defers_to_a_human(self):
+        rows = [{"candidate_id": 5, "review_status": "pending",
+                 "adjudication": None, "confidence": None}]
+        with patch.object(service.fact_store, "adjudication_reviews", return_value=rows), \
+             patch.object(service.knowledge_store, "review_fact_candidate") as review, \
+             patch.object(service.knowledge_store, "fact_candidate_counts",
+                          return_value={"pending": 1, "accepted": 0, "rejected": 0}), \
+             patch.object(service.llm, "model_identity", return_value="ollama:model"):
+            counts = service.apply_ai_fact_proposals(91)
+
+        self.assertEqual(counts["deferred"], 1)
+        review.assert_not_called()
+
     def test_extraction_budget_refusal_is_visible_and_leaves_documents_unscanned(self):
         docs = [
             {"id": 1, "title": "Alpha", "source": "upload", "body": "Alpha holds.", "snippet": ""},

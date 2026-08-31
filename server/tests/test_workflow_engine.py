@@ -128,6 +128,22 @@ class WorkflowStepTests(unittest.TestCase):
         self.assertEqual(saved[4]["config"], {"status": "verified"})
         trigger.assert_called_once_with(17, {"on": "schedule", "every_minutes": 360})
 
+    def test_fact_scan_reconfiguration_keeps_a_tuned_review_threshold(self) -> None:
+        nodes = [
+            {"kind": "trigger", "config": {}},
+            {"kind": "scan_facts", "config": {}},
+            {"kind": "review_facts", "config": {"mode": "ai", "minimum_confidence": .6}},
+            {"kind": "publish_facts", "config": {}},
+        ]
+        with patch.object(flowengine.workflow_store, "workflow_nodes", return_value=nodes), \
+             patch.object(flowengine.workflow_store, "update_nodes") as update, \
+             patch.object(flowengine.workflow_store, "set_trigger"):
+            flowengine.configure_fact_scan_flow(17, {"review_mode": "ai"})
+        saved = update.call_args.args[1]
+        review = next(node for node in saved if node["kind"] == "review_facts")
+        # the dialog has no threshold field, so a reconfigure must not reset it
+        self.assertEqual(review["config"]["minimum_confidence"], .6)
+
     def test_fact_scan_configuration_rejects_unknown_schedule(self) -> None:
         with self.assertRaisesRegex(ValueError, "schedule"):
             flowengine.configure_fact_scan_flow(17, {"schedule_minutes": 17})

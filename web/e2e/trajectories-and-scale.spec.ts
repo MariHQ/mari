@@ -105,6 +105,12 @@ test("stale reviewed-answer workflows can be reconciled together", async ({ page
     call.query.includes("reconcileStaleAssistantWorkflows"))).toBeTruthy();
 });
 
+test("a stale ?tab=scheduled link lands on the Scheduled tasks page", async ({ page }) => {
+  await page.goto("/workflows?tab=scheduled");
+  await expect(page).toHaveURL(/\/scheduled-tasks$/);
+  await expect(page.getByRole("heading", { name: "Scheduled tasks" })).toBeVisible();
+});
+
 test("scheduled tasks can be paused, rescheduled, and run without losing their cadence", async ({ page }) => {
   await page.goto("/scheduled-tasks");
   await expect(page.getByRole("heading", { name: "Scheduled tasks" })).toBeVisible();

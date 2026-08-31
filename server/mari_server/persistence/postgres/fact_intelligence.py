@@ -469,14 +469,21 @@ def run_assertion_ids(run_id: int) -> list[int]:
 
 
 def adjudication_reviews(run_id: int) -> list[dict]:
-    """Read bounded AI proposals without invoking another model at the gate."""
+    """Read bounded AI proposals without invoking another model at the gate.
+
+    LEFT JOIN, not JOIN: a candidate whose assertion was never created (the
+    impact-mapping stage was removed from the pipeline, or its embedding
+    failed) must still reach the review pass. An inner join made it invisible,
+    so it stayed pending with nothing counting it as deferred and nothing
+    saying why the AI never touched it."""
     project_id = access.require_current_access().project_id
     with db.connect() as conn:
         rows = conn.execute(
             """SELECT candidate.id AS candidate_id, candidate.review_status,
                       assertion.adjudication, assertion.confidence
                  FROM fact_extraction_candidates candidate
-                 JOIN fact_assertions assertion ON assertion.project_id = candidate.project_id
+                 LEFT JOIN fact_assertions assertion
+                   ON assertion.project_id = candidate.project_id
                   AND assertion.candidate_id = candidate.id
                 WHERE candidate.project_id = %s AND candidate.run_id = %s
                 ORDER BY candidate.id""",

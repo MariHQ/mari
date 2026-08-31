@@ -30,6 +30,18 @@ class WorkflowPersistenceTests(unittest.TestCase):
         self.assertIn("w.project_id IS NULL", sql)
         self.assertNotIn("DELETE", sql)
 
+    def test_scheduler_dueness_reads_the_newest_run_by_number(self) -> None:
+        connection = MagicMock()
+        connection.execute.return_value.fetchone.return_value = None
+        manager = MagicMock()
+        manager.__enter__.return_value = connection
+        with patch.object(workflows.db, "connect", return_value=manager):
+            workflows.latest_run(10, 60)
+        sql = connection.execute.call_args.args[0]
+        # the same ordering list_workflows derives last-run from
+        self.assertIn("ORDER BY number DESC", sql)
+        self.assertNotIn("ORDER BY id DESC", sql)
+
     def test_run_creation_refuses_a_concurrent_running_run(self) -> None:
         connection = MagicMock()
         connection.execute.return_value.fetchone.side_effect = [

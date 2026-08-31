@@ -401,10 +401,12 @@ def scheduled_workflows() -> list[dict]:
 
 
 def latest_run(workflow_id: int, every_minutes: int) -> dict | None:
+    # number DESC: the same ordering list_workflows derives last-run from, so
+    # the scheduler and the console agree on which run is the newest.
     with db.connect() as conn:
         return conn.execute(
             """SELECT status, (now() - started_at) >= make_interval(mins => %s) AS due
-               FROM workflow_runs WHERE workflow_id = %s ORDER BY id DESC LIMIT 1""",
+               FROM workflow_runs WHERE workflow_id = %s ORDER BY number DESC LIMIT 1""",
             (every_minutes, workflow_id),
         ).fetchone()
 
