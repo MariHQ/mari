@@ -338,6 +338,14 @@ def generation_model() -> tuple[str, str]:
     return _resolve(llm_cfg)
 
 
+def model_identity() -> str:
+    """The generation model as one printable identity, for reviewer labels."""
+    provider, model = generation_model()
+    if provider and model:
+        return f"{provider}:{model}"
+    return model or provider or "unconfigured model"
+
+
 # ————————————————— HTTP —————————————————
 
 

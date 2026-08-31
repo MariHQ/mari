@@ -70,8 +70,23 @@ def remove_source(source_id: int, *, delete_documents: bool = True) -> dict | No
             # or mutate this frozen snapshot.
             conn.execute("UPDATE documents SET source_id = NULL WHERE project_id = %s AND source_id = %s",
                          (project_id, source_id))
-        conn.execute("DELETE FROM ingest_checkpoints WHERE project_id = %s AND provider = %s",
-                     (project_id, row["provider"]))
+        # Checkpoint rows are keyed (provider, item), and a provider connected
+        # twice shares that keyspace — the failure row even uses the provider
+        # string as its item. A provider-wide delete therefore wiped the
+        # surviving sibling's progress rows too. Sweep the whole provider only
+        # when this was its last connection.
+        siblings = conn.execute(
+            """SELECT count(*) AS n FROM sources
+                WHERE project_id = %s AND provider = %s AND id <> %s""",
+            (project_id, row["provider"], source_id)).fetchone()["n"]
+        if siblings:
+            conn.execute(
+                """DELETE FROM ingest_checkpoints
+                    WHERE project_id = %s AND provider = %s AND item = %s""",
+                (project_id, row["provider"], row["display_name"]))
+        else:
+            conn.execute("DELETE FROM ingest_checkpoints WHERE project_id = %s AND provider = %s",
+                         (project_id, row["provider"]))
         conn.execute("DELETE FROM sources WHERE project_id = %s AND id = %s",
                      (project_id, source_id))
         # The scheduled "Sync <name>" flow: seeded with project_id NULL

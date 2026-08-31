@@ -267,12 +267,13 @@ class RemoveSourceTests(unittest.TestCase):
     class _Info:
         context = {"user": {"id": 1, "name": "Admin", "role": "admin"}}
 
-    def _remove(self, source_row, flows=(), running=False, delete_documents=True):
+    def _remove(self, source_row, flows=(), running=False, delete_documents=True,
+                siblings=0):
         from types import SimpleNamespace
         from mari_server.identity import graphql as mutations_admin
         from mari_server.persistence.postgres import admin as admin_store
 
-        conn = _FakeRemoveConn(source_row, flows)
+        conn = _FakeRemoveConn(source_row, flows, siblings=siblings)
         with patch.object(mutations_admin.ingest, "is_running", return_value=running), \
              patch.object(mutations_admin, "audit"), \
              patch.object(admin_store.db, "connect", return_value=conn), \
@@ -325,6 +326,19 @@ class RemoveSourceTests(unittest.TestCase):
         self.assertEqual(event_args[2], "removed: Confluence")
         self.assertFalse(any(sql.startswith("DELETE FROM sync_events") for sql, _ in conn.executed))
 
+    def test_keeps_a_sibling_connections_checkpoints(self) -> None:
+        result, conn = self._remove(
+            {"id": 42, "kind": "connector", "provider": "confluence",
+             "display_name": "Confluence — ENG"}, siblings=1)
+        self.assertTrue(result)
+        deletes = [(sql, args) for sql, args in conn.executed if sql.startswith("DELETE")]
+        # checkpoint rows are keyed (provider, item), and the sibling shares
+        # the provider: only this connection's rows go
+        self.assertIn(("DELETE FROM ingest_checkpoints WHERE project_id = %s AND provider = %s AND item = %s",
+                       (1, "confluence", "Confluence — ENG")), deletes)
+        self.assertNotIn(("DELETE FROM ingest_checkpoints WHERE project_id = %s AND provider = %s",
+                          (1, "confluence")), deletes)
+
     def test_can_keep_documents_as_a_disconnected_snapshot(self) -> None:
         result, conn = self._remove(
             {"id": 42, "kind": "connector", "provider": "confluence",
@@ -343,9 +357,10 @@ class _FakeRemoveConn:
     with the configured source row, the workflows scan answers with the
     configured flows, every statement is logged."""
 
-    def __init__(self, source_row, flows=()):
+    def __init__(self, source_row, flows=(), siblings=0):
         self.source_row = source_row
         self.flows = list(flows)
+        self.siblings = siblings
         self.executed = []
 
     def __enter__(self):
@@ -363,6 +378,8 @@ class _FakeRemoveConn:
         result = unittest.mock.Mock()
         if normalized.startswith("SELECT id, kind, provider, display_name FROM sources"):
             result.fetchone.return_value = self.source_row
+        elif normalized.startswith("SELECT count(*) AS n FROM sources"):
+            result.fetchone.return_value = {"n": self.siblings}
         elif normalized.startswith("SELECT id, nodes FROM workflows"):
             result.fetchall.return_value = self.flows
         else:

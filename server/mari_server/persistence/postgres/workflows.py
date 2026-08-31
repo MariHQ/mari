@@ -173,9 +173,27 @@ def dismiss_run(run_id: int) -> bool:
         ).fetchone())
 
 
+def _refuse_concurrent_run(conn, project_id: int, workflow_id: int) -> None:
+    """Raise when this workflow already has a run in flight.
+
+    The console disables Run now while a run executes, but a stale tab, the
+    API, or the agent can still ask, and two concurrent runs of one workflow
+    interleave their staged candidates. Callers must hold the workflow row
+    FOR UPDATE first so the check and the insert serialize with delete."""
+    running = conn.execute(
+        """SELECT 1 FROM workflow_runs
+            WHERE project_id = %s AND workflow_id = %s AND status = 'running'
+            LIMIT 1""", (project_id, workflow_id)).fetchone()
+    if running:
+        raise ValueError("This workflow already has a run in progress.")
+
+
 def create_run(workflow_id: int) -> dict:
     project_id = access.require_current_access().project_id
     with db.connect() as conn, conn.transaction():
+        conn.execute("SELECT 1 FROM workflows WHERE project_id = %s AND id = %s FOR UPDATE",
+                     (project_id, workflow_id))
+        _refuse_concurrent_run(conn, project_id, workflow_id)
         return conn.execute("""INSERT INTO workflow_runs
           (project_id, workflow_id, number, status, started_label, duration, progress, stats, rows_data)
           VALUES (%s, %s, nextval('workflow_run_number_seq'), 'running',
@@ -562,18 +580,23 @@ def digest_topic_count() -> int:
 
 def _create_run(project_id: int, workflow_id: int, dry_run: bool):
     def create(conn):
+        workflow = conn.execute(
+            "SELECT name FROM workflows WHERE project_id = %s AND id = %s FOR UPDATE",
+            (project_id, workflow_id),
+        ).fetchone()
+        if not workflow:
+            return None
+        _refuse_concurrent_run(conn, project_id, workflow_id)
         row = conn.execute(
             """INSERT INTO workflow_runs
                  (project_id, workflow_id, number, status, started_label, duration, progress, stats, rows_data)
-               SELECT %s, id, nextval('workflow_run_number_seq'), 'running',
-                      to_char(now(), 'Mon DD, HH12:MI AM'), '00:00:00', 0, %s, '[]'
-                 FROM workflows WHERE project_id = %s AND id = %s
-               RETURNING id, number,
-                 (SELECT name FROM workflows WHERE project_id = %s AND id = %s) AS name""",
-            (project_id, json.dumps({"ctx": {"dry_run": True}, "dry_run": True} if dry_run else {}),
-             project_id, workflow_id, project_id, workflow_id),
+               VALUES (%s, %s, nextval('workflow_run_number_seq'), 'running',
+                       to_char(now(), 'Mon DD, HH12:MI AM'), '00:00:00', 0, %s, '[]')
+               RETURNING id, number""",
+            (project_id, workflow_id,
+             json.dumps({"ctx": {"dry_run": True}, "dry_run": True} if dry_run else {})),
         ).fetchone()
-        return (int(row["id"]), int(row["number"]), str(row["name"])) if row else None
+        return (int(row["id"]), int(row["number"]), str(workflow["name"]))
     return transaction(create)
 
 
@@ -637,6 +660,15 @@ def _delete(project_id: int, workflow_id: int):
         ).fetchone()
         if not row:
             return None
+        # The GraphQL guard reads last_run_status before this transaction, so
+        # a run starting in between would be deleted mid-flight along with its
+        # history. Re-check under the row lock, where run creation serializes.
+        running = conn.execute(
+            """SELECT 1 FROM workflow_runs
+                WHERE project_id = %s AND workflow_id = %s AND status = 'running'
+                LIMIT 1""", (project_id, workflow_id)).fetchone()
+        if running:
+            raise ValueError("This task is still running. Wait for it to finish, then remove it.")
         conn.execute("DELETE FROM workflow_runs WHERE project_id = %s AND workflow_id = %s",
                      (project_id, workflow_id))
         conn.execute("DELETE FROM workflows WHERE project_id = %s AND id = %s",

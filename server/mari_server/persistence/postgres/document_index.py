@@ -104,6 +104,28 @@ def upsert_documents(conn, documents: list[dict]) -> list[tuple[int, bool]]:
     return results
 
 
+# A failed embed (provider down, model missing) must not erase the previous
+# profile's vector for unchanged content: a profile rotation retries at every
+# startup, and each failed pass used to null the legacy vector it still needed
+# until a retry finally succeeded. The old vector only goes when the content
+# itself changed, because then it describes text that no longer exists.
+_CHUNK_UPSERT = """
+    INSERT INTO chunks (project_id, document_id, idx, content, content_hash,
+                        embedding_profile, embedding)
+    VALUES (%s, %s, %s, %s, %s, %s, %s::vector)
+    ON CONFLICT (document_id, idx) DO UPDATE SET
+      content = EXCLUDED.content, content_hash = EXCLUDED.content_hash,
+      embedding_profile = CASE
+        WHEN EXCLUDED.embedding IS NOT NULL
+          OR chunks.content_hash IS DISTINCT FROM EXCLUDED.content_hash
+        THEN EXCLUDED.embedding_profile ELSE chunks.embedding_profile END,
+      embedding = CASE
+        WHEN EXCLUDED.embedding IS NOT NULL
+          OR chunks.content_hash IS DISTINCT FROM EXCLUDED.content_hash
+        THEN EXCLUDED.embedding ELSE chunks.embedding END
+    RETURNING id"""
+
+
 def sync_chunks(conn, doc_id: int, title: str, body: str,
                  max_tokens: int, overlap: int) -> tuple[int, int]:
     """Chunk + hash + embed-only-changed. Returns (chunks, newly_embedded)."""
@@ -128,15 +150,8 @@ def sync_chunks(conn, doc_id: int, title: str, body: str,
         vec = llm.embed(piece, purpose="document")
         if vec:
             embedded += 1
-        chunk = conn.execute("""
-            INSERT INTO chunks (project_id, document_id, idx, content, content_hash,
-                                embedding_profile, embedding)
-            VALUES (%s, %s, %s, %s, %s, %s, %s::vector)
-            ON CONFLICT (document_id, idx) DO UPDATE SET
-              content = EXCLUDED.content, content_hash = EXCLUDED.content_hash,
-              embedding_profile = EXCLUDED.embedding_profile,
-              embedding = EXCLUDED.embedding
-            RETURNING id""",
+        chunk = conn.execute(
+            _CHUNK_UPSERT,
             (project_id, doc_id, idx, piece, h, profile, str(vec) if vec else None)).fetchone()
         if vec:
             _store_embedding(
@@ -184,15 +199,8 @@ def sync_chunks_many(conn, documents: list[tuple[int, str, str]],
     for (doc_id, idx, piece, h), vec in zip(prepared, vectors, strict=True):
         if vec:
             embedded += 1
-        chunk = conn.execute("""
-            INSERT INTO chunks (project_id, document_id, idx, content, content_hash,
-                                embedding_profile, embedding)
-            VALUES (%s, %s, %s, %s, %s, %s, %s::vector)
-            ON CONFLICT (document_id, idx) DO UPDATE SET
-              content = EXCLUDED.content, content_hash = EXCLUDED.content_hash,
-              embedding_profile = EXCLUDED.embedding_profile,
-              embedding = EXCLUDED.embedding
-            RETURNING id""",
+        chunk = conn.execute(
+            _CHUNK_UPSERT,
             (project_id, doc_id, idx, piece, h, profile, str(vec) if vec else None)).fetchone()
         if vec:
             _store_embedding(

@@ -30,6 +30,21 @@ class RecordingConnection:
 
 
 class VersionedEmbeddingPersistenceTests(unittest.TestCase):
+    def test_failed_embed_never_erases_the_previous_profile_vector(self):
+        # A profile rotation retries at every startup; a pass whose embed
+        # failed must leave the legacy vector alone for unchanged content, or
+        # keyword-only degradation becomes permanent vector loss. The vector
+        # is only replaced when the model answered or the content changed.
+        sql = " ".join(document_index._CHUNK_UPSERT.split())
+        self.assertIn("embedding = CASE", sql)
+        self.assertIn("embedding_profile = CASE", sql)
+        self.assertIn("WHEN EXCLUDED.embedding IS NOT NULL", sql)
+        self.assertIn("OR chunks.content_hash IS DISTINCT FROM EXCLUDED.content_hash", sql)
+        self.assertIn("ELSE chunks.embedding END", sql)
+        self.assertIn("ELSE chunks.embedding_profile END", sql)
+        # content itself always follows the sync, vectors or not
+        self.assertIn("content = EXCLUDED.content, content_hash = EXCLUDED.content_hash", sql)
+
     def test_profile_rotation_upserts_only_the_selected_chunk_profile(self):
         conn = RecordingConnection()
 

@@ -117,6 +117,12 @@ def _mark_scanned(kind: str, doc_ids: list[int]) -> None:
     knowledge_store.mark_scanned(kind, doc_ids)
 
 
+# Sentinel a scan operation returns when the LLM budget refused the call.
+# Distinct from () — an empty read is a document with nothing in it, a refused
+# read is a document the budget never let the model open.
+_BUDGET_REFUSED = object()
+
+
 def _scan_concurrently(
     docs: list[dict], operation,
 ) -> tuple[list[tuple[dict, t.Any]], int, int, list[str]]:
@@ -129,7 +135,7 @@ def _scan_concurrently(
     scan someone can re-run; a scan that ran out of time and returned a smaller
     number is indistinguishable from a corpus with less in it."""
     if not docs:
-        return [], 0, 0
+        return [], 0, 0, []
     results: list[tuple[dict, t.Any]] = []
     failed = 0
     errors: list[str] = []
@@ -332,7 +338,7 @@ def extract_fact_candidates_for(doc_ids: list[int] | None = None,
     docs = [d for d in _scan_batch("facts", doc_ids, limit)
             if (d["body"] or d["snippet"] or "").strip()]
     if not docs:
-        return 0, 0, ""
+        return [], 0, ""
     extraction_purpose = "structured fact extraction"
     call_limit = max(0, min(int(max_llm_calls if max_llm_calls is not None else len(docs)), 200))
     output_per_call = max(200, min(2000, max_output_tokens // max(1, call_limit)))
@@ -366,7 +372,11 @@ def extract_fact_candidates_for(doc_ids: list[int] | None = None,
             estimated_input_tokens=max(1, len(str(doc.get("body") or doc.get("snippet") or "")) // 3 + 300),
             output_tokens=output_per_call,
         ):
-            return ()
+            # Not an empty read: the token budget ran out before the call
+            # limit did. Returning () here made an exhausted document look
+            # exactly like one with nothing in it, so the step said "passed"
+            # and the rotation marked the document scanned without reading it.
+            return _BUDGET_REFUSED
         document = _component_document(doc)
         return component_extract_facts(
             [document],
@@ -381,6 +391,8 @@ def extract_fact_candidates_for(doc_ids: list[int] | None = None,
         )
 
     results, unread, failed, errors = _scan_concurrently(docs, extract)
+    refused = sum(1 for _, out in results if out is _BUDGET_REFUSED)
+    results = [(doc, out) for doc, out in results if out is not _BUDGET_REFUSED]
     if not results and failed:
         raise _all_failed("documents", failed, errors)
 
@@ -423,9 +435,15 @@ def extract_fact_candidates_for(doc_ids: list[int] | None = None,
             note,
             f"{budget_omitted} document{'s' if budget_omitted != 1 else ''} deferred by the configured LLM call budget",
         ) if part)
+    if refused:
+        note = "; ".join(part for part in (
+            note,
+            f"{refused} document{'s' if refused != 1 else ''} skipped after the LLM token budget ran out",
+        ) if part)
     if run_id is not None:
         fact_store.complete_llm_budget(
-            run_id, stage="scan_facts", purpose=extraction_purpose, status="completed",
+            run_id, stage="scan_facts", purpose=extraction_purpose,
+            status="exhausted" if refused else "completed",
         )
     audit("scanned for facts", f"{len(candidates)} candidates from {len(results)} documents"
                                + (f" ({note})" if note else ""))
@@ -451,7 +469,7 @@ def scan_facts_for(doc_ids: list[int] | None = None,
 def apply_ai_fact_proposals(run_id: int, *, minimum_confidence: float = .8) -> dict[str, int]:
     """Apply bounded adjudication proposals; never make an extra hidden LLM call."""
     threshold = max(0.0, min(float(minimum_confidence), 1.0))
-    reviewer = f"Bounded AI proposal · {llm.model_identity()}" if hasattr(llm, "model_identity") else "Bounded AI proposal"
+    reviewer = f"Bounded AI proposal · {llm.model_identity()}"
     accepted_recommendations = {"new_fact", "supersede", "qualify", "duplicate"}
     deferred = 0
     for row in fact_store.adjudication_reviews(run_id):

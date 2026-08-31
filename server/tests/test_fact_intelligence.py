@@ -180,6 +180,48 @@ class FactRepresentationTests(unittest.TestCase):
             purpose="temporal evidence and relation proposals", status="completed",
         )
 
+    def test_extraction_budget_refusal_is_visible_and_leaves_documents_unscanned(self):
+        docs = [
+            {"id": 1, "title": "Alpha", "source": "upload", "body": "Alpha holds.", "snippet": ""},
+            {"id": 2, "title": "Beta", "source": "upload", "body": "Beta holds.", "snippet": ""},
+        ]
+        complete = Mock()
+        marked = Mock()
+        with patch.object(service, "_scan_batch", return_value=docs), \
+             patch.object(service, "_mark_scanned", marked), \
+             patch.object(service, "audit"), \
+             patch.object(service, "step_progress"), \
+             patch.object(service, "component_extract_facts") as extract, \
+             patch.object(service.knowledge_store, "fact_claims", return_value=set()), \
+             patch.object(service.llm, "generation_model", return_value=("ollama", "model")), \
+             patch.object(service.fact_store, "configure_llm_budget"), \
+             patch.object(service.fact_store, "reserve_llm_call", return_value=False), \
+             patch.object(service.fact_store, "complete_llm_budget", complete):
+            candidates, scanned, note = service.extract_fact_candidates_for(
+                [1, 2], run_id=91, max_llm_calls=2,
+            )
+
+        # A refused reservation is not an empty read: nothing is extracted,
+        # the documents stay unscanned for the next rotation, the note says
+        # what happened, and the budget row closes exhausted, not completed.
+        self.assertEqual(candidates, [])
+        self.assertEqual(scanned, 0)
+        self.assertIn("2 documents skipped after the LLM token budget ran out", note)
+        extract.assert_not_called()
+        marked.assert_called_once_with("facts", [])
+        complete.assert_called_once_with(
+            91, stage="scan_facts", purpose="structured fact extraction",
+            status="exhausted",
+        )
+
+    def test_bounded_ai_reviewer_names_the_generation_model(self):
+        from mari_server.providers import models as llm_models
+
+        with patch.object(llm_models, "generation_model", return_value=("ollama", "qwen3:14b")):
+            self.assertEqual(llm_models.model_identity(), "ollama:qwen3:14b")
+        with patch.object(llm_models, "generation_model", return_value=("", "")):
+            self.assertEqual(llm_models.model_identity(), "unconfigured model")
+
     def test_embedding_clusters_need_no_llm_and_keep_related_members_together(self):
         nodes = [
             {"id": 1, "fact_id": 10, "candidate_id": None, "claim": "Prod uses Kubernetes."},

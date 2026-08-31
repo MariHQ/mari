@@ -30,6 +30,34 @@ class WorkflowPersistenceTests(unittest.TestCase):
         self.assertIn("w.project_id IS NULL", sql)
         self.assertNotIn("DELETE", sql)
 
+    def test_run_creation_refuses_a_concurrent_running_run(self) -> None:
+        connection = MagicMock()
+        connection.execute.return_value.fetchone.side_effect = [
+            {"name": "Fact extraction"},  # the workflow row, locked FOR UPDATE
+            {"one": 1},                   # a run with status = 'running'
+        ]
+        with patch.object(workflows, "transaction", side_effect=lambda fn: fn(connection)):
+            with self.assertRaisesRegex(ValueError, "already has a run in progress"):
+                workflows._create_run(7, 10, False)
+        lock_sql = connection.execute.call_args_list[0].args[0]
+        self.assertIn("FOR UPDATE", lock_sql)
+        probe_sql = connection.execute.call_args_list[1].args[0]
+        self.assertIn("status = 'running'", probe_sql)
+        self.assertFalse(any("INSERT INTO workflow_runs" in call.args[0]
+                             for call in connection.execute.call_args_list))
+
+    def test_delete_rechecks_for_a_running_run_under_the_row_lock(self) -> None:
+        connection = MagicMock()
+        connection.execute.return_value.fetchone.side_effect = [
+            {"name": "Sync repo"},  # the workflow row, locked FOR UPDATE
+            {"one": 1},             # a run that started after the GraphQL guard read
+        ]
+        with patch.object(workflows, "transaction", side_effect=lambda fn: fn(connection)):
+            with self.assertRaisesRegex(ValueError, "still running"):
+                workflows._delete(7, 10)
+        self.assertFalse(any(call.args[0].lstrip().startswith("DELETE")
+                             for call in connection.execute.call_args_list))
+
     def test_setting_schedule_keeps_trigger_node_label_in_sync(self) -> None:
         context = access.AccessContext(
             user_id=2, project_id=7, project_slug="acme", project_name="Acme",
