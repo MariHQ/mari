@@ -239,17 +239,25 @@ def poll_slack(
         page_limit=request.page_limit,
         collection="channels",
     )
+    # Accept either the channel name people see in Slack or the stable channel
+    # ID Slack shows in "About -> Copy channel ID". IDs are especially useful
+    # for private channels, where renames should not silently stop ingestion.
     wanted = {name.lstrip("#").casefold() for name in config.channels}
+    matched: set[str] = set()
     previous = float(request.cursor or 0)
     newest = previous
     documents: list[KnowledgeDocument] = []
     complete = channels_complete
     for channel in channels:
         name = str(channel.get("name") or "")
-        if wanted and name.casefold() not in wanted:
+        channel_id = str(channel.get("id") or "")
+        identities = {name.casefold(), channel_id.casefold()}
+        selected = wanted.intersection(identities)
+        if wanted and not selected:
             continue
         if not channel.get("is_member"):
             continue
+        matched.update(selected)
         rows, history_complete = _paginate(
             config.bot_token,
             "conversations.history",
@@ -292,6 +300,18 @@ def poll_slack(
             if document is not None:
                 documents.append(document)
             complete = complete and thread_complete
+    missing = sorted(wanted - matched)
+    if missing:
+        # Slack omits private channels the bot is not a member of from
+        # conversations.list. Returning a successful empty snapshot in that
+        # case made the source card look healthy forever at zero documents.
+        # Name the exact remediation and the scopes used by the two API calls.
+        raise PermanentFailure(
+            "Slack could not access configured channel(s): "
+            + ", ".join(missing)
+            + ". For a private channel, invite the app to the channel and reinstall it "
+              "with groups:read and groups:history (plus users:read)."
+        )
     yield PollPage(
         tuple(documents),
         next_cursor=f"{newest:.6f}" if complete and newest else request.cursor,

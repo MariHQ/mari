@@ -19,6 +19,7 @@ from mari_components.connectors.github import (
 )
 from mari_components.connectors.jira import JiraConfig, poll_jira
 from mari_components.connectors.slack import SlackConfig, fetch_slack_thread_by_id, poll_slack
+from mari_components.errors import PermanentFailure
 from mari_components.http import HttpResponse
 from mari_components.types import PollRequest, SyncMode
 
@@ -392,6 +393,35 @@ class PriorityConnectorTests(unittest.TestCase):
         self.assertEqual(page.next_cursor, "2.000000")
         params = urllib.parse.parse_qs((api.requests[1].body or b"").decode())
         self.assertEqual(params["types"], ["public_channel,private_channel"])
+
+    def test_slack_configured_private_channel_must_be_visible_to_the_bot(self):
+        api = FakeHttp([
+            {"ok": True, "members": []},
+            {"ok": True, "channels": []},
+        ])
+        with self.assertRaisesRegex(
+            PermanentFailure, "invite the app.*groups:read.*groups:history"
+        ):
+            list(poll_slack(
+                SlackConfig("xoxb-token", channels=("private-platform",)),
+                PollRequest(), http=api,
+            ))
+
+    def test_slack_channel_id_can_select_a_private_channel(self):
+        api = FakeHttp([
+            {"ok": True, "members": [{"id": "U1", "name": "Dana"}]},
+            {"ok": True, "channels": [{
+                "id": "GPRIVATE1", "name": "renamed-platform", "is_member": True,
+            }]},
+            {"ok": True, "messages": [{
+                "type": "message", "ts": "2.0", "user": "U1", "text": "Private runbook",
+            }]},
+        ])
+        page = list(poll_slack(
+            SlackConfig("xoxb-token", channels=("GPRIVATE1",)),
+            PollRequest(), http=api,
+        ))[0]
+        self.assertEqual([document.title for document in page.upserts], ["Private runbook"])
 
     def test_slack_polling_refetches_root_for_a_new_reply_row(self):
         api = FakeHttp([

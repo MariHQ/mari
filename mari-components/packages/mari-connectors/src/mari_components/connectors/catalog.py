@@ -149,7 +149,11 @@ _DEFINITIONS = (
         (
             _field("bot_token", "Bot token", secret=True, placeholder="xoxb-…"),
             _field("history_token", "User history token", secret=True, required=False, placeholder="xoxp-…"),
-            _field("channels", "Channels", required=False, placeholder="general, engineering"),
+            _field(
+                "channels", "Channels", required=False, placeholder="general, C0123456789",
+                help=("Comma-separated channel names or IDs. For private channels, invite the app "
+                      "to each channel and grant groups:read, groups:history, and users:read."),
+            ),
         ),
         "https://api.slack.com/tutorials/tracks/getting-a-token",
         lambda v: SlackConfig(
