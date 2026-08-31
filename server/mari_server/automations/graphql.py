@@ -8,6 +8,7 @@ from strawberry.scalars import JSON
 from mari_server.identity import access
 from mari_components import workflows
 from mari_server.persistence.postgres import workflows as workflow_repository
+from mari_server.persistence.postgres.database import jload
 from mari_server.automations import runtime
 
 DEPRECATED_EDITOR = (
@@ -40,6 +41,30 @@ class WorkflowMutations:
     def dismiss_workflow_run(self, run_id: int) -> bool:
         """Hide a completed or waiting run from this user's recovered workspace."""
         return workflow_repository.dismiss_run(run_id)
+
+    @strawberry.mutation
+    def remove_scheduled_task(self, task_id: int) -> bool:
+        """Remove a recurring/background task and its run history.
+
+        This command is deliberately narrower than the retired workflow
+        editor delete: an observed/assistant trajectory cannot be deleted from
+        the task manager, and an executing task must finish first.
+        """
+        project_id = access.require_current_access().project_id
+        row = next((item for item in workflow_repository.list_workflows()
+                    if int(item["id"]) == task_id), None)
+        if not row:
+            return False
+        nodes = jload(row.get("nodes")) or []
+        trigger = jload(row.get("trigger")) or {}
+        task_steps = {"sync_source", "scan_facts", "refresh_digest"}
+        is_task = trigger.get("on") == "schedule" or any(
+            isinstance(node, dict) and node.get("kind") in task_steps for node in nodes)
+        if not is_task or row.get("status") == "archived":
+            raise ValueError("This item is not a scheduled task.")
+        if row.get("last_run_status") == "running":
+            raise ValueError("This task is still running. Wait for it to finish, then remove it.")
+        return workflows.delete(project_id, task_id, ports=WorkflowMutations._ports())
 
     @strawberry.mutation(deprecation_reason=DEPRECATED_EDITOR)
     def save_workflow(self, name: str, description: str, steps: JSON,
