@@ -267,7 +267,7 @@ class RemoveSourceTests(unittest.TestCase):
     class _Info:
         context = {"user": {"id": 1, "name": "Admin", "role": "admin"}}
 
-    def _remove(self, source_row, flows=(), running=False):
+    def _remove(self, source_row, flows=(), running=False, delete_documents=True):
         from types import SimpleNamespace
         from mari_server.identity import graphql as mutations_admin
         from mari_server.persistence.postgres import admin as admin_store
@@ -278,7 +278,8 @@ class RemoveSourceTests(unittest.TestCase):
              patch.object(admin_store.db, "connect", return_value=conn), \
              patch.object(admin_store.access, "require_current_access",
                           return_value=SimpleNamespace(project_id=1)):
-            result = mutations_admin.MutAdmin().remove_source(self._Info(), 42)
+            result = mutations_admin.MutAdmin().remove_source(
+                self._Info(), 42, delete_documents=delete_documents)
         return result, conn
 
     def test_refuses_while_a_sync_is_running(self) -> None:
@@ -323,6 +324,18 @@ class RemoveSourceTests(unittest.TestCase):
                           if sql.startswith("INSERT INTO sync_events"))
         self.assertEqual(event_args[2], "removed: Confluence")
         self.assertFalse(any(sql.startswith("DELETE FROM sync_events") for sql, _ in conn.executed))
+
+    def test_can_keep_documents_as_a_disconnected_snapshot(self) -> None:
+        result, conn = self._remove(
+            {"id": 42, "kind": "connector", "provider": "confluence",
+             "display_name": "Confluence"}, delete_documents=False)
+        self.assertTrue(result)
+        self.assertIn(("UPDATE documents SET source_id = NULL WHERE project_id = %s AND source_id = %s",
+                       (1, 42)), conn.executed)
+        self.assertFalse(any(sql.startswith("DELETE FROM documents") for sql, _ in conn.executed))
+        event_args = next(args for sql, args in conn.executed
+                          if sql.startswith("INSERT INTO sync_events"))
+        self.assertEqual(event_args[3], "Removed by admin, documents retained")
 
 
 class _FakeRemoveConn:

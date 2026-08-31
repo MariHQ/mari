@@ -90,7 +90,8 @@ class MutAdmin:
         return True
 
     @strawberry.mutation
-    def remove_source(self, info: strawberry.Info, source_id: int) -> bool:
+    def remove_source(self, info: strawberry.Info, source_id: int,
+                      delete_documents: bool = True) -> bool:
         """Real deletion, not the pause that disconnectSource performs: the
         source row, its documents and everything hanging off them, its
         checkpoints, and its scheduled sync flow. Connector-kind rows only,
@@ -99,11 +100,12 @@ class MutAdmin:
         actor = _require_admin(info)
         if ingest.is_running(source_id):
             raise ValueError("A sync for this source is still running. Wait for it to finish, then remove.")
-        removed = admin_store.remove_source(source_id)
+        removed = admin_store.remove_source(source_id, delete_documents=delete_documents)
         if not removed:
             return False
         audit("removed source", str(removed["display_name"]), actor["name"],
-              detail=[("Provider", str(removed["provider"]))])
+              detail=[("Provider", str(removed["provider"])),
+                      ("Indexed documents", "deleted" if delete_documents else "retained")])
         return True
 
     # ——— members (admin-only; audit the real caller) ———

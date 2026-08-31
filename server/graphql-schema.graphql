@@ -597,7 +597,7 @@ type Mutation {
   rejectTrajectory(trajectoryId: Int!, rejected: Boolean! = true): Boolean!
   deleteTrajectory(trajectoryId: Int!): Boolean!
   pauseSource(sourceId: Int!): Boolean!
-  removeSource(sourceId: Int!): Boolean!
+  removeSource(sourceId: Int!, deleteDocuments: Boolean! = true): Boolean!
   inviteMember(name: String!, email: String!, role: String! = "user"): Boolean!
   setMemberRole(id: Int!, role: String!): Boolean!
   removeMember(id: Int!): Boolean!

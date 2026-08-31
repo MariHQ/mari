@@ -21,7 +21,7 @@ def pause_source(provider: str) -> None:
           to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))""", (project_id, provider))
 
 
-def remove_source(source_id: int) -> dict | None:
+def remove_source(source_id: int, *, delete_documents: bool = True) -> dict | None:
     """Delete a connector source outright, in one transaction: the row, its
     documents and everything hanging off them, its ingest checkpoints, and its
     scheduled "Sync <name>" flow. Returns the deleted row's provider and
@@ -49,19 +49,27 @@ def remove_source(source_id: int) -> dict | None:
             return None
         if row["kind"] != "connector":
             raise ValueError("Only connector sources can be removed.")
-        docs = "SELECT id FROM documents WHERE project_id = %s AND source_id = %s"
-        for sql in (
-            f"DELETE FROM tags WHERE document_id IN ({docs})",
-            f"DELETE FROM edges WHERE from_doc IN ({docs}) OR to_doc IN ({docs})",
-            f"DELETE FROM findings WHERE document_id IN ({docs})",
-            f"DELETE FROM changes WHERE document_id IN ({docs})",
-            f"DELETE FROM watches WHERE document_id IN ({docs})",
-        ):
-            args = (project_id, source_id) * sql.count("SELECT id FROM documents")
-            conn.execute(sql, args)
-        # chunks cascade from documents; facts/glossary references become NULL
-        conn.execute("DELETE FROM documents WHERE project_id = %s AND source_id = %s",
-                     (project_id, source_id))
+        if delete_documents:
+            docs = "SELECT id FROM documents WHERE project_id = %s AND source_id = %s"
+            for sql in (
+                f"DELETE FROM tags WHERE document_id IN ({docs})",
+                f"DELETE FROM edges WHERE from_doc IN ({docs}) OR to_doc IN ({docs})",
+                f"DELETE FROM findings WHERE document_id IN ({docs})",
+                f"DELETE FROM changes WHERE document_id IN ({docs})",
+                f"DELETE FROM watches WHERE document_id IN ({docs})",
+            ):
+                args = (project_id, source_id) * sql.count("SELECT id FROM documents")
+                conn.execute(sql, args)
+            # chunks cascade from documents; facts/glossary references become NULL
+            conn.execute("DELETE FROM documents WHERE project_id = %s AND source_id = %s",
+                         (project_id, source_id))
+        else:
+            # Retained documents become ordinary disconnected knowledge. The
+            # provider/title/source metadata stays on each row; only the live
+            # connector identity is severed so a future connector cannot own
+            # or mutate this frozen snapshot.
+            conn.execute("UPDATE documents SET source_id = NULL WHERE project_id = %s AND source_id = %s",
+                         (project_id, source_id))
         conn.execute("DELETE FROM ingest_checkpoints WHERE project_id = %s AND provider = %s",
                      (project_id, row["provider"]))
         conn.execute("DELETE FROM sources WHERE project_id = %s AND id = %s",
@@ -77,10 +85,12 @@ def remove_source(source_id: int) -> dict | None:
                    for step in nodes):
                 conn.execute("DELETE FROM workflow_runs WHERE workflow_id = %s", (flow["id"],))
                 conn.execute("DELETE FROM workflows WHERE id = %s", (flow["id"],))
+        detail = ("Removed by admin, documents deleted" if delete_documents
+                  else "Removed by admin, documents retained")
         conn.execute("""INSERT INTO sync_events (project_id, provider, event, detail, at_label)
-          VALUES (%s, %s, %s, 'Removed by admin, documents deleted',
+          VALUES (%s, %s, %s, %s,
           to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))""",
-          (project_id, row["provider"], f"removed: {row['display_name']}"))
+          (project_id, row["provider"], f"removed: {row['display_name']}", detail))
     return row
 
 
