@@ -125,6 +125,153 @@ def fact_candidates(run_id: int) -> list[dict]:
         ).fetchall()
 
 
+def fact_embedding_subjects(run_id: int) -> list[dict]:
+    """Current claims that need to share one comparable embedding space."""
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn:
+        candidates = conn.execute(
+            """SELECT id, 'candidate' AS subject_type, claim
+                 FROM fact_extraction_candidates
+                WHERE project_id = %s AND run_id = %s ORDER BY id""",
+            (project_id, run_id),
+        ).fetchall()
+        facts = conn.execute(
+            """SELECT id, 'fact' AS subject_type, claim FROM facts
+                WHERE project_id = %s AND status NOT IN ('Retired', 'Invalidated') ORDER BY id""",
+            (project_id,),
+        ).fetchall()
+    return [*facts, *candidates]
+
+
+def upsert_fact_embedding(subject_type: str, subject_id: int, *, profile: str,
+                          provider: str, model: str, content_hash: str,
+                          embedding: list[float]) -> None:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn, conn.transaction():
+        conn.execute(
+            """INSERT INTO fact_embeddings
+                 (project_id, subject_type, subject_id, embedding_profile, provider,
+                  model, dimensions, content_hash, embedding)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::vector)
+               ON CONFLICT (project_id, subject_type, subject_id, embedding_profile, purpose)
+               DO UPDATE SET provider = EXCLUDED.provider, model = EXCLUDED.model,
+                 dimensions = EXCLUDED.dimensions, content_hash = EXCLUDED.content_hash,
+                 embedding = EXCLUDED.embedding, updated_at = now()""",
+            (project_id, subject_type, subject_id, profile, provider, model,
+             len(embedding), content_hash, str(embedding)),
+        )
+
+
+def current_fact_embedding_hashes(profile: str) -> dict[tuple[str, int], str]:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn:
+        rows = conn.execute(
+            """SELECT subject_type, subject_id, content_hash FROM fact_embeddings
+                WHERE project_id = %s AND embedding_profile = %s AND purpose = 'fact'""",
+            (project_id, profile),
+        ).fetchall()
+    return {(str(row["subject_type"]), int(row["subject_id"])): str(row["content_hash"])
+            for row in rows}
+
+
+def candidate_fact_neighbors(candidate_id: int, profile: str, *, limit: int = 8,
+                             minimum_similarity: float = .72) -> list[dict]:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn:
+        return conn.execute(
+            """SELECT f.id, f.claim AS label, f.status, f.document_id,
+                      d.updated_src AS target_updated_at, d.content_hash AS target_content_hash,
+                      1 - (target.embedding <=> query.embedding) AS similarity
+                 FROM fact_embeddings query
+                 JOIN fact_embeddings target ON target.project_id = query.project_id
+                   AND target.embedding_profile = query.embedding_profile
+                   AND target.purpose = query.purpose AND target.subject_type = 'fact'
+                 JOIN facts f ON f.project_id = target.project_id AND f.id = target.subject_id
+                 LEFT JOIN documents d ON d.project_id = f.project_id AND d.id = f.document_id
+                WHERE query.project_id = %s AND query.subject_type = 'candidate'
+                  AND query.subject_id = %s AND query.embedding_profile = %s
+                  AND f.status NOT IN ('Retired', 'Invalidated')
+                  AND 1 - (target.embedding <=> query.embedding) >= %s
+                ORDER BY target.embedding <=> query.embedding, f.id LIMIT %s""",
+            (project_id, candidate_id, profile, minimum_similarity, limit),
+        ).fetchall()
+
+
+def candidate_document_neighbors(candidate_id: int, profile: str, *, source_document_id: int | None,
+                                 limit: int = 6, minimum_similarity: float = .68) -> list[dict]:
+    """MaxSim over chunk vectors: each document may contribute its best passage."""
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn:
+        return conn.execute(
+            """SELECT d.id, d.title AS label, d.updated_src AS target_updated_at,
+                      d.content_hash AS target_content_hash,
+                      max(1 - (chunks.embedding <=> query.embedding)) AS similarity
+                 FROM fact_embeddings query
+                 JOIN chunk_embeddings chunks ON chunks.project_id = query.project_id
+                   AND chunks.embedding_profile = query.embedding_profile
+                   AND chunks.purpose = 'document'
+                 JOIN documents d ON d.project_id = chunks.project_id AND d.id = chunks.document_id
+                 JOIN chunks c ON c.project_id = chunks.project_id AND c.id = chunks.chunk_id
+                    AND c.content_hash = chunks.content_hash
+                WHERE query.project_id = %s AND query.subject_type = 'candidate'
+                  AND query.subject_id = %s AND query.embedding_profile = %s
+                  AND (%s::integer IS NULL OR d.id <> %s::integer)
+                GROUP BY d.id, d.title, d.updated_src, d.content_hash, query.embedding
+               HAVING max(1 - (chunks.embedding <=> query.embedding)) >= %s
+                ORDER BY similarity DESC, d.id LIMIT %s""",
+            (project_id, candidate_id, profile, source_document_id, source_document_id,
+             minimum_similarity, limit),
+        ).fetchall()
+
+
+def replace_candidate_semantic_links(candidate_id: int, profile: str, links: list[dict],
+                                     *, impact_score: int, high_impact: bool) -> None:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn, conn.transaction():
+        conn.execute(
+            """UPDATE fact_semantic_links SET active = false
+                WHERE project_id = %s AND subject_type = 'candidate' AND subject_id = %s
+                  AND embedding_profile = %s""",
+            (project_id, candidate_id, profile),
+        )
+        for link in links:
+            conn.execute(
+                """INSERT INTO fact_semantic_links
+                     (project_id, subject_type, subject_id, target_type, target_id,
+                      embedding_profile, similarity, relation, target_label,
+                      target_updated_at, target_content_hash, active)
+                   VALUES (%s, 'candidate', %s, %s, %s, %s, %s, %s, %s, %s, %s, true)
+                   ON CONFLICT (project_id, subject_type, subject_id, target_type, target_id, embedding_profile)
+                   DO UPDATE SET similarity = EXCLUDED.similarity, relation = EXCLUDED.relation,
+                     target_label = EXCLUDED.target_label,
+                     target_updated_at = EXCLUDED.target_updated_at,
+                     target_content_hash = EXCLUDED.target_content_hash,
+                     observed_at = now(), active = true""",
+                (project_id, candidate_id, link["target_type"], link["target_id"], profile,
+                 float(link["similarity"]), link["relation"], link["target_label"][:500],
+                 link.get("target_updated_at"), link.get("target_content_hash") or ""),
+            )
+        conn.execute(
+            """UPDATE fact_extraction_candidates SET impact_score = %s, high_impact = %s
+                WHERE project_id = %s AND id = %s""",
+            (impact_score, high_impact, project_id, candidate_id),
+        )
+
+
+def semantic_links(subject_type: str, subject_id: int) -> list[dict]:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn:
+        return conn.execute(
+            """SELECT target_type, target_id, relation, similarity, target_label,
+                      target_updated_at, target_content_hash, observed_at
+                 FROM fact_semantic_links
+                WHERE project_id = %s AND subject_type = %s AND subject_id = %s AND active
+                ORDER BY CASE relation WHEN 'contradicts' THEN 0 WHEN 'supports' THEN 1 ELSE 2 END,
+                         similarity DESC, id""",
+            (project_id, subject_type, subject_id),
+        ).fetchall()
+
+
 def review_fact_candidate(candidate_id: int, *, accepted: bool, reviewer: str,
                           reason: str = "", kind: str = "human") -> bool:
     project_id = access.require_current_access().project_id
@@ -170,16 +317,51 @@ def publish_fact_candidates(run_id: int, owner: str, *, verified: bool = False) 
             fact = conn.execute(
                 """INSERT INTO facts
                      (project_id, claim, source, owner_name, owner_tint, status,
-                      verified, verified_at, document_id)
+                      verified, verified_at, document_id, valid_from)
                    VALUES (%s, %s, %s, %s, 1, %s, %s,
-                           CASE WHEN %s THEN current_date ELSE NULL END, %s)
+                           CASE WHEN %s THEN current_date ELSE NULL END, %s,
+                           COALESCE((SELECT updated_src FROM documents
+                                      WHERE project_id = %s AND id = %s), now()))
                    ON CONFLICT (project_id, claim) DO UPDATE SET claim = EXCLUDED.claim
                    RETURNING id""",
                 (project_id, candidate["claim"], candidate["source_label"], owner,
                  status, time.strftime("%b %d, %Y") if verified else "—", verified,
-                 candidate["document_id"]),
+                 candidate["document_id"], project_id, candidate["document_id"]),
             ).fetchone()
             if fact:
+                conn.execute(
+                    """INSERT INTO fact_embeddings
+                         (project_id, subject_type, subject_id, embedding_profile, provider,
+                          model, purpose, representation, distance_metric, normalized,
+                          dimensions, content_hash, embedding)
+                       SELECT project_id, 'fact', %s, embedding_profile, provider, model,
+                              purpose, representation, distance_metric, normalized,
+                              dimensions, content_hash, embedding
+                         FROM fact_embeddings
+                        WHERE project_id = %s AND subject_type = 'candidate' AND subject_id = %s
+                       ON CONFLICT (project_id, subject_type, subject_id, embedding_profile, purpose)
+                       DO UPDATE SET content_hash = EXCLUDED.content_hash,
+                         embedding = EXCLUDED.embedding, updated_at = now()""",
+                    (fact["id"], project_id, candidate["id"]),
+                )
+                conn.execute(
+                    """INSERT INTO fact_semantic_links
+                         (project_id, subject_type, subject_id, target_type, target_id,
+                          embedding_profile, similarity, relation, target_label,
+                          target_updated_at, target_content_hash, observed_at, active)
+                       SELECT project_id, 'fact', %s, target_type, target_id,
+                              embedding_profile, similarity, relation, target_label,
+                              target_updated_at, target_content_hash, observed_at, active
+                         FROM fact_semantic_links
+                        WHERE project_id = %s AND subject_type = 'candidate' AND subject_id = %s
+                       ON CONFLICT (project_id, subject_type, subject_id, target_type, target_id, embedding_profile)
+                       DO UPDATE SET similarity = EXCLUDED.similarity, relation = EXCLUDED.relation,
+                         target_label = EXCLUDED.target_label,
+                         target_updated_at = EXCLUDED.target_updated_at,
+                         target_content_hash = EXCLUDED.target_content_hash,
+                         observed_at = EXCLUDED.observed_at, active = EXCLUDED.active""",
+                    (fact["id"], project_id, candidate["id"]),
+                )
                 conn.execute(
                     """UPDATE fact_extraction_candidates SET published_fact_id = %s
                         WHERE project_id = %s AND id = %s""",

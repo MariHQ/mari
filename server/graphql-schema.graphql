@@ -211,6 +211,19 @@ type FactExtractionCandidate {
   reviewer: String!
   reviewedAt: String!
   publishedFactId: Int
+  impactScore: Int!
+  highImpact: Boolean!
+  semanticLinks: [FactSemanticLink!]!
+}
+
+type FactSemanticLink {
+  targetType: String!
+  targetId: Int!
+  relation: String!
+  similarity: Float!
+  targetLabel: String!
+  targetUpdatedAt: String!
+  observedAt: String!
 }
 
 type Finding {
@@ -548,6 +561,7 @@ type Query {
   workflowRuns(workflowId: Int = null): [WorkflowRun!]!
   workflowRun(id: Int!): WorkflowRun
   factExtractionCandidates(runId: Int!): [FactExtractionCandidate!]!
+  factSemanticLinks(factId: Int!): [FactSemanticLink!]!
   knowledgeChatDestinations: [KnowledgeChatDestination!]!
   notifications: [Notification!]!
   workspace: Workspace!

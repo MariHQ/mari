@@ -40,7 +40,7 @@ from mari_server.product.types import (
     ActivityBucket, ActivityItem, ApiKey, ApprovedAnswer,
     AuditDetail, AuditEvent, AuditFinding, AuditRun, Change, ChatMessage,
     ChatSession, Checkpoint, Decision, DigestImpact, DigestTopic, DigestWhere,
-    DocHistory, Document, DocumentTemplate, Fact, FactContradiction, FactExtractionCandidate, Finding,
+    DocHistory, Document, DocumentTemplate, Fact, FactContradiction, FactExtractionCandidate, FactSemanticLink, Finding,
     FreshnessRow, GithubRepo, GithubTeamSync, GlossaryCandidate, GlossaryTerm,
     GraphStats, GraphView, InsightStats, LineageEdge, LineageNode, McpServer,
     Member, Notification, PromotedWorkflow, Provisioning, ReadabilityRow, RelatedDoc, Setting,
@@ -1007,6 +1007,16 @@ class Query:
 
     @strawberry.field
     def fact_extraction_candidates(self, run_id: int) -> list[FactExtractionCandidate]:
+        def semantic_links(candidate_id: int) -> list[FactSemanticLink]:
+            return [FactSemanticLink(
+                target_type=link["target_type"], target_id=link["target_id"],
+                relation=link["relation"], similarity=float(link["similarity"]),
+                target_label=link["target_label"],
+                target_updated_at=(link["target_updated_at"].isoformat()
+                                   if link.get("target_updated_at") else ""),
+                observed_at=link["observed_at"].isoformat() if link.get("observed_at") else "",
+            ) for link in knowledge_store.semantic_links("candidate", candidate_id)]
+
         return [FactExtractionCandidate(
             id=row["id"], run_id=row["run_id"], document_id=row.get("document_id"),
             document_title=row.get("document_title") or "Source unavailable",
@@ -1016,7 +1026,20 @@ class Query:
             reviewer=row["reviewer"],
             reviewed_at=row["reviewed_at"].isoformat() if row.get("reviewed_at") else "",
             published_fact_id=row.get("published_fact_id"),
+            impact_score=int(row.get("impact_score") or 0), high_impact=bool(row.get("high_impact")),
+            semantic_links=semantic_links(row["id"]),
         ) for row in knowledge_store.fact_candidates(run_id)]
+
+    @strawberry.field
+    def fact_semantic_links(self, fact_id: int) -> list[FactSemanticLink]:
+        return [FactSemanticLink(
+            target_type=link["target_type"], target_id=link["target_id"],
+            relation=link["relation"], similarity=float(link["similarity"]),
+            target_label=link["target_label"],
+            target_updated_at=(link["target_updated_at"].isoformat()
+                               if link.get("target_updated_at") else ""),
+            observed_at=link["observed_at"].isoformat() if link.get("observed_at") else "",
+        ) for link in knowledge_store.semantic_links("fact", fact_id)]
 
     @strawberry.field
     def knowledge_chat_destinations(self) -> list[KnowledgeChatDestination]:

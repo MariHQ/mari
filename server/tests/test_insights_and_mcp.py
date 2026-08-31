@@ -14,6 +14,36 @@ from mari_server.destinations import mcp
 
 
 class FactInsightTests(unittest.TestCase):
+    def test_fact_impact_uses_versioned_vectors_maxsim_neighbors_and_temporal_links(self) -> None:
+        subjects = [
+            {"id": 3, "subject_type": "fact", "claim": "Workspace retention period is 30 days."},
+            {"id": 9, "subject_type": "candidate", "claim": "Workspace retention period is 10 days."},
+        ]
+        candidate = {"id": 9, "claim": subjects[1]["claim"], "document_id": 7}
+        source = {"id": 7, "title": "Current policy", "updated_src": "2026-08-30", "content_hash": "doc-7"}
+        fact_neighbor = {"id": 3, "label": subjects[0]["claim"], "similarity": .94,
+                         "target_updated_at": "2026-01-01", "target_content_hash": "old"}
+        doc_neighbor = {"id": 8, "label": "Migration guide", "similarity": .81,
+                        "target_updated_at": "2026-08-20", "target_content_hash": "doc-8"}
+        with patch.object(knowledge_service.knowledge_store, "fact_embedding_subjects", return_value=subjects), \
+             patch.object(knowledge_service.knowledge_store, "current_fact_embedding_hashes", return_value={}), \
+             patch.object(knowledge_service.knowledge_store, "upsert_fact_embedding") as upsert, \
+             patch.object(knowledge_service.knowledge_store, "fact_candidates", return_value=[candidate]), \
+             patch.object(knowledge_service.knowledge_store, "candidate_fact_neighbors", return_value=[fact_neighbor]), \
+             patch.object(knowledge_service.knowledge_store, "candidate_document_neighbors", return_value=[doc_neighbor]) as docs, \
+             patch.object(knowledge_service.knowledge_store, "document", return_value=source), \
+             patch.object(knowledge_service.knowledge_store, "replace_candidate_semantic_links") as replace, \
+             patch.object(knowledge_service.llm, "embedding_profile", return_value="openai:model:profile"), \
+             patch.object(knowledge_service.llm, "embedding_model", return_value=("openai", "model")), \
+             patch.object(knowledge_service.llm, "embed_many", return_value=[[0.1] * 768, [0.2] * 768]):
+            result = knowledge_service.map_fact_candidate_impact(44)
+        self.assertEqual(upsert.call_count, 2)
+        docs.assert_called_once_with(9, "openai:model:profile", source_document_id=7)
+        links = replace.call_args.args[2]
+        self.assertEqual([link["relation"] for link in links], ["source", "contradicts", "related"])
+        self.assertTrue(replace.call_args.kwargs["high_impact"])
+        self.assertEqual(result, {"impact_links": 3, "high_impact_facts": 1})
+
     def test_fact_scan_keeps_provenance_deduplicates_and_rejects_metadata(self) -> None:
         docs = [{"id": 7, "title": "Limits", "source": "gdrive", "body": "Exports stop at 10 MB.", "snippet": ""}]
         model = [[

@@ -237,6 +237,16 @@ def _step_review_facts(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
     return "passed", detail, {"accepted_facts": counts["accepted"], "rejected_facts": counts["rejected"]}
 
 
+def _step_map_fact_impact(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
+    from mari_server.knowledge.service import map_fact_candidate_impact
+    if ctx.get("dry_run"):
+        return "passed", "would map related facts and temporal evidence (dry run)", {}
+    stats = map_fact_candidate_impact(int(ctx["run_id"]))
+    detail = (f"{stats['impact_links']} evidence links · "
+              f"{stats['high_impact_facts']} high-impact candidates")
+    return "passed", detail, stats
+
+
 def _step_publish_facts(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
     from mari_server.identity.actor import actor_name
     from mari_server.persistence.postgres import knowledge as knowledge_store
@@ -288,13 +298,14 @@ STEP_IMPLS: dict[str, t.Callable] = {
     "sync_source": _step_sync_source,
     "refresh_digest": _step_refresh_digest,
     "scan_facts": _step_scan_facts,
+    "map_fact_impact": _step_map_fact_impact,
     "review_facts": _step_review_facts,
     "publish_facts": _step_publish_facts,
     "scan_decisions": _step_scan_decisions,
 }
 
 # steps that call the local LLM (shown as slow in the UI)
-LLM_STEPS = {"refine", "fact_check", "derive_links", "summarize", "refresh_digest", "scan_facts", "review_facts", "scan_decisions"}
+LLM_STEPS = {"refine", "fact_check", "derive_links", "summarize", "refresh_digest", "scan_facts", "map_fact_impact", "review_facts", "scan_decisions"}
 
 # Steps that are safe to run a second time after a transient failure (FLOW-3).
 # A failed step used to end the run outright, with no retry and no way to tell a
@@ -308,7 +319,7 @@ LLM_STEPS = {"refine", "fact_check", "derive_links", "summarize", "refresh_diges
 # Deliberately absent: `approval` (pauses rather than fails) and `condition`
 # (cannot fail transiently).
 RETRYABLE_STEPS = {"fetch_docs", "tag", "create_task", "notify", "summarize",
-                   "derive_links", "sync_source", "scan_facts", "review_facts", "publish_facts", "scan_decisions",
+                   "derive_links", "sync_source", "scan_facts", "map_fact_impact", "review_facts", "publish_facts", "scan_decisions",
                    "fact_check", "refine", "refresh_digest"}
 STEP_RETRIES = 1        # one extra attempt, not a loop
 STEP_RETRY_BACKOFF = 2.0  # seconds
@@ -399,7 +410,8 @@ def _public_stats(ctx: dict) -> dict:
     # "the scan found nothing" on every run that never scanned.
     if "facts" in ctx:
         stats["facts"] = ctx["facts"]
-    for key in ("accepted_facts", "rejected_facts", "published_facts"):
+    for key in ("accepted_facts", "rejected_facts", "published_facts",
+                "impact_links", "high_impact_facts"):
         if key in ctx:
             stats[key] = ctx[key]
     if "decisions" in ctx:
@@ -697,6 +709,19 @@ def _adopt_fact_review(workflow_id: int) -> None:
     workflow_store.update_nodes(workflow_id, nodes)
 
 
+def _adopt_fact_impact(workflow_id: int) -> None:
+    """Insert impact mapping into the shipped staged workflow only."""
+    nodes = workflow_store.workflow_nodes(workflow_id)
+    if [node.get("kind") for node in nodes] != [
+        "trigger", "fetch_docs", "scan_facts", "review_facts", "publish_facts",
+    ]:
+        return
+    nodes.insert(3, {
+        "kind": "map_fact_impact", "label": "Map related facts and evidence", "config": {},
+    })
+    workflow_store.update_nodes(workflow_id, nodes)
+
+
 def ensure_fact_scan_flow() -> int:
     """Get or create the scheduled fact extraction flow for this project."""
     existing = workflow_store.find_by_step("scan_facts")
@@ -709,12 +734,14 @@ def ensure_fact_scan_flow() -> int:
             )
         _adopt_rotation(existing, "scan_facts", "facts")
         _adopt_fact_review(existing["id"])
+        _adopt_fact_impact(existing["id"])
         return existing["id"]
     nodes = [
             {"kind": "trigger", "label": "Every hour", "config": {"label": "Scheduled · hourly"}},
             {"kind": "fetch_docs", "label": "Read new and changed documents",
              "config": {"k": 50, "rotate": "facts"}},
             {"kind": "scan_facts", "label": "Extract checkable claims", "config": {}},
+            {"kind": "map_fact_impact", "label": "Map related facts and evidence", "config": {}},
             {"kind": "review_facts", "label": "Review candidates", "config": {"mode": "human"}},
             {"kind": "publish_facts", "label": "Publish accepted facts", "config": {"status": "needs_review"}},
         ]

@@ -113,11 +113,31 @@ class WorkflowStepTests(unittest.TestCase):
         with patch.object(flowengine.workflow_store, "find_by_step", return_value=existing), \
              patch.object(flowengine.workflow_store, "update_metadata") as update, \
              patch.object(flowengine, "_adopt_rotation"), \
-             patch.object(flowengine, "_adopt_fact_review"):
+             patch.object(flowengine, "_adopt_fact_review"), \
+             patch.object(flowengine, "_adopt_fact_impact"):
             self.assertEqual(flowengine.ensure_fact_scan_flow(), 17)
         update.assert_called_once_with(
             17, "Fact extraction", flowengine.FACT_SCAN_DESCRIPTION,
         )
+
+    def test_fact_impact_mapping_is_a_first_class_workflow_step(self) -> None:
+        with patch("mari_server.knowledge.service.map_fact_candidate_impact",
+                   return_value={"impact_links": 7, "high_impact_facts": 2}):
+            status, detail, updates = flowengine._step_map_fact_impact({}, {"run_id": 91})
+        self.assertEqual(status, "passed")
+        self.assertIn("7 evidence links", detail)
+        self.assertEqual(updates["high_impact_facts"], 2)
+
+    def test_staged_fact_workflow_adopts_temporal_impact_mapping(self) -> None:
+        nodes = [
+            {"kind": "trigger"}, {"kind": "fetch_docs"}, {"kind": "scan_facts"},
+            {"kind": "review_facts"}, {"kind": "publish_facts"},
+        ]
+        with patch.object(flowengine.workflow_store, "workflow_nodes", return_value=nodes), \
+             patch.object(flowengine.workflow_store, "update_nodes") as update:
+            flowengine._adopt_fact_impact(17)
+        saved = update.call_args.args[1]
+        self.assertEqual(saved[3]["kind"], "map_fact_impact")
 
     def test_human_fact_review_waits_until_every_candidate_has_a_verdict(self) -> None:
         with patch("mari_server.persistence.postgres.knowledge.fact_candidate_counts",

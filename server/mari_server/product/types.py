@@ -539,6 +539,20 @@ class FactExtractionCandidate:
     reviewer: str
     reviewed_at: str
     published_fact_id: int | None
+    impact_score: int
+    high_impact: bool
+    semantic_links: list[FactSemanticLink]
+
+
+@strawberry.type
+class FactSemanticLink:
+    target_type: str
+    target_id: int
+    relation: str
+    similarity: float
+    target_label: str
+    target_updated_at: str
+    observed_at: str
 
 
 @strawberry.type

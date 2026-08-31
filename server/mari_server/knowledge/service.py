@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import concurrent.futures as cf
 import contextvars
+import hashlib
 import json
 import time
 import typing as t
@@ -412,6 +413,87 @@ def ai_review_fact_candidates(run_id: int, instructions: str = "") -> dict[str, 
             reason=assessment.explanation, kind="ai",
         )
     return knowledge_store.fact_candidate_counts(run_id)
+
+
+def map_fact_candidate_impact(run_id: int) -> dict[str, int]:
+    """Embed candidates and map their temporal fact/document neighborhood.
+
+    Fact-to-document lookup deliberately uses chunk MaxSim in persistence: a
+    supporting passage should not disappear inside an unrelated document
+    centroid. Links snapshot source timestamps and hashes so an invalidation
+    report remains explainable after the corpus evolves.
+    """
+    subjects = knowledge_store.fact_embedding_subjects(run_id)
+    profile = llm.embedding_profile()
+    provider, model = llm.embedding_model()
+    hashes = {(
+        str(subject["subject_type"]), int(subject["id"]),
+    ): hashlib.sha256(str(subject["claim"]).encode("utf-8")).hexdigest() for subject in subjects}
+    stored = knowledge_store.current_fact_embedding_hashes(profile)
+    missing = [subject for subject in subjects
+               if stored.get((str(subject["subject_type"]), int(subject["id"]))) !=
+               hashes[(str(subject["subject_type"]), int(subject["id"]))]]
+    vectors = llm.embed_many([str(subject["claim"]) for subject in missing], purpose="document")
+    for subject, vector in zip(missing, vectors):
+        if vector is None:
+            raise RuntimeError(f"Fact embedding failed: {llm.last_error() or 'provider returned no vector'}")
+        key = (str(subject["subject_type"]), int(subject["id"]))
+        knowledge_store.upsert_fact_embedding(
+            key[0], key[1], profile=profile, provider=provider, model=model,
+            content_hash=hashes[key], embedding=vector,
+        )
+
+    candidates = knowledge_store.fact_candidates(run_id)
+    high_impact = 0
+    linked = 0
+    # Import at execution time: product queries owns the existing conservative
+    # numeric/polarity detector, and importing it at module load would create a
+    # GraphQL service cycle.
+    from mari_server.product.queries import detect_contradictions
+    for candidate in candidates:
+        fact_neighbors = knowledge_store.candidate_fact_neighbors(candidate["id"], profile)
+        document_neighbors = knowledge_store.candidate_document_neighbors(
+            candidate["id"], profile, source_document_id=candidate.get("document_id"),
+        )
+        links: list[dict] = []
+        contradictions = 0
+        if candidate.get("document_id"):
+            source = knowledge_store.document(candidate["document_id"])
+            if source:
+                links.append({
+                    "target_type": "document", "target_id": source["id"], "similarity": 1.0,
+                    "relation": "source", "target_label": source["title"],
+                    "target_updated_at": source.get("updated_src"),
+                    "target_content_hash": source.get("content_hash") or "",
+                })
+        for neighbor in fact_neighbors:
+            relation = "related"
+            if detect_contradictions([{"claim": candidate["claim"]}, {"claim": neighbor["label"]}]):
+                relation = "contradicts"
+                contradictions += 1
+            links.append({
+                "target_type": "fact", "target_id": neighbor["id"],
+                "similarity": float(neighbor["similarity"]), "relation": relation,
+                "target_label": neighbor["label"],
+                "target_updated_at": neighbor.get("target_updated_at"),
+                "target_content_hash": neighbor.get("target_content_hash") or "",
+            })
+        for neighbor in document_neighbors:
+            links.append({
+                "target_type": "document", "target_id": neighbor["id"],
+                "similarity": float(neighbor["similarity"]), "relation": "related",
+                "target_label": neighbor["label"],
+                "target_updated_at": neighbor.get("target_updated_at"),
+                "target_content_hash": neighbor.get("target_content_hash") or "",
+            })
+        score = len(fact_neighbors) * 2 + len(document_neighbors) + contradictions * 5
+        high = contradictions > 0 or score >= 6
+        knowledge_store.replace_candidate_semantic_links(
+            candidate["id"], profile, links, impact_score=score, high_impact=high,
+        )
+        linked += len(links)
+        high_impact += int(high)
+    return {"impact_links": linked, "high_impact_facts": high_impact}
 
 
 def fact_check_document(document_id: int) -> int:
