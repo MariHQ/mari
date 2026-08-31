@@ -62,8 +62,17 @@ INSERT INTO fact_assertions (
   recorded_from, recorded_to, status, confidence, confidence_reason,
   actor, content_hash
 )
-SELECT project_id, id, document_id, claim, valid_from, invalidated_at,
-       COALESCE(valid_from, now()), invalidated_at,
+SELECT project_id, id, document_id, claim,
+       CASE WHEN invalidated_at IS NOT NULL
+            THEN least(COALESCE(valid_from, invalidated_at - interval '1 microsecond'),
+                       invalidated_at - interval '1 microsecond')
+            ELSE valid_from END,
+       invalidated_at,
+       CASE WHEN invalidated_at IS NOT NULL
+            THEN least(COALESCE(valid_from, invalidated_at - interval '1 microsecond'),
+                       invalidated_at - interval '1 microsecond')
+            ELSE COALESCE(valid_from, now()) END,
+       invalidated_at,
        CASE WHEN status IN ('Retired', 'Invalidated') THEN 'invalidated' ELSE 'active' END,
        CASE WHEN status = 'Verified' THEN 1 ELSE 0.5 END,
        'Backfilled from the fact ledger', owner_name,

@@ -53,6 +53,10 @@ class FactIntelligenceSchemaTests(unittest.TestCase):
         self.assertNotIn("ALTER COLUMN canonical_key SET NOT NULL", MIGRATION)
         self.assertIn("WHERE canonical_key IS NOT NULL", MIGRATION)
 
+    def test_invalidated_legacy_rows_backfill_strict_time_intervals(self):
+        self.assertIn("invalidated_at - interval '1 microsecond'", MIGRATION)
+        self.assertIn("least(COALESCE(valid_from", MIGRATION)
+
 
 if __name__ == "__main__":
     unittest.main()
