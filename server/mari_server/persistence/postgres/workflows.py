@@ -97,7 +97,17 @@ def list_workflows() -> list[dict]:
     project_id = access.require_current_access().project_id
     with db.connect() as conn:
         return conn.execute(
-            "SELECT * FROM workflows WHERE project_id = %s ORDER BY id", (project_id,),
+            """SELECT w.*, latest.number AS last_run_number,
+                      latest.status AS last_run_status,
+                      latest.started_at AS last_run_started
+                 FROM workflows w
+                 LEFT JOIN LATERAL (
+                   SELECT number, status, started_at
+                     FROM workflow_runs r
+                    WHERE r.project_id = w.project_id AND r.workflow_id = w.id
+                    ORDER BY r.number DESC LIMIT 1
+                 ) latest ON true
+                WHERE w.project_id = %s ORDER BY w.id""", (project_id,),
         ).fetchall()
 
 
@@ -176,8 +186,40 @@ def create_run(workflow_id: int) -> dict:
 def set_trigger(workflow_id: int, trigger: dict) -> bool:
     project_id = access.require_current_access().project_id
     with db.connect() as conn, conn.transaction():
-        return bool(conn.execute("UPDATE workflows SET trigger = %s WHERE project_id = %s AND id = %s RETURNING id",
-                                 (json.dumps(trigger), project_id, workflow_id)).fetchone())
+        row = conn.execute(
+            "SELECT nodes FROM workflows WHERE project_id = %s AND id = %s FOR UPDATE",
+            (project_id, workflow_id),
+        ).fetchone()
+        if not row:
+            return False
+        nodes = jload(row["nodes"]) or []
+        if (trigger.get("on") or "") in {"", "schedule"}:
+            every = int(trigger.get("every_minutes") or 0)
+            if every == 0:
+                label, detail = "Manual", "Started manually"
+            elif every == 60:
+                label, detail = "Every hour", "Scheduled · hourly"
+            elif every == 1440:
+                label, detail = "Every day", "Scheduled · daily"
+            elif every == 10080:
+                label, detail = "Every week", "Scheduled · weekly"
+            elif every % 60 == 0:
+                hours = every // 60
+                label = f"Every {hours} hours"
+                detail = f"Scheduled · every {hours} hours"
+            else:
+                label = f"Every {every} min"
+                detail = f"Scheduled · every {every} min"
+            for node in nodes:
+                if node.get("kind") == "trigger":
+                    node["label"] = label
+                    node["config"] = {**(node.get("config") or {}), "label": detail}
+                    break
+        conn.execute(
+            "UPDATE workflows SET trigger = %s, nodes = %s WHERE project_id = %s AND id = %s",
+            (json.dumps(trigger), json.dumps(nodes), project_id, workflow_id),
+        )
+        return True
 
 
 def update_metadata(workflow_id: int, name: str, description: str) -> bool:

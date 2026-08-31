@@ -509,6 +509,12 @@ class Workflow:
     # {"on": "document_changed"|"document_added"|"", "source_id", "tag", "path_glob"};
     # empty "on" = manual-only.
     trigger: JSON
+    # Scheduler-manager read model. A workflow is schedule-capable when it is
+    # scheduled now or contains one of the product's recurring job steps.
+    schedule_capable: bool
+    last_run_number: int | None
+    last_run_status: str
+    last_run_started: str
 
 
 @strawberry.type

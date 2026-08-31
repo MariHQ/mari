@@ -1058,10 +1058,22 @@ class Query:
 
     @strawberry.field
     def workflows(self) -> list[Workflow]:
-        return [Workflow(id=r["id"], name=r["name"], description=r["description"], color=r["color"],
-                         pinned=r["pinned"], status=r["status"], nodes=jload(r["nodes"]),
-                         trigger=jload(r.get("trigger")) or {})
-                for r in workflow_store.list_workflows()]
+        result = []
+        for r in workflow_store.list_workflows():
+            nodes = jload(r["nodes"]) or []
+            trigger = jload(r.get("trigger")) or {}
+            recurring_steps = {"sync_source", "scan_facts", "refresh_digest"}
+            result.append(Workflow(
+                id=r["id"], name=r["name"], description=r["description"], color=r["color"],
+                pinned=r["pinned"], status=r["status"], nodes=nodes, trigger=trigger,
+                schedule_capable=(trigger.get("on") == "schedule" or any(
+                    node.get("kind") in recurring_steps for node in nodes)),
+                last_run_number=r.get("last_run_number"),
+                last_run_status=r.get("last_run_status") or "",
+                last_run_started=(r["last_run_started"].isoformat()
+                                  if r.get("last_run_started") else ""),
+            ))
+        return result
 
     @strawberry.field
     def workflow_runs(self, workflow_id: int | None = None) -> list[WorkflowRun]:

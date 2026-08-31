@@ -975,6 +975,10 @@ type Workflow {
   status: String!
   nodes: JSON!
   trigger: JSON!
+  scheduleCapable: Boolean!
+  lastRunNumber: Int
+  lastRunStatus: String!
+  lastRunStarted: String!
 }
 
 type WorkflowRun {
