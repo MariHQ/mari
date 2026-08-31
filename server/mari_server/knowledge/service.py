@@ -103,7 +103,7 @@ def _mark_scanned(kind: str, doc_ids: list[int]) -> None:
 
 def _scan_concurrently(
     docs: list[dict], operation,
-) -> tuple[list[tuple[dict, t.Any]], int, int]:
+) -> tuple[list[tuple[dict, t.Any]], int, int, list[str]]:
     """Run one model call per document, at most SCAN_WORKERS at a time, and
     stop accepting new work once SCAN_DEADLINE has passed.
 
@@ -116,6 +116,7 @@ def _scan_concurrently(
         return [], 0, 0
     results: list[tuple[dict, t.Any]] = []
     failed = 0
+    errors: list[str] = []
     pool = cf.ThreadPoolExecutor(max_workers=min(SCAN_WORKERS, len(docs)),
                                  thread_name_prefix="mari-scan")
     futures = {
@@ -132,8 +133,10 @@ def _scan_concurrently(
             document = futures[future]
             try:
                 results.append((document, future.result()))
-            except Exception:  # noqa: BLE001 — one bad document must not end the scan
+            except Exception as error:  # noqa: BLE001 — one bad document must not end the scan
                 failed += 1
+                detail = str(error).strip()
+                errors.append(f"{type(error).__name__}: {detail}" if detail else type(error).__name__)
             step_progress.report(len(finished), len(docs))
     except cf.TimeoutError:
         pass
@@ -141,7 +144,23 @@ def _scan_concurrently(
     for future in pending:
         future.cancel()
     pool.shutdown(wait=False, cancel_futures=True)
-    return results, len(pending), failed
+    return results, len(pending), failed, errors
+
+
+def _extraction_json(prompt: str, system: str, schema: dict[str, t.Any]) -> t.Any:
+    """Generate extraction JSON without losing the provider's real failure."""
+    value = llm.generate_json(prompt, system, SCAN_CALL_TIMEOUT, schema=schema)
+    if value is None:
+        raise RuntimeError(llm.last_error() or "the model returned no structured output")
+    return value
+
+
+def _all_failed(kind: str, failed: int, errors: list[str]) -> RuntimeError:
+    first = errors[0] if errors else "unknown model error"
+    suffix = f"; first error: {first}"
+    return RuntimeError(
+        f"Model extraction failed for all {failed} completed {kind}{suffix}"
+    )
 
 
 def _scan_note(unread: int, failed: int) -> str:
@@ -240,17 +259,16 @@ def scan_decisions_for(doc_ids: list[int] | None = None,
         return component_extract_decisions(
             [document],
             generate_json=lambda prompt, _version: _ground_extraction_payload(
-                llm.generate_json(
-                    prompt, "You mine team knowledge for decisions worth ratifying.", SCAN_CALL_TIMEOUT,
-                    schema=_DECISION_SCHEMA),
+                _extraction_json(
+                    prompt, "You mine team knowledge for decisions worth ratifying.", _DECISION_SCHEMA),
                 document, "decisions", "statement",
             ),
             maximum_documents=1, maximum_characters=1500,
         )
 
-    results, unread, failed = _scan_concurrently(docs, extract)
+    results, unread, failed, errors = _scan_concurrently(docs, extract)
     if not results and failed:
-        raise RuntimeError(f"Model extraction failed for all {failed} completed documents")
+        raise _all_failed("documents", failed, errors)
 
     added = 0
     for doc, out in results:
@@ -299,17 +317,16 @@ def scan_facts_for(doc_ids: list[int] | None = None,
         return component_extract_facts(
             [document],
             generate_json=lambda prompt, _version: _ground_extraction_payload(
-                llm.generate_json(
-                    prompt, "You extract verifiable facts from documentation.", SCAN_CALL_TIMEOUT,
-                    schema=_FACT_SCHEMA),
+                _extraction_json(
+                    prompt, "You extract verifiable facts from documentation.", _FACT_SCHEMA),
                 document, "facts", "claim",
             ),
             maximum_documents=1, maximum_characters=1500,
         )
 
-    results, unread, failed = _scan_concurrently(docs, extract)
+    results, unread, failed, errors = _scan_concurrently(docs, extract)
     if not results and failed:
-        raise RuntimeError(f"Model extraction failed for all {failed} completed documents")
+        raise _all_failed("documents", failed, errors)
 
     # The ceiling is per document (FACT-2). A shared budget meant the first
     # document's claims displaced the fifth document's, and the fifth
