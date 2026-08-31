@@ -36,6 +36,11 @@ class WorkflowMutations:
         return workflows.approve(project_id, run_id, actor_name=str(user.get("name") or "Mari"),
                                  ports=WorkflowMutations._ports())
 
+    @strawberry.mutation
+    def dismiss_workflow_run(self, run_id: int) -> bool:
+        """Hide a completed or waiting run from this user's recovered workspace."""
+        return workflow_repository.dismiss_run(run_id)
+
     @strawberry.mutation(deprecation_reason=DEPRECATED_EDITOR)
     def save_workflow(self, name: str, description: str, steps: JSON,
                       id: int | None = None, color: str = "#5c7a4c", pinned: bool = True) -> int:

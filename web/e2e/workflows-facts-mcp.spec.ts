@@ -42,8 +42,8 @@ test("LLM fact scan starts a workflow and reports its grounded result", async ({
   const config = page.getByRole("dialog", { name: "Configure fact extraction" });
   await config.getByLabel("Search within documents").fill("infrastructure");
   await config.getByLabel("Documents per run").fill("25");
-  await config.getByLabel("Review strategy").selectOption("guided");
-  await expect(config.getByText("AI recommendations, confidence, and rationale appear beside each candidate"))
+  await config.getByLabel("Review strategy").selectOption("auto");
+  await expect(config.getByText("High-confidence recommendations are applied; uncertain candidates still wait for you"))
     .toBeVisible();
   await config.getByRole("button", { name: "Save & run now" }).click();
   await expect(page.getByText(/Fact scan · run #1900/)).toBeVisible();
@@ -54,8 +54,13 @@ test("LLM fact scan starts a workflow and reports its grounded result", async ({
     && c.variables.config.query === "infrastructure"
     && c.variables.config.limit === 25
     && c.variables.config.adjudication_mode === "llm"
-    && c.variables.config.review_mode === "human")).toBeTruthy();
+    && c.variables.config.review_mode === "ai")).toBeTruthy();
   expect(api.calls.some((c) => c.query.includes("workflowRun"))).toBeTruthy();
+  await page.getByRole("button", { name: "Dismiss" }).click();
+  await expect(page.getByText(/Fact scan · run #1900/)).toHaveCount(0);
+  expect(api.calls.some((c) => c.query.includes("dismissWorkflowRun") && c.variables.runId === 99)).toBeTruthy();
+  await page.reload();
+  await expect(page.getByText(/Fact scan · run #1900/)).toHaveCount(0);
 });
 
 test("fact write failures remain visible and do not close the form", async ({ page }) => {

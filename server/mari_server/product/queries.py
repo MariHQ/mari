@@ -1090,6 +1090,19 @@ class Query:
                            triggered_by=r.get("triggered_by") or "")
 
     @strawberry.field
+    def latest_workflow_run(self, workflow_id: int) -> WorkflowRun | None:
+        """Newest run not explicitly dismissed by the current user."""
+        r = workflow_store.latest_visible_run(workflow_id)
+        if not r:
+            return None
+        return WorkflowRun(id=r["id"], workflow_id=r["workflow_id"], workflow_name=r["wf_name"],
+                           number=r["number"], status=r["status"],
+                           started=r["started_at"].isoformat() if r.get("started_at") else "",
+                           duration=r["duration"], progress=r["progress"],
+                           stats=jload(r["stats"]), rows=jload(r["rows_data"]),
+                           triggered_by=r.get("triggered_by") or "")
+
+    @strawberry.field
     def fact_extraction_candidates(self, run_id: int) -> list[FactExtractionCandidate]:
         def semantic_links(candidate_id: int) -> list[FactSemanticLink]:
             return [FactSemanticLink(

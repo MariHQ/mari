@@ -268,6 +268,10 @@ export async function installMockApi(page: Page, options: {
       data = { addFact: true };
     } else if (/startFactScan/.test(query)) {
       data = { startFactScan: 99 };
+    } else if (/dismissWorkflowRun/.test(query)) {
+      data = { dismissWorkflowRun: true };
+    } else if (/latestWorkflowRun/.test(query)) {
+      data = { latestWorkflowRun: null };
     } else if (/tuneTrajectoryStep/.test(query)) {
       data = { tuneTrajectoryStep: true };
     } else if (/tuneTrajectoryEvidence/.test(query)) {

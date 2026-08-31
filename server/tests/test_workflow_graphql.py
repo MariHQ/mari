@@ -22,6 +22,12 @@ class WorkflowGraphqlTests(unittest.TestCase):
         self.assertTrue(result)
         approve.assert_called_once_with(7, 2501, actor_name="Dana", ports=ports)
 
+    def test_dismiss_run_is_a_durable_repository_command(self) -> None:
+        with patch.object(graphql.workflow_repository, "dismiss_run", return_value=True) as dismiss:
+            result = graphql.WorkflowMutations.dismiss_workflow_run(None, 2501)
+        self.assertTrue(result)
+        dismiss.assert_called_once_with(2501)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -141,10 +141,10 @@ async function latestRun(): Promise<FactScan | null> {
     (row.nodes ?? []).some((node) => node.kind === "scan_facts"));
   if (!workflow) return null;
   const runs = await gqlResult<{
-    workflowRuns: { id: number; status: string }[];
-  }>("query($id: Int!) { workflowRuns(workflowId: $id) { id status } }", { id: workflow.id });
+    latestWorkflowRun: { id: number; status: string } | null;
+  }>("query($id: Int!) { latestWorkflowRun(workflowId: $id) { id status } }", { id: workflow.id });
   if (!runs.ok) throw new Error(runs.error);
-  const latest = runs.data?.workflowRuns[0];
+  const latest = runs.data?.latestWorkflowRun;
   return latest ? readRun(String(latest.id)) : null;
 }
 
@@ -224,6 +224,13 @@ export function factsActions({ currentUserName }: ActionContext): FactsActions {
       );
       if (!data.approveRun) throw new Error("Review every candidate before continuing the workflow.");
       return readRun(runId);
+    },
+    dismissFactScan: async (runId) => {
+      const data = await mutate(
+        "mutation($runId: Int!) { dismissWorkflowRun(runId: $runId) }",
+        { runId: Number(runId) },
+      );
+      if (!data.dismissWorkflowRun) throw new Error("The workflow run could not be dismissed.");
     },
     createReviewTask: async (fact) => {
       // `factCheck` is the fact-check *detector* and takes a document, not a

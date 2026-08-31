@@ -128,6 +128,37 @@ def get_run(run_id: int) -> dict | None:
         ).fetchone()
 
 
+def latest_visible_run(workflow_id: int) -> dict | None:
+    """Newest run this user has not dismissed from the Facts workspace."""
+    context = access.require_current_access()
+    with db.connect() as conn:
+        return conn.execute(
+            """SELECT r.*, w.name AS wf_name FROM workflow_runs r
+               JOIN workflows w ON w.project_id = r.project_id AND w.id = r.workflow_id
+               LEFT JOIN workflow_run_dismissals d
+                 ON d.project_id = r.project_id AND d.run_id = r.id AND d.user_id = %s
+              WHERE r.project_id = %s AND r.workflow_id = %s AND d.run_id IS NULL
+              ORDER BY r.number DESC LIMIT 1""",
+            (context.user_id, context.project_id, workflow_id),
+        ).fetchone()
+
+
+def dismiss_run(run_id: int) -> bool:
+    context = access.require_current_access()
+    if context.user_id <= 0:
+        return False
+    with db.connect() as conn, conn.transaction():
+        return bool(conn.execute(
+            """INSERT INTO workflow_run_dismissals (project_id, run_id, user_id)
+               SELECT %s, id, %s FROM workflow_runs
+                WHERE project_id = %s AND id = %s
+               ON CONFLICT (project_id, run_id, user_id)
+               DO UPDATE SET dismissed_at = now()
+               RETURNING run_id""",
+            (context.project_id, context.user_id, context.project_id, run_id),
+        ).fetchone())
+
+
 def create_run(workflow_id: int) -> dict:
     project_id = access.require_current_access().project_id
     with db.connect() as conn, conn.transaction():
