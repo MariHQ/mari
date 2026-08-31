@@ -1066,8 +1066,9 @@ class Query:
             result.append(Workflow(
                 id=r["id"], name=r["name"], description=r["description"], color=r["color"],
                 pinned=r["pinned"], status=r["status"], nodes=nodes, trigger=trigger,
-                schedule_capable=(trigger.get("on") == "schedule" or any(
-                    node.get("kind") in recurring_steps for node in nodes)),
+                schedule_capable=(r["status"] != "archived" and (
+                    trigger.get("on") == "schedule" or any(
+                        node.get("kind") in recurring_steps for node in nodes))),
                 last_run_number=r.get("last_run_number"),
                 last_run_status=r.get("last_run_status") or "",
                 last_run_started=(r["last_run_started"].isoformat()

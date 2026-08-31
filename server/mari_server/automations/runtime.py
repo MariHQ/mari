@@ -1070,6 +1070,7 @@ def ensure_decision_scan_flow() -> int:
 def seed_scheduled_flows() -> None:
     """Startup seeding: every github/connector source gets a scheduled sync
     flow; the weekly digest gets a refresh flow. Idempotent — existing kept."""
+    workflow_store.quarantine_orphan_sync_workflows()
     for s in workflow_store.connector_sources():
         cfg = s["config"] if isinstance(s["config"], dict) else json.loads(s["config"] or "{}")
         project_access = access.external_access(

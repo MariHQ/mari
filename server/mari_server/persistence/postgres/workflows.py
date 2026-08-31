@@ -517,6 +517,39 @@ def connector_sources() -> list[dict]:
         ).fetchall()
 
 
+def quarantine_orphan_sync_workflows() -> int:
+    """Archive legacy sync jobs that cannot belong to a live source.
+
+    Older bootstrap code wrote connector workflows without a project and, on
+    each restart, compared a source only with the first sync workflow it found.
+    Keep their run history, but make the rows non-runnable and invisible to the
+    scheduler manager. Project-scoped jobs whose source was removed receive the
+    same treatment.
+    """
+    with db.connect() as conn, conn.transaction():
+        rows = conn.execute(
+            """UPDATE workflows w
+                  SET status = 'archived', trigger = '{"on": ""}'::jsonb
+                WHERE status <> 'archived'
+                  AND EXISTS (
+                    SELECT 1 FROM jsonb_array_elements(w.nodes) node
+                     WHERE node->>'kind' = 'sync_source'
+                       AND (
+                         w.project_id IS NULL OR NOT EXISTS (
+                           SELECT 1 FROM sources s
+                            WHERE s.project_id = w.project_id
+                              AND s.id = CASE
+                                WHEN (node->'config'->>'source_id') ~ '^[0-9]+$'
+                                THEN (node->'config'->>'source_id')::int
+                                ELSE -1 END
+                         )
+                       )
+                  )
+              RETURNING id""",
+        ).fetchall()
+    return len(rows)
+
+
 def digest_topic_count() -> int:
     project_id = access.require_current_access().project_id
     with db.connect() as conn:

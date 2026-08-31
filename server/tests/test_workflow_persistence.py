@@ -18,6 +18,18 @@ class WorkflowPersistenceTests(unittest.TestCase):
         sql = connection.execute.call_args.args[0]
         self.assertIn("project_id IS NOT NULL", sql)
 
+    def test_orphan_sync_workflows_are_archived_without_deleting_history(self) -> None:
+        connection = MagicMock()
+        connection.execute.return_value.fetchall.return_value = [{"id": 4}, {"id": 49}]
+        manager = MagicMock()
+        manager.__enter__.return_value = connection
+        with patch.object(workflows.db, "connect", return_value=manager):
+            self.assertEqual(workflows.quarantine_orphan_sync_workflows(), 2)
+        sql = connection.execute.call_args.args[0]
+        self.assertIn("SET status = 'archived'", sql)
+        self.assertIn("w.project_id IS NULL", sql)
+        self.assertNotIn("DELETE", sql)
+
     def test_setting_schedule_keeps_trigger_node_label_in_sync(self) -> None:
         context = access.AccessContext(
             user_id=2, project_id=7, project_slug="acme", project_name="Acme",
