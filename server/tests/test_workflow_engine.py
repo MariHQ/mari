@@ -78,6 +78,10 @@ class WorkflowStepTests(unittest.TestCase):
         self.assertEqual(result["claims_per_document"], 10)
         self.assertEqual(result["source_ids"], [3, 8])
         saved = update.call_args.args[1]
+        self.assertEqual(saved[0], {
+            "kind": "trigger", "label": "Every 6 hours",
+            "config": {"label": "Scheduled · every 6 hours"},
+        })
         self.assertEqual(saved[1]["config"]["query"], "platform")
         self.assertEqual(saved[2]["config"], {"claims_per_document": 10})
         trigger.assert_called_once_with(17, {"on": "schedule", "every_minutes": 360})
@@ -85,6 +89,21 @@ class WorkflowStepTests(unittest.TestCase):
     def test_fact_scan_configuration_rejects_unknown_schedule(self) -> None:
         with self.assertRaisesRegex(ValueError, "schedule"):
             flowengine.configure_fact_scan_flow(17, {"schedule_minutes": 17})
+
+    def test_legacy_hourly_fact_name_becomes_schedule_neutral(self) -> None:
+        existing = {
+            "id": 17,
+            "name": "Hourly fact extraction",
+            "description": "Scans new and changed documents for atomic, checkable claims every hour.",
+            "nodes": [],
+        }
+        with patch.object(flowengine.workflow_store, "find_by_step", return_value=existing), \
+             patch.object(flowengine.workflow_store, "update_metadata") as update, \
+             patch.object(flowengine, "_adopt_rotation"):
+            self.assertEqual(flowengine.ensure_fact_scan_flow(), 17)
+        update.assert_called_once_with(
+            17, "Fact extraction", flowengine.FACT_SCAN_DESCRIPTION,
+        )
 
     def test_scheduler_has_orderly_shutdown_and_can_restart(self) -> None:
         flowengine.stop_scheduler(timeout=0)

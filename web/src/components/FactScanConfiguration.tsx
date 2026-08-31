@@ -50,9 +50,13 @@ export function FactScanConfiguration() {
       setTag(String(fetch.tag ?? ""));
       setLimit(Number(fetch.k ?? 50));
       setClaims(Number(scan.claims_per_document ?? 2));
-      setSchedule(workflow?.trigger?.on === "schedule"
-        ? Number(workflow.trigger.every_minutes ?? 60)
-        : 0);
+      // Opening the dialog can race the workflow query. A missing row while
+      // loading is not evidence that the seeded hourly workflow is manual.
+      setSchedule(workflow
+        ? (workflow.trigger?.on === "schedule"
+          ? Number(workflow.trigger.every_minutes ?? 60)
+          : 0)
+        : 60);
       setRequest((event as CustomEvent<RequestDetail>).detail);
     };
     window.addEventListener(EVENT, open);

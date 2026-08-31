@@ -602,7 +602,11 @@ def ensure_digest_flow() -> int | None:
     )
 
 
-FACT_SCAN_FLOW = "Hourly fact extraction"
+FACT_SCAN_FLOW = "Fact extraction"
+LEGACY_FACT_SCAN_FLOW = "Hourly fact extraction"
+FACT_SCAN_DESCRIPTION = (
+    "Scans new and changed documents for atomic, checkable claims on the configured schedule."
+)
 DECISION_SCAN_FLOW = "Decision scan"
 
 
@@ -638,9 +642,15 @@ def _adopt_rotation(row: dict, scan_kind: str, rotate: str) -> None:
 
 
 def ensure_fact_scan_flow() -> int:
-    """Get or create the hourly fact extraction flow for this project."""
+    """Get or create the scheduled fact extraction flow for this project."""
     existing = workflow_store.find_by_step("scan_facts")
     if existing:
+        if (existing.get("name") == LEGACY_FACT_SCAN_FLOW and
+                existing.get("description") ==
+                "Scans new and changed documents for atomic, checkable claims every hour."):
+            workflow_store.update_metadata(
+                existing["id"], FACT_SCAN_FLOW, FACT_SCAN_DESCRIPTION,
+            )
         _adopt_rotation(existing, "scan_facts", "facts")
         return existing["id"]
     nodes = [
@@ -651,7 +661,7 @@ def ensure_fact_scan_flow() -> int:
         ]
     return workflow_store.create_default_workflow(
         name=FACT_SCAN_FLOW,
-        description="Scans new and changed documents for atomic, checkable claims every hour.",
+        description=FACT_SCAN_DESCRIPTION,
         color="#1E6FA8", status="active", nodes=nodes,
         trigger={"on": "schedule", "every_minutes": 60},
     )
@@ -668,13 +678,23 @@ def configure_fact_scan_flow(workflow_id: int, raw: dict | None) -> dict:
     schedule = int(raw.get("schedule_minutes") or 0)
     if schedule not in {0, 60, 360, 1440, 10080}:
         raise ValueError("Fact scan schedule must be manual, hourly, every 6 hours, daily, or weekly.")
+    schedule_labels = {
+        0: ("Manual", "Started manually"),
+        60: ("Every hour", "Scheduled · hourly"),
+        360: ("Every 6 hours", "Scheduled · every 6 hours"),
+        1440: ("Every day", "Scheduled · daily"),
+        10080: ("Every week", "Scheduled · weekly"),
+    }
     fetch_config = {
         "k": limit, "rotate": "facts", "query": query, "tag": tag,
         "source_ids": source_ids,
     }
     nodes = workflow_store.workflow_nodes(workflow_id)
     for node in nodes:
-        if node.get("kind") == "fetch_docs":
+        if node.get("kind") == "trigger":
+            node["label"], detail = schedule_labels[schedule]
+            node["config"] = {"label": detail}
+        elif node.get("kind") == "fetch_docs":
             node["config"] = fetch_config
             node["label"] = "Read configured document scope"
         elif node.get("kind") == "scan_facts":

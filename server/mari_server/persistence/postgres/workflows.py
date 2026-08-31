@@ -145,6 +145,16 @@ def set_trigger(workflow_id: int, trigger: dict) -> bool:
                                  (json.dumps(trigger), project_id, workflow_id)).fetchone())
 
 
+def update_metadata(workflow_id: int, name: str, description: str) -> bool:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn, conn.transaction():
+        return bool(conn.execute(
+            """UPDATE workflows SET name = %s, description = %s
+                 WHERE project_id = %s AND id = %s RETURNING id""",
+            (name, description, project_id, workflow_id),
+        ).fetchone())
+
+
 def create_notification(recipient: str, text: str, detail: str) -> None:
     project_id = access.require_current_access().project_id
     with db.connect() as conn, conn.transaction():
@@ -354,8 +364,9 @@ def find_by_step(step_kind: str, *, project_scoped: bool = True) -> dict | None:
     project_id = access.require_current_access().project_id if project_scoped else None
     with db.connect() as conn:
         rows = conn.execute(
-            "SELECT id, nodes FROM workflows WHERE project_id = %s" if project_scoped
-            else "SELECT id, nodes FROM workflows",
+            "SELECT id, name, description, trigger, nodes FROM workflows WHERE project_id = %s"
+            if project_scoped else
+            "SELECT id, name, description, trigger, nodes FROM workflows",
             (project_id,) if project_scoped else (),
         ).fetchall()
     for row in rows:
