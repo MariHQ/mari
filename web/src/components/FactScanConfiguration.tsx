@@ -8,6 +8,9 @@ export type FactScanConfig = {
   limit: number;
   claims_per_document: number;
   schedule_minutes: number;
+  review_mode: "human" | "ai";
+  review_instructions: string;
+  publish_status: "needs_review" | "verified";
 };
 
 type RequestDetail = { finish: (config: FactScanConfig | null) => void };
@@ -38,6 +41,9 @@ export function FactScanConfiguration() {
   const [limit, setLimit] = useState(50);
   const [claims, setClaims] = useState(2);
   const [schedule, setSchedule] = useState(60);
+  const [reviewMode, setReviewMode] = useState<"human" | "ai">("human");
+  const [reviewInstructions, setReviewInstructions] = useState("");
+  const [publishStatus, setPublishStatus] = useState<"needs_review" | "verified">("needs_review");
 
   useEffect(() => {
     const open = (event: Event) => {
@@ -45,11 +51,16 @@ export function FactScanConfiguration() {
         (row.nodes ?? []).some((node) => node.kind === "scan_facts"));
       const fetch = (workflow?.nodes ?? []).find((node) => node.kind === "fetch_docs")?.config ?? {};
       const scan = (workflow?.nodes ?? []).find((node) => node.kind === "scan_facts")?.config ?? {};
+      const review = (workflow?.nodes ?? []).find((node) => node.kind === "review_facts")?.config ?? {};
+      const publish = (workflow?.nodes ?? []).find((node) => node.kind === "publish_facts")?.config ?? {};
       setSelected(Array.isArray(fetch.source_ids) ? fetch.source_ids.map(Number) : []);
       setQuery(String(fetch.query ?? ""));
       setTag(String(fetch.tag ?? ""));
       setLimit(Number(fetch.k ?? 50));
       setClaims(Number(scan.claims_per_document ?? 2));
+      setReviewMode(review.mode === "ai" ? "ai" : "human");
+      setReviewInstructions(String(review.instructions ?? scan.instructions ?? ""));
+      setPublishStatus(publish.status === "verified" ? "verified" : "needs_review");
       // Opening the dialog can race the workflow query. A missing row while
       // loading is not evidence that the seeded hourly workflow is manual.
       setSchedule(workflow
@@ -120,6 +131,28 @@ export function FactScanConfiguration() {
               <option value={10080}>Weekly</option>
             </select>
           </label>
+          <label className="text-[12px] font-medium text-ink">
+            Review gate
+            <select className="mt-1 w-full rounded border border-ink/20 bg-white px-3 py-2 font-normal"
+              value={reviewMode} onChange={(event) => setReviewMode(event.target.value as "human" | "ai")}>
+              <option value="human">Human review before publishing</option>
+              <option value="ai">AI review before publishing</option>
+            </select>
+          </label>
+          <label className="text-[12px] font-medium text-ink">
+            Accepted facts enter as
+            <select className="mt-1 w-full rounded border border-ink/20 bg-white px-3 py-2 font-normal"
+              value={publishStatus} onChange={(event) => setPublishStatus(event.target.value as "needs_review" | "verified")}>
+              <option value="needs_review">Needs review</option>
+              <option value="verified">Verified</option>
+            </select>
+          </label>
+          <label className="text-[12px] font-medium text-ink sm:col-span-2">
+            Extraction and review instructions
+            <textarea rows={3} className="mt-1 w-full resize-y rounded border border-ink/20 bg-white px-3 py-2 font-normal"
+              value={reviewInstructions} onChange={(event) => setReviewInstructions(event.target.value)}
+              placeholder="e.g. Only durable operating limits; reject plans, opinions, and temporary status updates." />
+          </label>
         </div>
 
         <fieldset className="mt-4 rounded border border-ink/12 p-3">
@@ -148,6 +181,9 @@ export function FactScanConfiguration() {
             limit: Math.max(1, Math.min(limit || 1, 200)),
             claims_per_document: Math.max(1, Math.min(claims || 1, 10)),
             schedule_minutes: schedule,
+            review_mode: reviewMode,
+            review_instructions: reviewInstructions.trim(),
+            publish_status: publishStatus,
           })}>Save &amp; run now</button>
         </div>
       </section>

@@ -20,6 +20,10 @@ import { requestFactScanConfiguration } from "../../components/FactScanConfigura
 // `rows` and `stats` are JSON scalars on the run, so they arrive whole.
 const RUN_QUERY = `query($id: Int!) {
   workflowRun(id: $id) { id number workflowName status progress stats rows }
+  factExtractionCandidates(runId: $id) {
+    id runId documentId documentTitle claim source evidence confidence reviewStatus
+    reviewKind reviewReason reviewer reviewedAt publishedFactId
+  }
 }`;
 
 type RunRes = {
@@ -28,6 +32,12 @@ type RunRes = {
     stats: { facts?: number } | null;
     rows: { step?: string; status?: string; detail?: string; duration?: string }[] | null;
   } | null;
+  factExtractionCandidates: {
+    id: number; runId: number; documentId: number | null; documentTitle: string;
+    claim: string; source: string; evidence: string; confidence: number;
+    reviewStatus: string; reviewKind: string; reviewReason: string; reviewer: string;
+    reviewedAt: string; publishedFactId: number | null;
+  }[];
 };
 
 /* The engine's step vocabulary is the library's, one word for one word. An
@@ -38,7 +48,7 @@ const asStatus = (s: string): RunStatus => (RUN_STATUS.has(s as RunStatus) ? (s 
 const invalidatedRuns = new Set<string>();
 
 function invalidateFactsOnce(id: string, status: RunStatus) {
-  if ((status === "running" || status === "pending") || invalidatedRuns.has(id)) return;
+  if ((status === "running" || status === "pending" || status === "waiting") || invalidatedRuns.has(id)) return;
   invalidatedRuns.add(id);
   factsChanged();
   if (invalidatedRuns.size > 200) invalidatedRuns.delete(invalidatedRuns.values().next().value!);
@@ -62,6 +72,16 @@ function mapRun(res: RunRes | null, id: string): FactScan {
     // Only a run that scanned reports a count; until then the page says nothing
     // about how many claims landed.
     added: typeof run.stats?.facts === "number" ? run.stats.facts : null,
+    candidates: (res?.factExtractionCandidates ?? []).map((candidate) => ({
+      id: candidate.id,
+      documentTitle: candidate.documentTitle,
+      claim: candidate.claim,
+      evidence: candidate.evidence,
+      confidence: candidate.confidence,
+      status: candidate.reviewStatus as "pending" | "accepted" | "rejected",
+      reviewReason: candidate.reviewReason,
+      reviewer: candidate.reviewer,
+    })),
   };
 }
 
@@ -100,6 +120,21 @@ export function factsActions({ currentUserName }: ActionContext): FactsActions {
       return readRun(String(d.startFactScan));
     },
     scanProgress: (id: string) => readRun(id),
+    reviewFactCandidate: async (runId, candidateId, accept, reason = "") => {
+      await mutate(
+        "mutation($id: Int!, $accept: Boolean!, $reason: String!) { reviewFactCandidate(id: $id, accept: $accept, reason: $reason) }",
+        { id: candidateId, accept, reason },
+      );
+      return readRun(runId);
+    },
+    completeFactReview: async (runId) => {
+      const data = await mutate(
+        "mutation($runId: Int!) { approveRun(runId: $runId) }",
+        { runId: Number(runId) },
+      );
+      if (!data.approveRun) throw new Error("Review every candidate before continuing the workflow.");
+      return readRun(runId);
+    },
     createReviewTask: async (fact) => {
       // `factCheck` is the fact-check *detector* and takes a document, not a
       // claim, so re-verification is a task on the ledger row: the same
