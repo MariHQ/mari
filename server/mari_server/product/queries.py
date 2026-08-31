@@ -1135,6 +1135,17 @@ class Query:
         )
 
     @strawberry.field
+    def fact_run_intelligence(self, run_id: int) -> list[FactIntelligence]:
+        values: list[FactIntelligence] = []
+        for assertion_id in fact_store.run_assertion_ids(run_id):
+            value = _fact_intelligence_value(fact_store.assertion_intelligence(
+                assertion_id, embedding_profile=llm.embedding_profile(),
+            ))
+            if value:
+                values.append(value)
+        return values
+
+    @strawberry.field
     def fact_intelligence(self, fact_id: int) -> FactIntelligence | None:
         assertion_id = fact_store.fact_current_assertion_id(fact_id)
         return _fact_intelligence_value(

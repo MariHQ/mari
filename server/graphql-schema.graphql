@@ -695,6 +695,7 @@ type Query {
   factExtractionCandidates(runId: Int!): [FactExtractionCandidate!]!
   factSemanticLinks(factId: Int!): [FactSemanticLink!]!
   factCandidateIntelligence(candidateId: Int!): FactIntelligence
+  factRunIntelligence(runId: Int!): [FactIntelligence!]!
   factIntelligence(factId: Int!): FactIntelligence
   factLlmBudgets(runId: Int!): [FactLlmBudget!]!
   factImpactPreview(factId: Int!): FactImpactPreview

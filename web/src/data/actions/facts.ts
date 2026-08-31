@@ -10,7 +10,7 @@
  * and no Retire rather than a control that would report success and change
  * nothing. */
 
-import type { FactScan, FactsActions, FactSemanticImpactLink } from "@mari-design/components/pages/FactsPage";
+import type { FactIntelligence, FactLlmBudget, FactScan, FactsActions, FactSemanticImpactLink } from "@mari-design/components/pages/FactsPage";
 import type { RunStatus } from "@mari-design/components/workflow/RunHistory";
 import { gqlResult } from "../../lib/api";
 import { mutate, type ActionContext } from "../actions";
@@ -24,6 +24,20 @@ const RUN_QUERY = `query($id: Int!) {
     id runId documentId documentTitle claim source evidence confidence reviewStatus
     reviewKind reviewReason reviewer reviewedAt publishedFactId impactScore highImpact
     semanticLinks { targetType targetId relation similarity targetLabel targetUpdatedAt observedAt }
+  }
+  factLlmBudgets(runId: $id) {
+    stage purpose model maxCalls maxInputTokens maxOutputTokens
+    callsUsed inputTokens outputTokens status
+  }
+  factRunIntelligence(runId: $id) {
+    candidateId structuredClaim adjudication validFrom validTo
+    components { role text }
+    relations { targetClaim relation exactScore approximateScore decisionKind rationale }
+    evidenceGroups {
+      verdict sufficient confidence rationale decisionKind
+      spans { documentTitle quote role similarity }
+    }
+    clusters { label stableKey labelKind membershipScore }
   }
 }`;
 
@@ -44,6 +58,12 @@ type RunRes = {
       similarity: number; targetLabel: string; targetUpdatedAt: string; observedAt: string;
     }[];
   }[];
+  factLlmBudgets: FactLlmBudget[];
+  factRunIntelligence: (Omit<FactIntelligence, "relations"> & {
+    candidateId: number | null;
+    relations: { targetClaim: string; relation: string; exactScore: number | null;
+      approximateScore: number | null; decisionKind: string; rationale: string }[];
+  })[];
 };
 
 /* The engine's step vocabulary is the library's, one word for one word. An
@@ -67,6 +87,16 @@ function mapRun(res: RunRes | null, id: string): FactScan {
   // A run that has stopped has landed whatever it was going to land, so the
   // ledger under the page re-reads instead of showing yesterday's rows.
   invalidateFactsOnce(id, status);
+  const intelligence = new Map((res?.factRunIntelligence ?? [])
+    .filter((row) => row.candidateId !== null)
+    .map((row) => [row.candidateId!, {
+      ...row,
+      relations: row.relations.map((relation) => ({
+        targetClaim: relation.targetClaim, relation: relation.relation,
+        similarity: relation.exactScore ?? relation.approximateScore,
+        decisionKind: relation.decisionKind, rationale: relation.rationale,
+      })),
+    }]));
   return {
     id,
     label: `${run.workflowName} · run #${run.number}`,
@@ -78,6 +108,7 @@ function mapRun(res: RunRes | null, id: string): FactScan {
     // Only a run that scanned reports a count; until then the page says nothing
     // about how many claims landed.
     added: typeof run.stats?.facts === "number" ? run.stats.facts : null,
+    llmBudgets: res?.factLlmBudgets ?? [],
     candidates: (res?.factExtractionCandidates ?? []).map((candidate) => ({
       id: candidate.id,
       documentTitle: candidate.documentTitle,
@@ -90,6 +121,7 @@ function mapRun(res: RunRes | null, id: string): FactScan {
       impactScore: candidate.impactScore,
       highImpact: candidate.highImpact,
       semanticLinks: candidate.semanticLinks ?? [],
+      intelligence: intelligence.get(candidate.id),
     })).sort((a, b) => Number(b.highImpact) - Number(a.highImpact) || b.impactScore - a.impactScore),
   };
 }
@@ -129,16 +161,24 @@ export function factsActions({ currentUserName }: ActionContext): FactsActions {
       factsChanged();
     },
     inspectFactImpact: async (id: number): Promise<FactSemanticImpactLink[]> => {
-      const result = await gqlResult<{ factSemanticLinks: FactSemanticImpactLink[] }>(
+      const result = await gqlResult<{ factImpactPreview: null | { items: {
+        impactKind: string; targetType: string; targetId: string; targetLabel: string;
+        dependencyType: string; similarity: number | null;
+      }[] } }>(
         `query($id: Int!) {
-          factSemanticLinks(factId: $id) {
-            targetType targetId relation similarity targetLabel targetUpdatedAt observedAt
+          factImpactPreview(factId: $id) {
+            items { impactKind targetType targetId targetLabel dependencyType similarity }
           }
         }`,
         { id },
       );
       if (!result.ok) throw new Error(result.error);
-      return result.data?.factSemanticLinks ?? [];
+      return (result.data?.factImpactPreview?.items ?? []).map((item) => ({
+        targetType: item.targetType, targetId: item.targetId,
+        relation: item.impactKind === "possible" ? "embedding neighbor" : item.dependencyType,
+        similarity: item.similarity ?? (item.impactKind === "direct" ? 1 : .75),
+        targetLabel: item.targetLabel, targetUpdatedAt: "", observedAt: "",
+      }));
     },
     addFact: async ({ claim, source, owner }) => {
       // `owner` defaults server-side, so an unowned claim is still accepted
