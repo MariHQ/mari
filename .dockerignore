@@ -29,6 +29,8 @@ vendor/mari-design/.git/
 vendor/mari-design/.preview/
 vendor/mari-design/node_modules/
 vendor/mari-design/output/
+vendor/mari-kit/
+docs/temporal-fact-intelligence-design.md
 
 # Runtime output (recreated at startup)
 server/builds/
