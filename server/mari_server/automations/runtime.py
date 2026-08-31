@@ -207,13 +207,47 @@ def _step_scan_facts(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
     picks its own batch, as it does from the Facts page."""
     if ctx.get("dry_run"):
         return "passed", "would mine recent documents for claims (dry run)", {}
-    from mari_server.knowledge.service import scan_facts_for
+    from mari_server.knowledge.service import extract_fact_candidates_for
+    from mari_server.persistence.postgres import knowledge as knowledge_store
     doc_ids = ctx.get("doc_ids") or None
-    added, scanned, note = scan_facts_for(
+    candidates, scanned, note = extract_fact_candidates_for(
         doc_ids,
         claims_per_document=max(1, min(int(cfg.get("claims_per_document") or 2), 10)),
+        instructions=str(cfg.get("instructions") or ""),
     )
+    added = knowledge_store.stage_fact_candidates(int(ctx["run_id"]), candidates)
     return "passed", _scan_detail(added, scanned, note, "claim"), {"facts": added}
+
+
+def _step_review_facts(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
+    from mari_server.knowledge.service import ai_review_fact_candidates
+    from mari_server.persistence.postgres import knowledge as knowledge_store
+    run_id = int(ctx["run_id"])
+    mode = str(cfg.get("mode") or "human")
+    if ctx.get("dry_run"):
+        return "passed", f"would use {mode} review (dry run)", {}
+    if mode == "ai":
+        counts = ai_review_fact_candidates(run_id, str(cfg.get("instructions") or ""))
+        detail = f"AI accepted {counts['accepted']} · rejected {counts['rejected']}"
+        return "passed", detail, {"accepted_facts": counts["accepted"], "rejected_facts": counts["rejected"]}
+    counts = knowledge_store.fact_candidate_counts(run_id)
+    if counts["pending"]:
+        return "waiting", f"{counts['pending']} candidates awaiting human review", {"pause": True}
+    detail = f"Human accepted {counts['accepted']} · rejected {counts['rejected']}"
+    return "passed", detail, {"accepted_facts": counts["accepted"], "rejected_facts": counts["rejected"]}
+
+
+def _step_publish_facts(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
+    from mari_server.identity.actor import actor_name
+    from mari_server.persistence.postgres import knowledge as knowledge_store
+    if ctx.get("dry_run"):
+        return "passed", "would publish accepted candidates (dry run)", {}
+    verified = str(cfg.get("status") or "needs_review") == "verified"
+    published = knowledge_store.publish_fact_candidates(
+        int(ctx["run_id"]), actor_name(), verified=verified,
+    )
+    destination = "Verified" if verified else "Needs review"
+    return "passed", f"{published} accepted claims published as {destination}", {"published_facts": published}
 
 
 def _step_scan_decisions(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
@@ -254,11 +288,13 @@ STEP_IMPLS: dict[str, t.Callable] = {
     "sync_source": _step_sync_source,
     "refresh_digest": _step_refresh_digest,
     "scan_facts": _step_scan_facts,
+    "review_facts": _step_review_facts,
+    "publish_facts": _step_publish_facts,
     "scan_decisions": _step_scan_decisions,
 }
 
 # steps that call the local LLM (shown as slow in the UI)
-LLM_STEPS = {"refine", "fact_check", "derive_links", "summarize", "refresh_digest", "scan_facts", "scan_decisions"}
+LLM_STEPS = {"refine", "fact_check", "derive_links", "summarize", "refresh_digest", "scan_facts", "review_facts", "scan_decisions"}
 
 # Steps that are safe to run a second time after a transient failure (FLOW-3).
 # A failed step used to end the run outright, with no retry and no way to tell a
@@ -272,7 +308,7 @@ LLM_STEPS = {"refine", "fact_check", "derive_links", "summarize", "refresh_diges
 # Deliberately absent: `approval` (pauses rather than fails) and `condition`
 # (cannot fail transiently).
 RETRYABLE_STEPS = {"fetch_docs", "tag", "create_task", "notify", "summarize",
-                   "derive_links", "sync_source", "scan_facts", "scan_decisions",
+                   "derive_links", "sync_source", "scan_facts", "review_facts", "publish_facts", "scan_decisions",
                    "fact_check", "refine", "refresh_digest"}
 STEP_RETRIES = 1        # one extra attempt, not a loop
 STEP_RETRY_BACKOFF = 2.0  # seconds
@@ -325,6 +361,7 @@ def execute_run(run_id: int, resume_from: int = 0) -> None:
     steps = wf["nodes"] if isinstance(wf["nodes"], list) else json.loads(wf["nodes"] or "[]")
     rows = run["rows_data"] if isinstance(run["rows_data"], list) else json.loads(run["rows_data"] or "[]")
     ctx: dict = (run["stats"] if isinstance(run["stats"], dict) else json.loads(run["stats"] or "{}")).get("ctx", {})
+    ctx.setdefault("run_id", run_id)
     start = time.time()
 
     if not rows:
@@ -362,6 +399,9 @@ def _public_stats(ctx: dict) -> dict:
     # "the scan found nothing" on every run that never scanned.
     if "facts" in ctx:
         stats["facts"] = ctx["facts"]
+    for key in ("accepted_facts", "rejected_facts", "published_facts"):
+        if key in ctx:
+            stats[key] = ctx[key]
     if "decisions" in ctx:
         stats["decisions"] = ctx["decisions"]
     return stats
@@ -641,6 +681,22 @@ def _adopt_rotation(row: dict, scan_kind: str, rotate: str) -> None:
     workflow_store.update_nodes(row["id"], nodes)
 
 
+def _adopt_fact_review(workflow_id: int) -> None:
+    """Upgrade the shipped three-step scanner to its staged review workflow.
+
+    Only the known legacy shape is changed. A custom pipeline remains the
+    owner's pipeline even when it happens to contain a scan_facts step.
+    """
+    nodes = workflow_store.workflow_nodes(workflow_id)
+    if [node.get("kind") for node in nodes] != ["trigger", "fetch_docs", "scan_facts"]:
+        return
+    nodes.extend([
+        {"kind": "review_facts", "label": "Review candidates", "config": {"mode": "human"}},
+        {"kind": "publish_facts", "label": "Publish accepted facts", "config": {"status": "needs_review"}},
+    ])
+    workflow_store.update_nodes(workflow_id, nodes)
+
+
 def ensure_fact_scan_flow() -> int:
     """Get or create the scheduled fact extraction flow for this project."""
     existing = workflow_store.find_by_step("scan_facts")
@@ -652,12 +708,15 @@ def ensure_fact_scan_flow() -> int:
                 existing["id"], FACT_SCAN_FLOW, FACT_SCAN_DESCRIPTION,
             )
         _adopt_rotation(existing, "scan_facts", "facts")
+        _adopt_fact_review(existing["id"])
         return existing["id"]
     nodes = [
             {"kind": "trigger", "label": "Every hour", "config": {"label": "Scheduled · hourly"}},
             {"kind": "fetch_docs", "label": "Read new and changed documents",
              "config": {"k": 50, "rotate": "facts"}},
             {"kind": "scan_facts", "label": "Extract checkable claims", "config": {}},
+            {"kind": "review_facts", "label": "Review candidates", "config": {"mode": "human"}},
+            {"kind": "publish_facts", "label": "Publish accepted facts", "config": {"status": "needs_review"}},
         ]
     return workflow_store.create_default_workflow(
         name=FACT_SCAN_FLOW,
@@ -676,6 +735,13 @@ def configure_fact_scan_flow(workflow_id: int, raw: dict | None) -> dict:
     query = str(raw.get("query") or "").strip()[:200]
     tag = str(raw.get("tag") or "").strip()[:80]
     schedule = int(raw.get("schedule_minutes") or 0)
+    review_mode = str(raw.get("review_mode") or "human")
+    if review_mode not in {"human", "ai"}:
+        raise ValueError("Fact review mode must be human or AI.")
+    instructions = str(raw.get("review_instructions") or "").strip()[:1000]
+    publish_status = str(raw.get("publish_status") or "needs_review")
+    if publish_status not in {"needs_review", "verified"}:
+        raise ValueError("Published facts must need review or be verified.")
     if schedule not in {0, 60, 360, 1440, 10080}:
         raise ValueError("Fact scan schedule must be manual, hourly, every 6 hours, daily, or weekly.")
     schedule_labels = {
@@ -698,13 +764,19 @@ def configure_fact_scan_flow(workflow_id: int, raw: dict | None) -> dict:
             node["config"] = fetch_config
             node["label"] = "Read configured document scope"
         elif node.get("kind") == "scan_facts":
-            node["config"] = {"claims_per_document": claims}
+            node["config"] = {"claims_per_document": claims, "instructions": instructions}
+        elif node.get("kind") == "review_facts":
+            node["config"] = {"mode": review_mode, "instructions": instructions}
+        elif node.get("kind") == "publish_facts":
+            node["config"] = {"status": publish_status}
     workflow_store.update_nodes(workflow_id, nodes)
     workflow_store.set_trigger(
         workflow_id,
         {"on": "schedule", "every_minutes": schedule} if schedule else {"on": ""},
     )
-    return {**fetch_config, "claims_per_document": claims, "schedule_minutes": schedule}
+    return {**fetch_config, "claims_per_document": claims, "schedule_minutes": schedule,
+            "review_mode": review_mode, "review_instructions": instructions,
+            "publish_status": publish_status}
 
 
 def ensure_decision_scan_flow() -> int:

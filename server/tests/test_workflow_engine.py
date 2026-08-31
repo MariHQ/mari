@@ -45,11 +45,14 @@ class WorkflowStepTests(unittest.TestCase):
 
     def test_scan_steps_use_document_ids_selected_by_fetch_step(self) -> None:
         from mari_server.knowledge import service
-        with patch.object(service, "scan_facts_for", return_value=(3, 2, "")) as scan:
-            status, _, updates = flowengine._step_scan_facts({}, {"doc_ids": [7, 8]})
+        candidates = [{"claim": "A", "document_id": 7}]
+        with patch.object(service, "extract_fact_candidates_for", return_value=(candidates, 2, "")) as scan, \
+             patch("mari_server.persistence.postgres.knowledge.stage_fact_candidates", return_value=1) as stage:
+            status, _, updates = flowengine._step_scan_facts({}, {"doc_ids": [7, 8], "run_id": 91})
         self.assertEqual(status, "passed")
-        self.assertEqual(updates["facts"], 3)
-        scan.assert_called_once_with([7, 8], claims_per_document=2)
+        self.assertEqual(updates["facts"], 1)
+        scan.assert_called_once_with([7, 8], claims_per_document=2, instructions="")
+        stage.assert_called_once_with(91, candidates)
 
     def test_fact_extraction_is_registered_hourly_for_each_project(self) -> None:
         context = access.external_access(3, "acme", "Acme", "test", "seed")
@@ -65,6 +68,8 @@ class WorkflowStepTests(unittest.TestCase):
             {"kind": "trigger", "config": {}},
             {"kind": "fetch_docs", "label": "old", "config": {}},
             {"kind": "scan_facts", "config": {}},
+            {"kind": "review_facts", "config": {}},
+            {"kind": "publish_facts", "config": {}},
         ]
         with patch.object(flowengine.workflow_store, "workflow_nodes", return_value=nodes), \
              patch.object(flowengine.workflow_store, "update_nodes") as update, \
@@ -73,6 +78,8 @@ class WorkflowStepTests(unittest.TestCase):
                 "limit": 999, "claims_per_document": 99,
                 "source_ids": [8, 8, 3], "query": " platform ",
                 "tag": " canonical ", "schedule_minutes": 360,
+                "review_mode": "ai", "review_instructions": "Only durable limits.",
+                "publish_status": "verified",
             })
         self.assertEqual(result["k"], 200)
         self.assertEqual(result["claims_per_document"], 10)
@@ -83,7 +90,13 @@ class WorkflowStepTests(unittest.TestCase):
             "config": {"label": "Scheduled · every 6 hours"},
         })
         self.assertEqual(saved[1]["config"]["query"], "platform")
-        self.assertEqual(saved[2]["config"], {"claims_per_document": 10})
+        self.assertEqual(saved[2]["config"], {
+            "claims_per_document": 10, "instructions": "Only durable limits.",
+        })
+        self.assertEqual(saved[3]["config"], {
+            "mode": "ai", "instructions": "Only durable limits.",
+        })
+        self.assertEqual(saved[4]["config"], {"status": "verified"})
         trigger.assert_called_once_with(17, {"on": "schedule", "every_minutes": 360})
 
     def test_fact_scan_configuration_rejects_unknown_schedule(self) -> None:
@@ -99,11 +112,34 @@ class WorkflowStepTests(unittest.TestCase):
         }
         with patch.object(flowengine.workflow_store, "find_by_step", return_value=existing), \
              patch.object(flowengine.workflow_store, "update_metadata") as update, \
-             patch.object(flowengine, "_adopt_rotation"):
+             patch.object(flowengine, "_adopt_rotation"), \
+             patch.object(flowengine, "_adopt_fact_review"):
             self.assertEqual(flowengine.ensure_fact_scan_flow(), 17)
         update.assert_called_once_with(
             17, "Fact extraction", flowengine.FACT_SCAN_DESCRIPTION,
         )
+
+    def test_human_fact_review_waits_until_every_candidate_has_a_verdict(self) -> None:
+        with patch("mari_server.persistence.postgres.knowledge.fact_candidate_counts",
+                   return_value={"pending": 2, "accepted": 1, "rejected": 0}):
+            status, detail, updates = flowengine._step_review_facts(
+                {"mode": "human"}, {"run_id": 91},
+            )
+        self.assertEqual(status, "waiting")
+        self.assertIn("2 candidates", detail)
+        self.assertEqual(updates, {"pause": True})
+
+    def test_fact_publish_only_promotes_reviewed_candidates(self) -> None:
+        with patch("mari_server.persistence.postgres.knowledge.publish_fact_candidates",
+                   return_value=3) as publish, \
+             patch("mari_server.identity.actor.actor_name", return_value="Raphael"):
+            status, detail, updates = flowengine._step_publish_facts(
+                {"status": "verified"}, {"run_id": 91},
+            )
+        self.assertEqual(status, "passed")
+        self.assertIn("Verified", detail)
+        self.assertEqual(updates, {"published_facts": 3})
+        publish.assert_called_once_with(91, "Raphael", verified=True)
 
     def test_scheduler_has_orderly_shutdown_and_can_restart(self) -> None:
         flowengine.stop_scheduler(timeout=0)

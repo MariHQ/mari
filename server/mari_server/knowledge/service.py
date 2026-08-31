@@ -292,11 +292,11 @@ def scan_decisions_for(doc_ids: list[int] | None = None,
                                    + (f" ({note})" if note else ""))
     return added, len(results), note
 
-def scan_facts_for(doc_ids: list[int] | None = None,
-                   limit: int = SCAN_DOCS,
-                   claims_per_document: int = CLAIMS_PER_DOC) -> tuple[int, int, str]:
-    """Mine `doc_ids` (or the least-recently-scanned documents) for atomic,
-    checkable claims; they land as 'Needs review' facts.
+def extract_fact_candidates_for(doc_ids: list[int] | None = None,
+                                limit: int = SCAN_DOCS,
+                                claims_per_document: int = CLAIMS_PER_DOC,
+                                instructions: str = "") -> tuple[list[dict], int, str]:
+    """Mine documents into evidence-bearing candidates without publishing.
 
     One document per model call, not one call over a pasted-together
     corpus. The old shape asked the model which document each claim came
@@ -306,7 +306,7 @@ def scan_facts_for(doc_ids: list[int] | None = None,
     claims. Reading one document at a time makes `document_id` a fact about
     the call rather than a guess about the output.
 
-    Returns (added, documents read, note)."""
+    Returns (candidates, documents read, note)."""
     docs = [d for d in _scan_batch("facts", doc_ids, limit)
             if (d["body"] or d["snippet"] or "").strip()]
     if not docs:
@@ -319,7 +319,9 @@ def scan_facts_for(doc_ids: list[int] | None = None,
             [document],
             generate_json=lambda prompt, _version: _ground_extraction_payload(
                 _extraction_json(
-                    prompt, "You extract verifiable facts from documentation.", _FACT_SCHEMA),
+                    prompt, "You extract verifiable facts from documentation."
+                    + (f" Reviewer instructions: {instructions[:1000]}" if instructions else ""),
+                    _FACT_SCHEMA),
                 document, "facts", "claim",
             ),
             maximum_documents=1, maximum_characters=1500,
@@ -333,26 +335,83 @@ def scan_facts_for(doc_ids: list[int] | None = None,
     # document's claims displaced the fifth document's, and the fifth
     # document was read for nothing — silently, since the count it returned
     # looked exactly like a document that had no claims in it.
-    added = 0
+    candidates: list[dict] = []
+    seen = set(existing)
     for doc, out in results:
         for item in out[:max(1, min(int(claims_per_document), 10))]:
             claim = (item.claim if hasattr(item, "claim")
                      else str(item.get("claim", ""))).strip()[:200]
-            if not is_claim(claim) or claim.lower() in existing:
+            if not is_claim(claim) or claim.lower() in seen:
                 continue
-            # `source` stays the human label it always was; `document_id`
-            # is the key, and it is the document this call actually read.
-            if knowledge_store.add_fact(
-                claim, ("Mari scan · " + doc["title"])[:80], actor_name(), doc["id"],
-            ):
-                existing.add(claim.lower())
-                added += 1
+            evidence = ""
+            confidence = 0.0
+            if hasattr(item, "evidence"):
+                evidence = item.evidence[0].quote if item.evidence else ""
+                confidence = float(getattr(item, "confidence", 0) or 0)
+            elif isinstance(item, dict):
+                raw_evidence = item.get("evidence") or []
+                evidence = str((raw_evidence[0] if raw_evidence else {}).get("quote") or "")
+                confidence = float(item.get("confidence") or 0)
+            candidates.append({
+                "claim": claim,
+                "source": ("Mari scan · " + doc["title"])[:80],
+                "document_id": doc["id"],
+                "evidence": evidence[:1000],
+                "confidence": confidence,
+            })
+            seen.add(claim.lower())
 
     _mark_scanned("facts", [doc["id"] for doc, _ in results])
     note = _scan_note(unread, failed)
-    audit("scanned for facts", f"{added} candidates from {len(results)} documents"
+    audit("scanned for facts", f"{len(candidates)} candidates from {len(results)} documents"
                                + (f" ({note})" if note else ""))
-    return added, len(results), note
+    return candidates, len(results), note
+
+
+def scan_facts_for(doc_ids: list[int] | None = None,
+                   limit: int = SCAN_DOCS,
+                   claims_per_document: int = CLAIMS_PER_DOC) -> tuple[int, int, str]:
+    """Legacy immediate scan. Workflow runs use staged candidates instead."""
+    candidates, scanned, note = extract_fact_candidates_for(
+        doc_ids, limit=limit, claims_per_document=claims_per_document,
+    )
+    added = 0
+    for candidate in candidates:
+        if knowledge_store.add_fact(
+            candidate["claim"], candidate["source"], actor_name(), candidate["document_id"],
+        ):
+            added += 1
+    return added, scanned, note
+
+
+def ai_review_fact_candidates(run_id: int, instructions: str = "") -> dict[str, int]:
+    """Ground every staged candidate against its source and persist a verdict."""
+    candidates = knowledge_store.fact_candidates(run_id)
+    reviewer = f"AI · {llm.model_identity()}" if hasattr(llm, "model_identity") else "AI reviewer"
+    for candidate in candidates:
+        if candidate["review_status"] != "pending":
+            continue
+        doc = knowledge_store.document(candidate["document_id"]) if candidate.get("document_id") else None
+        if not doc:
+            knowledge_store.review_fact_candidate(
+                candidate["id"], accepted=False, reviewer=reviewer,
+                reason="Source document is no longer available.", kind="ai",
+            )
+            continue
+        system = "You are Mari, a rigorous fact reviewer. Accept only claims directly supported by source evidence."
+        if instructions:
+            system += f" Review policy: {instructions[:1000]}"
+        assessments = component_check_claims(
+            [candidate["claim"]], [_component_document(doc)],
+            generate_json=lambda prompt, _version: llm.generate_json(prompt, system=system),
+            maximum_claims=1, maximum_documents=1, maximum_characters=10_000,
+        )
+        assessment = assessments[0]
+        knowledge_store.review_fact_candidate(
+            candidate["id"], accepted=assessment.verdict == "supported", reviewer=reviewer,
+            reason=assessment.explanation, kind="ai",
+        )
+    return knowledge_store.fact_candidate_counts(run_id)
 
 
 def fact_check_document(document_id: int) -> int:

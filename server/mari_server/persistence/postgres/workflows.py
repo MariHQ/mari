@@ -465,6 +465,13 @@ def _approve(project_id: int, run_id: int, actor: str):
         ).fetchone()
         if not run or run["status"] != "waiting":
             return None
+        pending = conn.execute(
+            """SELECT count(*) AS n FROM fact_extraction_candidates
+                WHERE project_id = %s AND run_id = %s AND review_status = 'pending'""",
+            (project_id, run_id),
+        ).fetchone()
+        if pending and int(pending["n"]):
+            return None
         stats, rows = jload(run["stats"]) or {}, jload(run["rows_data"]) or []
         paused_at = int(stats.get("paused_at", 0))
         if paused_at < len(rows):

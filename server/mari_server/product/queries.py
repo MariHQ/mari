@@ -40,7 +40,7 @@ from mari_server.product.types import (
     ActivityBucket, ActivityItem, ApiKey, ApprovedAnswer,
     AuditDetail, AuditEvent, AuditFinding, AuditRun, Change, ChatMessage,
     ChatSession, Checkpoint, Decision, DigestImpact, DigestTopic, DigestWhere,
-    DocHistory, Document, DocumentTemplate, Fact, FactContradiction, Finding,
+    DocHistory, Document, DocumentTemplate, Fact, FactContradiction, FactExtractionCandidate, Finding,
     FreshnessRow, GithubRepo, GithubTeamSync, GlossaryCandidate, GlossaryTerm,
     GraphStats, GraphView, InsightStats, LineageEdge, LineageNode, McpServer,
     Member, Notification, PromotedWorkflow, Provisioning, ReadabilityRow, RelatedDoc, Setting,
@@ -1004,6 +1004,19 @@ class Query:
                            duration=r["duration"], progress=r["progress"],
                            stats=jload(r["stats"]), rows=jload(r["rows_data"]),
                            triggered_by=r.get("triggered_by") or "")
+
+    @strawberry.field
+    def fact_extraction_candidates(self, run_id: int) -> list[FactExtractionCandidate]:
+        return [FactExtractionCandidate(
+            id=row["id"], run_id=row["run_id"], document_id=row.get("document_id"),
+            document_title=row.get("document_title") or "Source unavailable",
+            claim=row["claim"], source=row["source_label"], evidence=row["evidence"],
+            confidence=float(row["confidence"]), review_status=row["review_status"],
+            review_kind=row["review_kind"], review_reason=row["review_reason"],
+            reviewer=row["reviewer"],
+            reviewed_at=row["reviewed_at"].isoformat() if row.get("reviewed_at") else "",
+            published_fact_id=row.get("published_fact_id"),
+        ) for row in knowledge_store.fact_candidates(run_id)]
 
     @strawberry.field
     def knowledge_chat_destinations(self) -> list[KnowledgeChatDestination]:

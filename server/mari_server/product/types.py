@@ -524,6 +524,24 @@ class WorkflowRun:
 
 
 @strawberry.type
+class FactExtractionCandidate:
+    id: int
+    run_id: int
+    document_id: int | None
+    document_title: str
+    claim: str
+    source: str
+    evidence: str
+    confidence: float
+    review_status: str
+    review_kind: str
+    review_reason: str
+    reviewer: str
+    reviewed_at: str
+    published_fact_id: int | None
+
+
+@strawberry.type
 class KnowledgeChatDestination:
     id: int
     name: str

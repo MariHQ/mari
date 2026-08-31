@@ -178,6 +178,16 @@ class MutKnowledge:
         audit("verified fact", claim)
         return True
 
+    @strawberry.mutation
+    def review_fact_candidate(self, id: int, accept: bool, reason: str = "") -> bool:
+        """Record a durable human verdict on staged extraction output."""
+        ok = knowledge_store.review_fact_candidate(
+            id, accepted=accept, reviewer=actor_name(), reason=reason, kind="human",
+        )
+        if ok:
+            audit("accepted" if accept else "rejected", f"fact candidate #{id}")
+        return ok
+
     @strawberry.mutation(deprecation_reason=DEPRECATED_REVIEW)
     def create_task(self, title: str, kind: str = "factcheck", kind_label: str = "Fact check",
                     assignee: str = "", due: str | None = None,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 
 from mari_server.persistence.postgres import connection as db
 from mari_server.identity import context as access
@@ -87,6 +88,105 @@ def add_fact(claim: str, source: str, owner: str, document_id: int | None) -> bo
             (project_id, claim, source, owner, document_id),
         ).fetchone()
     return bool(row)
+
+
+def stage_fact_candidates(run_id: int, candidates: list[dict]) -> int:
+    """Persist model output for review without touching the fact ledger."""
+    project_id = access.require_current_access().project_id
+    if not candidates:
+        return 0
+    added = 0
+    with db.connect() as conn, conn.transaction():
+        for candidate in candidates:
+            row = conn.execute(
+                """INSERT INTO fact_extraction_candidates
+                     (project_id, run_id, document_id, claim, source_label, evidence, confidence)
+                   SELECT %s, r.id, %s, %s, %s, %s, %s
+                     FROM workflow_runs r
+                    WHERE r.project_id = %s AND r.id = %s
+                   ON CONFLICT (run_id, claim) DO NOTHING RETURNING id""",
+                (project_id, candidate.get("document_id"), candidate["claim"],
+                 candidate.get("source") or "", candidate.get("evidence") or "",
+                 float(candidate.get("confidence") or 0), project_id, run_id),
+            ).fetchone()
+            added += bool(row)
+    return added
+
+
+def fact_candidates(run_id: int) -> list[dict]:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn:
+        return conn.execute(
+            """SELECT c.*, d.title AS document_title
+                 FROM fact_extraction_candidates c
+                 LEFT JOIN documents d ON d.project_id = c.project_id AND d.id = c.document_id
+                WHERE c.project_id = %s AND c.run_id = %s ORDER BY c.id""",
+            (project_id, run_id),
+        ).fetchall()
+
+
+def review_fact_candidate(candidate_id: int, *, accepted: bool, reviewer: str,
+                          reason: str = "", kind: str = "human") -> bool:
+    project_id = access.require_current_access().project_id
+    status = "accepted" if accepted else "rejected"
+    with db.connect() as conn, conn.transaction():
+        return bool(conn.execute(
+            """UPDATE fact_extraction_candidates
+                  SET review_status = %s, review_kind = %s, review_reason = %s,
+                      reviewer = %s, reviewed_at = now()
+                WHERE project_id = %s AND id = %s AND published_fact_id IS NULL
+                RETURNING id""",
+            (status, kind[:20], reason[:1000], reviewer[:120], project_id, candidate_id),
+        ).fetchone())
+
+
+def fact_candidate_counts(run_id: int) -> dict[str, int]:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn:
+        rows = conn.execute(
+            """SELECT review_status, count(*) AS n FROM fact_extraction_candidates
+                WHERE project_id = %s AND run_id = %s GROUP BY review_status""",
+            (project_id, run_id),
+        ).fetchall()
+    counts = {"pending": 0, "accepted": 0, "rejected": 0}
+    counts.update({str(row["review_status"]): int(row["n"]) for row in rows})
+    return counts
+
+
+def publish_fact_candidates(run_id: int, owner: str, *, verified: bool = False) -> int:
+    """Idempotently promote accepted candidates to the durable fact ledger."""
+    project_id = access.require_current_access().project_id
+    status = "Verified" if verified else "Needs review"
+    published = 0
+    with db.connect() as conn, conn.transaction():
+        rows = conn.execute(
+            """SELECT * FROM fact_extraction_candidates
+                WHERE project_id = %s AND run_id = %s
+                  AND review_status = 'accepted' AND published_fact_id IS NULL
+                ORDER BY id FOR UPDATE""",
+            (project_id, run_id),
+        ).fetchall()
+        for candidate in rows:
+            fact = conn.execute(
+                """INSERT INTO facts
+                     (project_id, claim, source, owner_name, owner_tint, status,
+                      verified, verified_at, document_id)
+                   VALUES (%s, %s, %s, %s, 1, %s, %s,
+                           CASE WHEN %s THEN current_date ELSE NULL END, %s)
+                   ON CONFLICT (project_id, claim) DO UPDATE SET claim = EXCLUDED.claim
+                   RETURNING id""",
+                (project_id, candidate["claim"], candidate["source_label"], owner,
+                 status, time.strftime("%b %d, %Y") if verified else "—", verified,
+                 candidate["document_id"]),
+            ).fetchone()
+            if fact:
+                conn.execute(
+                    """UPDATE fact_extraction_candidates SET published_fact_id = %s
+                        WHERE project_id = %s AND id = %s""",
+                    (fact["id"], project_id, candidate["id"]),
+                )
+                published += 1
+    return published
 
 
 def document(document_id: int) -> dict | None:
