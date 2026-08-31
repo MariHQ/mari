@@ -24,9 +24,15 @@ test("facts can be verified and captured through the ledger", async ({ page }) =
 test("LLM fact scan starts a workflow and reports its grounded result", async ({ page }) => {
   await page.goto("/facts");
   await page.getByRole("button", { name: "Scan for facts" }).click();
+  const config = page.getByRole("dialog", { name: "Configure fact extraction" });
+  await config.getByLabel("Search within documents").fill("infrastructure");
+  await config.getByLabel("Documents per run").fill("25");
+  await config.getByRole("button", { name: "Save & run now" }).click();
   await expect(page.getByText(/Fact scan · run #1900/)).toBeVisible();
   await expect(page.getByText(/2 new claims captured/)).toBeVisible();
-  expect(api.calls.some((c) => c.query.includes("startFactScan"))).toBeTruthy();
+  expect(api.calls.some((c) => c.query.includes("startFactScan")
+    && c.variables.config.query === "infrastructure"
+    && c.variables.config.limit === 25)).toBeTruthy();
   expect(api.calls.some((c) => c.query.includes("workflowRun"))).toBeTruthy();
 });
 

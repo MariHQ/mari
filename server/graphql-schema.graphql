@@ -400,7 +400,7 @@ type Mutation {
   promoteGlossaryCandidate(id: Int!, accept: Boolean!): Boolean!
   scanDecisions: Int!
   scanFacts: Int!
-  startFactScan: Int!
+  startFactScan(config: JSON = null): Int!
   startDecisionScan: Int!
   scanAnswerCandidates(sources: [String!]!): [AnswerCandidate!]!
   setWorkflowTrigger(workflowId: Int!, trigger: String!): Boolean!

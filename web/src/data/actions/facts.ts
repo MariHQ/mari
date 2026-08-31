@@ -15,6 +15,7 @@ import type { RunStatus } from "@mari-design/components/workflow/RunHistory";
 import { gqlResult } from "../../lib/api";
 import { mutate, type ActionContext } from "../actions";
 import { factsChanged } from "../facts";
+import { requestFactScanConfiguration } from "../../components/FactScanConfiguration";
 
 // `rows` and `stats` are JSON scalars on the run, so they arrive whole.
 const RUN_QUERY = `query($id: Int!) {
@@ -90,7 +91,12 @@ export function factsActions({ currentUserName }: ActionContext): FactsActions {
      * scan" flow and the engine executes the steps on a background thread, so
      * this returns as soon as the run exists and the page follows it. */
     scanFacts: async () => {
-      const d = await mutate("mutation { startFactScan }");
+      const config = await requestFactScanConfiguration();
+      if (!config) throw new Error("Fact scan cancelled.");
+      const d = await mutate(
+        "mutation($config: JSON) { startFactScan(config: $config) }",
+        { config },
+      );
       return readRun(String(d.startFactScan));
     },
     scanProgress: (id: string) => readRun(id),

@@ -1,0 +1,152 @@
+import { useEffect, useState } from "react";
+import { useQuery } from "../lib/api";
+
+export type FactScanConfig = {
+  source_ids: number[];
+  query: string;
+  tag: string;
+  limit: number;
+  claims_per_document: number;
+  schedule_minutes: number;
+};
+
+type RequestDetail = { finish: (config: FactScanConfig | null) => void };
+const EVENT = "mari:configure-fact-scan";
+
+export function requestFactScanConfiguration(): Promise<FactScanConfig | null> {
+  return new Promise((finish) => {
+    window.dispatchEvent(new CustomEvent<RequestDetail>(EVENT, { detail: { finish } }));
+  });
+}
+
+const SOURCE_QUERY = `{
+  sourcePulse { id name }
+  workflows { name nodes trigger }
+}`;
+
+type ConfigQuery = {
+  sourcePulse: { id: number; name: string }[];
+  workflows: { name: string; nodes: { kind?: string; config?: Record<string, unknown> }[]; trigger: Record<string, unknown> }[];
+};
+
+export function FactScanConfiguration() {
+  const sources = useQuery<ConfigQuery>(SOURCE_QUERY);
+  const [request, setRequest] = useState<RequestDetail | null>(null);
+  const [selected, setSelected] = useState<number[]>([]);
+  const [query, setQuery] = useState("");
+  const [tag, setTag] = useState("");
+  const [limit, setLimit] = useState(50);
+  const [claims, setClaims] = useState(2);
+  const [schedule, setSchedule] = useState(60);
+
+  useEffect(() => {
+    const open = (event: Event) => {
+      const workflow = (sources.data?.workflows ?? []).find((row) =>
+        (row.nodes ?? []).some((node) => node.kind === "scan_facts"));
+      const fetch = (workflow?.nodes ?? []).find((node) => node.kind === "fetch_docs")?.config ?? {};
+      const scan = (workflow?.nodes ?? []).find((node) => node.kind === "scan_facts")?.config ?? {};
+      setSelected(Array.isArray(fetch.source_ids) ? fetch.source_ids.map(Number) : []);
+      setQuery(String(fetch.query ?? ""));
+      setTag(String(fetch.tag ?? ""));
+      setLimit(Number(fetch.k ?? 50));
+      setClaims(Number(scan.claims_per_document ?? 2));
+      setSchedule(workflow?.trigger?.on === "schedule"
+        ? Number(workflow.trigger.every_minutes ?? 60)
+        : 0);
+      setRequest((event as CustomEvent<RequestDetail>).detail);
+    };
+    window.addEventListener(EVENT, open);
+    return () => window.removeEventListener(EVENT, open);
+  }, [sources.data]);
+
+  if (!request) return null;
+  const close = (value: FactScanConfig | null) => {
+    request.finish(value);
+    setRequest(null);
+  };
+  const rows = sources.data?.sourcePulse ?? [];
+
+  return (
+    <div className="fixed inset-0 z-[100] grid place-items-center bg-ink/30 p-4" role="presentation">
+      <section
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="fact-scan-title"
+        className="w-full max-w-[620px] rounded-md border border-ink/15 bg-paper p-5 shadow-xl"
+      >
+        <div className="mb-5">
+          <div className="font-term text-[11px] uppercase tracking-[0.16em] text-ink/60">Fact workflow</div>
+          <h2 id="fact-scan-title" className="mt-1 text-[20px] font-semibold text-ink">Configure fact extraction</h2>
+          <p className="mt-1 text-[13px] text-ink/65">
+            These parameters are saved on the Fact extraction workflow and apply to manual and scheduled runs.
+          </p>
+        </div>
+
+        <div className="grid gap-4 sm:grid-cols-2">
+          <label className="text-[12px] font-medium text-ink">
+            Search within documents
+            <input className="mt-1 w-full rounded border border-ink/20 bg-white px-3 py-2 font-normal"
+              value={query} onChange={(event) => setQuery(event.target.value)} placeholder="e.g. infrastructure" />
+          </label>
+          <label className="text-[12px] font-medium text-ink">
+            Required tag
+            <input className="mt-1 w-full rounded border border-ink/20 bg-white px-3 py-2 font-normal"
+              value={tag} onChange={(event) => setTag(event.target.value)} placeholder="e.g. canonical" />
+          </label>
+          <label className="text-[12px] font-medium text-ink">
+            Documents per run
+            <input type="number" min={1} max={200}
+              className="mt-1 w-full rounded border border-ink/20 bg-white px-3 py-2 font-normal"
+              value={limit} onChange={(event) => setLimit(Number(event.target.value))} />
+          </label>
+          <label className="text-[12px] font-medium text-ink">
+            Claims per document
+            <input type="number" min={1} max={10}
+              className="mt-1 w-full rounded border border-ink/20 bg-white px-3 py-2 font-normal"
+              value={claims} onChange={(event) => setClaims(Number(event.target.value))} />
+          </label>
+          <label className="text-[12px] font-medium text-ink sm:col-span-2">
+            Schedule
+            <select className="mt-1 w-full rounded border border-ink/20 bg-white px-3 py-2 font-normal"
+              value={schedule} onChange={(event) => setSchedule(Number(event.target.value))}>
+              <option value={0}>Manual only</option>
+              <option value={60}>Hourly</option>
+              <option value={360}>Every 6 hours</option>
+              <option value={1440}>Daily</option>
+              <option value={10080}>Weekly</option>
+            </select>
+          </label>
+        </div>
+
+        <fieldset className="mt-4 rounded border border-ink/12 p-3">
+          <legend className="px-1 text-[12px] font-medium text-ink">Sources</legend>
+          <p className="mb-2 text-[11.5px] text-ink/60">No selection scans all connected sources.</p>
+          <div className="grid max-h-32 gap-2 overflow-auto sm:grid-cols-2">
+            {rows.map((source) => (
+              <label key={source.id} className="flex items-center gap-2 text-[12.5px] text-ink/80">
+                <input type="checkbox" checked={selected.includes(source.id)} onChange={(event) =>
+                  setSelected((current) => event.target.checked
+                    ? [...current, source.id]
+                    : current.filter((id) => id !== source.id))} />
+                {source.name}
+              </label>
+            ))}
+            {!sources.loading && rows.length === 0 && <span className="text-[12px] text-ink/60">No sources connected.</span>}
+          </div>
+        </fieldset>
+
+        <div className="mt-5 flex justify-end gap-2">
+          <button className="rounded border border-ink/20 px-4 py-2 text-[13px]" onClick={() => close(null)}>Cancel</button>
+          <button className="rounded bg-ink px-4 py-2 text-[13px] font-medium text-white" onClick={() => close({
+            source_ids: selected,
+            query: query.trim(),
+            tag: tag.trim(),
+            limit: Math.max(1, Math.min(limit || 1, 200)),
+            claims_per_document: Math.max(1, Math.min(claims || 1, 10)),
+            schedule_minutes: schedule,
+          })}>Save &amp; run now</button>
+        </div>
+      </section>
+    </div>
+  );
+}

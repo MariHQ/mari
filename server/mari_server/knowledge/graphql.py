@@ -11,6 +11,7 @@ import time
 import typing as t
 
 import strawberry
+from strawberry.scalars import JSON
 
 from mari_server.automations import runtime as flowengine
 from mari_server.providers import models as llm
@@ -632,13 +633,15 @@ class MutKnowledge:
         return scan_facts_for()[0]
 
     @strawberry.mutation
-    def start_fact_scan(self) -> int:
+    def start_fact_scan(self, config: JSON | None = None) -> int:
         """Start the fact scan as a real background run and answer with the run
         id, so the page that asked can follow it. The scan reads the whole
         recent corpus through a model: it is a flow with steps and a history
         like every other long job here, not something a link fires and forgets.
         """
         wf_id = flowengine.ensure_fact_scan_flow()
+        if config is not None:
+            flowengine.configure_fact_scan_flow(wf_id, config)
         run = workflow_store.create_run(wf_id)
         n = run["number"]
         audit(f"started run #{n}", flowengine.FACT_SCAN_FLOW)

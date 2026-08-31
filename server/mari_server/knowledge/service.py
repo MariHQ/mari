@@ -293,7 +293,8 @@ def scan_decisions_for(doc_ids: list[int] | None = None,
     return added, len(results), note
 
 def scan_facts_for(doc_ids: list[int] | None = None,
-                   limit: int = SCAN_DOCS) -> tuple[int, int, str]:
+                   limit: int = SCAN_DOCS,
+                   claims_per_document: int = CLAIMS_PER_DOC) -> tuple[int, int, str]:
     """Mine `doc_ids` (or the least-recently-scanned documents) for atomic,
     checkable claims; they land as 'Needs review' facts.
 
@@ -334,7 +335,7 @@ def scan_facts_for(doc_ids: list[int] | None = None,
     # looked exactly like a document that had no claims in it.
     added = 0
     for doc, out in results:
-        for item in out[:CLAIMS_PER_DOC]:
+        for item in out[:max(1, min(int(claims_per_document), 10))]:
             claim = (item.claim if hasattr(item, "claim")
                      else str(item.get("claim", ""))).strip()[:200]
             if not is_claim(claim) or claim.lower() in existing:

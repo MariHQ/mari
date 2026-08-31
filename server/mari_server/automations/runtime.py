@@ -46,7 +46,8 @@ def _step_fetch(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
     rotation = str(cfg.get("rotate") or "")
     trigger_ids = ctx.get("trigger_doc_ids") or []
     rows = workflow_store.select_documents(
-        trigger_ids=trigger_ids, tag=tag, query=query, limit=k, rotation=rotation,
+        trigger_ids=trigger_ids, tag=tag, query=query, limit=min(k, 200), rotation=rotation,
+        source_ids=cfg.get("source_ids") or [],
     )
     ids = [r["id"] for r in rows]
     names = ", ".join(r["title"][:40] for r in rows[:3])
@@ -208,7 +209,10 @@ def _step_scan_facts(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
         return "passed", "would mine recent documents for claims (dry run)", {}
     from mari_server.knowledge.service import scan_facts_for
     doc_ids = ctx.get("doc_ids") or None
-    added, scanned, note = scan_facts_for(doc_ids)
+    added, scanned, note = scan_facts_for(
+        doc_ids,
+        claims_per_document=max(1, min(int(cfg.get("claims_per_document") or 2), 10)),
+    )
     return "passed", _scan_detail(added, scanned, note, "claim"), {"facts": added}
 
 
@@ -638,7 +642,6 @@ def ensure_fact_scan_flow() -> int:
     existing = workflow_store.find_by_step("scan_facts")
     if existing:
         _adopt_rotation(existing, "scan_facts", "facts")
-        workflow_store.activate_hourly_fact_scan(existing["id"])
         return existing["id"]
     nodes = [
             {"kind": "trigger", "label": "Every hour", "config": {"label": "Scheduled · hourly"}},
@@ -652,6 +655,36 @@ def ensure_fact_scan_flow() -> int:
         color="#1E6FA8", status="active", nodes=nodes,
         trigger={"on": "schedule", "every_minutes": 60},
     )
+
+
+def configure_fact_scan_flow(workflow_id: int, raw: dict | None) -> dict:
+    """Validate and persist parameters shared by manual and scheduled scans."""
+    raw = raw if isinstance(raw, dict) else {}
+    limit = max(1, min(int(raw.get("limit") or 50), 200))
+    claims = max(1, min(int(raw.get("claims_per_document") or 2), 10))
+    source_ids = sorted({int(value) for value in raw.get("source_ids") or [] if int(value) > 0})
+    query = str(raw.get("query") or "").strip()[:200]
+    tag = str(raw.get("tag") or "").strip()[:80]
+    schedule = int(raw.get("schedule_minutes") or 0)
+    if schedule not in {0, 60, 360, 1440, 10080}:
+        raise ValueError("Fact scan schedule must be manual, hourly, every 6 hours, daily, or weekly.")
+    fetch_config = {
+        "k": limit, "rotate": "facts", "query": query, "tag": tag,
+        "source_ids": source_ids,
+    }
+    nodes = workflow_store.workflow_nodes(workflow_id)
+    for node in nodes:
+        if node.get("kind") == "fetch_docs":
+            node["config"] = fetch_config
+            node["label"] = "Read configured document scope"
+        elif node.get("kind") == "scan_facts":
+            node["config"] = {"claims_per_document": claims}
+    workflow_store.update_nodes(workflow_id, nodes)
+    workflow_store.set_trigger(
+        workflow_id,
+        {"on": "schedule", "every_minutes": schedule} if schedule else {"on": ""},
+    )
+    return {**fetch_config, "claims_per_document": claims, "schedule_minutes": schedule}
 
 
 def ensure_decision_scan_flow() -> int:

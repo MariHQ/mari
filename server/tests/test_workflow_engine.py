@@ -49,7 +49,7 @@ class WorkflowStepTests(unittest.TestCase):
             status, _, updates = flowengine._step_scan_facts({}, {"doc_ids": [7, 8]})
         self.assertEqual(status, "passed")
         self.assertEqual(updates["facts"], 3)
-        scan.assert_called_once_with([7, 8])
+        scan.assert_called_once_with([7, 8], claims_per_document=2)
 
     def test_fact_extraction_is_registered_hourly_for_each_project(self) -> None:
         context = access.external_access(3, "acme", "Acme", "test", "seed")
@@ -59,6 +59,32 @@ class WorkflowStepTests(unittest.TestCase):
             self.assertEqual(flowengine.ensure_fact_scan_flow(), 17)
         self.assertEqual(create.call_args.kwargs["trigger"], {"on": "schedule", "every_minutes": 60})
         self.assertEqual(create.call_args.kwargs["nodes"][1]["config"], {"k": 50, "rotate": "facts"})
+
+    def test_fact_scan_configuration_is_bounded_and_persisted_on_the_workflow(self) -> None:
+        nodes = [
+            {"kind": "trigger", "config": {}},
+            {"kind": "fetch_docs", "label": "old", "config": {}},
+            {"kind": "scan_facts", "config": {}},
+        ]
+        with patch.object(flowengine.workflow_store, "workflow_nodes", return_value=nodes), \
+             patch.object(flowengine.workflow_store, "update_nodes") as update, \
+             patch.object(flowengine.workflow_store, "set_trigger") as trigger:
+            result = flowengine.configure_fact_scan_flow(17, {
+                "limit": 999, "claims_per_document": 99,
+                "source_ids": [8, 8, 3], "query": " platform ",
+                "tag": " canonical ", "schedule_minutes": 360,
+            })
+        self.assertEqual(result["k"], 200)
+        self.assertEqual(result["claims_per_document"], 10)
+        self.assertEqual(result["source_ids"], [3, 8])
+        saved = update.call_args.args[1]
+        self.assertEqual(saved[1]["config"]["query"], "platform")
+        self.assertEqual(saved[2]["config"], {"claims_per_document": 10})
+        trigger.assert_called_once_with(17, {"on": "schedule", "every_minutes": 360})
+
+    def test_fact_scan_configuration_rejects_unknown_schedule(self) -> None:
+        with self.assertRaisesRegex(ValueError, "schedule"):
+            flowengine.configure_fact_scan_flow(17, {"schedule_minutes": 17})
 
     def test_scheduler_has_orderly_shutdown_and_can_restart(self) -> None:
         flowengine.stop_scheduler(timeout=0)

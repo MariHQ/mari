@@ -11,6 +11,7 @@ import { ACTION_FACTORIES } from "./data/actions";
 import { AuthProvider, useAuth } from "./lib/auth";
 import { AgentDock } from "./components/AgentDock";
 import { KnowledgeChatDestination } from "./components/KnowledgeChatDestination";
+import { FactScanConfiguration } from "./components/FactScanConfiguration";
 import { useIsMobile } from "./lib/mobile";
 
 /* The whole console, routed off the component library's own page registry.
@@ -215,6 +216,7 @@ function Routed() {
           SPA underneath it while the conversation stays open. Renders nothing
           until there is a session. */}
       <RouteAgentDock />
+      <FactScanConfiguration />
     </NavProvider>
   );
 }

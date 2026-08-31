@@ -14,38 +14,33 @@ _ROTATION_COLUMNS = {"facts": "facts_scanned_at", "decisions": "decisions_scanne
 
 
 def select_documents(*, trigger_ids: list[int], tag: str, query: str,
-                     limit: int, rotation: str) -> list[dict]:
+                     limit: int, rotation: str,
+                     source_ids: list[int] | None = None) -> list[dict]:
     column = _ROTATION_COLUMNS.get(rotation)
     order = (f"{column} NULLS FIRST, d.updated_src DESC NULLS LAST, d.id"
              if column else "d.updated_src DESC NULLS LAST, d.id DESC")
     project_id = access.require_current_access().project_id
+    source_ids = [int(value) for value in (source_ids or []) if int(value) > 0]
     with db.connect() as conn:
         if trigger_ids:
             return conn.execute(
                 """SELECT id, title FROM documents
-                     WHERE project_id = %s AND id = ANY(%s) ORDER BY id""",
-                (project_id, trigger_ids),
-            ).fetchall()
-        if tag:
-            return conn.execute(
-                f"""SELECT d.id, d.title FROM documents d
-                     JOIN tags t ON t.document_id = d.id AND t.project_id = d.project_id
-                     WHERE d.project_id = %s AND t.tag = %s
-                     ORDER BY {order} LIMIT %s""",
-                (project_id, tag, limit),
-            ).fetchall()
-        if query:
-            return conn.execute(
-                f"""SELECT d.id, d.title FROM documents d
-                     WHERE d.project_id = %s AND
-                       (d.search_vec @@ plainto_tsquery('english', %s) OR d.title ILIKE %s)
-                     ORDER BY {order} LIMIT %s""",
-                (project_id, query, f"%{query}%", limit),
+                     WHERE project_id = %s AND id = ANY(%s)
+                       AND (%s::int[] = '{}' OR source_id = ANY(%s)) ORDER BY id""",
+                (project_id, trigger_ids, source_ids, source_ids),
             ).fetchall()
         needs_scan = (f" AND ({column} IS NULL OR d.updated_src > {column})" if column else "")
         return conn.execute(
             f"""SELECT d.id, d.title FROM documents d WHERE d.project_id = %s{needs_scan}
-                 ORDER BY {order} LIMIT %s""", (project_id, limit),
+                   AND (%s = '' OR d.search_vec @@ plainto_tsquery('english', %s)
+                        OR d.title ILIKE %s)
+                   AND (%s = '' OR EXISTS (
+                     SELECT 1 FROM tags t WHERE t.project_id = d.project_id
+                       AND t.document_id = d.id AND t.tag = %s))
+                   AND (%s::int[] = '{{}}' OR d.source_id = ANY(%s))
+                 ORDER BY {order} LIMIT %s""",
+            (project_id, query, query, f"%{query}%", tag, tag,
+             source_ids, source_ids, limit),
         ).fetchall()
 
 
@@ -377,14 +372,16 @@ def update_nodes(workflow_id: int, nodes: list[dict]) -> None:
         )
 
 
-def activate_hourly_fact_scan(workflow_id: int) -> None:
+def workflow_nodes(workflow_id: int) -> list[dict]:
     project_id = access.require_current_access().project_id
-    with db.connect() as conn, conn.transaction():
-        conn.execute(
-            """UPDATE workflows SET status = 'active',
-                   trigger = '{"on":"schedule","every_minutes":60}'::jsonb
-               WHERE project_id = %s AND id = %s""", (project_id, workflow_id),
-        )
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT nodes FROM workflows WHERE project_id = %s AND id = %s",
+            (project_id, workflow_id),
+        ).fetchone()
+    if not row:
+        raise ValueError("Fact scan workflow not found")
+    return row["nodes"] if isinstance(row["nodes"], list) else json.loads(row["nodes"] or "[]")
 
 
 def create_default_workflow(*, name: str, description: str, color: str,
