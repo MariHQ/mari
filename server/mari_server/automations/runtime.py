@@ -830,6 +830,41 @@ def _adopt_fact_intelligence(workflow_id: int) -> None:
     workflow_store.update_nodes(workflow_id, nodes)
 
 
+def _normalize_fact_intelligence_config(workflow_id: int) -> None:
+    """Fill newly shipped bounds without overwriting user-owned values."""
+    nodes = workflow_store.workflow_nodes(workflow_id)
+    if [node.get("kind") for node in nodes] != [
+        "trigger", "fetch_docs", "scan_facts", "map_fact_impact",
+        "adjudicate_facts", "cluster_facts", "review_facts", "publish_facts",
+    ]:
+        return
+    defaults = {
+        "scan_facts": {"claims_per_document": 2, "max_llm_calls": 50,
+                       "max_input_tokens": 100000, "max_output_tokens": 20000},
+        "map_fact_impact": {"retrieval_backend": "postgres", "fact_neighbors": 8,
+                            "evidence_neighbors": 8, "minimum_fact_similarity": .72,
+                            "minimum_evidence_similarity": .68, "max_components": 12},
+        "adjudicate_facts": {"mode": "off", "max_calls": 10,
+                             "max_input_tokens": 24000, "max_output_tokens": 8000,
+                             "output_tokens_per_call": 800, "related_assertions": 8,
+                             "evidence_spans": 12},
+        "cluster_facts": {"label_mode": "off", "minimum_similarity": .78,
+                          "max_llm_clusters": 5, "max_input_tokens": 8000,
+                          "max_output_tokens": 2000},
+    }
+    changed = False
+    for node in nodes:
+        if node.get("kind") not in defaults:
+            continue
+        config = dict(node.get("config") or {})
+        merged = {**defaults[node["kind"]], **config}
+        if merged != config:
+            node["config"] = merged
+            changed = True
+    if changed:
+        workflow_store.update_nodes(workflow_id, nodes)
+
+
 def ensure_fact_scan_flow() -> int:
     """Get or create the scheduled fact extraction flow for this project."""
     existing = workflow_store.find_by_step("scan_facts")
@@ -844,6 +879,7 @@ def ensure_fact_scan_flow() -> int:
         _adopt_fact_review(existing["id"])
         _adopt_fact_impact(existing["id"])
         _adopt_fact_intelligence(existing["id"])
+        _normalize_fact_intelligence_config(existing["id"])
         return existing["id"]
     nodes = [
             {"kind": "trigger", "label": "Every hour", "config": {"label": "Scheduled · hourly"}},

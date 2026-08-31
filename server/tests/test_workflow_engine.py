@@ -120,7 +120,8 @@ class WorkflowStepTests(unittest.TestCase):
              patch.object(flowengine, "_adopt_rotation"), \
              patch.object(flowengine, "_adopt_fact_review"), \
              patch.object(flowengine, "_adopt_fact_impact"), \
-             patch.object(flowengine, "_adopt_fact_intelligence"):
+             patch.object(flowengine, "_adopt_fact_intelligence"), \
+             patch.object(flowengine, "_normalize_fact_intelligence_config"):
             self.assertEqual(flowengine.ensure_fact_scan_flow(), 17)
         update.assert_called_once_with(
             17, "Fact extraction", flowengine.FACT_SCAN_DESCRIPTION,
@@ -144,6 +145,27 @@ class WorkflowStepTests(unittest.TestCase):
             flowengine._adopt_fact_impact(17)
         saved = update.call_args.args[1]
         self.assertEqual(saved[3]["kind"], "map_fact_impact")
+
+    def test_fact_intelligence_defaults_fill_missing_bounds_without_overwriting_users(self) -> None:
+        nodes = [
+            {"kind": "trigger", "config": {}}, {"kind": "fetch_docs", "config": {}},
+            {"kind": "scan_facts", "config": {"claims_per_document": 7}},
+            {"kind": "map_fact_impact", "config": {"fact_neighbors": 3}},
+            {"kind": "adjudicate_facts", "config": {"mode": "llm", "max_calls": 2}},
+            {"kind": "cluster_facts", "config": {}},
+            {"kind": "review_facts", "config": {"mode": "human"}},
+            {"kind": "publish_facts", "config": {"status": "needs_review"}},
+        ]
+        with patch.object(flowengine.workflow_store, "workflow_nodes", return_value=nodes), \
+             patch.object(flowengine.workflow_store, "update_nodes") as update:
+            flowengine._normalize_fact_intelligence_config(17)
+        saved = update.call_args.args[1]
+        self.assertEqual(saved[2]["config"]["claims_per_document"], 7)
+        self.assertEqual(saved[2]["config"]["max_llm_calls"], 50)
+        self.assertEqual(saved[3]["config"]["fact_neighbors"], 3)
+        self.assertEqual(saved[4]["config"]["mode"], "llm")
+        self.assertEqual(saved[4]["config"]["max_calls"], 2)
+        self.assertEqual(saved[5]["config"]["label_mode"], "off")
 
     def test_waiting_run_rows_survive_a_new_workflow_stage(self) -> None:
         run = {"rows_data": [
