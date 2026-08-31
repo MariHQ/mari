@@ -91,6 +91,22 @@ async function readRun(id: string): Promise<FactScan> {
   return mapRun(r.data, id);
 }
 
+async function latestRun(): Promise<FactScan | null> {
+  const workflows = await gqlResult<{
+    workflows: { id: number; nodes: { kind?: string }[] }[];
+  }>("{ workflows { id nodes } }");
+  if (!workflows.ok) throw new Error(workflows.error);
+  const workflow = workflows.data?.workflows.find((row) =>
+    (row.nodes ?? []).some((node) => node.kind === "scan_facts"));
+  if (!workflow) return null;
+  const runs = await gqlResult<{
+    workflowRuns: { id: number; status: string }[];
+  }>("query($id: Int!) { workflowRuns(workflowId: $id) { id status } }", { id: workflow.id });
+  if (!runs.ok) throw new Error(runs.error);
+  const latest = runs.data?.workflowRuns[0];
+  return latest ? readRun(String(latest.id)) : null;
+}
+
 export function factsActions({ currentUserName }: ActionContext): FactsActions {
   return {
     verifyFact: async (id: number) => {
@@ -120,6 +136,7 @@ export function factsActions({ currentUserName }: ActionContext): FactsActions {
       return readRun(String(d.startFactScan));
     },
     scanProgress: (id: string) => readRun(id),
+    latestFactScan: latestRun,
     reviewFactCandidate: async (runId, candidateId, accept, reason = "") => {
       await mutate(
         "mutation($id: Int!, $accept: Boolean!, $reason: String!) { reviewFactCandidate(id: $id, accept: $accept, reason: $reason) }",
