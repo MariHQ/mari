@@ -164,16 +164,21 @@ export function factsActions({ currentUserName }: ActionContext): FactsActions {
       const result = await gqlResult<{ factImpactPreview: null | { items: {
         impactKind: string; targetType: string; targetId: string; targetLabel: string;
         dependencyType: string; similarity: number | null;
-      }[] } }>(
+      }[] }; factSemanticLinks: FactSemanticImpactLink[] }>(
         `query($id: Int!) {
           factImpactPreview(factId: $id) {
             items { impactKind targetType targetId targetLabel dependencyType similarity }
+          }
+          factSemanticLinks(factId: $id) {
+            targetType targetId relation similarity targetLabel targetUpdatedAt observedAt
           }
         }`,
         { id },
       );
       if (!result.ok) throw new Error(result.error);
-      return (result.data?.factImpactPreview?.items ?? []).map((item) => ({
+      const items = result.data?.factImpactPreview?.items;
+      if (!items?.length) return result.data?.factSemanticLinks ?? [];
+      return items.map((item) => ({
         targetType: item.targetType, targetId: item.targetId,
         relation: item.impactKind === "possible" ? "embedding neighbor" : item.dependencyType,
         similarity: item.similarity ?? (item.impactKind === "direct" ? 1 : .75),
