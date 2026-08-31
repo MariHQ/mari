@@ -185,7 +185,7 @@ export function FactScanConfiguration() {
             <select className="mt-1 w-full rounded border border-ink/20 bg-white px-3 py-2 font-normal"
               value={reviewMode} onChange={(event) => setReviewMode(event.target.value as "human" | "ai")}>
               <option value="human">Human review before publishing</option>
-              <option value="ai">AI review before publishing</option>
+              <option value="ai">Apply bounded AI proposals; defer uncertainty</option>
             </select>
           </label>
           <label className="text-[12px] font-medium text-ink">

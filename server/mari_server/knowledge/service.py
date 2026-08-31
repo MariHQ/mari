@@ -448,46 +448,29 @@ def scan_facts_for(doc_ids: list[int] | None = None,
     return added, scanned, note
 
 
-def ai_review_fact_candidates(run_id: int, instructions: str = "") -> dict[str, int]:
-    """Ground every staged candidate against its source and persist a verdict."""
-    candidates = knowledge_store.fact_candidates(run_id)
-    reviewer = f"AI · {llm.model_identity()}" if hasattr(llm, "model_identity") else "AI reviewer"
-    for candidate in candidates:
-        if candidate["review_status"] != "pending":
+def apply_ai_fact_proposals(run_id: int, *, minimum_confidence: float = .8) -> dict[str, int]:
+    """Apply bounded adjudication proposals; never make an extra hidden LLM call."""
+    threshold = max(0.0, min(float(minimum_confidence), 1.0))
+    reviewer = f"Bounded AI proposal · {llm.model_identity()}" if hasattr(llm, "model_identity") else "Bounded AI proposal"
+    accepted_recommendations = {"new_fact", "supersede", "qualify", "duplicate"}
+    deferred = 0
+    for row in fact_store.adjudication_reviews(run_id):
+        if row["review_status"] != "pending":
             continue
-        document_ids: list[int] = []
-        if candidate.get("document_id"):
-            document_ids.append(int(candidate["document_id"]))
-        for link in knowledge_store.semantic_links("candidate", candidate["id"]):
-            if link["target_type"] == "document" and int(link["target_id"]) not in document_ids:
-                document_ids.append(int(link["target_id"]))
-        docs = [doc for document_id in document_ids[:7]
-                if (doc := knowledge_store.document(document_id))]
-        if not docs:
+        proposal = row.get("adjudication") or {}
+        confidence = float(proposal.get("confidence") or row.get("confidence") or 0)
+        recommendation = str(proposal.get("recommendation") or "needs_review")
+        if bool(proposal.get("needs_human_review", True)) or confidence < threshold:
+            deferred += 1
+            continue
+        if recommendation in accepted_recommendations or recommendation == "reject":
             knowledge_store.review_fact_candidate(
-                candidate["id"], accepted=False, reviewer=reviewer,
-                reason="Source document is no longer available.", kind="ai",
+                int(row["candidate_id"]), accepted=recommendation in accepted_recommendations,
+                reviewer=reviewer, reason=str(proposal.get("reason") or "")[:1000], kind="ai",
             )
-            continue
-        system = (
-            "You are Mari, a rigorous temporal fact reviewer. Accept only claims directly supported "
-            "by the supplied evidence neighborhood. Document revisions are dates: when the business "
-            "has evolved, newer authoritative evidence may supersede older statements. Reject a claim "
-            "when newer evidence contradicts it; explain the temporal conflict."
-        )
-        if instructions:
-            system += f" Review policy: {instructions[:1000]}"
-        assessments = component_check_claims(
-            [candidate["claim"]], [_component_document(doc) for doc in docs],
-            generate_json=lambda prompt, _version: llm.generate_json(prompt, system=system),
-            maximum_claims=1, maximum_documents=len(docs), maximum_characters=30_000,
-        )
-        assessment = assessments[0]
-        knowledge_store.review_fact_candidate(
-            candidate["id"], accepted=assessment.verdict == "supported", reviewer=reviewer,
-            reason=assessment.explanation, kind="ai",
-        )
-    return knowledge_store.fact_candidate_counts(run_id)
+        else:
+            deferred += 1
+    return {**knowledge_store.fact_candidate_counts(run_id), "deferred": deferred}
 
 
 def _temporal_value(value: t.Any) -> dt.datetime | None:

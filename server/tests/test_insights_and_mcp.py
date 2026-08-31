@@ -14,31 +14,28 @@ from mari_server.destinations import mcp
 
 
 class FactInsightTests(unittest.TestCase):
-    def test_ai_review_reads_newer_cluster_evidence_not_only_extraction_source(self) -> None:
-        candidate = {"id": 9, "claim": "Workspace retention is 30 days.",
-                     "document_id": 7, "review_status": "pending"}
-        old = {"id": 7, "title": "Old policy", "body": "Retention is 30 days.",
-               "snippet": "", "source": "confluence", "updated_src": "2025-01-01"}
-        new = {"id": 8, "title": "Current policy", "body": "Retention is 10 days.",
-               "snippet": "", "source": "confluence", "updated_src": "2026-08-30"}
-        assessment = SimpleNamespace(verdict="contradicted", explanation="Newer policy supersedes it.")
-        with patch.object(knowledge_service.knowledge_store, "fact_candidates", return_value=[candidate]), \
-             patch.object(knowledge_service.knowledge_store, "semantic_links", return_value=[
-                 {"target_type": "document", "target_id": 8},
-             ]), \
-             patch.object(knowledge_service.knowledge_store, "document", side_effect=[old, new]), \
-             patch.object(knowledge_service, "component_check_claims", return_value=[assessment]) as check, \
-             patch.object(knowledge_service.llm, "generate_json", return_value={}) as generate, \
+    def test_ai_review_only_applies_bounded_adjudication_and_defers_uncertainty(self) -> None:
+        rows = [
+            {"candidate_id": 9, "review_status": "pending", "confidence": .95,
+             "adjudication": {"recommendation": "reject", "confidence": .93,
+                              "reason": "Newer policy supersedes it.",
+                              "needs_human_review": False}},
+            {"candidate_id": 10, "review_status": "pending", "confidence": .7,
+             "adjudication": {"recommendation": "new_fact", "confidence": .7,
+                              "needs_human_review": True}},
+        ]
+        with patch.object(knowledge_service.fact_store, "adjudication_reviews", return_value=rows), \
+             patch.object(knowledge_service.llm, "generate_json") as generate, \
              patch.object(knowledge_service.knowledge_store, "review_fact_candidate") as review, \
              patch.object(knowledge_service.knowledge_store, "fact_candidate_counts",
-                          return_value={"pending": 0, "accepted": 0, "rejected": 1}):
-            result = knowledge_service.ai_review_fact_candidates(44)
-            check.call_args.kwargs["generate_json"]("prompt", "version")
-            system = generate.call_args.kwargs["system"]
-        self.assertEqual(len(check.call_args.args[1]), 2)
-        self.assertIn("newer", system.lower())
+                          return_value={"pending": 1, "accepted": 0, "rejected": 1}):
+            result = knowledge_service.apply_ai_fact_proposals(44)
+        generate.assert_not_called()
+        review.assert_called_once()
         self.assertFalse(review.call_args.kwargs["accepted"])
+        self.assertEqual(review.call_args.args[0], 9)
         self.assertEqual(result["rejected"], 1)
+        self.assertEqual(result["deferred"], 1)
 
     def test_fact_impact_uses_versioned_vectors_maxsim_neighbors_and_temporal_links(self) -> None:
         candidate = {"id": 9, "claim": "Workspace retention period is 10 days.", "document_id": 7}

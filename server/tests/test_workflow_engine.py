@@ -197,6 +197,17 @@ class WorkflowStepTests(unittest.TestCase):
         self.assertIn("2 candidates", detail)
         self.assertEqual(updates, {"pause": True})
 
+    def test_ai_review_waits_for_humans_when_bounded_proposals_abstain(self) -> None:
+        with patch("mari_server.knowledge.service.apply_ai_fact_proposals",
+                   return_value={"pending": 1, "accepted": 2, "rejected": 0,
+                                 "deferred": 1}):
+            status, detail, updates = flowengine._step_review_facts(
+                {"mode": "ai", "minimum_confidence": .9}, {"run_id": 91},
+            )
+        self.assertEqual(status, "waiting")
+        self.assertIn("need human review", detail)
+        self.assertEqual(updates["accepted_facts"], 2)
+
     def test_fact_publish_only_promotes_reviewed_candidates(self) -> None:
         with patch("mari_server.persistence.postgres.knowledge.publish_fact_candidates",
                    return_value=3) as publish, \

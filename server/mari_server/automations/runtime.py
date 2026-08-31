@@ -224,14 +224,21 @@ def _step_scan_facts(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
 
 
 def _step_review_facts(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
-    from mari_server.knowledge.service import ai_review_fact_candidates
+    from mari_server.knowledge.service import apply_ai_fact_proposals
     from mari_server.persistence.postgres import knowledge as knowledge_store
     run_id = int(ctx["run_id"])
     mode = str(cfg.get("mode") or "human")
     if ctx.get("dry_run"):
         return "passed", f"would use {mode} review (dry run)", {}
     if mode == "ai":
-        counts = ai_review_fact_candidates(run_id, str(cfg.get("instructions") or ""))
+        counts = apply_ai_fact_proposals(
+            run_id, minimum_confidence=float(cfg.get("minimum_confidence") or .8),
+        )
+        if counts["pending"]:
+            return "waiting", (
+                f"AI applied bounded proposals; {counts['pending']} candidates need human review"
+            ), {"pause": True, "accepted_facts": counts["accepted"],
+                "rejected_facts": counts["rejected"]}
         detail = f"AI accepted {counts['accepted']} · rejected {counts['rejected']}"
         return "passed", detail, {"accepted_facts": counts["accepted"], "rejected_facts": counts["rejected"]}
     counts = knowledge_store.fact_candidate_counts(run_id)

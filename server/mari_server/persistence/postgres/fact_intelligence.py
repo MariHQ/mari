@@ -468,6 +468,23 @@ def run_assertion_ids(run_id: int) -> list[int]:
     return [int(row["id"]) for row in rows]
 
 
+def adjudication_reviews(run_id: int) -> list[dict]:
+    """Read bounded AI proposals without invoking another model at the gate."""
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn:
+        rows = conn.execute(
+            """SELECT candidate.id AS candidate_id, candidate.review_status,
+                      assertion.adjudication, assertion.confidence
+                 FROM fact_extraction_candidates candidate
+                 JOIN fact_assertions assertion ON assertion.project_id = candidate.project_id
+                  AND assertion.candidate_id = candidate.id
+                WHERE candidate.project_id = %s AND candidate.run_id = %s
+                ORDER BY candidate.id""",
+            (project_id, run_id),
+        ).fetchall()
+    return [{**row, "adjudication": _json(row.get("adjudication"))} for row in rows]
+
+
 def cluster_graph(run_id: int, *, minimum_similarity: float) -> tuple[list[dict], list[dict]]:
     project_id = access.require_current_access().project_id
     with db.connect() as conn:
