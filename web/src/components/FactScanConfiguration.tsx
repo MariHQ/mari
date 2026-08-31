@@ -87,7 +87,7 @@ export function FactScanConfiguration() {
         role="dialog"
         aria-modal="true"
         aria-labelledby="fact-scan-title"
-        className="w-full max-w-[620px] rounded-md border border-ink/15 bg-paper p-5 shadow-xl"
+        className="max-h-[calc(100vh-2rem)] w-full max-w-[620px] overflow-y-auto rounded-md border border-ink/15 bg-paper p-5 shadow-xl"
       >
         <div className="mb-5">
           <div className="font-term text-[11px] uppercase tracking-[0.16em] text-ink/60">Fact workflow</div>

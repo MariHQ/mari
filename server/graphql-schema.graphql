@@ -196,6 +196,23 @@ type FactContradiction {
   detail: String!
 }
 
+type FactExtractionCandidate {
+  id: Int!
+  runId: Int!
+  documentId: Int
+  documentTitle: String!
+  claim: String!
+  source: String!
+  evidence: String!
+  confidence: Float!
+  reviewStatus: String!
+  reviewKind: String!
+  reviewReason: String!
+  reviewer: String!
+  reviewedAt: String!
+  publishedFactId: Int
+}
+
 type Finding {
   id: Int!
   kind: String!
@@ -362,6 +379,7 @@ type Mutation {
   setTaskDone(id: Int!, done: Boolean!): Boolean! @deprecated(reason: "The Review page was removed. The review projection stays one more release as the backend for policy auto-approval and inline approvals.")
   clearDoneTasks: Int! @deprecated(reason: "The Review page was removed. The review projection stays one more release as the backend for policy auto-approval and inline approvals.")
   verifyFact(id: Int!): Boolean!
+  reviewFactCandidate(id: Int!, accept: Boolean!, reason: String! = ""): Boolean!
   createTask(title: String!, kind: String! = "factcheck", kindLabel: String! = "Fact check", assignee: String! = "", due: String = null, subjectType: String! = "", subjectId: String! = "", subjectTitle: String! = "", subjectHref: String! = ""): Boolean! @deprecated(reason: "The Review page was removed. The review projection stays one more release as the backend for policy auto-approval and inline approvals.")
   setTaskDue(id: Int!, due: String = null): Boolean!
   addFact(claim: String!, source: String!, owner: String! = "", documentId: Int = null): Boolean!
@@ -529,6 +547,7 @@ type Query {
   workflows: [Workflow!]!
   workflowRuns(workflowId: Int = null): [WorkflowRun!]!
   workflowRun(id: Int!): WorkflowRun
+  factExtractionCandidates(runId: Int!): [FactExtractionCandidate!]!
   knowledgeChatDestinations: [KnowledgeChatDestination!]!
   notifications: [Notification!]!
   workspace: Workspace!
