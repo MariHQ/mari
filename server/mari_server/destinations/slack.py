@@ -50,6 +50,7 @@ from mari_components.destinations.chat import answer_search_query
 from mari_components.knowledge import answer_question as component_answer_question
 from mari_server.persistence.postgres.event_inbox import DEFAULT_INBOX, EventDispatcher
 from mari_server.persistence.postgres import bots as bot_store
+from mari_server.persistence.postgres import fact_intelligence as fact_store
 from mari_server.conversations.prompts import answer_system, workspace_style_text
 from mari_server.persistence.postgres import trajectories as trajectory_store
 
@@ -181,6 +182,22 @@ def answer_question(question: str, supplemental_context: str = "") -> str:
         label = _source_label(document.title, (getattr(document, "metadata", None) or {}).get("source"))
         if label not in cited:
             cited.append(label)
+    fact_quotes = [evidence.quote for evidence in result.evidence
+                   if evidence.document_id == "verified-facts" and evidence.quote]
+    cited_claims = [claim for claim in facts if any(claim in quote for quote in fact_quotes)]
+    if cited_claims:
+        answer_id = hashlib.sha256(f"{question}\n{result.answer}".encode()).hexdigest()
+        try:
+            for claim, fact_id in bot_store.verified_fact_ids(cited_claims).items():
+                fact_store.record_dependency(
+                    fact_id, downstream_type="answer", downstream_id=answer_id,
+                    downstream_label=question[:500], dependency_type="used_by_answer",
+                    provenance={"surface": "slack", "quote": next(
+                        quote for quote in fact_quotes if claim in quote
+                    )}, created_by="slack-assistant",
+                )
+        except Exception:  # noqa: BLE001 — lineage telemetry never hides a grounded answer
+            log.exception("Could not record fact dependency for grounded Slack answer")
     suffix = "\n\nSources: " + " · ".join(
         f"[{index + 1}] {label}" for index, label in enumerate(cited)) if cited else ""
     return result.answer + suffix

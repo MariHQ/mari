@@ -42,6 +42,25 @@ class SlackKnowledgeScopeTests(unittest.TestCase):
         self.assertIn("Sources: [1] Deploy", answer)
         self.assertIn("Production deploys require approval.", generate.call_args.args[0])
 
+    def test_cited_verified_fact_records_answer_dependency(self) -> None:
+        claim = "Production deploys require approval."
+        with access.use_access(slack_context()), \
+             patch.object(bots.llm, "embed", return_value=None), \
+             patch.object(bots, "hybrid_search", return_value=[]), \
+             patch.object(bots.bot_store, "verified_facts", return_value=[claim]), \
+             patch.object(bots.bot_store, "verified_fact_ids", return_value={claim: 44}), \
+             patch.object(bots.fact_store, "record_dependency") as record, \
+             patch.object(bots.llm, "generate_json", return_value={
+                 "answer": "Approval is required.",
+                 "evidence": [{"document_id": "verified-facts", "quote": claim}],
+             }):
+            answer = bots.answer_question("Can I deploy?")
+
+        self.assertIn("Approval is required", answer)
+        record.assert_called_once()
+        self.assertEqual(record.call_args.args[0], 44)
+        self.assertEqual(record.call_args.kwargs["dependency_type"], "used_by_answer")
+
 
 if __name__ == "__main__":
     unittest.main()

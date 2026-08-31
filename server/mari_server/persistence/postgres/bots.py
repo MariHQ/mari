@@ -53,6 +53,20 @@ def verified_facts(limit: int = 8) -> list[str]:
             (project_id, limit)).fetchall()]
 
 
+def verified_fact_ids(claims: list[str]) -> dict[str, int]:
+    """Resolve only cited claims back to ledger identities for impact lineage."""
+    if not claims:
+        return {}
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn:
+        rows = conn.execute(
+            """SELECT id, claim FROM facts
+                WHERE project_id = %s AND status = 'Verified' AND claim = ANY(%s)""",
+            (project_id, claims),
+        ).fetchall()
+    return {str(row["claim"]): int(row["id"]) for row in rows}
+
+
 def touch_installation(installation_id: int, patch: dict | None = None) -> None:
     with db.connect() as conn, conn.transaction():
         if patch:
