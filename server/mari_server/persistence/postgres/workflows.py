@@ -210,7 +210,8 @@ def fail_running_run(run_id: int, note: str) -> None:
     with db.connect() as conn, conn.transaction():
         conn.execute(
             """UPDATE workflow_runs SET status = 'failed', progress = 100,
-                 stats = coalesce(stats, '{}'::jsonb) || jsonb_build_object('note', %s)
+                 stats = coalesce(stats, '{}'::jsonb) ||
+                         jsonb_build_object('note', CAST(%s AS text))
                WHERE project_id = %s AND id = %s AND status = 'running'""",
             (note[:200], project_id, run_id),
         )
@@ -336,7 +337,8 @@ def fail_unroutable_run(run_id: int, note: str) -> None:
     with db.connect() as conn, conn.transaction():
         conn.execute(
             """UPDATE workflow_runs SET status = 'failed', progress = 100,
-                      stats = coalesce(stats, '{}'::jsonb) || jsonb_build_object('note', %s)
+                      stats = coalesce(stats, '{}'::jsonb) ||
+                              jsonb_build_object('note', CAST(%s AS text))
                  WHERE id = %s AND status = 'running'""", (note[:200], run_id),
         )
 
