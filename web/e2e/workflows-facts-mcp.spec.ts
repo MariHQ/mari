@@ -91,7 +91,8 @@ test("a failed fact scan offers Retry and a new scan starts from it", async ({ p
 
 test("an unverified fact shows the date it was captured", async ({ page }) => {
   await page.goto("/facts");
-  await expect(page.getByText("Captured Aug 19, 2026", { exact: false })).toBeVisible();
+  const row = page.getByRole("row").filter({ hasText: "Retention is 10 days." });
+  await expect(row.getByTitle("Captured, not yet verified")).toHaveText("Aug 19, 2026");
 });
 
 test("the facts filter bar narrows by owner and date range", async ({ page }) => {
@@ -99,10 +100,12 @@ test("the facts filter bar narrows by owner and date range", async ({ page }) =>
   await expect(page.getByText("Retention is 30 days.", { exact: true })).toBeVisible();
   await expect(page.getByText("Retention is 10 days.", { exact: true })).toBeVisible();
 
-  await page.getByLabel("Filter by owner").selectOption("Lee Chen");
+  await page.getByRole("button", { name: /^Owner:/ }).click();
+  await page.getByRole("menuitemradio", { name: "Lee Chen" }).click();
   await expect(page.getByText("Retention is 30 days.", { exact: true })).toBeVisible();
   await expect(page.getByText("Retention is 10 days.", { exact: true })).toHaveCount(0);
-  await page.getByLabel("Filter by owner").selectOption("");
+  await page.getByRole("button", { name: /^Owner:/ }).click();
+  await page.getByRole("menuitemradio", { name: "All" }).click();
 
   // fact 1 dates to its verification (Aug 18) even though it was captured
   // Aug 1 — the filter ranks dates the way the column displays them, or a

@@ -192,6 +192,23 @@ def _all_failed(kind: str, failed: int, errors: list[str]) -> RuntimeError:
     )
 
 
+def _reclassify_timeouts(results: list, failed: int, errors: list[str]) -> tuple[int, int, list[str]]:
+    """Timed-out calls become unread, not failed, when nothing else went wrong.
+
+    A timeout is time running out, not the model answering badly: the
+    documents were never read, they stay unscanned for the next rotation, and
+    the run has nothing to fail over. A laptop busy enough to starve the
+    local model used to fail every scheduled scan outright; now the run
+    passes and says how many documents wait. A mix of timeouts and real
+    model failures keeps failing loudly, because there the model did answer
+    and answered badly. Returns (extra_unread, failed, errors)."""
+    if results or not failed:
+        return 0, failed, errors
+    if all("TimeoutError" in error or "timed out" in error.lower() for error in errors):
+        return failed, 0, []
+    return 0, failed, errors
+
+
 def _scan_note(unread: int, failed: int) -> str:
     parts: list[str] = []
     if failed:
@@ -296,6 +313,8 @@ def scan_decisions_for(doc_ids: list[int] | None = None,
         )
 
     results, unread, failed, errors = _scan_concurrently(docs, extract)
+    timed_out, failed, errors = _reclassify_timeouts(results, failed, errors)
+    unread += timed_out
     if not results and failed:
         raise _all_failed("documents", failed, errors)
 
@@ -404,6 +423,8 @@ def extract_fact_candidates_for(doc_ids: list[int] | None = None,
     results, unread, failed, errors = _scan_concurrently(docs, extract)
     refused = sum(1 for _, out in results if out is _BUDGET_REFUSED)
     results = [(doc, out) for doc, out in results if out is not _BUDGET_REFUSED]
+    timed_out, failed, errors = _reclassify_timeouts(results, failed, errors)
+    unread += timed_out
     if not results and failed:
         raise _all_failed("documents", failed, errors)
 

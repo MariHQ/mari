@@ -384,6 +384,37 @@ class FactRepresentationTests(unittest.TestCase):
         # The AI-accepted candidate transfers nothing.
         self.assertEqual(transfers, [("Eric Disque", 7, 9, "Mari")])
 
+    def test_all_timeouts_defer_the_documents_instead_of_failing_the_run(self):
+        docs = [
+            {"id": 1, "title": "Alpha", "source": "upload", "body": "Alpha holds.", "snippet": ""},
+            {"id": 2, "title": "Beta", "source": "upload", "body": "Beta holds.", "snippet": ""},
+        ]
+        complete = Mock()
+        with patch.object(service, "_scan_batch", return_value=docs), \
+             patch.object(service, "_mark_scanned") as marked, \
+             patch.object(service, "audit"), \
+             patch.object(service, "step_progress"), \
+             patch.object(service, "component_extract_facts",
+                          side_effect=RuntimeError("cannot reach localhost:11434: TimeoutError")), \
+             patch.object(service.knowledge_store, "fact_claims", return_value=set()), \
+             patch.object(service.llm, "generation_model", return_value=("ollama", "model")), \
+             patch.object(service.fact_store, "configure_llm_budget"), \
+             patch.object(service.fact_store, "reserve_llm_call", return_value=True), \
+             patch.object(service.fact_store, "complete_llm_budget", complete):
+            candidates, scanned, note = service.extract_fact_candidates_for(
+                [1, 2], run_id=91, max_llm_calls=2,
+            )
+
+        # Time running out is deferral, not failure: a laptop busy enough to
+        # starve the local model used to fail every scheduled scan outright.
+        self.assertEqual((candidates, scanned), ([], 0))
+        self.assertIn("not read because the scan hit its", note)
+        marked.assert_called_once_with("facts", [])
+        complete.assert_called_once_with(
+            91, stage="scan_facts", purpose="structured fact extraction",
+            status="completed",
+        )
+
     def test_bounded_ai_reviewer_names_the_generation_model(self):
         from mari_server.providers import models as llm_models
 
