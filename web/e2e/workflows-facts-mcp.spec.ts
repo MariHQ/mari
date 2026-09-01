@@ -94,6 +94,24 @@ test("an unverified fact shows the date it was captured", async ({ page }) => {
   await expect(page.getByText("Captured Aug 19, 2026", { exact: false })).toBeVisible();
 });
 
+test("the facts filter bar narrows by owner and date range", async ({ page }) => {
+  await page.goto("/facts");
+  await expect(page.getByText("Retention is 30 days.", { exact: true })).toBeVisible();
+  await expect(page.getByText("Retention is 10 days.", { exact: true })).toBeVisible();
+
+  await page.getByLabel("Filter by owner").selectOption("Lee Chen");
+  await expect(page.getByText("Retention is 30 days.", { exact: true })).toBeVisible();
+  await expect(page.getByText("Retention is 10 days.", { exact: true })).toHaveCount(0);
+  await page.getByLabel("Filter by owner").selectOption("");
+
+  // fact 1 dates to its verification (Aug 18), fact 2 to its capture (Aug 19)
+  await page.getByLabel("Captured from").fill("2026-08-19");
+  await expect(page.getByText("Retention is 10 days.", { exact: true })).toBeVisible();
+  await expect(page.getByText("Retention is 30 days.", { exact: true })).toHaveCount(0);
+  await page.getByLabel("Captured to").fill("2026-08-19");
+  await expect(page.getByText("Retention is 10 days.", { exact: true })).toBeVisible();
+});
+
 test("fact write failures remain visible and do not close the form", async ({ page }) => {
   api.failNext(/addFact/, "Fact already exists");
   await page.goto("/facts");

@@ -60,7 +60,7 @@ function initialData() {
       { step: "Approve", status: "waiting", detail: "awaiting Dana", duration: "00:00:00" },
     ] }],
     facts: [
-      { id: 1, claim: "Retention is 30 days.", source: "Retention runbook", owner: "Dana", status: "Verified", verified: "2026-08-18", validFrom: "2026-01-01", impactCount: 3, highImpact: true },
+      { id: 1, claim: "Retention is 30 days.", source: "Retention runbook", owner: "Lee Chen", status: "Verified", verified: "2026-08-18", validFrom: "2026-01-01", impactCount: 3, highImpact: true },
       { id: 2, claim: "Retention is 10 days.", source: "Old handbook", owner: "Dana", status: "Needs review", verified: "", validFrom: "2025-01-01", capturedAt: "2026-08-19", impactCount: 0, highImpact: false },
     ],
     factContradictions: [{ factId: 1, claim: "Retention is 30 days.", otherFactId: 2, otherClaim: "Retention is 10 days.", reason: "numeric conflict", detail: "30 versus 10 days" }],
