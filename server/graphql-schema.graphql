@@ -184,6 +184,7 @@ type Fact {
   status: String!
   verified: String!
   validFrom: String!
+  capturedAt: String!
   impactCount: Int!
   highImpact: Boolean!
 }

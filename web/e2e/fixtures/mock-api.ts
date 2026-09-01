@@ -61,7 +61,7 @@ function initialData() {
     ] }],
     facts: [
       { id: 1, claim: "Retention is 30 days.", source: "Retention runbook", owner: "Dana", status: "Verified", verified: "2026-08-18", validFrom: "2026-01-01", impactCount: 3, highImpact: true },
-      { id: 2, claim: "Retention is 10 days.", source: "Old handbook", owner: "Dana", status: "Needs review", verified: "", validFrom: "2025-01-01", impactCount: 0, highImpact: false },
+      { id: 2, claim: "Retention is 10 days.", source: "Old handbook", owner: "Dana", status: "Needs review", verified: "", validFrom: "2025-01-01", capturedAt: "2026-08-19", impactCount: 0, highImpact: false },
     ],
     factContradictions: [{ factId: 1, claim: "Retention is 30 days.", otherFactId: 2, otherClaim: "Retention is 10 days.", reason: "numeric conflict", detail: "30 versus 10 days" }],
     decisions: [{ id: 1, statement: "Use Postgres for metadata", context: "Queryable state stays relational.", status: "ratified", sourceLabel: "GitHub · ADR-14", owners: ["Dana"], decidedOn: "2026-08-18", supersededBy: null, supersededByStatement: "", impactSummary: "Affects storage design", impactCount: 2 }],
@@ -332,9 +332,12 @@ export async function installMockApi(page: Page, options: {
     } else if (/deleteAssistantWorkflow/.test(query)) {
       data = { deleteAssistantWorkflow: true };
     } else if (/workflowRun\(/.test(query)) {
+      // `factScanStatus` is settable so a spec can exercise the failed run
+      // path (the Retry button) against the same fixture.
+      const scanStatus = String(state.factScanStatus || "passed");
       data = {
-        workflowRun: { id: 99, number: 1900, workflowName: "Fact scan", status: "passed", progress: 100,
-          stats: { facts: 2 }, rows: [{ step: "Scan facts", status: "passed", detail: "2 new claims captured", duration: "00:00:01" }] },
+        workflowRun: { id: 99, number: 1900, workflowName: "Fact scan", status: scanStatus, progress: 100,
+          stats: { facts: 2 }, rows: [{ step: "Scan facts", status: scanStatus, detail: scanStatus === "failed" ? "RuntimeError: model unreachable" : "2 new claims captured", duration: "00:00:01" }] },
         factExtractionCandidates: [{
           id: 501, runId: 99, documentId: 11, documentTitle: "Infrastructure runbook",
           claim: "Production clusters use Kubernetes.", source: "Confluence", evidence: "Production runs on Kubernetes.",

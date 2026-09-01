@@ -208,6 +208,14 @@ export function factsActions({ currentUserName }: ActionContext): FactsActions {
       );
       return readRun(String(d.startFactScan));
     },
+    /* Retry after a failure reuses the configuration the workflow already
+     * carries: startFactScan without a config runs the stored pipeline, and
+     * the failed documents were never marked scanned, so the rotation picks
+     * them straight back up. */
+    retryFactScan: async () => {
+      const d = await mutate("mutation { startFactScan }");
+      return readRun(String(d.startFactScan));
+    },
     scanProgress: (id: string) => readRun(id),
     latestFactScan: latestRun,
     reviewFactCandidate: async (runId, candidateId, accept, reason = "") => {

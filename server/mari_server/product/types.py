@@ -159,6 +159,7 @@ class Fact:
     status: str
     verified: str  # ISO date of the last verification, "" when never verified
     valid_from: str
+    captured_at: str  # ISO timestamp the fact entered the ledger
     impact_count: int
     high_impact: bool
 

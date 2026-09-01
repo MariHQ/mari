@@ -792,6 +792,7 @@ class Query:
                      owner_tint=r["owner_tint"], status=r["status"],
                      verified=r["verified_at"].isoformat() if r["verified_at"] else "",
                      valid_from=r["valid_from"].isoformat() if r.get("valid_from") else "",
+                     captured_at=r["created_at"].isoformat() if r.get("created_at") else "",
                      impact_count=int(r.get("impact_count") or 0), high_impact=bool(r.get("high_impact")))
                 for r in knowledge_store.facts()]
 
@@ -808,6 +809,7 @@ class Query:
                      owner_tint=r["owner_tint"], status=r["status"],
                      verified=r["verified_at"].isoformat() if r["verified_at"] else "",
                      valid_from=r["valid_from"].isoformat() if r.get("valid_from") else "",
+                     captured_at=r["created_at"].isoformat() if r.get("created_at") else "",
                      impact_count=int(r.get("impact_count") or 0), high_impact=bool(r.get("high_impact")))
                 for r in rows]
 

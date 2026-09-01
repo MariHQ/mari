@@ -8,13 +8,13 @@ import { useQuery } from "../lib/api";
 import type { PageData } from "./types";
 
 const QUERY = `{
-  facts { id claim source owner status verified validFrom impactCount highImpact }
+  facts { id claim source owner status verified validFrom capturedAt impactCount highImpact }
   factContradictions { factId claim otherFactId otherClaim reason detail }
 }`;
 
 type Res = {
   facts: { id: number; claim: string; source: string; owner: string; status: string; verified: string;
-    validFrom: string; impactCount: number; highImpact: boolean }[];
+    validFrom: string; capturedAt: string; impactCount: number; highImpact: boolean }[];
   factContradictions: {
     factId: number; claim: string; otherFactId: number;
     otherClaim: string; reason: string; detail: string;
@@ -43,7 +43,8 @@ export function mapFacts(res: Res): Fact[] {
     // The row computes an age off this, so an unverified fact has to be null
     // rather than "" — otherwise it reads as verified at the epoch.
     verified: f.verified || null,
-    validFrom: f.validFrom || null, impactCount: f.impactCount, highImpact: f.highImpact,
+    validFrom: f.validFrom || null, capturedAt: f.capturedAt || null,
+    impactCount: f.impactCount, highImpact: f.highImpact,
   }));
 }
 

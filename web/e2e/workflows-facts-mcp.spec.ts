@@ -67,6 +67,25 @@ test("LLM fact scan starts a workflow and reports its grounded result", async ({
   await expect(page.getByText(/Fact scan · run #1900/)).toHaveCount(0);
 });
 
+test("a failed fact scan offers Retry and a new scan starts from it", async ({ page }) => {
+  api.setData("factScanStatus", "failed");
+  await page.goto("/facts");
+  await page.getByRole("button", { name: "Scan for facts" }).click();
+  const config = page.getByRole("dialog", { name: "Configure fact extraction" });
+  await config.getByRole("button", { name: "Save & run now" }).click();
+  await expect(page.getByText(/Fact scan · run #1900/)).toBeVisible();
+  await expect(page.getByText("RuntimeError: model unreachable", { exact: false })).toBeVisible();
+  const before = api.calls.filter((c) => c.query.includes("startFactScan")).length;
+  await page.getByRole("button", { name: "Retry" }).click();
+  await expect.poll(() =>
+    api.calls.filter((c) => c.query.includes("startFactScan")).length).toBe(before + 1);
+});
+
+test("an unverified fact shows the date it was captured", async ({ page }) => {
+  await page.goto("/facts");
+  await expect(page.getByText("Captured Aug 19, 2026", { exact: false })).toBeVisible();
+});
+
 test("fact write failures remain visible and do not close the form", async ({ page }) => {
   api.failNext(/addFact/, "Fact already exists");
   await page.goto("/facts");

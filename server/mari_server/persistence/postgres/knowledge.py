@@ -322,6 +322,15 @@ def publish_fact_candidates(run_id: int, owner: str, *, verified: bool = False) 
             (project_id, run_id),
         ).fetchall()
         for candidate in rows:
+            # A fact belongs to the person who vouched for it. The publish
+            # step runs under the scheduler's automation identity, which
+            # stamped every scanned fact "Mari" even when a person clicked
+            # Accept; the candidate's own reviewer is the real owner. An
+            # AI-accepted candidate keeps the caller's actor, because no
+            # person vouched for that one.
+            fact_owner = (str(candidate["reviewer"])
+                          if candidate.get("review_kind") == "human" and candidate.get("reviewer")
+                          else owner)
             assertion = conn.execute(
                 """SELECT * FROM fact_assertions
                     WHERE project_id = %s AND candidate_id = %s FOR UPDATE""",
@@ -388,7 +397,7 @@ def publish_fact_candidates(run_id: int, owner: str, *, verified: bool = False) 
                                           WHERE project_id = %s AND id = %s), now()))
                        ON CONFLICT DO NOTHING
                        RETURNING id, current_assertion_id""",
-                    (project_id, canonical_key, candidate["claim"], candidate["source_label"], owner,
+                    (project_id, canonical_key, candidate["claim"], candidate["source_label"], fact_owner,
                      status, time.strftime("%b %d, %Y") if verified else "—", verified,
                      candidate["document_id"], project_id, candidate["document_id"]),
                 ).fetchone()

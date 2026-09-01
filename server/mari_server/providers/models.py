@@ -633,14 +633,22 @@ def generate(prompt: str, system: str = "", timeout: float = 120.0,
         # JSON cut off mid-row. Size the window to the prompt being sent,
         # bounded so one long call cannot ask a laptop for a 262k window.
         budget = max_tokens or (1500 if json_format else 700)
+        # Bucketed, not exact: Ollama restarts the model runner whenever the
+        # requested num_ctx changes, and a per-prompt context size made nearly
+        # every call in a multi-stage scan pay a multi-second reload. Rounding
+        # up to the next power of two lets consecutive calls of similar size
+        # reuse the loaded runner.
+        needed = max(OLLAMA_MIN_CONTEXT, _tokens(prompt) + _tokens(system) + budget + 512)
+        bucket = OLLAMA_MIN_CONTEXT
+        while bucket < needed and bucket < OLLAMA_MAX_CONTEXT:
+            bucket *= 2
         payload: dict[str, t.Any] = {
             "model": model, "prompt": prompt, "system": system, "stream": False,
             "think": False,
             "options": {
                 "temperature": 0.3,
                 "num_predict": budget,
-                "num_ctx": min(OLLAMA_MAX_CONTEXT,
-                               max(OLLAMA_MIN_CONTEXT, _tokens(prompt) + _tokens(system) + budget + 512)),
+                "num_ctx": min(OLLAMA_MAX_CONTEXT, bucket),
             },
         }
         if json_format:
