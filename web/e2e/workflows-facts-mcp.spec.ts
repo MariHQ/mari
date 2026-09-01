@@ -117,6 +117,15 @@ test("the facts filter bar narrows by owner and date range", async ({ page }) =>
   await expect(page.getByText("Retention is 30 days.", { exact: true })).toHaveCount(0);
   await page.getByLabel("Date to").fill("2026-08-19");
   await expect(page.getByText("Retention is 10 days.", { exact: true })).toBeVisible();
+
+  // Filters that narrow everything away name themselves and offer a way out;
+  // "nothing matches the current filter" named none of the four (2026-09-01).
+  await page.getByLabel("Date from").fill("2026-08-25");
+  await expect(page.getByText("No facts match these filters", { exact: true })).toBeVisible();
+  await expect(page.getByText(/narrowed by dates 2026-08-25/)).toBeVisible();
+  await page.getByRole("button", { name: "Clear filters" }).click();
+  await expect(page.getByText("Retention is 30 days.", { exact: true })).toBeVisible();
+  await expect(page.getByText("Retention is 10 days.", { exact: true })).toBeVisible();
 });
 
 test("fact write failures remain visible and do not close the form", async ({ page }) => {
