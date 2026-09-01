@@ -109,6 +109,49 @@ def remove_source(source_id: int, *, delete_documents: bool = True) -> dict | No
     return row
 
 
+def adopt_frozen_documents(key: str, new_source_id: int) -> int:
+    """Re-adopt a keep-documents snapshot into a new connection of the same
+    provider, so reconnecting resumes ownership instead of ingesting a full
+    duplicate set beside the frozen one (document identity embeds the source
+    id, so a new connection could never match the old rows on its own).
+
+    Conservative on purpose: adoption happens only when this is the
+    provider's ONLY connection. documents.source holds the bare provider key,
+    so with two sites of one provider there is no way to know whose snapshot
+    the frozen rows were, and guessing would graft one site's pages onto the
+    other. The collision guard skips any row whose rewritten identity a
+    fresh sync already claimed; that row stays frozen rather than clobbered.
+
+    Adopted rows keep their content and chunks: the first sync then upserts
+    in place, and unchanged content hashes are never re-embedded."""
+    project_id = access.require_current_access().project_id
+    pattern = f"^{key}:[0-9]+:"
+    replacement = f"{key}:{new_source_id}:"
+    with db.connect() as conn, conn.transaction():
+        siblings = conn.execute(
+            """SELECT count(*) AS n FROM sources
+                WHERE project_id = %s AND id <> %s
+                  AND (provider = %s OR provider LIKE %s)""",
+            (project_id, new_source_id, key, key + ":%")).fetchone()["n"]
+        if siblings:
+            return 0
+        rows = conn.execute(
+            """UPDATE documents
+                  SET source_id = %s,
+                      external_id = regexp_replace(external_id, %s, %s)
+                WHERE project_id = %s AND source_id IS NULL AND source = %s
+                  AND external_id ~ %s
+                  AND NOT EXISTS (
+                    SELECT 1 FROM documents live
+                     WHERE live.project_id = documents.project_id
+                       AND live.source = documents.source
+                       AND live.external_id = regexp_replace(documents.external_id, %s, %s))
+                RETURNING id""",
+            (new_source_id, pattern, replacement, project_id, key,
+             pattern, pattern, replacement)).fetchall()
+    return len(rows)
+
+
 def change_member_role(user_id: int, role: str) -> dict | None:
     project_id = access.require_current_access().project_id
     with db.connect() as conn, conn.transaction():

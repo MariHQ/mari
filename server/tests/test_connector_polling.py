@@ -109,6 +109,7 @@ class ConnectNamedInstanceTests(unittest.TestCase):
              patch.object(connectors_api.source_store, "connector_source_for",
                           return_value=blocking) as lookup, \
              patch.object(connectors_api, "audit"), \
+             patch.object(connectors_api.admin_store, "adopt_frozen_documents", return_value=0), \
              patch.object(connectors_api.flowengine, "ensure_sync_flow"), \
              patch.object(connectors_api.ingest, "start_sync"):
             result = connectors_api.connect(body)
@@ -325,6 +326,48 @@ class RemoveSourceTests(unittest.TestCase):
                           if sql.startswith("INSERT INTO sync_events"))
         self.assertEqual(event_args[2], "removed: Confluence")
         self.assertFalse(any(sql.startswith("DELETE FROM sync_events") for sql, _ in conn.executed))
+
+    def test_reconnect_adopts_the_frozen_snapshot_when_unambiguous(self) -> None:
+        from types import SimpleNamespace
+        from mari_server.persistence.postgres import admin as admin_store
+
+        class Conn(_FakeRemoveConn):
+            def execute(self, sql, args=()):
+                normalized = " ".join(sql.split())
+                self.executed.append((normalized, args))
+                result = unittest.mock.Mock()
+                if normalized.startswith("SELECT count(*) AS n FROM sources"):
+                    result.fetchone.return_value = {"n": self.siblings}
+                else:
+                    result.fetchall.return_value = [{"id": 5}, {"id": 9}]
+                return result
+
+        conn = Conn(None, siblings=0)
+        with unittest.mock.patch.object(admin_store.db, "connect", return_value=conn), \
+             unittest.mock.patch.object(admin_store.access, "require_current_access",
+                                        return_value=SimpleNamespace(project_id=1)):
+            adopted = admin_store.adopt_frozen_documents("confluence", 10)
+        self.assertEqual(adopted, 2)
+        sql, args = next((s, a) for s, a in conn.executed if s.startswith("UPDATE documents"))
+        # identity is rewritten onto the new source id, and a row whose
+        # rewritten identity a fresh sync already claimed stays frozen
+        self.assertIn("regexp_replace(external_id, %s, %s)", sql)
+        self.assertIn("NOT EXISTS", sql)
+        self.assertIn("source_id IS NULL", sql)
+        self.assertEqual(args[1:3], ("^confluence:[0-9]+:", "confluence:10:"))
+
+    def test_reconnect_adopts_nothing_beside_a_sibling_connection(self) -> None:
+        from types import SimpleNamespace
+        from mari_server.persistence.postgres import admin as admin_store
+
+        conn = _FakeRemoveConn(None, siblings=1)
+        with unittest.mock.patch.object(admin_store.db, "connect", return_value=conn), \
+             unittest.mock.patch.object(admin_store.access, "require_current_access",
+                                        return_value=SimpleNamespace(project_id=1)):
+            adopted = admin_store.adopt_frozen_documents("confluence", 10)
+        # two sites of one provider: no way to know whose snapshot this was
+        self.assertEqual(adopted, 0)
+        self.assertFalse(any(sql.startswith("UPDATE documents") for sql, _ in conn.executed))
 
     def test_keeps_a_sibling_connections_checkpoints(self) -> None:
         result, conn = self._remove(

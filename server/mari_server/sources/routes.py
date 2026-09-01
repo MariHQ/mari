@@ -25,6 +25,7 @@ from mari_server.persistence.postgres import connector_sync
 from mari_server.providers import connectors as component_connectors
 from mari_server.automations import runtime as flowengine
 from mari_server.sources import sync as ingest
+from mari_server.persistence.postgres import admin as admin_store
 from mari_server.persistence.postgres import sources as source_store
 from mari_server.persistence.postgres.database import audit
 from mari_components.connectors import connector_definition, connector_definitions
@@ -204,6 +205,12 @@ def connect(body: ProviderIn) -> dict:
                                   "name": blocking["display_name"]}
         return answer
     audit("connected source", display)
+    # A keep-documents snapshot of this provider is re-adopted before the
+    # first sync, so reconnecting resumes ownership of the frozen rows
+    # instead of ingesting a full duplicate set beside them.
+    adopted = admin_store.adopt_frozen_documents(key, source_id)
+    if adopted:
+        audit("adopted retained documents", f"{adopted} into {display}")
     # every connected source gets a scheduled sync flow (Flows UI owns cadence)
     flowengine.ensure_sync_flow(source_id, display)
     ingest.start_sync(source_id)  # dispatches to connect_sync by kind
