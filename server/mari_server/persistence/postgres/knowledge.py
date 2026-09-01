@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 
 from mari_server.persistence.postgres import connection as db
 from mari_server.identity import context as access
+from mari_server.identity.actor import SERVICE_ACTOR
 from mari_server.providers import models as llm
 
 
@@ -430,6 +431,17 @@ def publish_fact_candidates(run_id: int, owner: str, *, verified: bool = False) 
                                 WHERE project_id = %s AND id = %s""",
                             (fact["id"], project_id, assertion["id"]),
                         )
+            if fact and fact_owner != owner:
+                # A person adopting a machine-published fact vouches harder
+                # than the machine did, so the service identity yields to the
+                # human reviewer. The WHERE clause is the guard: a fact any
+                # real person owns keeps its owner, and a row just created
+                # with the reviewer's name is a no-op.
+                conn.execute(
+                    """UPDATE facts SET owner_name = %s
+                        WHERE project_id = %s AND id = %s AND owner_name = %s""",
+                    (fact_owner, project_id, fact["id"], SERVICE_ACTOR),
+                )
             if fact:
                 conn.execute(
                     """INSERT INTO fact_embeddings

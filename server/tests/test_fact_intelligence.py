@@ -334,6 +334,56 @@ class FactRepresentationTests(unittest.TestCase):
         # keeps the automation actor, because no person vouched for it.
         self.assertEqual(owners, ["Eric Disque", "Mari"])
 
+    def test_human_adoption_takes_over_a_machine_owned_fact(self):
+        from mari_server.persistence.postgres import knowledge as knowledge_store
+
+        candidates = [
+            {"id": 1, "claim": "Backups cover both volumes.", "source_label": "Mari scan · Runbook",
+             "document_id": 4, "review_kind": "human", "reviewer": "Eric Disque"},
+            {"id": 2, "claim": "The API uses Recreate.", "source_label": "Mari scan · Runbook",
+             "document_id": 4, "review_kind": "ai", "reviewer": "Bounded AI proposal · ollama:model"},
+        ]
+
+        class Conn:
+            def __init__(self):
+                self.calls = []
+
+            def execute(self, sql, args=()):
+                normalized = " ".join(sql.split())
+                self.calls.append((normalized, args))
+                result = Mock()
+                result.fetchall.return_value = (
+                    candidates if normalized.startswith("SELECT * FROM fact_extraction_candidates") else [])
+                # every claim already exists: the insert conflicts away and
+                # the follow-up select finds the machine-published fact
+                result.fetchone.return_value = (
+                    {"id": 9, "current_assertion_id": None}
+                    if normalized.startswith("SELECT id, current_assertion_id FROM facts") else None)
+                return result
+
+            def transaction(self):
+                from contextlib import nullcontext
+                return nullcontext()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return False
+
+        conn = Conn()
+        context = SimpleNamespace(project_id=7)
+        with patch.object(knowledge_store.access, "require_current_access", return_value=context), \
+             patch.object(knowledge_store.db, "connect", return_value=conn):
+            knowledge_store.publish_fact_candidates(91, "Mari")
+
+        transfers = [args for sql, args in conn.calls
+                     if sql.startswith("UPDATE facts SET owner_name")]
+        # The human adoption takes the fact over from the service identity —
+        # and only from the service identity, which the WHERE clause pins.
+        # The AI-accepted candidate transfers nothing.
+        self.assertEqual(transfers, [("Eric Disque", 7, 9, "Mari")])
+
     def test_bounded_ai_reviewer_names_the_generation_model(self):
         from mari_server.providers import models as llm_models
 
