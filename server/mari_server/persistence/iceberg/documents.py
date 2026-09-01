@@ -13,6 +13,7 @@ import threading
 import typing as t
 
 import pyarrow as pa
+from pyiceberg.exceptions import NoSuchNamespaceError, NoSuchTableError
 from pyiceberg.expressions import EqualTo
 from pyiceberg.types import TimestamptzType
 
@@ -45,10 +46,18 @@ class IcebergDocumentStore:
     def __init__(self, store: IcebergWarehouse | None = None):
         self.store = store or warehouse()
         self._lock = threading.RLock()
+        # Create only when the CATALOG says the table is missing. The guard
+        # was a bare except, so a FileNotFoundError — the catalog pointing at
+        # files this process cannot see, which is catalog/warehouse desync,
+        # not absence — was laundered into a create that then failed on the
+        # catalog's primary key as "already exists", the wrong error pointing
+        # away from the real one. Desync now propagates as itself.
+        # create_table_if_not_exists keeps the remaining first-boot race
+        # (two processes creating simultaneously) harmless.
         try:
             table = self.store.catalog.load_table(TABLE)
-        except Exception:
-            table = self.store.catalog.create_table(TABLE, schema=SCHEMA)
+        except (NoSuchTableError, NoSuchNamespaceError):
+            table = self.store.catalog.create_table_if_not_exists(TABLE, schema=SCHEMA)
         if "source_updated_at" not in table.schema().column_names:
             with table.update_schema() as update:
                 update.add_column("source_updated_at", TimestamptzType())

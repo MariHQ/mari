@@ -75,6 +75,14 @@ UPDATE settings
  WHERE key IN ('github_bot', 'slack_bot') AND jsonb_typeof(value) = 'object';
 -- API keys are bearer credentials for the REST surface; none should travel.
 TRUNCATE api_keys;
+-- The Iceberg catalog rows point at absolute file:// paths on the build
+-- machine, and the warehouse files themselves never ship in the image — so a
+-- restored workspace's first document write chased a path that does not
+-- exist and then failed its fallback create with "already exists". The image
+-- starts with an empty catalog and creates its journal fresh; the demo's
+-- version history does not travel.
+DROP TABLE IF EXISTS iceberg_tables;
+DROP TABLE IF EXISTS iceberg_namespace_properties;
 SQL
 
 echo "==> verify the scrub actually happened"

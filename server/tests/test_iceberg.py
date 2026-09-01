@@ -36,6 +36,35 @@ class IcebergWarehouseTests(unittest.TestCase):
         catalog.create_namespace_if_not_exists.assert_called_once_with("mari")
         mkdir.assert_not_called()
 
+    def test_catalog_desync_propagates_instead_of_masquerading_as_a_create(self):
+        # A catalog whose rows point at files this process cannot see is
+        # desync, not absence. The bare except used to answer it with a
+        # create that failed on the catalog's primary key as "already
+        # exists" — the wrong error, pointing away from the real one (the
+        # four-day container/host split of 2026-09-01).
+        catalog = Mock()
+        catalog.load_table.side_effect = FileNotFoundError(
+            "/Users/somebody/else/warehouse/mari/knowledge_versions/metadata/x.json")
+        store = Mock(spec=IcebergWarehouse)
+        store.catalog = catalog
+        with self.assertRaises(FileNotFoundError):
+            IcebergDocumentStore(store)
+        catalog.create_table.assert_not_called()
+        catalog.create_table_if_not_exists.assert_not_called()
+
+    def test_a_genuinely_missing_table_is_created_race_safely(self):
+        from pyiceberg.exceptions import NoSuchTableError
+
+        catalog = Mock()
+        table = Mock()
+        table.schema.return_value.column_names = ["source_updated_at"]
+        catalog.load_table.side_effect = NoSuchTableError("mari.knowledge_versions")
+        catalog.create_table_if_not_exists.return_value = table
+        store = Mock(spec=IcebergWarehouse)
+        store.catalog = catalog
+        IcebergDocumentStore(store)
+        catalog.create_table_if_not_exists.assert_called_once()
+
     def test_warehouse_contains_only_canonical_document_versions(self):
         with tempfile.TemporaryDirectory() as directory:
             warehouse = temporary_warehouse(directory)
