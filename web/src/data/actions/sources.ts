@@ -20,7 +20,7 @@
 import type { SourcesActions } from "@mari-design/components/pages/SourcesPage";
 import { DuplicateSourceError } from "@mari-design/components/features/SourcesConnectorWizard";
 import type { Source } from "@mari-design/components/features/SourcesConnectorCard";
-import { clearQueryCache, gqlResult, projectHeaders } from "../../lib/api";
+import { gqlResult, invalidateQueries, projectHeaders } from "../../lib/api";
 import { mutate } from "./index";
 
 /* ── REST helpers (shared with the welcome/onboarding actions) ───────────── */
@@ -57,7 +57,7 @@ export async function uploadDocuments(files: File[]): Promise<void> {
   if (!res.ok) {
     throw new Error(typeof (json as any)?.detail === "string" ? (json as any).detail : `Upload failed with HTTP ${res.status}.`);
   }
-  clearQueryCache();
+  invalidateQueries();
   const rejected = ((json as UploadResult).files ?? []).filter((f) => f.error);
   if (rejected.length) {
     throw new Error(rejected.map((f) => `${f.name}: ${f.error}`).join(" · "));
@@ -84,7 +84,7 @@ export async function connectAny(provider: string, config: Record<string, string
     }
     throw new Error(r.error);
   }
-  clearQueryCache();
+  invalidateQueries();
   // The id is what lets the wizard follow the first sync it just started.
   return r.sourceId != null ? String(r.sourceId) : undefined;
 }
@@ -125,10 +125,10 @@ export function sourcesActions(): SourcesActions {
         // lastError is the live registry message, falling back server-side to
         // the stored config value. A crash before anything was stored has no
         // words anywhere, so only then does a generic line stand in.
-        clearQueryCache();
+        invalidateQueries();
         return { state: "failed" as const, error: st.lastError || "The sync failed without reporting a reason." };
       }
-      clearQueryCache();
+      invalidateQueries();
       return { state: "done" as const, done: st.done, total: st.total };
     },
     uploadFiles: uploadDocuments,
@@ -177,7 +177,7 @@ export function sourcesActions(): SourcesActions {
       await mutate(`mutation($id: Int!, $deleteDocuments: Boolean!) {
         removeSource(sourceId: $id, deleteDocuments: $deleteDocuments)
       }`, { id: idOf(s), deleteDocuments });
-      clearQueryCache();
+      invalidateQueries();
     },
 
     /* A first sync that failed left a real `sources` row behind — the connect

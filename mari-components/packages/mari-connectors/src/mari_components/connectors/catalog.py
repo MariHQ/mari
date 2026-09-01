@@ -181,7 +181,10 @@ _DEFINITIONS = (
         (
             _field("site_url", "Site URL", placeholder="https://company.atlassian.net"),
             _field("email", "Atlassian account email"),
-            _field("api_token", "API token", secret=True, placeholder="ATATT…"),
+            _field(
+                "api_token", "API token", secret=True, placeholder="ATATT…",
+                help="Create one at https://id.atlassian.com/manage-profile/security/api-tokens",
+            ),
             _field("space_key", "Space key", required=False, placeholder="ENG"),
             _field("webhook_secret", "Webhook signing secret", secret=True, required=False),
         ),
@@ -214,8 +217,10 @@ _DEFINITIONS = (
             _field(
                 "api_token", "API token", secret=True, placeholder="ATATT…",
                 help=(
-                    "Create a regular API token, not an API token with scopes. Scoped tokens use an "
-                    "Atlassian API URL this connector does not support. Record its expiration date."
+                    "Create a regular API token at "
+                    "https://id.atlassian.com/manage-profile/security/api-tokens, not an API token "
+                    "with scopes. Scoped tokens use an Atlassian API URL this connector does not "
+                    "support. Record its expiration date."
                 ),
             ),
             _field(
