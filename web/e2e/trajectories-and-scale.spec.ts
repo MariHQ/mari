@@ -144,7 +144,7 @@ test("a scheduled task can be removed from the task manager", async ({ page }) =
   await page.goto("/scheduled-tasks");
   await expect(page.getByRole("heading", { name: "Fact review" })).toBeVisible();
   await page.getByRole("button", { name: "Remove" }).click();
-  await page.getByRole("button", { name: "Really remove?" }).click();
+  await page.getByRole("button", { name: "Confirm remove" }).click();
   await expect.poll(() => api.calls.some((call) => call.query.includes("removeScheduledTask")
     && call.variables.taskId === 1)).toBeTruthy();
   await expect(page.getByRole("heading", { name: "Fact review" })).toHaveCount(0);
