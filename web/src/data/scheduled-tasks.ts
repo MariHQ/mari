@@ -4,7 +4,7 @@ import type { PageData } from "./types";
 
 const QUERY = `query ScheduledTasks {
   workflows {
-    id name description status trigger scheduleCapable
+    id name description status trigger scheduleCapable nodes
     lastRunNumber lastRunStatus lastRunStarted
   }
 }`;
@@ -12,7 +12,8 @@ const QUERY = `query ScheduledTasks {
 type WorkflowRes = {
   id: number; name: string; description: string; status: string;
   trigger: { on?: string; every_minutes?: number } | null;
-  scheduleCapable: boolean; lastRunNumber: number | null;
+  scheduleCapable: boolean; nodes: { kind?: string }[] | null;
+  lastRunNumber: number | null;
   lastRunStatus: string; lastRunStarted: string;
 };
 
@@ -28,6 +29,8 @@ export function useScheduledTasks(): PageData<ScheduledTasksData> {
       lastRunNumber: workflow.lastRunNumber,
       lastRunStatus: workflow.lastRunStatus,
       lastRunStarted: workflow.lastRunStarted,
+      // Sync rows get the Sources page's sub-hourly cadence options.
+      sync: (workflow.nodes ?? []).some((node) => node.kind === "sync_source"),
     }));
   return {
     data: { tasks }, loading: query.loading,

@@ -140,6 +140,22 @@ test("scheduled tasks can be paused, rescheduled, and run without losing their c
   await expect(page.getByLabel("Fact review cadence")).toHaveValue("");
 });
 
+test("sync rows offer the sub-hourly cadences that Sources set", async ({ page }) => {
+  api.setData("workflows", [{
+    id: 11, name: "Sync acme/handbook", description: "Keeps acme/handbook indexed.",
+    color: "#5c7a4c", pinned: false, status: "active",
+    trigger: { on: "schedule", every_minutes: 10 }, scheduleCapable: true,
+    lastRunNumber: 1901, lastRunStatus: "passed", lastRunStarted: "2026-08-19T12:00:00Z",
+    nodes: [{ kind: "trigger", label: "Every 10 min", config: {} },
+            { kind: "sync_source", label: "Sync", config: { source_id: 1 } }],
+  }]);
+  await page.goto("/scheduled-tasks");
+  const cadence = page.getByLabel("Sync acme/handbook cadence");
+  // a real option, not a synthesized orphan you could leave but never rejoin
+  await expect(cadence).toHaveValue("10");
+  await expect(cadence.locator('option[value="15"]')).toHaveText("Every 15 min");
+});
+
 test("a scheduled task can be removed from the task manager", async ({ page }) => {
   await page.goto("/scheduled-tasks");
   await expect(page.getByRole("heading", { name: "Fact review" })).toBeVisible();
