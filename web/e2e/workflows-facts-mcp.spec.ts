@@ -104,11 +104,17 @@ test("the facts filter bar narrows by owner and date range", async ({ page }) =>
   await expect(page.getByText("Retention is 10 days.", { exact: true })).toHaveCount(0);
   await page.getByLabel("Filter by owner").selectOption("");
 
-  // fact 1 dates to its verification (Aug 18), fact 2 to its capture (Aug 19)
-  await page.getByLabel("Captured from").fill("2026-08-19");
+  // fact 1 dates to its verification (Aug 18) even though it was captured
+  // Aug 1 — the filter ranks dates the way the column displays them, or a
+  // row reading one date passes a range that excludes it. fact 2 dates to
+  // its capture (Aug 19), having no verification.
+  await page.getByLabel("Date from").fill("2026-08-18");
+  await expect(page.getByText("Retention is 30 days.", { exact: true })).toBeVisible();
+  await expect(page.getByText("Retention is 10 days.", { exact: true })).toBeVisible();
+  await page.getByLabel("Date from").fill("2026-08-19");
   await expect(page.getByText("Retention is 10 days.", { exact: true })).toBeVisible();
   await expect(page.getByText("Retention is 30 days.", { exact: true })).toHaveCount(0);
-  await page.getByLabel("Captured to").fill("2026-08-19");
+  await page.getByLabel("Date to").fill("2026-08-19");
   await expect(page.getByText("Retention is 10 days.", { exact: true })).toBeVisible();
 });
 
