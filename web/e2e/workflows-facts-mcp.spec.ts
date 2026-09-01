@@ -31,7 +31,7 @@ test("high-impact facts expose temporal evidence before invalidation", async ({ 
   await expect(drawer.getByText("contradicts", { exact: true })).toBeVisible();
   await drawer.getByRole("button", { name: "Close" }).click();
   await row.getByRole("button", { name: "Invalidate" }).click();
-  await page.getByRole("button", { name: "Invalidate this claim and preserve its impact history?" }).click();
+  await page.getByRole("button", { name: "Invalidate and preserve impact" }).click();
   await expect(row.getByText("Invalidated", { exact: true })).toBeVisible();
   expect(api.calls.some((call) => call.query.includes("invalidateFact"))).toBeTruthy();
 });
