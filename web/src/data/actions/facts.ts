@@ -153,6 +153,9 @@ export function factsActions({ currentUserName }: ActionContext): FactsActions {
     verifyFact: async (id: number) => {
       await mutate("mutation($id: Int!) { verifyFact(id: $id) }", { id });
     },
+    restoreFact: async (id: number) => {
+      await mutate("mutation($id: Int!) { restoreFact(id: $id) }", { id });
+    },
     retireFact: async (id: number) => {
       await mutate(
         "mutation($id: Int!) { invalidateFact(id: $id, reason: \"Invalidated from the fact ledger\") }",

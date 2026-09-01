@@ -264,6 +264,30 @@ class FactRepresentationTests(unittest.TestCase):
         visible = configure.call_args.kwargs["visible_config"]
         self.assertEqual(visible["output_tokens_per_call"], 2000)
 
+    def test_restore_reopens_the_assertion_and_demands_a_fresh_verification(self):
+        conn = RecordingConnection([
+            RecordingResult(row={"id": 5, "claim": "Retention is 30 days.",
+                                 "current_assertion_id": 41, "invalidated_at": "2026-09-01"}),
+            RecordingResult(), RecordingResult(),
+        ])
+        context = SimpleNamespace(project_id=7)
+        with patch.object(store.access, "require_current_access", return_value=context), \
+             patch.object(store.db, "connect", return_value=conn):
+            result = store.restore_fact(5)
+
+        self.assertEqual(result, {"id": 5, "claim": "Retention is 30 days."})
+        select_sql = conn.calls[0][0]
+        # only an invalidated fact restores; retired stays closed
+        self.assertIn("status = 'Invalidated'", select_sql)
+        assertion_sql, assertion_args = conn.calls[1]
+        self.assertIn("SET status = 'active', recorded_to = NULL", assertion_sql)
+        # the boundary the invalidation stamped clears; an earlier one is kept
+        self.assertIn("CASE WHEN valid_to = %s THEN NULL ELSE valid_to END", assertion_sql)
+        self.assertEqual(assertion_args, ("2026-09-01", 7, 41))
+        fact_sql, _ = conn.calls[2]
+        # Needs review, never Verified: nobody re-verified anything yet
+        self.assertIn("SET status = 'Needs review', invalidated_at = NULL", fact_sql)
+
     def test_published_facts_belong_to_the_person_who_accepted_them(self):
         from mari_server.persistence.postgres import knowledge as knowledge_store
 

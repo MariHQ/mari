@@ -201,6 +201,17 @@ class MutKnowledge:
         audit("invalidated fact", row["claim"])
         return True
 
+    @strawberry.mutation
+    def restore_fact(self, id: int) -> bool:
+        """Reopen an invalidated fact as Needs review. Verification is not
+        restored — a person re-verifies deliberately."""
+        from mari_server.persistence.postgres import fact_intelligence as fact_store
+        row = fact_store.restore_fact(id)
+        if not row:
+            return False
+        audit("restored fact", row["claim"])
+        return True
+
     @strawberry.mutation(deprecation_reason=DEPRECATED_REVIEW)
     def create_task(self, title: str, kind: str = "factcheck", kind_label: str = "Fact check",
                     assignee: str = "", due: str | None = None,

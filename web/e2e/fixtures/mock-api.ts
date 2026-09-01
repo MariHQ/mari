@@ -270,6 +270,10 @@ export async function installMockApi(page: Page, options: {
       const fact = state.facts.find((f: any) => f.id === variables.id);
       if (fact) fact.status = "Invalidated";
       data = { invalidateFact: true };
+    } else if (/restoreFact/.test(query)) {
+      const fact = state.facts.find((f: any) => f.id === variables.id);
+      if (fact) fact.status = "Needs review";
+      data = { restoreFact: true };
     } else if (/factSemanticLinks/.test(query)) {
       data = { factSemanticLinks: [
         { targetType: "document", targetId: 1, relation: "source", similarity: 1,

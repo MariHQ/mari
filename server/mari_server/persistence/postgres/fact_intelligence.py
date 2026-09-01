@@ -923,6 +923,42 @@ def impact_preview(fact_id: int) -> dict | None:
             "items": items}
 
 
+def restore_fact(fact_id: int) -> dict | None:
+    """Reopen an invalidated fact as Needs review.
+
+    The change of mind the one-way invalidate had no answer to. The assertion
+    comes back active, with the validity boundary the invalidation stamped
+    cleared and any earlier boundary kept. The invalidation event stays in
+    the log, because it happened. Verification is NOT restored: a person
+    re-verifies deliberately, or the restore would fabricate a verification
+    nobody performed."""
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn, conn.transaction():
+        fact = conn.execute(
+            """SELECT id, claim, current_assertion_id, invalidated_at FROM facts
+                WHERE project_id = %s AND id = %s AND status = 'Invalidated'
+                FOR UPDATE""",
+            (project_id, fact_id),
+        ).fetchone()
+        if not fact:
+            return None
+        if fact.get("current_assertion_id"):
+            conn.execute(
+                """UPDATE fact_assertions
+                      SET status = 'active', recorded_to = NULL,
+                          valid_to = CASE WHEN valid_to = %s THEN NULL ELSE valid_to END
+                    WHERE project_id = %s AND id = %s AND status = 'invalidated'""",
+                (fact["invalidated_at"], project_id, int(fact["current_assertion_id"])),
+            )
+        conn.execute(
+            """UPDATE facts SET status = 'Needs review', invalidated_at = NULL,
+                      invalidation_reason = ''
+                WHERE project_id = %s AND id = %s""",
+            (project_id, fact_id),
+        )
+    return {"id": fact_id, "claim": str(fact["claim"])}
+
+
 def invalidate_fact(fact_id: int, *, reason: str, actor: str,
                     effective_at: t.Any, replacement_assertion_id: int | None = None) -> dict | None:
     """Close valid/system time and materialize a replay-safe impact event."""

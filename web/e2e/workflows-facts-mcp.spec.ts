@@ -34,6 +34,14 @@ test("high-impact facts expose temporal evidence before invalidation", async ({ 
   await page.getByRole("button", { name: "Invalidate and preserve impact" }).click();
   await expect(row.getByText("Invalidated", { exact: true })).toBeVisible();
   expect(api.calls.some((call) => call.query.includes("invalidateFact"))).toBeTruthy();
+
+  // A changed mind has a way back: Restore reopens the claim as needs-review
+  // and the row offers Verify again — verification itself is not restored.
+  await row.getByRole("button", { name: "Restore" }).click();
+  await expect.poll(() => api.calls.some((call) => call.query.includes("restoreFact")
+    && call.variables.id === 1)).toBeTruthy();
+  await expect(row.getByText("Needs review", { exact: true })).toBeVisible();
+  await expect(row.getByRole("button", { name: "Verify" })).toBeVisible();
 });
 
 test("LLM fact scan starts a workflow and reports its grounded result", async ({ page }) => {
