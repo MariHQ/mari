@@ -8,9 +8,10 @@ test.beforeEach(async ({ page }) => {
 
 test("Sources offers both connector ingestion and direct file upload", async ({ page }) => {
   // Upload was removed from this page once and reinstated 2026-09-01: with
-  // it gone, the only way to add a file was the onboarding flow, once.
+  // it gone, the only way to add a file was the onboarding flow, once. The
+  // control lives on the upload source's own card, beside Pause.
   await page.goto("/sources");
-  await expect(page.getByText("Upload files", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Upload files" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Add source" })).toBeVisible();
 });
 
@@ -92,15 +93,15 @@ test("removing a source lets the admin retain its indexed documents", async ({ p
     && call.variables.deleteDocuments === false)).toBeTruthy();
 });
 
-test("files upload straight from Sources into the ingest pipeline", async ({ page }) => {
+test("files upload straight from the upload source's card", async ({ page }) => {
   await openSources(page);
   // The control was defined, documented, and never mounted: the only upload
-  // path was the onboarding flow, once. It lives beside Add source now.
-  await page.locator('input[type="file"]').setInputFiles({
+  // path was the onboarding flow, once. It lives on the Uploads card now.
+  await page.getByLabel("Choose files to upload").setInputFiles({
     name: "runbook.md", mimeType: "text/markdown", buffer: Buffer.from("# Runbook\nRetention is 30 days."),
   });
   await expect.poll(() => api.restCalls.some((call) => call.path === "/onboard/upload")).toBeTruthy();
-  await expect(page.getByText("1 file ingested into Uploads.", { exact: true })).toBeVisible();
+  await expect(page.getByText("1 file ingested.", { exact: true })).toBeVisible();
 });
 
 test("removing a source deletes its documents by default", async ({ page }) => {

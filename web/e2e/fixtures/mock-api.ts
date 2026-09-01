@@ -48,6 +48,7 @@ function initialData() {
     sourcePulse: [
       { id: 1, provider: "github", name: "acme/handbook", status: "active", stat: "1", unit: "docs", docsCount: 1, health: "Healthy", kind: "github", lastSyncAt: now, bars: [1, 2, 1], syncIntervalMinutes: 10, syncFlowId: 11 },
       { id: 2, provider: "confluence", name: "Confluence — ENG", status: "active", stat: "1", unit: "docs", docsCount: 1, health: "Healthy", kind: "connector", lastSyncAt: now, bars: [1], syncIntervalMinutes: 60, syncFlowId: 12 },
+      { id: 3, provider: "upload", name: "Uploads", status: "active", stat: "6", unit: "docs", docsCount: 6, health: "Healthy", kind: "upload", lastSyncAt: now, bars: [1] },
     ],
     workflows: [{ id: 1, name: "Fact review", description: "Scan and approve facts", color: "#5c7a4c", pinned: true, status: "active", trigger: { on: "schedule", every_minutes: 60 }, scheduleCapable: true, lastRunNumber: 1801, lastRunStatus: "waiting", lastRunStarted: now, nodes: [
       { kind: "trigger", label: "Every hour", config: {} },
