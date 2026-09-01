@@ -179,6 +179,10 @@ export async function installMockApi(page: Page, options: {
     } });
   });
   await page.route("**/auth/logout", (route) => { signedIn = false; return route.fulfill({ json: { ok: true } }); });
+  await page.route("**/onboard/upload", (route) => {
+    restCalls.push({ path: "/onboard/upload", body: route.request().postData()?.length ?? 0 });
+    return route.fulfill({ json: { accepted: 1, rejected: [] } });
+  });
   await page.route("**/auth/setup", async (route) => {
     const body = route.request().postDataJSON();
     restCalls.push({ path: "/auth/setup", body });
