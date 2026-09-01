@@ -98,23 +98,29 @@ def summarize_digest(documents: Iterable[KnowledgeDocument], *, generate_json: J
         summary = str(topic.get("summary") or "").strip()
         if not title or not summary:
             raise MalformedModelOutput("digest topic title and summary are required")
-        # An ungroundable citation drops the TOPIC, not the digest: one
-        # hallucinated document id used to erase the whole week's summary,
-        # and on a weekly cadence that meant seven days of an empty Home.
-        # A malformed shape still raises above — that is a recipe bug, not
-        # a citation the model got wrong.
-        try:
-            evidence = _evidence(topic.get("evidence"), allowed, recipe=DIGEST_VERSION)
-        except MalformedModelOutput:
-            continue
-        parsed.append(DigestTopic(title, summary, evidence))
+        parsed.append(DigestTopic(title, summary, _grounded(topic.get("evidence"), allowed)))
     if not parsed:
         raise MalformedModelOutput("at least one digest topic is required")
-    try:
-        overall = _evidence(value.get("evidence"), allowed, recipe=DIGEST_VERSION)
-    except MalformedModelOutput:
-        overall = ()
-    return DigestSummary(str(value["summary"]).strip(), tuple(parsed), overall)
+    return DigestSummary(str(value["summary"]).strip(), tuple(parsed),
+                         _grounded(value.get("evidence"), allowed))
+
+
+def _grounded(entries: object, allowed: dict[str, KnowledgeDocument]) -> tuple[Evidence, ...]:
+    """The citations that actually ground, each judged on its own.
+
+    The digest is a summary, not the fact ledger: a hallucinated document id
+    or a paraphrased quote used to fail the WHOLE digest (a week of an empty
+    Home, on the weekly cadence), and dropping whole topics was no better —
+    a small local model paraphrases often enough that nothing survived. The
+    ungroundable citation is what gets dropped; the topic keeps whatever
+    citations held, down to none."""
+    kept: list[Evidence] = []
+    for entry in entries if isinstance(entries, list) else []:
+        try:
+            kept.extend(_evidence([entry], allowed, recipe=DIGEST_VERSION))
+        except MalformedModelOutput:
+            continue
+    return tuple(kept)
 
 
 def _severity(value: object) -> str:
