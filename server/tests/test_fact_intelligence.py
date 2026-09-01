@@ -241,6 +241,29 @@ class FactRepresentationTests(unittest.TestCase):
             status="exhausted",
         )
 
+    def test_extraction_gives_each_call_the_recipe_budget_not_a_slice(self):
+        # 20000 output tokens over a 50-call limit used to hand every call
+        # 400 tokens; the structured recipe needs ~1000, so every answer was
+        # truncated mid-JSON and the whole stage failed. Each call now gets
+        # the full per-call allowance and the reservation spends the budget.
+        docs = [{"id": 1, "title": "Alpha", "source": "upload", "body": "Alpha holds.", "snippet": ""}]
+        configure = Mock()
+        with patch.object(service, "_scan_batch", return_value=docs), \
+             patch.object(service, "_mark_scanned"), \
+             patch.object(service, "audit"), \
+             patch.object(service, "step_progress"), \
+             patch.object(service, "component_extract_facts", return_value=[]), \
+             patch.object(service.knowledge_store, "fact_claims", return_value=set()), \
+             patch.object(service.llm, "generation_model", return_value=("ollama", "model")), \
+             patch.object(service.fact_store, "configure_llm_budget", configure), \
+             patch.object(service.fact_store, "reserve_llm_call", return_value=True), \
+             patch.object(service.fact_store, "complete_llm_budget"):
+            service.extract_fact_candidates_for(
+                [1], run_id=91, max_llm_calls=50, max_output_tokens=20000,
+            )
+        visible = configure.call_args.kwargs["visible_config"]
+        self.assertEqual(visible["output_tokens_per_call"], 2000)
+
     def test_bounded_ai_reviewer_names_the_generation_model(self):
         from mari_server.providers import models as llm_models
 

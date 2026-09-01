@@ -68,7 +68,11 @@ from mari_components.knowledge import (
 SCAN_DOCS = 8            # documents read per scan when the caller names none
 CLAIMS_PER_DOC = 2       # ceiling per document — never a shared, racing budget
 SCAN_WORKERS = 4         # concurrent model calls; the pool is bounded on purpose
-SCAN_CALL_TIMEOUT = 60.0  # per model call
+# Just under the deadline, not a per-call expectation: a local model serves
+# the pool's four calls one at a time, so a call's clock is mostly queue wait
+# and 60 seconds expired while third in line. The deadline is what actually
+# bounds the stage; a call that outlives it is counted unread and retried.
+SCAN_CALL_TIMEOUT = 170.0  # per model call, queue wait included
 SCAN_DEADLINE = 180.0    # wall clock for the whole scan, however many documents
 FACT_REPRESENTATION_PROFILE = "fact-components-v1"
 
@@ -341,7 +345,14 @@ def extract_fact_candidates_for(doc_ids: list[int] | None = None,
         return [], 0, ""
     extraction_purpose = "structured fact extraction"
     call_limit = max(0, min(int(max_llm_calls if max_llm_calls is not None else len(docs)), 200))
-    output_per_call = max(200, min(2000, max_output_tokens // max(1, call_limit)))
+    # Each call gets what the recipe needs, not an even slice of the stage
+    # budget. Dividing by the call limit gave every document 400 tokens under
+    # the default config, the structured recipe needs roughly a thousand, and
+    # a truncated JSON answer parses as nothing — so every document failed
+    # instead of fewer documents succeeding. The token reservation below is
+    # what bounds the total: when the stage budget is spent, later documents
+    # are refused, counted, and reported, which is the honest degradation.
+    output_per_call = max(1, min(2000, max_output_tokens))
     if run_id is not None:
         provider, model = llm.generation_model()
         fact_store.configure_llm_budget(
