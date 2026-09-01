@@ -156,6 +156,18 @@ test("sync rows offer the sub-hourly cadences that Sources set", async ({ page }
   await expect(cadence.locator('option[value="15"]')).toHaveText("Every 15 min");
 });
 
+test("a removed recurring job can be scheduled again with New task", async ({ page }) => {
+  await page.goto("/scheduled-tasks");
+  await page.getByRole("button", { name: "New task" }).click();
+  const dialog = page.getByRole("dialog", { name: "New scheduled task" });
+  await dialog.getByLabel("Task kind").selectOption("digest");
+  await dialog.getByLabel("Task cadence").selectOption("10080");
+  await dialog.getByRole("button", { name: "Create task" }).click();
+  await expect.poll(() => api.calls.some((call) => call.query.includes("createScheduledTask")
+    && call.variables.kind === "digest" && call.variables.everyMinutes === 10080)).toBeTruthy();
+  await expect(page.getByRole("heading", { name: "Weekly digest refresh" })).toBeVisible();
+});
+
 test("a scheduled task can be removed from the task manager", async ({ page }) => {
   await page.goto("/scheduled-tasks");
   await expect(page.getByRole("heading", { name: "Fact review" })).toBeVisible();

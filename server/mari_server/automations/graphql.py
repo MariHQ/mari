@@ -43,6 +43,32 @@ class WorkflowMutations:
         return workflow_repository.dismiss_run(run_id)
 
     @strawberry.mutation
+    def create_scheduled_task(self, kind: str, every_minutes: int = 0) -> int:
+        """Recreate one of the console's recurring jobs, with a cadence.
+
+        Removal deletes the workflow outright, and until now only a server
+        restart (which re-seeds) could bring a job back. Idempotent: the
+        existing flow of that kind is reused and only its cadence changes.
+        Decision scan is not offered — it is deliberately manual-only."""
+        cadences = {0, 10, 15, 60, 360, 1440, 10080}
+        if every_minutes not in cadences:
+            raise ValueError("Unknown cadence.")
+        if kind == "facts":
+            workflow_id = int(runtime.ensure_fact_scan_flow())
+        elif kind == "digest":
+            created = runtime.ensure_digest_flow()
+            existing = workflow_repository.find_by_step("refresh_digest")
+            workflow_id = int(created or (existing or {}).get("id") or 0)
+        else:
+            raise ValueError("Unknown scheduled task kind.")
+        if not workflow_id:
+            raise ValueError("The task could not be created.")
+        if every_minutes:
+            workflow_repository.set_trigger(
+                workflow_id, {"on": "schedule", "every_minutes": every_minutes})
+        return workflow_id
+
+    @strawberry.mutation
     def remove_scheduled_task(self, task_id: int) -> bool:
         """Remove a recurring/background task and its run history.
 

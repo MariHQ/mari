@@ -21,5 +21,11 @@ export function scheduledTasksActions(): ScheduledTasksActions {
     remove: async (taskId) => {
       await mutate(`mutation($taskId: Int!) { removeScheduledTask(taskId: $taskId) }`, { taskId });
     },
+    createTask: async (kind, everyMinutes) => {
+      await mutate(
+        `mutation($kind: String!, $everyMinutes: Int!) { createScheduledTask(kind: $kind, everyMinutes: $everyMinutes) }`,
+        { kind, everyMinutes },
+      );
+    },
   };
 }

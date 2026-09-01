@@ -574,6 +574,7 @@ type Mutation {
   runWorkflow(workflowId: Int!, dryRun: Boolean! = false): Int!
   approveRun(runId: Int!): Boolean!
   dismissWorkflowRun(runId: Int!): Boolean!
+  createScheduledTask(kind: String!, everyMinutes: Int! = 0): Int!
   removeScheduledTask(taskId: Int!): Boolean!
   saveWorkflow(name: String!, description: String!, steps: JSON!, id: Int = null, color: String! = "#5c7a4c", pinned: Boolean! = true): Int! @deprecated(reason: "The Flows pipeline editor was removed; nothing in the product authors workflows any more. Scheduled syncs and promoted workflows still run. Kept for one release for existing API clients.")
   deleteWorkflow(id: Int!): Boolean! @deprecated(reason: "The Flows pipeline editor was removed; nothing in the product authors workflows any more. Scheduled syncs and promoted workflows still run. Kept for one release for existing API clients.")

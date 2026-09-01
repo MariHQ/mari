@@ -251,6 +251,19 @@ export async function installMockApi(page: Page, options: {
         row.id === Number(variables.workflowId ?? variables.taskId ?? variables.id));
       if (workflow) workflow.trigger = JSON.parse(String(variables.trigger || "{}"));
       data = { setWorkflowTrigger: true };
+    } else if (/createScheduledTask/.test(query)) {
+      const digest = variables.kind === "digest";
+      const minutes = Number(variables.everyMinutes) || 0;
+      state.workflows.push({
+        id: 90, name: digest ? "Weekly digest refresh" : "Fact extraction",
+        description: digest ? "Regenerates the Home digest." : "Scans documents for claims.",
+        color: "#5c7a4c", pinned: false, status: "active",
+        trigger: minutes ? { on: "schedule", every_minutes: minutes } : { on: "" },
+        scheduleCapable: true, lastRunNumber: null, lastRunStatus: "", lastRunStarted: "",
+        nodes: [{ kind: "trigger", label: "", config: {} },
+                { kind: digest ? "refresh_digest" : "scan_facts", label: "", config: {} }],
+      });
+      data = { createScheduledTask: 90 };
     } else if (/removeScheduledTask/.test(query)) {
       state.workflows = state.workflows.filter((row: any) =>
         row.id !== Number(variables.taskId));
