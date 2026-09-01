@@ -157,6 +157,34 @@ class KnowledgeRecipeTests(unittest.TestCase):
         )
         self.assertEqual(digest.topics[0].evidence[0].document_id, "doc:1")
 
+    def test_digest_drops_an_ungrounded_topic_instead_of_dying(self):
+        # One hallucinated citation used to erase the whole digest; on a
+        # weekly cadence that meant seven days of an empty Home.
+        digest = summarize_digest(
+            [self.document],
+            generate_json=self.generator({
+                "summary": "Retention changed.",
+                "topics": [
+                    {"title": "Invented", "summary": "Cites a ghost.",
+                     "evidence": [{"document_id": "doc:404", "quote": "nope"}]},
+                    {"title": "Retention", "summary": "Thirty days.", "evidence": self.evidence()},
+                ],
+                "evidence": [{"document_id": "doc:404", "quote": "nope"}],
+            }),
+        )
+        self.assertEqual([topic.title for topic in digest.topics], ["Retention"])
+        self.assertEqual(digest.evidence, ())
+        with self.assertRaisesRegex(MalformedModelOutput, "at least one digest topic"):
+            summarize_digest(
+                [self.document],
+                generate_json=self.generator({
+                    "summary": "All ghosts.",
+                    "topics": [{"title": "Invented", "summary": "Cites a ghost.",
+                                "evidence": [{"document_id": "doc:404", "quote": "nope"}]}],
+                    "evidence": [],
+                }),
+            )
+
     def impact_documents(self):
         return [
             self.document,

@@ -98,10 +98,23 @@ def summarize_digest(documents: Iterable[KnowledgeDocument], *, generate_json: J
         summary = str(topic.get("summary") or "").strip()
         if not title or not summary:
             raise MalformedModelOutput("digest topic title and summary are required")
-        parsed.append(DigestTopic(title, summary, _evidence(topic.get("evidence"), allowed, recipe=DIGEST_VERSION)))
+        # An ungroundable citation drops the TOPIC, not the digest: one
+        # hallucinated document id used to erase the whole week's summary,
+        # and on a weekly cadence that meant seven days of an empty Home.
+        # A malformed shape still raises above — that is a recipe bug, not
+        # a citation the model got wrong.
+        try:
+            evidence = _evidence(topic.get("evidence"), allowed, recipe=DIGEST_VERSION)
+        except MalformedModelOutput:
+            continue
+        parsed.append(DigestTopic(title, summary, evidence))
     if not parsed:
         raise MalformedModelOutput("at least one digest topic is required")
-    return DigestSummary(str(value["summary"]).strip(), tuple(parsed), _evidence(value.get("evidence"), allowed, recipe=DIGEST_VERSION))
+    try:
+        overall = _evidence(value.get("evidence"), allowed, recipe=DIGEST_VERSION)
+    except MalformedModelOutput:
+        overall = ()
+    return DigestSummary(str(value["summary"]).strip(), tuple(parsed), overall)
 
 
 def _severity(value: object) -> str:
