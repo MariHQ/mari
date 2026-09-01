@@ -100,12 +100,10 @@ test("the facts filter bar narrows by owner and date range", async ({ page }) =>
   await expect(page.getByText("Retention is 30 days.", { exact: true })).toBeVisible();
   await expect(page.getByText("Retention is 10 days.", { exact: true })).toBeVisible();
 
-  await page.getByRole("button", { name: /^Owner:/ }).click();
-  await page.getByRole("menuitemradio", { name: "Lee Chen" }).click();
+  await page.getByLabel("Filter by owner").selectOption("Lee Chen");
   await expect(page.getByText("Retention is 30 days.", { exact: true })).toBeVisible();
   await expect(page.getByText("Retention is 10 days.", { exact: true })).toHaveCount(0);
-  await page.getByRole("button", { name: /^Owner:/ }).click();
-  await page.getByRole("menuitemradio", { name: "All" }).click();
+  await page.getByLabel("Filter by owner").selectOption("");
 
   // fact 1 dates to its verification (Aug 18) even though it was captured
   // Aug 1 — the filter ranks dates the way the column displays them, or a
