@@ -411,7 +411,14 @@ def _thread_document(
     root = readable[0]
     root_ts = str(root.get("thread_ts") or root.get("ts") or "")
     channel_id = str(channel.get("id") or "")
-    lines: list[str] = []
+    channel_name = str(channel.get("name") or "").strip()
+    # Channel identity is retrieval evidence, not merely connector bookkeeping.
+    # Keep it in the canonical text so lexical search, embeddings, and the answer
+    # model can all resolve questions such as "what was recently said in
+    # private-test?". The metadata mapping is intentionally retained too for
+    # callers that need the structured value.
+    channel_label = f"#{channel_name}" if channel_name else channel_id
+    lines: list[str] = [f"Slack channel: {channel_label}"]
     for message in readable:
         timestamp = dt.datetime.fromtimestamp(float(message["ts"]), tz=dt.timezone.utc)
         author = users.get(str(message.get("user") or ""), str(message.get("user") or "unknown"))
@@ -426,7 +433,7 @@ def _thread_document(
         updated_at=dt.datetime.fromtimestamp(latest, tz=dt.timezone.utc).isoformat(),
         source_url=f"https://slack.com/archives/{channel_id}/p{root_ts.replace('.', '')}",
         acl=DocumentACL("restricted", (Principal("channel", channel_id),)),
-        metadata={"channel": channel_id, "channel_name": str(channel.get("name") or "")},
+        metadata={"channel": channel_id, "channel_name": channel_name},
     )
 
 
@@ -469,9 +476,13 @@ def fetch_slack_thread_by_id(
         raise ValueError("Slack channel id and thread timestamp are required")
     request = PollRequest(page_limit=page_limit)
     users = _users(config, request, http=http)
+    # Events carry only the opaque channel id. Resolve it before constructing
+    # the document so event-driven ingestion has the same searchable channel
+    # name as a scheduled poll.
+    channel = _channel_info(config, channel_id.strip(), http=http) or {"id": channel_id.strip()}
     return fetch_slack_thread(
         config,
-        {"id": channel_id.strip()},
+        channel,
         thread_timestamp.strip(),
         users=users,
         http=http,

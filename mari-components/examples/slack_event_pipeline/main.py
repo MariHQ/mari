@@ -83,7 +83,9 @@ def run(environment: Mapping[str, str] | None = None) -> dict[str, object]:
         poll_slack(config, PollRequest(mode=SyncMode.FULL), http=provider),
         mode=SyncMode.FULL,
     )
-    initial_messages = next(iter(documents.values())).body.count("\n") + 1
+    # The first line identifies the Slack channel; every remaining line is a
+    # message, so the newline count is the message count.
+    initial_messages = next(iter(documents.values())).body.count("\n")
 
     if mode == "fake":
         provider.add_reply("Events deliver this reply immediately.")
@@ -112,7 +114,7 @@ def run(environment: Mapping[str, str] | None = None) -> dict[str, object]:
         ),),
         mode=SyncMode.INCREMENTAL,
     )
-    stream_messages = streamed.body.count("\n") + 1
+    stream_messages = streamed.body.count("\n")
 
     # Simulate one lost event. The next scheduled poll sees the reply row,
     # refetches its root thread, and repairs the same canonical document.
@@ -145,7 +147,7 @@ def run(environment: Mapping[str, str] | None = None) -> dict[str, object]:
         "stream_messages": stream_messages,
         "polling_repaired_documents": polling_changed,
         "polling_unchanged_documents": polling_unchanged,
-        "final_messages": final.body.count("\n") + 1,
+        "final_messages": final.body.count("\n"),
         "poll_cursor": state.cursor,
         "thread_id": final.external_id,
         "visibility": final.acl.visibility,

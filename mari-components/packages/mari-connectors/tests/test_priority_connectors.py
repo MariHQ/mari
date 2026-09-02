@@ -861,6 +861,7 @@ class PriorityConnectorTests(unittest.TestCase):
     def test_event_helpers_refetch_canonical_slack_thread_and_create_drive_watch(self):
         slack = FakeHttp([
             {"ok": True, "members": [{"id": "U1", "name": "Dana"}]},
+            {"ok": True, "channel": {"id": "C1", "name": "private-test", "is_private": True}},
             {"ok": True, "messages": [
                 {"type": "message", "ts": "1.0", "user": "U1", "text": "Question"},
                 {"type": "message", "ts": "2.0", "thread_ts": "1.0", "user": "U1", "text": "Answer"},
@@ -871,6 +872,8 @@ class PriorityConnectorTests(unittest.TestCase):
         )
         self.assertTrue(complete)
         self.assertEqual(document.external_id, "thread:C1:1.0")
+        self.assertEqual(document.metadata["channel_name"], "private-test")
+        self.assertTrue(document.body.startswith("Slack channel: #private-test\n"))
         self.assertIn("Answer", document.body)
 
         drive = FakeHttp([{"id": "channel", "resourceId": "resource", "expiration": "123"}])

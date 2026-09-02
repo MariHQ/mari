@@ -47,6 +47,34 @@ class KnowledgeChatDestinationTests(unittest.TestCase):
         search.assert_called_once_with("mari", 8)
         self.assertIn("Question: mari", context.messages[-1]["content"])
 
+    def test_document_search_is_not_limited_to_approved_answers_and_keeps_channel_context(self):
+        project = SimpleNamespace(project_id=7, user_id=0)
+        documents = [{
+            "id": 41,
+            "title": "a fact is that the sky is blue",
+            "source": "slack",
+            "body": "Slack channel: #private-test\n2026-09-02 20:25 @daniel: a fact is that the sky is blue",
+            "snippet": "a fact is that the sky is blue",
+        }]
+        with patch.object(conversation_chat.chat_store, "create_session", return_value=9), \
+             patch.object(conversation_chat.chat_store, "add_message"), \
+             patch.object(conversation_chat, "select_workflow", return_value=None), \
+             patch.object(conversation_chat.chat_store, "approved_answer", return_value=None) as approved, \
+             patch.object(conversation_chat.chat_store, "verified_facts", return_value=[]), \
+             patch.object(conversation_chat.chat_store, "messages", return_value=[
+                 {"role": "user", "content": "what was recently said in the private-test channel?"},
+             ]), patch.object(conversation_chat, "_pinned_first", side_effect=lambda rows: rows), \
+             patch.object(conversation_chat.document_store, "source_urls", return_value={}), \
+             patch.object(conversation_chat, "hybrid_search", return_value=documents) as search:
+            context = conversation_chat.ports(
+                project, "test", frozenset({"search", "facts", "answers"}),
+            ).prepare(None, "what was recently said in the private-test channel?")
+
+        approved.assert_called_once()
+        search.assert_called_once_with("what was recently said in the private-test channel?", 8)
+        self.assertIn("Slack channel: #private-test", context.messages[-1]["content"])
+        self.assertEqual([source["document_id"] for source in context.sources], [41])
+
     def test_create_validates_slug_and_calls_application_port(self):
         ports = knowledge_chat.KnowledgeChatPorts(
             create=lambda project, name, slug, title, welcome, tools: 12,
