@@ -199,7 +199,15 @@ def is_not_found(answer: str) -> bool:
     text = (answer or "").strip()
     words = " ".join(re.sub(r"[^a-z ]+", " ", text.lower()).split())
     if _NOT_FOUND_KEY in words:
-        return True
+        # The model occasionally writes the canonical sentence and then gives
+        # a real, grounded answer ("... beyond the two messages shown: ...").
+        # That is poor wording, but it is not a refusal and must not discard
+        # the evidence rail. Pure refusals still normalize to the key itself,
+        # optionally with a short apology before it.
+        _before, _key, after = words.partition(_NOT_FOUND_KEY)
+        if not after.strip():
+            return True
+        return False
     if not _REFUSAL.search(text):
         return False
     return bool(_REFUSAL_SCOPE.search(text)) or len(text) < REFUSAL_LIMIT

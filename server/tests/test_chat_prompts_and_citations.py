@@ -50,6 +50,7 @@ class ChatPromptTests(unittest.TestCase):
         self.assertIn("already been authorized", prompt)
         self.assertIn("restricted upstream sources", prompt)
         self.assertIn("answer from and cite it", prompt)
+        self.assertIn("never open with the not-found sentence", prompt)
 
     def test_every_surface_carries_the_shared_style_and_the_untrusted_rule(self):
         self.assertEqual(set(SURFACES), set(SURFACE_MARKERS))
@@ -257,6 +258,14 @@ class CitedSourcesTests(unittest.TestCase):
                   "when it last ran. I couldn't find who owns the job, though.")
         self.assertGreater(len(answer), citations.REFUSAL_LIMIT)
         self.assertFalse(citations.is_not_found(answer))
+
+    def test_not_found_prefix_followed_by_a_grounded_answer_keeps_sources(self):
+        answer = (
+            "I could not find this in the connected sources beyond the two messages shown: "
+            '"the sky is blue" and "this is a private test."'
+        )
+        self.assertFalse(citations.is_not_found(answer))
+        self.assertEqual(len(citations.cited(answer, self.sources())), 3)
         self.assertEqual(len(citations.cited(answer, self.sources())), 3)
 
     def test_a_cited_answer_is_never_a_refusal_however_it_hedges(self):
