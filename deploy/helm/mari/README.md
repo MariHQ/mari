@@ -54,7 +54,7 @@ versions omit the leading `v` used by the Git tag:
 
 ```sh
 helm upgrade --install mari oci://ghcr.io/marihq/charts/mari \
-  --version 0.2.2 \
+  --version 0.2.3 \
   --namespace mari --create-namespace \
   --set secrets.existingSecret=mari-secrets \
   --wait --timeout 10m
@@ -65,7 +65,7 @@ Release. This is useful before the GHCR package has been made public:
 
 ```sh
 helm upgrade --install mari \
-  https://github.com/MariHQ/mari/releases/download/v0.2.2/mari-0.2.2.tgz \
+  https://github.com/MariHQ/mari/releases/download/v0.2.3/mari-0.2.3.tgz \
   --namespace mari --create-namespace \
   --set secrets.existingSecret=mari-secrets \
   --wait --timeout 10m
