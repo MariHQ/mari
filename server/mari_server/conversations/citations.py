@@ -12,10 +12,12 @@ by name and dropping it would blank their cards on deploy, not on upgrade.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
+import re
 from typing import Any
 
 from mari_components.knowledge.excerpt import excerpt
+from mari_server.conversations.prompts import NOT_FOUND
 
 # Wider than the old 110-character `meta` slice, still short enough that the
 # card stays two or three lines at the console's column width.
@@ -119,3 +121,141 @@ def source_payload(rows: Sequence[Mapping[str, Any]], *,
             "score": scores[index],
         })
     return sources
+
+
+# ————— what the answer actually cites —————
+#
+# Retrieval hands the model up to four documents and every chat surface used
+# to show all four under the answer, whatever the answer said. Under "I could
+# not find this in the connected sources" that rail was four pages the reader
+# had just been told were no help. The functions below read the finished
+# answer and keep only the rows it cites.
+
+_CITE = re.compile(r"\[(\d{1,3})\](?!\()")
+_FENCE_OPEN = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})")
+# A fenced block, or an inline code span, that opens the answer. The text
+# after it is whatever the model went on to say, usually nothing.
+_LEADING_FENCED = re.compile(r"^(`{3,}|~{3,})[^\n]*\n(?P<inner>[\s\S]*?)\n[ \t]*\1[ \t]*(?=\n|$)")
+_LEADING_INLINE = re.compile(r"^`(?P<inner>[^`\n]+)`")
+_NOT_FOUND_KEY = " ".join(re.sub(r"[^a-z ]+", " ", NOT_FOUND.lower()).split())
+# The refusal, paraphrased. The style rules ask for one sentence, but a model
+# that rewords it ("I couldn't find anything about that in the connected
+# sources") is still refusing, and the rail under it is still four pages the
+# reader was just told were no help.
+_REFUSAL = re.compile(
+    r"\b(?:could ?not|couldn.?t|can ?not|can.?t) find\b"
+    r"|\bno information\b|\bnothing about\b|\bnot covered\b",
+    re.IGNORECASE,
+)
+_REFUSAL_SCOPE = re.compile(r"\b(?:sources?|context|knowledge base)\b", re.IGNORECASE)
+# A refusal that names no scope still counts when it is this short: a real
+# answer of a sentence or two does not dwell on what it failed to find.
+REFUSAL_LIMIT = 200
+
+
+def _outside_fences(text: str) -> Iterator[str]:
+    """The chunks of an answer that are not inside a fenced code block, so a
+    shell snippet's `arr[3]` is never read as a citation. Mirrors the library's
+    outsideFences in ChatMessage.tsx."""
+    fence = ""
+    chunk: list[str] = []
+    for line in text.split("\n"):
+        opened = _FENCE_OPEN.match(line)
+        if fence:
+            if opened and line.strip().startswith(fence):
+                fence = ""
+        elif opened:
+            if chunk:
+                yield "\n".join(chunk)
+                chunk = []
+            fence = opened.group(1)[:3]
+        else:
+            chunk.append(line)
+    if chunk:
+        yield "\n".join(chunk)
+
+
+def cite_numbers(answer: str) -> set[int]:
+    """Every [n] marker in an answer, read the way the console links them:
+    outside fenced code, outside inline code, and never a real link `[3](…)`."""
+    numbers: set[int] = set()
+    for chunk in _outside_fences(answer or ""):
+        for index, part in enumerate(re.split(r"(`[^`]*`)", chunk)):
+            if index % 2:
+                continue
+            numbers.update(int(match.group(1)) for match in _CITE.finditer(part))
+    return numbers
+
+
+def is_not_found(answer: str) -> bool:
+    """Whether the answer is a refusal.
+
+    The style rules' sentence is the canonical case, read loosely: case,
+    punctuation and any wrapping the model added do not count. A paraphrase
+    counts too: "could not find", "no information", "nothing about" or "not
+    covered", said of the sources, the context or the knowledge base, or said
+    of nothing in particular in an answer under `REFUSAL_LIMIT` characters.
+    """
+    text = (answer or "").strip()
+    words = " ".join(re.sub(r"[^a-z ]+", " ", text.lower()).split())
+    if _NOT_FOUND_KEY in words:
+        # The model occasionally writes the canonical sentence and then gives
+        # a real, grounded answer ("... beyond the two messages shown: ...").
+        # That is poor wording, but it is not a refusal and must not discard
+        # the evidence rail. Pure refusals still normalize to the key itself,
+        # optionally with a short apology before it.
+        _before, _key, after = words.partition(_NOT_FOUND_KEY)
+        if not after.strip():
+            return True
+        return False
+    if not _REFUSAL.search(text):
+        return False
+    return bool(_REFUSAL_SCOPE.search(text)) or len(text) < REFUSAL_LIMIT
+
+
+def clean_answer(answer: str) -> str:
+    """The model's answer as it should reach a renderer.
+
+    Leading whitespace goes: a reply never opens with an indented code block,
+    but the console's Markdown parser reads four leading spaces as one, which
+    is how a plain sentence came out in monospace. A not-found sentence the
+    model wrapped in a fence or backticks is unwrapped for the same reason,
+    and whatever follows the wrapper is kept as the model wrote it, so the
+    stream and the stored transcript agree. Anything else is passed through
+    untouched, code fences included.
+    """
+    text = (answer or "").lstrip()
+    wrapped = _LEADING_FENCED.match(text) or _LEADING_INLINE.match(text)
+    if wrapped and is_not_found(wrapped.group("inner")):
+        return wrapped.group("inner").strip() + text[wrapped.end():]
+    return text
+
+
+def cited(answer: str, sources: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """The sources to show under `answer`, keeping their numbers.
+
+    Cited rows only, when the answer cites a row that exists. An answer that
+    says it could not find anything gets none. An answer with no markers that
+    is not a refusal keeps every candidate: the model drew on the context
+    without saying where, and hiding provenance would be worse than
+    over-showing it (this is also what keeps an approved answer's card, which
+    nothing cites by number).
+    """
+    rows = [dict(source) for source in sources]
+    available = {_number(row) for row in rows} - {None}
+    # A marker with no row behind it ([7] over four candidates) is a slip,
+    # not a citation, so an answer whose only markers are slips is read like
+    # an answer with none.
+    numbers = {number for number in cite_numbers(answer) if number in available}
+    if numbers:
+        return [row for row in rows if _number(row) in numbers]
+    if is_not_found(answer):
+        return []
+    return rows
+
+
+def _number(row: Mapping[str, Any]) -> int | None:
+    try:
+        return int(row.get("n"))
+    except (TypeError, ValueError):
+        return None

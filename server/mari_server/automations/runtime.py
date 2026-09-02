@@ -43,15 +43,22 @@ def _elapsed(start: float) -> str:
 # interpolates into SQL.
 def _step_fetch(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
     query, tag, k = cfg.get("query", ""), cfg.get("tag", ""), max(1, int(cfg.get("k", 3)))
+    path_glob = str(cfg.get("path_glob") or "")
     rotation = str(cfg.get("rotate") or "")
     trigger_ids = ctx.get("trigger_doc_ids") or []
     rows = workflow_store.select_documents(
-        trigger_ids=trigger_ids, tag=tag, query=query, limit=k, rotation=rotation,
+        trigger_ids=trigger_ids, tag=tag, query=query, limit=min(k, 200), rotation=rotation,
+        source_ids=cfg.get("source_ids") or [], path_glob=path_glob,
     )
     ids = [r["id"] for r in rows]
     names = ", ".join(r["title"][:40] for r in rows[:3])
     src = " (from trigger)" if trigger_ids else (" (least recently scanned)" if rotation else "")
-    return "passed", f"{len(ids)} documents{src} · {names}", {"doc_ids": ids}
+    return "passed", f"{len(ids)} documents{src} · {names}", {
+        "doc_ids": ids,
+        # The same text that selected a document scopes extraction to its
+        # matching passages. Keeping it in run context makes retries stable.
+        "fact_passage_query": str(query or "").strip(),
+    }
 
 
 def _step_refine(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
@@ -168,6 +175,23 @@ def _step_trigger(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
     return "passed", note or cfg.get("label", "manual run"), {}
 
 
+# How often the scheduled sync step runs a full, authoritative pass instead of
+# an incremental one. An incremental poll deletes only on explicit tombstones,
+# and only dropbox, gdrive and github files emit those — a Confluence page,
+# Jira issue or Slack message deleted at the provider stayed searchable and
+# citable until someone clicked resync. Absence is authoritative only on a
+# complete full snapshot, so a full pass on a cadence is what makes deletions
+# land. Per-flow `full_every_hours` overrides this; 0 turns the sweep off.
+FULL_SYNC_EVERY_HOURS = 24.0
+
+
+def _full_sync_cadence(cfg: dict) -> float:
+    try:
+        return max(0.0, float(cfg.get("full_every_hours", FULL_SYNC_EVERY_HOURS) or 0))
+    except (TypeError, ValueError):
+        return FULL_SYNC_EVERY_HOURS
+
+
 def _step_sync_source(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
     """Run the real diff-based ingest sync for one source, synchronously, and
     report honest per-step stats from the sync result."""
@@ -178,20 +202,35 @@ def _step_sync_source(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
         return "failed", f"source #{source_id} not found", {}
     if ctx.get("dry_run"):
         return "passed", f"would sync {name} (dry run)", {}
-    stats = ingest.run_sync(source_id)
+    # The last full pass lives in sources.last_full_sync_at, a column of its
+    # own: sources.config is the sync worker's and is rewritten wholesale.
+    every = _full_sync_cadence(cfg)
+    full = every > 0 and workflow_store.full_sync_due(source_id, every)
+    stats = ingest.run_sync(source_id, full=full)
     if stats is None:
         return "skipped", f"{name}: a sync is already running", {}
     if stats.get("error"):
         return "failed", f"{name}: {stats['error']}"[:140], {}
+    # Recorded only when the pass really finished its snapshot. A throttled
+    # or otherwise incomplete full pass returns without an error key, and
+    # recording it made the next 24h of polls incremental against a
+    # reconcile that never happened; left alone, the next tick resumes the
+    # pending snapshot from its checkpoint instead of restarting from zero.
+    reconciled = full and bool(stats.get("snapshot_complete"))
+    if reconciled:
+        workflow_store.record_full_sync(source_id)
     detail = (f"{name}: {stats['files_changed']} files · {stats['items_changed']} items changed · "
-              f"{stats['embedded']} chunks embedded · {stats['skipped']} unchanged")
+              f"{stats['embedded']} chunks embedded · {stats['skipped']} unchanged"
+              + (" · full reconcile" if reconciled else
+                 " · full reconcile incomplete (resumes next run)" if full else ""))
     return "passed", detail, {"files_changed": stats["files_changed"],
                               "items_changed": stats["items_changed"], "embedded": stats["embedded"]}
 
 
-def _scan_detail(added: int, scanned: int, note: str, noun: str) -> str:
+def _scan_detail(added: int, scanned: int, note: str, noun: str,
+                 unit: str = "document") -> str:
     detail = (f"{added} new {noun}{'' if added == 1 else 's'} captured "
-              f"from {scanned} document{'' if scanned == 1 else 's'}")
+              f"from {scanned} {unit}{'' if scanned == 1 else 's'}")
     return f"{detail} · {note}" if note else detail
 
 
@@ -206,10 +245,126 @@ def _step_scan_facts(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
     picks its own batch, as it does from the Facts page."""
     if ctx.get("dry_run"):
         return "passed", "would mine recent documents for claims (dry run)", {}
-    from mari_server.knowledge.service import scan_facts_for
+    from mari_server.knowledge.service import extract_fact_candidates_for
+    from mari_server.persistence.postgres import knowledge as knowledge_store
     doc_ids = ctx.get("doc_ids") or None
-    added, scanned, note = scan_facts_for(doc_ids)
-    return "passed", _scan_detail(added, scanned, note, "claim"), {"facts": added}
+    candidates, scanned, note, successful_passages = extract_fact_candidates_for(
+        doc_ids,
+        passage_query=str(ctx.get("fact_passage_query") or ""),
+        claims_per_document=max(1, min(int(cfg.get("claims_per_document") or 2), 10)),
+        instructions=str(cfg.get("instructions") or ""),
+        run_id=int(ctx["run_id"]),
+        max_llm_calls=max(0, min(int(cfg.get("max_llm_calls") or 50), 200)),
+        max_input_tokens=max(0, min(int(cfg.get("max_input_tokens") or 100000), 2_000_000)),
+        max_output_tokens=max(0, min(int(cfg.get("max_output_tokens") or 20000), 400_000)),
+    )
+    added = knowledge_store.stage_fact_candidates(
+        int(ctx["run_id"]), candidates, passages=successful_passages,
+    )
+    return "passed", _scan_detail(added, scanned, note, "claim", "passage"), {"facts": added}
+
+
+def _step_review_facts(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
+    from mari_server.knowledge.service import apply_ai_fact_proposals
+    from mari_server.persistence.postgres import knowledge as knowledge_store
+    run_id = int(ctx["run_id"])
+    mode = str(cfg.get("mode") or "human")
+    if ctx.get("dry_run"):
+        return "passed", f"would use {mode} review (dry run)", {}
+    if mode == "ai":
+        counts = apply_ai_fact_proposals(
+            run_id, minimum_confidence=float(cfg.get("minimum_confidence") or .8),
+        )
+        if counts["pending"]:
+            return "waiting", (
+                f"AI applied bounded proposals; {counts['pending']} candidates need human review"
+            ), {"pause": True, "accepted_facts": counts["accepted"],
+                "rejected_facts": counts["rejected"]}
+        detail = f"AI accepted {counts['accepted']} · rejected {counts['rejected']}"
+        return "passed", detail, {"accepted_facts": counts["accepted"], "rejected_facts": counts["rejected"]}
+    counts = knowledge_store.fact_candidate_counts(run_id)
+    if counts["pending"]:
+        return "waiting", f"{counts['pending']} candidates awaiting human review", {"pause": True}
+    detail = f"Human accepted {counts['accepted']} · rejected {counts['rejected']}"
+    return "passed", detail, {"accepted_facts": counts["accepted"], "rejected_facts": counts["rejected"]}
+
+
+def _step_map_fact_impact(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
+    from mari_server.knowledge.service import map_fact_candidate_impact
+    if ctx.get("dry_run"):
+        return "passed", "would map related facts and temporal evidence (dry run)", {}
+    stats = map_fact_candidate_impact(
+        int(ctx["run_id"]),
+        retrieval_backend=str(cfg.get("retrieval_backend") or "postgres"),
+        fact_neighbors=max(1, min(int(cfg.get("fact_neighbors") or 8), 50)),
+        evidence_neighbors=max(1, min(int(cfg.get("evidence_neighbors") or 8), 50)),
+        minimum_fact_similarity=float(cfg.get("minimum_fact_similarity") or .72),
+        minimum_evidence_similarity=float(cfg.get("minimum_evidence_similarity") or .68),
+        max_components=max(1, min(int(cfg.get("max_components") or 12), 32)),
+    )
+    detail = (f"{stats.get('embedded_components', 0)} component vectors · "
+              f"{stats['impact_links']} evidence links · "
+              f"{stats['high_impact_facts']} high-impact candidates")
+    return "passed", detail, stats
+
+
+def _step_adjudicate_facts(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
+    from mari_server.knowledge.service import adjudicate_fact_candidates
+    if ctx.get("dry_run"):
+        mode = str(cfg.get("mode") or "off")
+        return "passed", f"would use {mode} temporal evidence adjudication (dry run)", {}
+    stats = adjudicate_fact_candidates(
+        int(ctx["run_id"]), enabled=str(cfg.get("mode") or "off") == "llm",
+        max_calls=max(0, min(int(cfg.get("max_calls") or 10), 100)),
+        max_input_tokens=max(0, min(int(cfg.get("max_input_tokens") or 24000), 1_000_000)),
+        max_output_tokens=max(0, min(int(cfg.get("max_output_tokens") or 8000), 200_000)),
+        output_tokens_per_call=max(100, min(int(cfg.get("output_tokens_per_call") or 800), 4000)),
+        related_assertions=max(1, min(int(cfg.get("related_assertions") or 8), 20)),
+        evidence_spans=max(1, min(int(cfg.get("evidence_spans") or 12), 30)),
+        instructions=str(cfg.get("instructions") or ""),
+    )
+    if str(cfg.get("mode") or "off") != "llm":
+        return "passed", "LLM adjudication disabled · human review retains embedding context", stats
+    detail = (f"{stats['adjudicated_facts']} candidates adjudicated · "
+              f"{stats['llm_calls']} bounded LLM calls · "
+              f"{stats['llm_abstentions']} abstentions")
+    if stats["llm_budget_exhausted"]:
+        detail += " · budget exhausted; remaining candidates require human review"
+    return "passed", detail, stats
+
+
+def _step_cluster_facts(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
+    from mari_server.knowledge.service import build_fact_clusters
+    if ctx.get("dry_run"):
+        mode = str(cfg.get("label_mode") or "off")
+        return "passed", f"would build embedding clusters with {mode} labels (dry run)", {}
+    stats = build_fact_clusters(
+        int(ctx["run_id"]),
+        minimum_similarity=float(cfg.get("minimum_similarity") or .78),
+        label_mode=str(cfg.get("label_mode") or "off"),
+        max_llm_clusters=max(0, min(int(cfg.get("max_llm_clusters") or 5), 50)),
+        max_input_tokens=max(0, min(int(cfg.get("max_input_tokens") or 8000), 500_000)),
+        max_output_tokens=max(0, min(int(cfg.get("max_output_tokens") or 2000), 100_000)),
+        instructions=str(cfg.get("instructions") or ""),
+    )
+    detail = (f"{stats['fact_clusters']} embedding clusters · "
+              f"{stats['cluster_llm_calls']} visible label calls")
+    if stats["cluster_llm_budget_exhausted"]:
+        detail += " · label budget exhausted"
+    return "passed", detail, stats
+
+
+def _step_publish_facts(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
+    from mari_server.identity.actor import actor_name
+    from mari_server.persistence.postgres import knowledge as knowledge_store
+    if ctx.get("dry_run"):
+        return "passed", "would publish accepted candidates (dry run)", {}
+    verified = str(cfg.get("status") or "needs_review") == "verified"
+    published = knowledge_store.publish_fact_candidates(
+        int(ctx["run_id"]), actor_name(), verified=verified,
+    )
+    destination = "Verified" if verified else "Needs review"
+    return "passed", f"{published} accepted claims published as {destination}", {"published_facts": published}
 
 
 def _step_scan_decisions(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
@@ -250,11 +405,16 @@ STEP_IMPLS: dict[str, t.Callable] = {
     "sync_source": _step_sync_source,
     "refresh_digest": _step_refresh_digest,
     "scan_facts": _step_scan_facts,
+    "map_fact_impact": _step_map_fact_impact,
+    "adjudicate_facts": _step_adjudicate_facts,
+    "cluster_facts": _step_cluster_facts,
+    "review_facts": _step_review_facts,
+    "publish_facts": _step_publish_facts,
     "scan_decisions": _step_scan_decisions,
 }
 
 # steps that call the local LLM (shown as slow in the UI)
-LLM_STEPS = {"refine", "fact_check", "derive_links", "summarize", "refresh_digest", "scan_facts", "scan_decisions"}
+LLM_STEPS = {"refine", "fact_check", "derive_links", "summarize", "refresh_digest", "scan_facts", "adjudicate_facts", "cluster_facts", "review_facts", "scan_decisions"}
 
 # Steps that are safe to run a second time after a transient failure (FLOW-3).
 # A failed step used to end the run outright, with no retry and no way to tell a
@@ -268,7 +428,7 @@ LLM_STEPS = {"refine", "fact_check", "derive_links", "summarize", "refresh_diges
 # Deliberately absent: `approval` (pauses rather than fails) and `condition`
 # (cannot fail transiently).
 RETRYABLE_STEPS = {"fetch_docs", "tag", "create_task", "notify", "summarize",
-                   "derive_links", "sync_source", "scan_facts", "scan_decisions",
+                   "derive_links", "sync_source", "scan_facts", "map_fact_impact", "adjudicate_facts", "cluster_facts", "review_facts", "publish_facts", "scan_decisions",
                    "fact_check", "refine", "refresh_digest"}
 STEP_RETRIES = 1        # one extra attempt, not a loop
 STEP_RETRY_BACKOFF = 2.0  # seconds
@@ -305,11 +465,60 @@ def _run_step(kind: str, impl: t.Callable | None, cfg: dict, ctx: dict) -> tuple
     )
 
 
+class RunSwept(RuntimeError):
+    """The run's row is no longer live: fail_stale_runs flipped it to
+    'failed' (or it already finished) while this runner was still going.
+    Raised by _persist so the runner stops instead of writing status =
+    'running' back over the sweep next to the replacement run the scheduler
+    has since started."""
+
+
 def _persist(run_id: int, rows: list[dict], status: str, progress: int, stats: dict, start: float) -> None:
-    workflow_store.save_run_progress(
+    # Also the run's heartbeat: save_run_progress stamps heartbeat_at.
+    if not workflow_store.save_run_progress(
         run_id, rows=rows, status=status, progress=progress,
         stats=stats, duration=_elapsed(start),
-    )
+    ):
+        raise RunSwept(f"run #{run_id} is no longer live; stopping")
+
+
+# ————— run lease —————
+#
+# A run persists between steps and whenever a step's percentage moves, and
+# every persist stamps workflow_runs.heartbeat_at. That is not enough on its
+# own: a sync_source step syncing a large Confluence, or an adjudication step
+# working through its LLM budget, can run for a long time without a persist,
+# and a lease that only steps refresh would expire under exactly the runs
+# that take longest. So a run also keeps a ticker that touches the heartbeat
+# every HEARTBEAT_SECONDS while execute_run is on the stack. A 'running' row
+# whose heartbeat is older than RUN_STALE_AFTER_SECONDS therefore has no
+# process behind it — _persist raised on a DB blip and the fallback
+# fail_running_run was swallowed, or the worker died — and the scheduler
+# fails it instead of treating it as live forever.
+HEARTBEAT_SECONDS = 30
+RUN_STALE_AFTER_SECONDS = max(
+    HEARTBEAT_SECONDS * 4, int(config.get("runtime", "run_stale_after_seconds", 600)))
+
+
+def _keep_alive(run_id: int, project_access: access.AccessContext | None) -> threading.Event:
+    """Start the heartbeat ticker for one run; set the returned event to stop it.
+    A missed beat is not a failed run — the ticker swallows its own errors and
+    keeps trying, because the stale threshold is several beats wide."""
+    stop = threading.Event()
+
+    def tick() -> None:
+        while not stop.wait(HEARTBEAT_SECONDS):
+            try:
+                if project_access is None:
+                    workflow_store.touch_run_heartbeat(run_id)
+                else:
+                    with access.use_access(project_access):
+                        workflow_store.touch_run_heartbeat(run_id)
+            except Exception:  # noqa: BLE001 — see docstring
+                pass
+
+    threading.Thread(target=tick, daemon=True, name=f"mari-flow-heartbeat-{run_id}").start()
+    return stop
 
 
 def execute_run(run_id: int, resume_from: int = 0) -> None:
@@ -317,14 +526,46 @@ def execute_run(run_id: int, resume_from: int = 0) -> None:
     loaded = workflow_store.load_run(run_id)
     if not loaded:
         return
+    keep_alive = _keep_alive(run_id, access.current_access())
+    try:
+        _execute_steps(run_id, resume_from, loaded)
+    except RunSwept:
+        # The sweep already recorded the failure and its note; a mid-step
+        # reporter swallows this (progress.report), so the run stops at the
+        # next step boundary and writes nothing more.
+        return
+    finally:
+        keep_alive.set()
+
+
+def _execute_steps(run_id: int, resume_from: int, loaded: tuple[dict, dict]) -> None:
     run, wf = loaded
     steps = wf["nodes"] if isinstance(wf["nodes"], list) else json.loads(wf["nodes"] or "[]")
     rows = run["rows_data"] if isinstance(run["rows_data"], list) else json.loads(run["rows_data"] or "[]")
     ctx: dict = (run["stats"] if isinstance(run["stats"], dict) else json.loads(run["stats"] or "{}")).get("ctx", {})
+    ctx.setdefault("run_id", run_id)
     start = time.time()
 
+    templates = [{"step": s.get("label", s.get("kind", "step")),
+                  "status": "pending", "detail": ""} for s in steps]
     if not rows:
-        rows = [{"step": s.get("label", s.get("kind", "step")), "status": "pending", "detail": ""} for s in steps]
+        rows = templates
+    elif len(rows) != len(steps) or any(
+            row.get("step") != template["step"] for row, template in zip(rows, templates)):
+        # Workflow defaults can gain a stage while an approval run is waiting.
+        # Align persisted rows by their stable display label so resume has one
+        # row per current step; unmatched new stages start pending, while the
+        # old completed/review rows keep their evidence and duration.
+        unused = list(rows)
+        aligned: list[dict] = []
+        for template in templates:
+            match = next((row for row in unused if row.get("step") == template["step"]), None)
+            if match is None:
+                aligned.append(template)
+            else:
+                aligned.append(match)
+                unused.remove(match)
+        rows = aligned
 
     for i in range(resume_from, len(steps)):
         step = steps[i]
@@ -358,6 +599,10 @@ def _public_stats(ctx: dict) -> dict:
     # "the scan found nothing" on every run that never scanned.
     if "facts" in ctx:
         stats["facts"] = ctx["facts"]
+    for key in ("accepted_facts", "rejected_facts", "published_facts",
+                "impact_links", "high_impact_facts"):
+        if key in ctx:
+            stats[key] = ctx[key]
     if "decisions" in ctx:
         stats["decisions"] = ctx["decisions"]
     return stats
@@ -380,12 +625,56 @@ def _public_stats(ctx: dict) -> dict:
 FLOW_WORKERS = max(1, int(config.get("runtime", "flow_workers", 4)))
 _run_pool = cf.ThreadPoolExecutor(max_workers=FLOW_WORKERS, thread_name_prefix="mari-flow")
 
+# A run queued behind a busy pool is alive, but nothing beats for it: its
+# heartbeat is whatever the insert (or approveRun) stamped, and a queue wait
+# longer than RUN_STALE_AFTER_SECONDS had the sweep fail it, the scheduler
+# start a replacement, and the original resurrect when a worker finally ran
+# it. One ticker thread beats for every queued run until its worker starts
+# and execute_run's own ticker takes over; it exits when the queue drains.
+_QUEUED: dict[int, access.AccessContext] = {}
+_QUEUE_LOCK = threading.Lock()
+_QUEUE_TICKER: dict[str, t.Any] = {"thread": None, "stop": threading.Event()}
+
+
+def _queue_tick() -> None:
+    while not _QUEUE_TICKER["stop"].wait(HEARTBEAT_SECONDS):
+        with _QUEUE_LOCK:
+            queued = list(_QUEUED.items())
+            if not queued:
+                _QUEUE_TICKER["thread"] = None
+                return
+        for run_id, project_access in queued:
+            try:
+                with access.use_access(project_access):
+                    workflow_store.touch_run_heartbeat(run_id)
+            except Exception:  # noqa: BLE001 — a missed beat is not a failed run
+                pass
+    with _QUEUE_LOCK:
+        _QUEUE_TICKER["thread"] = None
+
+
+def _enqueue(run_id: int, project_access: access.AccessContext) -> None:
+    with _QUEUE_LOCK:
+        _QUEUED[run_id] = project_access
+        if _QUEUE_TICKER["thread"] is None:
+            _QUEUE_TICKER["stop"].clear()
+            thread = threading.Thread(target=_queue_tick, daemon=True,
+                                      name="mari-flow-queue-heartbeat")
+            _QUEUE_TICKER["thread"] = thread
+            thread.start()
+
+
+def _dequeue(run_id: int) -> None:
+    with _QUEUE_LOCK:
+        _QUEUED.pop(run_id, None)
+
 
 def _guarded_run(run_id: int, resume_from: int, project_access: access.AccessContext) -> None:
     """execute_run, with a last-resort failure record. A run whose execution
     raised before it could persist anything would otherwise sit at 'running'
     until the next restart reconciled it — a run that says it is still going
     when nothing is going is the worst of the three possible states."""
+    _dequeue(run_id)
     try:
         with access.use_access(project_access):
             execute_run(run_id, resume_from)
@@ -412,6 +701,7 @@ def start_run(run_id: int, resume_from: int = 0) -> None:
             "automation", str(run_id),
             frozenset({"knowledge.read", "knowledge.write", "automation.run", "source.sync"}),
         )
+    _enqueue(run_id, project_access)
     _run_pool.submit(_guarded_run, run_id, resume_from, project_access)
 
 
@@ -448,9 +738,16 @@ def fire_document_triggers(doc_ids: list[int], change: str) -> list[int]:
         note = f"Triggered by: {first} {verb}" + (
             f" (+{len(matched) - 1} more)" if len(matched) > 1 else "")
         trigger_meta = {"on": change, "doc_ids": [doc["id"] for doc in matched], "note": note}
-        run_ids.append(workflow_store.create_triggered_run(
-            workflow, trigger_meta["doc_ids"], trigger_meta, note,
-        ))
+        try:
+            run_ids.append(workflow_store.create_triggered_run(
+                workflow, trigger_meta["doc_ids"], trigger_meta, note,
+            ))
+        except ValueError:
+            # The workflow already has a run in flight (or was just deleted).
+            # Two concurrent runs of one workflow interleave their staged
+            # candidates, so the batch is dropped for this workflow rather
+            # than started alongside; the next change batch fires it again.
+            continue
     for run_id in run_ids:
         start_run(run_id)
     return run_ids
@@ -479,8 +776,13 @@ def reconcile_stale_runs() -> int:
     and told the person waiting on it that their sign-off had been "interrupted
     by restart", which was not true: nothing was interrupted, the server was
     simply started again. A waiting run needs no process to be alive; approveRun
-    resumes it from `paused_at` whenever someone gets to it."""
-    return workflow_store.reconcile_stale_runs(PROCESS_START_TS)
+    resumes it from `paused_at` whenever someone gets to it.
+
+    Runs that predate this process are one case; runs whose heartbeat has
+    gone quiet are the other, and a restart is as good a moment as any tick
+    to sweep them."""
+    return (workflow_store.reconcile_stale_runs(PROCESS_START_TS)
+            + workflow_store.fail_stale_runs(RUN_STALE_AFTER_SECONDS))
 
 
 def run_due_schedules() -> list[int]:
@@ -489,6 +791,9 @@ def run_due_schedules() -> list[int]:
     whose latest run is still running/waiting is never double-started.
     Returns the started run ids."""
     started: list[int] = []
+    # Sweep lost leases first, so a run that died mid-flight reads as failed
+    # by the time latest_run asks whether the workflow is still busy.
+    workflow_store.fail_stale_runs(RUN_STALE_AFTER_SECONDS)
     for workflow in workflow_store.scheduled_workflows():
         trigger = (workflow["trigger"] if isinstance(workflow["trigger"], dict)
                    else json.loads(workflow["trigger"] or "{}"))
@@ -505,9 +810,15 @@ def run_due_schedules() -> list[int]:
             continue
         label = f"Scheduled · every {every} min"
         trigger_meta = {"on": "schedule", "every_minutes": every, "note": label}
-        started.append(workflow_store.create_scheduled_run(
-            workflow, trigger_meta, label,
-        ))
+        try:
+            started.append(workflow_store.create_scheduled_run(
+                workflow, trigger_meta, label,
+            ))
+        except ValueError:
+            # Lost the race under the row lock: a manual Run now landed
+            # between latest_run and the insert, or the workflow was deleted.
+            # The next tick re-evaluates; nothing is owed now.
+            continue
     for rid in started:
         start_run(rid)
     return started
@@ -561,21 +872,21 @@ def _wf_nodes(row: dict) -> list[dict]:
 def ensure_sync_flow(source_id: int, repo: str) -> int | None:
     """Idempotently create the scheduled 'Sync <label>' flow for a github or
     connector source. Returns the new workflow id, or None if one exists."""
-    existing = workflow_store.find_by_step("sync_source", project_scoped=False)
-    if existing and any(
-        int((step.get("config") or {}).get("source_id") or 0) == source_id
-        for step in existing["nodes"] if isinstance(step, dict)
-    ):
+    existing = workflow_store.find_by_step(
+        "sync_source", config={"source_id": source_id},
+    )
+    if existing:
         return None
     nodes = [
         {"kind": "trigger", "label": "Every 10 min", "config": {"label": "Scheduled · every 10 min"}},
-        {"kind": "sync_source", "label": f"Sync {repo}", "config": {"source_id": source_id}},
+        {"kind": "sync_source", "label": f"Sync {repo}",
+         "config": {"source_id": source_id, "full_every_hours": FULL_SYNC_EVERY_HOURS}},
     ]
     return workflow_store.create_default_workflow(
         name=f"Sync {repo}"[:120],
         description=f"Keeps {repo} indexed — incremental sync on a schedule.",
         color="#5c7a4c", status="active", nodes=nodes,
-        trigger={"on": "schedule", "every_minutes": 10}, project_scoped=False,
+        trigger={"on": "schedule", "every_minutes": 10},
     )
 
 
@@ -583,7 +894,7 @@ def ensure_digest_flow() -> int | None:
     """Idempotently create the 'Weekly digest refresh' flow (schedule: every
     10080 min == weekly). The old settings.digest_schedule.enabled decides
     whether it starts active or paused. Returns the new id or None."""
-    if workflow_store.find_by_step("refresh_digest", project_scoped=False):
+    if workflow_store.find_by_step("refresh_digest"):
         return None
     status = "active" if workflow_store.setting("digest_schedule").get("enabled", True) else "paused"
     nodes = [
@@ -594,11 +905,15 @@ def ensure_digest_flow() -> int | None:
         name="Weekly digest refresh",
         description="Regenerates the Overview digest from recent documents and facts.",
         color="#c8973a", status=status, nodes=nodes,
-        trigger={"on": "schedule", "every_minutes": 10080}, project_scoped=False,
+        trigger={"on": "schedule", "every_minutes": 10080},
     )
 
 
-FACT_SCAN_FLOW = "Hourly fact extraction"
+FACT_SCAN_FLOW = "Fact extraction"
+LEGACY_FACT_SCAN_FLOW = "Hourly fact extraction"
+FACT_SCAN_DESCRIPTION = (
+    "Scans new and changed documents for atomic, checkable claims on the configured schedule."
+)
 DECISION_SCAN_FLOW = "Decision scan"
 
 
@@ -633,25 +948,279 @@ def _adopt_rotation(row: dict, scan_kind: str, rotate: str) -> None:
     workflow_store.update_nodes(row["id"], nodes)
 
 
+def _adopt_fact_review(workflow_id: int) -> None:
+    """Upgrade the shipped three-step scanner to its staged review workflow.
+
+    Only the known legacy shape is changed. A custom pipeline remains the
+    owner's pipeline even when it happens to contain a scan_facts step.
+    """
+    nodes = workflow_store.workflow_nodes(workflow_id)
+    if [node.get("kind") for node in nodes] != ["trigger", "fetch_docs", "scan_facts"]:
+        return
+    nodes.extend([
+        {"kind": "review_facts", "label": "Review candidates", "config": {"mode": "human"}},
+        {"kind": "publish_facts", "label": "Publish accepted facts", "config": {"status": "needs_review"}},
+    ])
+    workflow_store.update_nodes(workflow_id, nodes)
+
+
+def _adopt_fact_impact(workflow_id: int) -> None:
+    """Insert impact mapping into the shipped staged workflow only."""
+    nodes = workflow_store.workflow_nodes(workflow_id)
+    if [node.get("kind") for node in nodes] != [
+        "trigger", "fetch_docs", "scan_facts", "review_facts", "publish_facts",
+    ]:
+        return
+    nodes.insert(3, {
+        "kind": "map_fact_impact", "label": "Map related facts and evidence", "config": {},
+    })
+    workflow_store.update_nodes(workflow_id, nodes)
+
+
+def _adopt_fact_intelligence(workflow_id: int) -> None:
+    """Add bounded adjudication and clustering to the shipped six-stage flow."""
+    nodes = workflow_store.workflow_nodes(workflow_id)
+    if [node.get("kind") for node in nodes] != [
+        "trigger", "fetch_docs", "scan_facts", "map_fact_impact",
+        "review_facts", "publish_facts",
+    ]:
+        return
+    nodes[3]["label"] = "Embed facts and retrieve evidence"
+    nodes[3]["config"] = {
+        "retrieval_backend": "postgres", "fact_neighbors": 8,
+        "evidence_neighbors": 8, "minimum_fact_similarity": .72,
+        "minimum_evidence_similarity": .68, "max_components": 12,
+    }
+    nodes.insert(4, {
+        "kind": "adjudicate_facts", "label": "Judge candidate quality and evidence",
+        "config": {"mode": "llm", "max_calls": 50, "max_input_tokens": 120000,
+                   "max_output_tokens": 40000, "output_tokens_per_call": 800,
+                   "related_assertions": 8, "evidence_spans": 12},
+    })
+    nodes.insert(5, {
+        "kind": "cluster_facts", "label": "Build fact clusters",
+        "config": {"label_mode": "off", "minimum_similarity": .78,
+                   "max_llm_clusters": 5, "max_input_tokens": 8000,
+                   "max_output_tokens": 2000},
+    })
+    nodes[6]["label"] = "Apply judge verdicts; review uncertainty"
+    nodes[6]["config"] = {"mode": "ai", "minimum_confidence": .85}
+    workflow_store.update_nodes(workflow_id, nodes)
+
+
+def _normalize_fact_intelligence_config(workflow_id: int) -> None:
+    """Fill newly shipped bounds without overwriting user-owned values."""
+    nodes = workflow_store.workflow_nodes(workflow_id)
+    if [node.get("kind") for node in nodes] != [
+        "trigger", "fetch_docs", "scan_facts", "map_fact_impact",
+        "adjudicate_facts", "cluster_facts", "review_facts", "publish_facts",
+    ]:
+        return
+    defaults = {
+        "scan_facts": {"claims_per_document": 2, "max_llm_calls": 50,
+                       "max_input_tokens": 100000, "max_output_tokens": 20000},
+        "map_fact_impact": {"retrieval_backend": "postgres", "fact_neighbors": 8,
+                            "evidence_neighbors": 8, "minimum_fact_similarity": .72,
+                            "minimum_evidence_similarity": .68, "max_components": 12},
+        "adjudicate_facts": {"mode": "llm", "max_calls": 50,
+                             "max_input_tokens": 120000, "max_output_tokens": 40000,
+                             "output_tokens_per_call": 800, "related_assertions": 8,
+                             "evidence_spans": 12},
+        "cluster_facts": {"label_mode": "off", "minimum_similarity": .78,
+                          "max_llm_clusters": 5, "max_input_tokens": 8000,
+                          "max_output_tokens": 2000},
+    }
+    changed = False
+    for node in nodes:
+        if node.get("kind") not in defaults:
+            continue
+        config = dict(node.get("config") or {})
+        merged = {**defaults[node["kind"]], **config}
+        if merged != config:
+            node["config"] = merged
+            changed = True
+    if changed:
+        workflow_store.update_nodes(workflow_id, nodes)
+
+
 def ensure_fact_scan_flow() -> int:
-    """Get or create the hourly fact extraction flow for this project."""
+    """Get or create the scheduled fact extraction flow for this project."""
     existing = workflow_store.find_by_step("scan_facts")
     if existing:
+        if (existing.get("name") == LEGACY_FACT_SCAN_FLOW and
+                existing.get("description") ==
+                "Scans new and changed documents for atomic, checkable claims every hour."):
+            workflow_store.update_metadata(
+                existing["id"], FACT_SCAN_FLOW, FACT_SCAN_DESCRIPTION,
+            )
         _adopt_rotation(existing, "scan_facts", "facts")
-        workflow_store.activate_hourly_fact_scan(existing["id"])
+        _adopt_fact_review(existing["id"])
+        _adopt_fact_impact(existing["id"])
+        _adopt_fact_intelligence(existing["id"])
+        _normalize_fact_intelligence_config(existing["id"])
         return existing["id"]
     nodes = [
             {"kind": "trigger", "label": "Every hour", "config": {"label": "Scheduled · hourly"}},
             {"kind": "fetch_docs", "label": "Read new and changed documents",
              "config": {"k": 50, "rotate": "facts"}},
-            {"kind": "scan_facts", "label": "Extract checkable claims", "config": {}},
+            {"kind": "scan_facts", "label": "Extract checkable claims", "config": {
+                "max_llm_calls": 50, "max_input_tokens": 100000,
+                "max_output_tokens": 20000,
+            }},
+            {"kind": "map_fact_impact", "label": "Embed facts and retrieve evidence", "config": {
+                "retrieval_backend": "postgres", "fact_neighbors": 8,
+                "evidence_neighbors": 8, "minimum_fact_similarity": .72,
+                "minimum_evidence_similarity": .68, "max_components": 12,
+            }},
+            {"kind": "adjudicate_facts", "label": "Judge candidate quality and evidence", "config": {
+                "mode": "llm", "max_calls": 50, "max_input_tokens": 120000,
+                "max_output_tokens": 40000, "output_tokens_per_call": 800,
+                "related_assertions": 8, "evidence_spans": 12,
+            }},
+            {"kind": "cluster_facts", "label": "Build fact clusters", "config": {
+                "label_mode": "off", "minimum_similarity": .78,
+                "max_llm_clusters": 5, "max_input_tokens": 8000,
+                "max_output_tokens": 2000,
+            }},
+            {"kind": "review_facts", "label": "Apply judge verdicts; review uncertainty", "config": {
+                "mode": "ai", "minimum_confidence": .85,
+            }},
+            {"kind": "publish_facts", "label": "Publish accepted facts", "config": {"status": "needs_review"}},
         ]
     return workflow_store.create_default_workflow(
         name=FACT_SCAN_FLOW,
-        description="Scans new and changed documents for atomic, checkable claims every hour.",
+        description=FACT_SCAN_DESCRIPTION,
         color="#1E6FA8", status="active", nodes=nodes,
         trigger={"on": "schedule", "every_minutes": 60},
     )
+
+
+def configure_fact_scan_flow(workflow_id: int, raw: dict | None) -> dict:
+    """Validate and persist parameters shared by manual and scheduled scans."""
+    raw = raw if isinstance(raw, dict) else {}
+    limit = max(1, min(int(raw.get("limit") or 50), 200))
+    claims = max(1, min(int(raw.get("claims_per_document") or 2), 10))
+    source_ids = sorted({int(value) for value in raw.get("source_ids") or [] if int(value) > 0})
+    query = str(raw.get("query") or "").strip()[:200]
+    tag = str(raw.get("tag") or "").strip()[:80]
+    path_glob = str(raw.get("path_glob") or "").strip()[:240]
+    schedule = int(raw.get("schedule_minutes") or 0)
+    review_mode = str(raw.get("review_mode") or "ai")
+    if review_mode not in {"human", "ai"}:
+        raise ValueError("Fact review mode must be human or AI.")
+    instructions = str(raw.get("review_instructions") or "").strip()[:1000]
+    publish_status = str(raw.get("publish_status") or "needs_review")
+    if publish_status not in {"needs_review", "verified"}:
+        raise ValueError("Published facts must need review or be verified.")
+    if schedule not in {0, 60, 360, 1440, 10080}:
+        raise ValueError("Fact scan schedule must be manual, hourly, every 6 hours, daily, or weekly.")
+    retrieval_backend = str(raw.get("retrieval_backend") or "postgres")
+    if retrieval_backend != "postgres":
+        raise ValueError("Fact retrieval currently uses Postgres vectors.")
+    fact_neighbors = max(1, min(int(raw.get("fact_neighbors") or 8), 50))
+    evidence_neighbors = max(1, min(int(raw.get("evidence_neighbors") or 8), 50))
+    max_components = max(1, min(int(raw.get("max_components") or 12), 32))
+    fact_similarity = max(-1.0, min(float(raw.get("minimum_fact_similarity") or .72), 1.0))
+    evidence_similarity = max(-1.0, min(float(raw.get("minimum_evidence_similarity") or .68), 1.0))
+    extraction_calls = max(0, min(int(raw.get("extraction_max_calls") or limit), 200))
+    extraction_input = max(0, min(int(raw.get("extraction_max_input_tokens") or 100000), 2_000_000))
+    extraction_output = max(0, min(int(raw.get("extraction_max_output_tokens") or 20000), 400_000))
+    adjudication_mode = str(raw.get("adjudication_mode") or "llm")
+    if adjudication_mode not in {"off", "llm"}:
+        raise ValueError("Fact adjudication must be off or use the configured LLM.")
+    adjudication_calls = max(0, min(int(raw.get("adjudication_max_calls") or 50), 100))
+    adjudication_input = max(0, min(int(raw.get("adjudication_max_input_tokens") or 120000), 1_000_000))
+    adjudication_output = max(0, min(int(raw.get("adjudication_max_output_tokens") or 40000), 200_000))
+    cluster_label_mode = str(raw.get("cluster_label_mode") or "off")
+    if cluster_label_mode not in {"off", "llm"}:
+        raise ValueError("Fact cluster labels must be off or use the configured LLM.")
+    cluster_similarity = max(-1.0, min(float(raw.get("cluster_minimum_similarity") or .78), 1.0))
+    cluster_calls = max(0, min(int(raw.get("cluster_max_llm_calls") or 5), 50))
+    schedule_labels = {
+        0: ("Manual", "Started manually"),
+        60: ("Every hour", "Scheduled · hourly"),
+        360: ("Every 6 hours", "Scheduled · every 6 hours"),
+        1440: ("Every day", "Scheduled · daily"),
+        10080: ("Every week", "Scheduled · weekly"),
+    }
+    fetch_config = {
+        "k": limit, "rotate": "facts", "query": query, "tag": tag,
+        "source_ids": source_ids, "path_glob": path_glob,
+    }
+    nodes = workflow_store.workflow_nodes(workflow_id)
+    for node in nodes:
+        if node.get("kind") == "trigger":
+            node["label"], detail = schedule_labels[schedule]
+            node["config"] = {"label": detail}
+        elif node.get("kind") == "fetch_docs":
+            node["config"] = fetch_config
+            node["label"] = "Read configured document scope"
+        elif node.get("kind") == "scan_facts":
+            node["config"] = {
+                "claims_per_document": claims, "instructions": instructions,
+                "max_llm_calls": extraction_calls,
+                "max_input_tokens": extraction_input,
+                "max_output_tokens": extraction_output,
+            }
+        elif node.get("kind") == "map_fact_impact":
+            node["config"] = {
+                "retrieval_backend": retrieval_backend, "fact_neighbors": fact_neighbors,
+                "evidence_neighbors": evidence_neighbors,
+                "minimum_fact_similarity": fact_similarity,
+                "minimum_evidence_similarity": evidence_similarity,
+                "max_components": max_components,
+            }
+        elif node.get("kind") == "adjudicate_facts":
+            node["config"] = {
+                "mode": adjudication_mode, "max_calls": adjudication_calls,
+                "max_input_tokens": adjudication_input,
+                "max_output_tokens": adjudication_output,
+                "output_tokens_per_call": min(4000, max(100, adjudication_output or 800)),
+                "related_assertions": fact_neighbors, "evidence_spans": evidence_neighbors,
+                "instructions": instructions,
+            }
+        elif node.get("kind") == "cluster_facts":
+            node["config"] = {
+                "label_mode": cluster_label_mode, "minimum_similarity": cluster_similarity,
+                "max_llm_clusters": cluster_calls,
+                "max_input_tokens": max(0, cluster_calls * 1600),
+                "max_output_tokens": max(0, cluster_calls * 400),
+                "instructions": instructions,
+            }
+        elif node.get("kind") == "review_facts":
+            # The dialog has no threshold field, so whatever the workflow
+            # already carries is the user's tuned value. Reconfiguring the
+            # scan used to reset it to .85 every time.
+            prior = (node.get("config") or {}).get("minimum_confidence")
+            node["config"] = {
+                "mode": review_mode,
+                "minimum_confidence": max(0.0, min(float(prior or .85), 1.0)),
+                "instructions": instructions,
+            }
+        elif node.get("kind") == "publish_facts":
+            node["config"] = {"status": publish_status}
+    workflow_store.update_nodes(workflow_id, nodes)
+    workflow_store.set_trigger(
+        workflow_id,
+        {"on": "schedule", "every_minutes": schedule} if schedule else {"on": ""},
+    )
+    return {**fetch_config, "claims_per_document": claims, "schedule_minutes": schedule,
+            "review_mode": review_mode, "review_instructions": instructions,
+            "publish_status": publish_status, "retrieval_backend": retrieval_backend,
+            "fact_neighbors": fact_neighbors, "evidence_neighbors": evidence_neighbors,
+            "max_components": max_components,
+            "minimum_fact_similarity": fact_similarity,
+            "minimum_evidence_similarity": evidence_similarity,
+            "extraction_max_calls": extraction_calls,
+            "extraction_max_input_tokens": extraction_input,
+            "extraction_max_output_tokens": extraction_output,
+            "adjudication_mode": adjudication_mode,
+            "adjudication_max_calls": adjudication_calls,
+            "adjudication_max_input_tokens": adjudication_input,
+            "adjudication_max_output_tokens": adjudication_output,
+            "cluster_label_mode": cluster_label_mode,
+            "cluster_minimum_similarity": cluster_similarity,
+            "cluster_max_llm_calls": cluster_calls}
 
 
 def ensure_decision_scan_flow() -> int:
@@ -677,10 +1246,16 @@ def ensure_decision_scan_flow() -> int:
 def seed_scheduled_flows() -> None:
     """Startup seeding: every github/connector source gets a scheduled sync
     flow; the weekly digest gets a refresh flow. Idempotent — existing kept."""
+    workflow_store.quarantine_orphan_sync_workflows()
     for s in workflow_store.connector_sources():
         cfg = s["config"] if isinstance(s["config"], dict) else json.loads(s["config"] or "{}")
-        ensure_sync_flow(s["id"], cfg.get("repo") or s["display_name"])
-    ensure_digest_flow()
+        project_access = access.external_access(
+            int(s["project_id"]), str(s["project_slug"]), str(s["project_name"]),
+            "automation", "connector-sync-seed",
+            frozenset({"knowledge.read", "knowledge.write", "automation.run"}),
+        )
+        with access.use_access(project_access):
+            ensure_sync_flow(s["id"], cfg.get("repo") or s["display_name"])
     for project in workflow_store.active_projects():
         project_access = access.external_access(
             int(project["id"]), str(project["slug"]), str(project["name"]),
@@ -688,4 +1263,13 @@ def seed_scheduled_flows() -> None:
             frozenset({"knowledge.read", "knowledge.write", "automation.run"}),
         )
         with access.use_access(project_access):
+            ensure_digest_flow()
             ensure_fact_scan_flow()
+            # A deployment can change the embedding input contract without an
+            # administrator touching Settings (for example, enabling Nomic's
+            # asymmetric search tasks). Refresh stale chunks in the existing
+            # guarded worker so the corpus does not silently stay keyword-only.
+            from mari_server.persistence.postgres import document_index
+            from mari_server.sources import sync as source_sync
+            if document_index.needs_reindex():
+                source_sync.start_reindex()

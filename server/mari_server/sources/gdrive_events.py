@@ -16,7 +16,7 @@ from pydantic import BaseModel
 
 from mari_server.identity import access
 from mari_server.identity import routes as auth
-from mari_server.persistence.postgres import document_index
+from mari_server.persistence.postgres import connector_sync, document_index
 from mari_server import settings as config
 from mari_server.sources import sync as ingest
 from mari_server.providers import connectors as component_connectors
@@ -29,7 +29,7 @@ from mari_components.connectors import (
     GoogleDriveConfig, connector_definition, start_google_drive_watch,
 )
 from mari_components.connectors.events import gdrive_change_hint
-from mari_components.errors import IncompleteSnapshot
+from mari_components.errors import AuthenticationFailure, IncompleteSnapshot, TransientFailure
 
 
 router = APIRouter()
@@ -51,6 +51,37 @@ def _json(value):
 
 def _source(source_id: int, project_id: int) -> dict | None:
     return event_store.source(source_id, project_id, "connector", "gdrive")
+
+
+def _persist_refresh(source_id: int, source_config: dict):
+    """The on_refresh hook for this source: a refreshed access token lands in
+    the stored config through merge_config, the one writer that leaves every
+    other key alone, and in the in-memory copy so the rest of the call uses
+    it. Before this the refreshed token lived only in the poll that minted
+    it, so the next poll and every watch renewal refreshed again or failed."""
+    def persist(refreshed) -> None:
+        updates = dict(refreshed)
+        source_config.update(updates)
+        with document_index.connection() as conn:
+            connector_sync.merge_config(conn, int(source_id), updates, synced=False)
+            conn.commit()
+    return persist
+
+
+def _start_watch(source_config: dict, page_token: str, base: str, channel_id: str,
+                 channel_token: str, expiration: dt.datetime):
+    return start_google_drive_watch(
+        GoogleDriveConfig(
+            str(source_config.get("access_token") or ""),
+            str(source_config.get("folder_id") or ""),
+        ),
+        page_token,
+        f"{base}/webhooks/google-drive",
+        channel_id,
+        channel_token,
+        expiration_ms=round(expiration.timestamp() * 1000),
+        http=component_connectors.http_transport,
+    )
 
 
 @router.post("/connectors/google-drive/watch")
@@ -77,18 +108,23 @@ def create_watch(
     expiration = dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=_WATCH_DAYS)
     event_store.create_drive_watch(project_id, source["id"], channel_id, token_hash, page_token, expiration)
     try:
-        watched = start_google_drive_watch(
-            GoogleDriveConfig(
-                str(source_config.get("access_token") or ""),
-                str(source_config.get("folder_id") or ""),
-            ),
-            page_token,
-            f"{base}/webhooks/google-drive",
-            channel_id,
-            channel_token,
-            expiration_ms=round(expiration.timestamp() * 1000),
-            http=component_connectors.http_transport,
-        )
+        try:
+            watched = _start_watch(source_config, page_token, base, channel_id,
+                                   channel_token, expiration)
+        except AuthenticationFailure:
+            # The stored access token is Google's hour-long grant. The poll
+            # path refreshes it on 401, but this path sent it verbatim, so
+            # the hourly renewal loop failed for any source whose sweep had
+            # not run within the hour and its channel expired. Refresh,
+            # persist, retry once; a source with no refresh grant fails as
+            # before.
+            definition = connector_definition("gdrive")
+            if not definition.can_refresh(source_config):
+                raise
+            _persist_refresh(source["id"], source_config)(
+                definition.refresh(source_config, http=component_connectors.http_transport))
+            watched = _start_watch(source_config, page_token, base, channel_id,
+                                   channel_token, expiration)
     except Exception as exc:
         error = str(exc)
         event_store.update_drive_watch(channel_id, status="error", last_error=error[:1000])
@@ -149,6 +185,7 @@ async def gdrive_webhook(request: Request):
 def _apply_poll(source: dict, source_config: dict, poll) -> None:
     source_id = int(source["id"])
     hashes = dict(source_config.get("item_hashes") or {})
+    page_hashes: dict[str, str] = {}
     max_tokens, overlap = document_index.chunk_settings()
     with document_index.connection() as conn:
         for document in poll.upserts:
@@ -171,7 +208,7 @@ def _apply_poll(source: dict, source_config: dict, poll) -> None:
             )
             if hashes.get(path) != content_hash:
                 document_index.sync_chunks(conn, doc_id, title, body, max_tokens, overlap)
-            hashes[path] = content_hash
+            hashes[path] = page_hashes[path] = content_hash
         tombstones = {value.external_id for value in poll.tombstones if value.external_id}
         if tombstones:
             rows = document_repository.source_document_paths(conn, source_id)
@@ -181,6 +218,9 @@ def _apply_poll(source: dict, source_config: dict, poll) -> None:
             for path in tombstones:
                 hashes.pop(path, None)
         source_config["item_hashes"] = hashes
+        # Documents and this page's hash entries commit together, and only
+        # those entries: the poll worker owns the rest of the manifest.
+        connector_sync.merge_config(conn, source_id, {}, hashes=page_hashes, dropped=sorted(tombstones))
         conn.commit()
     if poll.upserts or poll.tombstones:
         invalidate_search(int(source["project_id"]))
@@ -218,9 +258,17 @@ def process_gdrive_delivery(row: dict) -> None:
     with access.use_access(project_access):
         try:
             while True:
+                # Checked per page: a scheduled sweep may start while a long
+                # Changes drain is in progress. Transient so the inbox retries
+                # the delivery after the sweep releases the source.
+                if ingest.is_running(int(source["id"])):
+                    raise TransientFailure(
+                        f"Google Drive changes: a scheduled sync for source {source['id']} "
+                        "is running; retrying after it finishes")
                 request = PollRequest(cursor=cursor, page_limit=1)
                 pages = connector_definition("gdrive").poll(
                     source_config, request, http=component_connectors.http_transport,
+                    on_refresh=_persist_refresh(source["id"], source_config),
                 )
                 poll = next(pages)
                 _apply_poll(source, source_config, poll)
@@ -230,7 +278,7 @@ def process_gdrive_delivery(row: dict) -> None:
                 cursor = str(durable)
                 token = cursor[8:]
                 source_config["cursor"] = cursor
-                event_store.update_drive_cursor(source["id"], source_config, token)
+                event_store.update_drive_cursor(source["id"], cursor, token)
                 if poll.snapshot_complete:
                     break
         except IncompleteSnapshot:

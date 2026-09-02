@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import hashlib
 import json
 import unittest
@@ -10,8 +11,11 @@ from fastapi import HTTPException
 
 from mari_server.identity import access
 from mari_server.sources import gdrive_events
-from mari_components import PollPage
-from mari_components.connectors import GoogleDriveWatch
+from mari_components import KnowledgeDocument, PollPage, PollRequest
+from mari_components.connectors import GoogleDriveConfig, GoogleDriveWatch, connector_definition
+from mari_components.connectors import catalog
+from mari_components.errors import AuthenticationFailure, TransientFailure
+from mari_components.types import Tombstone
 
 
 class MemoryInbox:
@@ -121,17 +125,19 @@ class DriveWatchSetupTests(unittest.TestCase):
 
 
 class DriveChangesTests(unittest.TestCase):
+    CHANNEL = {"channel_id": "channel-1", "source_id": 5, "project_id": 9,
+               "config": {"cursor": "changes:start", "access_token": "ya29.secret"},
+               "provider": "gdrive", "display_name": "Drive", "source_status": "active",
+               "project_status": "active", "project_slug": "acme", "project_name": "Acme"}
+
     def test_worker_drains_all_pages_and_persists_each_checkpoint(self):
-        channel = {"channel_id": "channel-1", "source_id": 5, "project_id": 9,
-                   "config": {"cursor": "changes:start"}, "provider": "gdrive",
-                   "display_name": "Drive", "source_status": "active", "project_status": "active",
-                   "project_slug": "acme", "project_name": "Acme"}
         pages = [PollPage(next_cursor="changes:start", next_checkpoint="changes:middle",
                           snapshot_complete=False),
                  PollPage(next_cursor="changes:end", snapshot_complete=True)]
         definition = Mock()
         definition.poll.side_effect = lambda _cfg, _request, **_kwargs: iter([pages.pop(0)])
-        with patch.object(gdrive_events.event_store, "drive_channel", return_value=channel), \
+        with patch.object(gdrive_events.event_store, "drive_channel", return_value=dict(self.CHANNEL)), \
+             patch.object(gdrive_events.ingest, "is_running", return_value=False), \
              patch.object(gdrive_events, "connector_definition", return_value=definition), \
              patch.object(gdrive_events, "_apply_poll") as apply_poll, \
              patch.object(gdrive_events.event_store, "update_drive_cursor") as update_cursor:
@@ -140,7 +146,46 @@ class DriveChangesTests(unittest.TestCase):
         self.assertEqual([call.args[1].cursor for call in definition.poll.call_args_list],
                          ["changes:start", "changes:middle"])
         self.assertEqual(apply_poll.call_count, 2)
-        self.assertEqual(update_cursor.call_count, 2)
+        # the cursor alone travels to the store, never the whole config copy
+        self.assertEqual([call.args for call in update_cursor.call_args_list],
+                         [(5, "changes:middle", "middle"), (5, "changes:end", "end")])
+
+    def test_worker_yields_to_a_running_sweep_and_retries_later(self):
+        definition = Mock()
+        with patch.object(gdrive_events.event_store, "drive_channel", return_value=dict(self.CHANNEL)), \
+             patch.object(gdrive_events.ingest, "is_running", return_value=True), \
+             patch.object(gdrive_events, "connector_definition", return_value=definition), \
+             patch.object(gdrive_events.event_store, "update_drive_cursor") as update_cursor:
+            with self.assertRaisesRegex(TransientFailure, "scheduled sync .* is running"):
+                gdrive_events.process_gdrive_delivery({"project_id": 9,
+                    "payload": {"channel_id": "channel-1"}})
+        definition.poll.assert_not_called()
+        update_cursor.assert_not_called()
+
+    def test_page_apply_writes_only_its_own_hash_entries(self):
+        # The poll worker owns the manifest; this worker owns the entries for
+        # the files this page touched, merged in the documents transaction.
+        source = {"id": 5, "project_id": 9}
+        config = {"access_token": "ya29.secret", "item_hashes": {"kept": "k1", "gone": "g1"}}
+        poll = PollPage(
+            upserts=(KnowledgeDocument("doc-1", "Doc", "Body", revision="r7"),),
+            tombstones=(Tombstone("gone"),), next_cursor="changes:end", snapshot_complete=True)
+        conn = Mock()
+        with patch.object(gdrive_events.document_index, "connection", return_value=_Context(conn)), \
+             patch.object(gdrive_events.document_index, "chunk_settings", return_value=(100, 10)), \
+             patch.object(gdrive_events.document_index, "upsert_document", return_value=(91, True)), \
+             patch.object(gdrive_events.document_index, "sync_chunks"), \
+             patch.object(gdrive_events.document_repository, "source_document_paths",
+                          return_value=[{"id": 92, "source_path": "gdrive/gone"}]), \
+             patch.object(gdrive_events.document_index, "delete_documents") as delete, \
+             patch.object(gdrive_events.connector_sync, "merge_config") as merge, \
+             patch.object(gdrive_events, "invalidate_search"):
+            gdrive_events._apply_poll(source, config, poll)
+        delete.assert_called_once_with(conn, [92])
+        merge.assert_called_once_with(conn, 5, {}, hashes={"doc-1": "r7"}, dropped=["gone"])
+        conn.commit.assert_called_once()
+        # the in-memory copy still tracks what was seen for this drain
+        self.assertEqual(config["item_hashes"], {"kept": "k1", "doc-1": "r7"})
 
     def test_410_runs_full_poll_reconciliation_and_replaces_cursor(self):
         source = {"id": 5, "source_id": 5, "project_id": 9, "channel_id": "channel-1"}
@@ -152,6 +197,126 @@ class DriveChangesTests(unittest.TestCase):
             gdrive_events._full_reconcile(source, {}, "channel-1")
         mark.assert_called_once_with("channel-1")
         restore.assert_called_once_with(5, "fresh")
+
+    def test_worker_persists_a_refreshed_token_through_merge_config(self):
+        # The poll refreshes on 401; the new token has to reach the stored
+        # config, or the next delivery and the watch renewal refresh again.
+        def poll(cfg, _request, *, http, on_refresh):
+            on_refresh({"access_token": "fresh"})
+            self.assertEqual(cfg["access_token"], "fresh")
+            return iter([PollPage(next_cursor="changes:end", snapshot_complete=True)])
+        definition = Mock()
+        definition.poll.side_effect = poll
+        conn = Mock()
+        with patch.object(gdrive_events.event_store, "drive_channel", return_value=dict(self.CHANNEL)), \
+             patch.object(gdrive_events.ingest, "is_running", return_value=False), \
+             patch.object(gdrive_events, "connector_definition", return_value=definition), \
+             patch.object(gdrive_events, "_apply_poll"), \
+             patch.object(gdrive_events.event_store, "update_drive_cursor"), \
+             patch.object(gdrive_events.document_index, "connection", return_value=_Context(conn)), \
+             patch.object(gdrive_events.connector_sync, "merge_config") as merge:
+            gdrive_events.process_gdrive_delivery({"project_id": 9,
+                "payload": {"channel_id": "channel-1"}})
+        merge.assert_called_once_with(conn, 5, {"access_token": "fresh"}, synced=False)
+        conn.commit.assert_called_once()
+
+
+class DriveTokenRefreshTests(unittest.TestCase):
+    REFRESHABLE = {"cursor": "changes:start", "access_token": "stale",
+                   "refresh_token": "1//refresh", "client_id": "client", "client_secret": "secret"}
+
+    def setUp(self):
+        self.context = access.AccessContext(1, 9, "acme", "Acme", "admin", access.CAPABILITIES)
+
+    def test_watch_refreshes_a_rejected_token_persists_it_and_retries_once(self):
+        source = {"id": 5, "project_id": 9, "config": dict(self.REFRESHABLE)}
+        attempts = []
+        def watch(config, *_args, **_kwargs):
+            attempts.append(config.access_token)
+            if len(attempts) == 1:
+                raise AuthenticationFailure("provider rejected credentials (HTTP 401)")
+            return GoogleDriveWatch("channel", "resource-1", None)
+        conn = Mock()
+        with patch.object(gdrive_events, "_source", return_value=source), \
+             patch.object(gdrive_events.config, "get", return_value="https://mari.example.test"), \
+             patch.object(gdrive_events.event_store, "create_drive_watch"), \
+             patch.object(gdrive_events.event_store, "activate_drive_watch") as activate, \
+             patch.object(gdrive_events.event_store, "update_drive_watch") as failed, \
+             patch.object(gdrive_events, "start_google_drive_watch", side_effect=watch), \
+             patch.object(catalog, "refresh_google_access_token", return_value="fresh"), \
+             patch.object(gdrive_events.document_index, "connection", return_value=_Context(conn)), \
+             patch.object(gdrive_events.connector_sync, "merge_config") as merge:
+            result = gdrive_events.create_watch(gdrive_events.DriveWatchIn(source_id=5), self.context)
+        self.assertTrue(result["ok"])
+        self.assertEqual(attempts, ["stale", "fresh"])
+        activate.assert_called_once()
+        failed.assert_not_called()
+        # only the minted keys are written, through the shared merge writer
+        merge.assert_called_once()
+        self.assertEqual(merge.call_args.args[:2], (conn, 5))
+        updates = merge.call_args.args[2]
+        self.assertEqual(updates["access_token"], "fresh")
+        self.assertIn("access_token_refreshed_at", updates)
+        self.assertEqual(set(updates), {"access_token", "access_token_refreshed_at"})
+        conn.commit.assert_called_once()
+
+    def test_watch_without_a_refresh_grant_still_fails_as_502(self):
+        source = {"id": 5, "project_id": 9, "config": {"cursor": "changes:start", "access_token": "stale"}}
+        with patch.object(gdrive_events, "_source", return_value=source), \
+             patch.object(gdrive_events.config, "get", return_value="https://mari.example.test"), \
+             patch.object(gdrive_events.event_store, "create_drive_watch"), \
+             patch.object(gdrive_events.event_store, "update_drive_watch") as failed, \
+             patch.object(gdrive_events, "start_google_drive_watch",
+                          side_effect=AuthenticationFailure("provider rejected credentials (HTTP 401)")), \
+             patch.object(gdrive_events.connector_sync, "merge_config") as merge, \
+             self.assertRaisesRegex(HTTPException, "rejected credentials"):
+            gdrive_events.create_watch(gdrive_events.DriveWatchIn(source_id=5), self.context)
+        failed.assert_called_once()
+        merge.assert_not_called()
+
+    def test_catalog_poll_reports_minted_keys_before_retrying_with_them(self):
+        polled = []
+        def poll_operation(config, _request, *, http):
+            polled.append(config.access_token)
+            if config.access_token == "stale":
+                raise AuthenticationFailure("provider rejected credentials (HTTP 401)")
+            yield PollPage(snapshot_complete=True)
+        definition = catalog.ConnectorDefinition(
+            "fake", "Fake", "", (), "",
+            lambda values: GoogleDriveConfig(str(values.get("access_token") or ""), ""),
+            lambda *_args, **_kwargs: None, poll_operation,
+            refresh_operation=lambda _values, _http: {"access_token": "fresh"},
+        )
+        values = dict(self.REFRESHABLE)
+        persisted = []
+        pages = list(definition.poll(values, PollRequest(), http=lambda _request: None,
+                                     on_refresh=persisted.append))
+        self.assertEqual(len(pages), 1)
+        self.assertEqual(polled, ["stale", "fresh"])
+        self.assertEqual(persisted, [{"access_token": "fresh"}])
+        # the caller's mapping is not mutated behind its back
+        self.assertEqual(values["access_token"], "stale")
+
+    def test_drive_refresh_returns_the_token_and_when_it_was_minted(self):
+        with patch.object(catalog, "refresh_google_access_token", return_value="fresh"):
+            refreshed = connector_definition("gdrive").refresh(self.REFRESHABLE, http=lambda _request: None)
+        self.assertEqual(refreshed["access_token"], "fresh")
+        minted = dt.datetime.fromisoformat(refreshed["access_token_refreshed_at"])
+        self.assertIsNotNone(minted.tzinfo)
+        self.assertLess(dt.datetime.now(dt.timezone.utc) - minted, dt.timedelta(minutes=1))
+        with self.assertRaisesRegex(AuthenticationFailure, "no refresh grant"):
+            connector_definition("gdrive").refresh({"access_token": "stale"}, http=lambda _request: None)
+
+
+class _Context:
+    def __init__(self, value):
+        self.value = value
+
+    def __enter__(self):
+        return self.value
+
+    def __exit__(self, *_args):
+        return False
 
 
 if __name__ == "__main__":

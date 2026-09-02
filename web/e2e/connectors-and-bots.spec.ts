@@ -1,14 +1,17 @@
 import { expect, test } from "@playwright/test";
-import { installMockApi, type MockApi } from "./fixtures/mock-api";
+import { installMockApi, NOT_A_CONNECTOR, type MockApi } from "./fixtures/mock-api";
 
 let api: MockApi;
 test.beforeEach(async ({ page }) => {
   api = await installMockApi(page);
 });
 
-test("Sources exposes connector ingestion without the removed upload workflow", async ({ page }) => {
+test("Sources offers both connector ingestion and direct file upload", async ({ page }) => {
+  // Upload was removed from this page once and reinstated 2026-09-01: with
+  // it gone, the only way to add a file was the onboarding flow, once. The
+  // control lives on the upload source's own card, beside Pause.
   await page.goto("/sources");
-  await expect(page.getByText("Upload files", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Upload files" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Add source" })).toBeVisible();
 });
 
@@ -79,6 +82,72 @@ test("pausing a source is labelled as a pause, not a destructive disconnect", as
   await expect.poll(() => api.calls.some((c) => c.query.includes("pauseSource"))).toBeTruthy();
 });
 
+test("removing a source lets the admin retain its indexed documents", async ({ page }) => {
+  await openSources(page);
+  await page.getByRole("button", { name: "Actions for Confluence — ENG" }).click();
+  await page.getByRole("menuitem", { name: "Remove…" }).click();
+  const dialog = page.getByRole("dialog", { name: "Remove source" });
+  await dialog.getByLabel("Keep indexed documents").check();
+  await dialog.getByRole("button", { name: "Remove source" }).click();
+  await expect.poll(() => api.calls.some((call) => call.query.includes("removeSource")
+    && call.variables.deleteDocuments === false)).toBeTruthy();
+});
+
+test("files upload straight from the upload source's card", async ({ page }) => {
+  await openSources(page);
+  // The control was defined, documented, and never mounted: the only upload
+  // path was the onboarding flow, once. It lives on the Uploads card now.
+  await page.getByLabel("Choose files to upload").setInputFiles({
+    name: "runbook.md", mimeType: "text/markdown", buffer: Buffer.from("# Runbook\nRetention is 30 days."),
+  });
+  await expect.poll(() => api.restCalls.some((call) => call.path === "/onboard/upload")).toBeTruthy();
+  await expect(page.getByText("1 file ingested.", { exact: true })).toBeVisible();
+});
+
+test("removing a source deletes its documents by default", async ({ page }) => {
+  await openSources(page);
+  await page.getByRole("button", { name: "Actions for Confluence — ENG" }).click();
+  await page.getByRole("menuitem", { name: "Remove…" }).click();
+  const dialog = page.getByRole("dialog", { name: "Remove source" });
+  await expect(dialog.getByLabel("Delete indexed documents")).toBeChecked();
+  await dialog.getByRole("button", { name: "Remove source" }).click();
+  await expect.poll(() => api.calls.some((call) => call.query.includes("removeSource")
+    && call.variables.deleteDocuments === true)).toBeTruthy();
+});
+
+test("an orphan legacy source can be removed from its card", async ({ page }) => {
+  // A row the retired connectSource mutation wrote: no kind, no documents,
+  // no sync. It used to render without a Remove action and could not leave.
+  await openSources(page);
+  const card = page.getByRole("button", { name: "Actions for Confluence (old)" });
+  await card.click();
+  // The real orphan card: its provider is a catalog key, so the menu carries
+  // the Edit entry the server refuses, not a stripped-down card the console
+  // never draws.
+  await expect(page.getByRole("menuitem", { name: "Edit connection" })).toBeVisible();
+  await page.getByRole("menuitem", { name: "Remove…" }).click();
+  const dialog = page.getByRole("dialog", { name: "Remove source" });
+  await dialog.getByRole("button", { name: "Remove source" }).click();
+  await expect.poll(() => api.calls.some((call) => call.query.includes("removeSource")
+    && call.variables.id === 4)).toBeTruthy();
+  // Removed for real: the card is gone once the page re-reads its sources.
+  await expect(dialog).toHaveCount(0);
+  await expect(card).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Actions for Confluence — ENG" })).toBeVisible();
+});
+
+test("an orphan legacy source shows the server's refusal instead of a fake sync", async ({ page }) => {
+  // Every other menu entry on the orphan is refused server-side; the card
+  // shows those words rather than a progress bar for a sync that never ran.
+  await openSources(page);
+  await page.getByRole("button", { name: "Actions for Confluence (old)" }).click();
+  await page.getByRole("menuitem", { name: "Full resync" }).click();
+  await expect.poll(() => api.calls.some((call) => call.query.includes("resyncSource")
+    && call.variables.id === 4)).toBeTruthy();
+  await expect(page.getByText(NOT_A_CONNECTOR, { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Actions for Confluence (old)" })).toBeVisible();
+});
+
 test("Sources exposes connector ingestion without a Bots tab", async ({ page }) => {
   await openSources(page);
   await expect(page.getByRole("button", { name: "Add source" })).toBeVisible();
@@ -98,6 +167,7 @@ test("Slack bot setup persists the verified project installation, calls auth.tes
   await expect(drawer).toContainText("channels:history");
   await expect(drawer).toContainText("im:write");
   await expect(drawer).toContainText("message.channels");
+  await expect(drawer).toContainText("message.groups");
   await expect(drawer).toContainText("messages_tab_enabled: true");
   await expect(drawer).toContainText("messages_tab_read_only_enabled: false");
   await expect(drawer).toContainText("socket_mode_enabled: true");

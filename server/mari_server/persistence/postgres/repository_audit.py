@@ -266,8 +266,10 @@ def run_audit(provider: str = "github") -> int:
 
 def fix_finding(finding_id: int, actor: str, member_name: str = "") -> str:
     """Apply a finding's fix. Returns a human summary of what happened."""
+    project_id = access.require_current_access().project_id
     with _conn() as conn:
-        f = conn.execute("SELECT * FROM audit_findings WHERE id = %s", (finding_id,)).fetchone()
+        f = conn.execute("SELECT * FROM audit_findings WHERE id = %s AND project_id = %s",
+                         (finding_id, project_id)).fetchone()
         if not f or f["status"] != "open":
             return "already handled"
         payload = f["fix_payload"] if isinstance(f["fix_payload"], dict) else json.loads(f["fix_payload"])
@@ -281,43 +283,55 @@ def fix_finding(finding_id: int, actor: str, member_name: str = "") -> str:
             if path.exists():  # index the file from the connected repo
                 text = path.read_text(errors="replace")
                 title = pathlib.PurePosixPath(stem).name.replace("-", " ").replace("_", " ").title()
-                conn.execute("""INSERT INTO documents (source, external_id, title, snippet, body, author,
-                                author_initials, kind, updated_src, created_src)
-                                VALUES ('github', %s, %s, %s, %s, 'CI', 'CI', 'page', now(), now())
-                                ON CONFLICT (source, external_id) DO UPDATE SET body = EXCLUDED.body""",
-                             (f"repo-{stem}", title, text[:180].replace("\n", " "), text))
+                conn.execute("""INSERT INTO documents (project_id, source, external_id, title, snippet, body,
+                                author, author_initials, kind, updated_src, created_src)
+                                VALUES (%s, 'github', %s, %s, %s, %s, 'CI', 'CI', 'page', now(), now())
+                                ON CONFLICT (project_id, source, external_id)
+                                DO UPDATE SET body = EXCLUDED.body""",
+                             (project_id, f"repo-{stem}", title, text[:180].replace("\n", " "), text))
                 summary = f"indexed {stem}.md"
         elif action == "apply_tag":
-            conn.execute("INSERT INTO tags (document_id, tag) VALUES (%s, %s) ON CONFLICT DO NOTHING",
-                         (payload["doc_id"], payload["tag"]))
+            # Every tag reader filters on tags.project_id, so a row written
+            # without it is invisible. Only tag a document this project owns,
+            # and leave the finding open when it does not.
+            document = conn.execute("SELECT id FROM documents WHERE id = %s AND project_id = %s",
+                                    (payload["doc_id"], project_id)).fetchone()
+            if not document:
+                return "that document is not in this project"
+            conn.execute("""INSERT INTO tags (project_id, document_id, tag) VALUES (%s, %s, %s)
+                            ON CONFLICT DO NOTHING""",
+                         (project_id, document["id"], payload["tag"]))
             summary = f"tagged '{payload['tag']}'"
         elif action == "link_translation":
             stem, lang = payload["stem"], payload["lang"]
-            src = conn.execute("SELECT id FROM documents WHERE external_id = %s", (f"repo-{stem}",)).fetchone()
+            src = conn.execute("SELECT id FROM documents WHERE project_id = %s AND external_id = %s",
+                               (project_id, f"repo-{stem}")).fetchone()
             _, base = _fix_repo_base()
             vf = base / f"{stem}.{lang}.md"
             text = vf.read_text() if vf.exists() else ""
             title = f"{stem} ({lang.upper()} translation)"
-            conn.execute("""INSERT INTO documents (source, external_id, title, snippet, body, author,
-                            author_initials, kind, updated_src, created_src)
-                            VALUES ('github', %s, %s, %s, %s, 'CI', 'CI', 'page', now(), now())
-                            ON CONFLICT (source, external_id) DO NOTHING""",
-                         (f"repo-{stem}-{lang}", title, text[:180].replace("\n", " "), text))
-            tgt = conn.execute("SELECT id FROM documents WHERE external_id = %s", (f"repo-{stem}-{lang}",)).fetchone()
+            conn.execute("""INSERT INTO documents (project_id, source, external_id, title, snippet, body,
+                            author, author_initials, kind, updated_src, created_src)
+                            VALUES (%s, 'github', %s, %s, %s, %s, 'CI', 'CI', 'page', now(), now())
+                            ON CONFLICT (project_id, source, external_id) DO NOTHING""",
+                         (project_id, f"repo-{stem}-{lang}", title, text[:180].replace("\n", " "), text))
+            tgt = conn.execute("SELECT id FROM documents WHERE project_id = %s AND external_id = %s",
+                               (project_id, f"repo-{stem}-{lang}")).fetchone()
             if src and tgt:
-                conn.execute("""INSERT INTO edges (from_doc, to_doc, rel, day, curve, meta, created_at)
-                                SELECT %s, %s, 'translates', 16, 10, '{"derived":"audit"}', CURRENT_DATE
+                conn.execute("""INSERT INTO edges (project_id, from_doc, to_doc, rel, day, curve, meta, created_at)
+                                SELECT %s, %s, %s, 'translates', 16, 10, '{"derived":"audit"}', CURRENT_DATE
                                 WHERE NOT EXISTS (SELECT 1 FROM edges WHERE from_doc = %s AND to_doc = %s)""",
-                             (src["id"], tgt["id"], src["id"], tgt["id"]))
+                             (project_id, src["id"], tgt["id"], src["id"], tgt["id"]))
             summary = f"linked {stem}.{lang}.md as a translation"
         elif action == "translation_task":
             title = f"Translate {payload['stem']}.md to {payload['lang'].upper()}"
             # Unassigned: the audit knows a translation is missing, not who
             # should write it. (The names that used to be here belonged to
             # nobody in the installing workspace.)
-            conn.execute("""INSERT INTO tasks (title, assignee, assignee_initials, assignee_tint, kind, kind_label)
-                            VALUES (%s, '', '', 1, 'approval', 'Translation')
-                            ON CONFLICT (title) DO NOTHING""", (title,))
+            conn.execute("""INSERT INTO tasks (project_id, title, assignee, assignee_initials, assignee_tint,
+                            kind, kind_label)
+                            VALUES (%s, %s, '', '', 1, 'approval', 'Translation')
+                            ON CONFLICT (project_id, title) DO NOTHING""", (project_id, title))
             summary = "translation task created"
         elif action == "invite_member":
             # This fix does not create an account. A commit address found in a
@@ -336,34 +350,38 @@ def fix_finding(finding_id: int, actor: str, member_name: str = "") -> str:
                         f"No workspace member named {member_name!r}. Invite them from "
                         f"Settings → Members first, then map {email} to that account.")
                 conn.execute("""INSERT INTO audit_author_map
-                                (email, git_name, member_name, status, decided_by)
-                                VALUES (%s, %s, %s, 'mapped', %s)
-                                ON CONFLICT (email) DO UPDATE SET
+                                (project_id, email, git_name, member_name, status, decided_by)
+                                VALUES (%s, %s, %s, %s, 'mapped', %s)
+                                ON CONFLICT (project_id, lower(email)) DO UPDATE SET
                                   git_name = EXCLUDED.git_name, member_name = EXCLUDED.member_name,
                                   status = 'mapped', decided_by = EXCLUDED.decided_by,
                                   decided_at = now()""",
-                             (email, git_name, member_name, actor))
+                             (project_id, email, git_name, member_name, actor))
                 summary = f"mapped {email} to member {member_name}"
             else:
                 conn.execute("""INSERT INTO audit_author_map
-                                (email, git_name, member_name, status, decided_by)
-                                VALUES (%s, %s, %s, 'suggested', %s)
-                                ON CONFLICT (email) DO UPDATE SET
+                                (project_id, email, git_name, member_name, status, decided_by)
+                                VALUES (%s, %s, %s, %s, 'suggested', %s)
+                                ON CONFLICT (project_id, lower(email)) DO UPDATE SET
                                   git_name = EXCLUDED.git_name, decided_by = EXCLUDED.decided_by,
                                   decided_at = now()
                                 WHERE audit_author_map.status <> 'mapped'""",
-                             (email, git_name, git_name, actor))
+                             (project_id, email, git_name, git_name, actor))
                 summary = (f"recorded {git_name} <{email}> as a suggested invitation — "
                            "invite them from Settings → Members to create the account")
         elif action == "hygiene_task":
             title = f"Add {payload['file']} to the repo"
-            conn.execute("""INSERT INTO tasks (title, assignee, assignee_initials, assignee_tint, kind, kind_label)
-                            VALUES (%s, '', '', 3, 'approval', 'Repo hygiene')
-                            ON CONFLICT (title) DO NOTHING""", (title,))
+            conn.execute("""INSERT INTO tasks (project_id, title, assignee, assignee_initials, assignee_tint,
+                            kind, kind_label)
+                            VALUES (%s, %s, '', '', 3, 'approval', 'Repo hygiene')
+                            ON CONFLICT (project_id, title) DO NOTHING""", (project_id, title))
             summary = "hygiene task created"
 
-        conn.execute("UPDATE audit_findings SET status = 'fixed' WHERE id = %s", (finding_id,))
-        conn.execute("UPDATE audit_runs SET fixed = fixed + 1 WHERE id = %s", (f["run_id"],))
-        conn.execute("INSERT INTO events (actor, verb, target) VALUES (%s, 'fixed audit finding', %s)",
-                     (actor, f["title"]))
+        conn.execute("UPDATE audit_findings SET status = 'fixed' WHERE id = %s AND project_id = %s",
+                     (finding_id, project_id))
+        conn.execute("UPDATE audit_runs SET fixed = fixed + 1 WHERE id = %s AND project_id = %s",
+                     (f["run_id"], project_id))
+        conn.execute("""INSERT INTO events (project_id, actor, verb, target)
+                        VALUES (%s, %s, 'fixed audit finding', %s)""",
+                     (project_id, actor, f["title"]))
     return summary

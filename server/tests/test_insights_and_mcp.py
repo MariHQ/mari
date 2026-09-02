@@ -14,6 +14,63 @@ from mari_server.destinations import mcp
 
 
 class FactInsightTests(unittest.TestCase):
+    def test_ai_review_only_applies_bounded_adjudication_and_defers_uncertainty(self) -> None:
+        rows = [
+            {"candidate_id": 9, "review_status": "pending", "confidence": .95,
+             "adjudication": {"recommendation": "reject", "confidence": .93,
+                              "reason": "Newer policy supersedes it.",
+                              "needs_human_review": False}},
+            {"candidate_id": 10, "review_status": "pending", "confidence": .7,
+             "adjudication": {"recommendation": "new_fact", "confidence": .7,
+                              "needs_human_review": True}},
+        ]
+        with patch.object(knowledge_service.fact_store, "adjudication_reviews", return_value=rows), \
+             patch.object(knowledge_service.llm, "generate_json") as generate, \
+             patch.object(knowledge_service.knowledge_store, "review_fact_candidate") as review, \
+             patch.object(knowledge_service.knowledge_store, "fact_candidate_counts",
+                          return_value={"pending": 1, "accepted": 0, "rejected": 1}):
+            result = knowledge_service.apply_ai_fact_proposals(44)
+        generate.assert_not_called()
+        review.assert_called_once()
+        self.assertFalse(review.call_args.kwargs["accepted"])
+        self.assertEqual(review.call_args.args[0], 9)
+        self.assertEqual(result["rejected"], 1)
+        self.assertEqual(result["deferred"], 1)
+
+    def test_fact_impact_uses_versioned_vectors_maxsim_neighbors_and_temporal_links(self) -> None:
+        candidate = {"id": 9, "claim": "Workspace retention period is 10 days.", "document_id": 7}
+        source = {"id": 7, "title": "Current policy", "updated_src": "2026-08-30", "content_hash": "doc-7"}
+        fact_neighbor = {"assertion_id": 3, "fact_id": 3,
+                         "claim": "Workspace retention period is 30 days.", "similarity": .94,
+                         "recorded_from": "2026-01-01"}
+        doc_neighbor = {"document_id": 8, "chunk_id": 88, "title": "Migration guide",
+                        "quote": "Retention is changing.", "similarity": .81,
+                        "updated_src": "2026-08-20", "content_hash": "doc-8", "acl": {}}
+        with patch.object(knowledge_service, "build_fact_representations",
+                          return_value={"embedded_assertions": 2, "embedded_components": 7}), \
+             patch.object(knowledge_service.knowledge_store, "fact_candidates", return_value=[candidate]), \
+             patch.object(knowledge_service.fact_store, "representation_subjects",
+                          return_value=[{"assertion_id": 9, "candidate_id": 9}]), \
+             patch.object(knowledge_service.fact_store, "assertion_neighbors",
+                          return_value=[fact_neighbor]) as facts, \
+             patch.object(knowledge_service.fact_store, "evidence_neighbors",
+                          return_value=[doc_neighbor]) as docs, \
+             patch.object(knowledge_service.fact_store, "replace_embedding_relations") as relations, \
+             patch.object(knowledge_service.fact_store, "replace_embedding_evidence") as evidence, \
+             patch.object(knowledge_service.knowledge_store, "document", return_value=source), \
+             patch.object(knowledge_service.knowledge_store, "replace_candidate_semantic_links") as replace, \
+             patch.object(knowledge_service.llm, "embedding_profile", return_value="openai:model:profile"):
+            result = knowledge_service.map_fact_candidate_impact(44)
+        facts.assert_called_once()
+        docs.assert_called_once()
+        relations.assert_called_once()
+        evidence.assert_called_once()
+        links = replace.call_args.args[2]
+        self.assertEqual([link["relation"] for link in links], ["source", "contradicts", "related"])
+        self.assertTrue(replace.call_args.kwargs["high_impact"])
+        self.assertEqual(result, {"impact_links": 3, "high_impact_facts": 1,
+                                  "embedded_assertions": 2, "embedded_components": 7})
+
     def test_fact_scan_keeps_provenance_deduplicates_and_rejects_metadata(self) -> None:
         docs = [{"id": 7, "title": "Limits", "source": "gdrive", "body": "Exports stop at 10 MB.", "snippet": ""}]
         model = [[
@@ -21,8 +78,8 @@ class FactInsightTests(unittest.TestCase):
             {"claim": "PR #340 · user · closed · updated 2026-01-17T01:57:54Z"},
         ]]
         with patch.object(knowledge_service, "_scan_batch", return_value=docs), \
-             patch.object(knowledge_service, "_scan_concurrently", return_value=(list(zip(docs, model)), 0, 0)), \
-             patch.object(knowledge_service.knowledge_store, "fact_claims", return_value=set()), \
+             patch.object(knowledge_service, "_scan_concurrently", return_value=(list(zip(docs, model)), 0, 0, [])), \
+             patch.object(knowledge_service.knowledge_store, "fact_claim_keys", return_value=set()), \
              patch.object(knowledge_service.knowledge_store, "add_fact", return_value=True) as add, \
              patch.object(knowledge_service, "_mark_scanned") as marked, \
              patch.object(knowledge_service, "audit"):
@@ -123,3 +180,17 @@ class McpProtocolTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class McpTokenLookupTests(unittest.TestCase):
+    def test_authenticate_matches_only_the_hash_column(self) -> None:
+        # Migration 0036 hashed every legacy plaintext bearer, so the lookup
+        # must not fall back to m.token: only the hash reaches the query.
+        with patch.object(mcp_repository, "q1", return_value=None) as lookup:
+            self.assertIsNone(mcp_repository.authenticate("abc123"))
+        sql, args = lookup.call_args.args
+        normalized = " ".join(sql.split())
+        self.assertIn("WHERE m.token_hash = %s", normalized)
+        self.assertNotIn("m.token =", normalized)
+        self.assertNotIn("m.token <>", normalized)
+        self.assertEqual(args, ("abc123",))

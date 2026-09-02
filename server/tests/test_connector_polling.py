@@ -1,15 +1,24 @@
 from __future__ import annotations
 
+import json
 import unittest
 from unittest.mock import patch
 
 from mari_server.persistence.postgres import connector_sync as connect_sync
+from mari_server.providers import connectors as connector_provider
 from mari_server.sources import routes as connectors_api
 from mari_components.connectors import CONNECTOR_CATALOG
 from mari_components.types import KnowledgeDocument
+from mari_server.identity import access as access_module
 
 
 class ConnectorContractTests(unittest.TestCase):
+    def test_confluence_gets_a_larger_bounded_sweep_budget(self) -> None:
+        confluence = connector_provider.request("confluence", None, None, {})
+        slack = connector_provider.request("slack", None, None, {})
+        self.assertEqual(confluence.page_limit, 100)
+        self.assertEqual(slack.page_limit, 20)
+
     def test_catalog_hides_upload_and_website(self) -> None:
         with patch.object(connectors_api, "_connected_map", return_value={}):
             keys = [item["key"] for item in connectors_api.catalog()]
@@ -102,6 +111,7 @@ class ConnectNamedInstanceTests(unittest.TestCase):
              patch.object(connectors_api.source_store, "connector_source_for",
                           return_value=blocking) as lookup, \
              patch.object(connectors_api, "audit"), \
+             patch.object(connectors_api.admin_store, "adopt_frozen_documents", return_value=0), \
              patch.object(connectors_api.flowengine, "ensure_sync_flow"), \
              patch.object(connectors_api.ingest, "start_sync"):
             result = connectors_api.connect(body)
@@ -258,20 +268,25 @@ class RemoveSourceTests(unittest.TestCase):
     worker could still be writing documents for the source."""
 
     class _Info:
-        context = {"user": {"id": 1, "name": "Admin", "role": "admin"}}
+        # The admin tier is the caller's membership in the request's project,
+        # so the fake context carries one (identity.graphql._require_admin).
+        context = {"user": {"id": 1, "name": "Admin", "role": "admin"},
+                   "access": access_module.AccessContext(1, 7, "acme", "Acme", "admin", access_module.capabilities_for_role("admin"))}
 
-    def _remove(self, source_row, flows=(), running=False):
+    def _remove(self, source_row, flows=(), running=False, delete_documents=True,
+                siblings=0):
         from types import SimpleNamespace
         from mari_server.identity import graphql as mutations_admin
         from mari_server.persistence.postgres import admin as admin_store
 
-        conn = _FakeRemoveConn(source_row, flows)
+        conn = _FakeRemoveConn(source_row, flows, siblings=siblings)
         with patch.object(mutations_admin.ingest, "is_running", return_value=running), \
              patch.object(mutations_admin, "audit"), \
              patch.object(admin_store.db, "connect", return_value=conn), \
              patch.object(admin_store.access, "require_current_access",
                           return_value=SimpleNamespace(project_id=1)):
-            result = mutations_admin.MutAdmin().remove_source(self._Info(), 42)
+            result = mutations_admin.MutAdmin().remove_source(
+                self._Info(), 42, delete_documents=delete_documents)
         return result, conn
 
     def test_refuses_while_a_sync_is_running(self) -> None:
@@ -279,10 +294,46 @@ class RemoveSourceTests(unittest.TestCase):
             self._remove({"id": 42, "kind": "connector", "provider": "confluence",
                           "display_name": "Confluence"}, running=True)
 
-    def test_refuses_a_non_connector_kind(self) -> None:
-        with self.assertRaisesRegex(ValueError, "Only connector sources"):
-            self._remove({"id": 42, "kind": "legacy", "provider": "notion",
-                          "display_name": "Notion"})
+    def test_removes_a_github_kind_row_like_any_legacy_row(self) -> None:
+        # Migration 0007 rewrites every github row to connector at startup and
+        # no writer inserts the kind any more, so a github-kind row is a legacy
+        # row like any other: it goes, it is never refused (a refusal would
+        # strand it with no path out).
+        result, conn = self._remove({"id": 42, "kind": "github", "provider": "github",
+                                     "display_name": "acme/handbook"})
+        self.assertTrue(result)
+        deletes = [(sql, args) for sql, args in conn.executed if sql.startswith("DELETE")]
+        self.assertIn(("DELETE FROM sources WHERE project_id = %s AND id = %s", (1, 42)), deletes)
+
+    def test_refuses_the_upload_kind(self) -> None:
+        with self.assertRaisesRegex(ValueError, "upload source"):
+            self._remove({"id": 42, "kind": "upload", "provider": "upload",
+                          "display_name": "Uploads"})
+
+    def test_removes_a_legacy_row_the_old_connect_mutation_left(self) -> None:
+        # The pre-0.1.3 connectSource mutation inserted a bare provider row
+        # with no kind. It owns no sync flow, so only the row, its documents
+        # and its checkpoints go, and the sync history keeps a "removed" event.
+        flows = [{"id": 10, "nodes": [{"kind": "sync_source", "config": {"source_id": 7}}]}]
+        # siblings=0: sources_project_provider_uidx makes (project_id, provider)
+        # unique, so the orphan is always its provider's only row.
+        result, conn = self._remove(
+            {"id": 42, "kind": "", "provider": "confluence", "display_name": "Confluence"},
+            flows=flows, siblings=0)
+        self.assertTrue(result)
+        deletes = [(sql, args) for sql, args in conn.executed if sql.startswith("DELETE")]
+        tables = [sql.split()[2] for sql, _ in deletes]
+        for table in ("tags", "edges", "findings", "changes", "watches", "documents"):
+            self.assertIn(table, tables)
+        self.assertIn(("DELETE FROM sources WHERE project_id = %s AND id = %s", (1, 42)), deletes)
+        # its provider's last (only) row: the provider-wide checkpoint sweep
+        self.assertIn(("DELETE FROM ingest_checkpoints WHERE project_id = %s AND provider = %s",
+                       (1, "confluence")), deletes)
+        self.assertNotIn("workflows", tables)
+        self.assertNotIn("sync_events", tables)
+        event_args = next(args for sql, args in conn.executed
+                          if sql.startswith("INSERT INTO sync_events"))
+        self.assertEqual(event_args[2], "removed: Confluence")
 
     def test_a_missing_row_answers_false_without_deleting(self) -> None:
         result, conn = self._remove(None)
@@ -317,15 +368,83 @@ class RemoveSourceTests(unittest.TestCase):
         self.assertEqual(event_args[2], "removed: Confluence")
         self.assertFalse(any(sql.startswith("DELETE FROM sync_events") for sql, _ in conn.executed))
 
+    def test_reconnect_adopts_the_frozen_snapshot_when_unambiguous(self) -> None:
+        from types import SimpleNamespace
+        from mari_server.persistence.postgres import admin as admin_store
+
+        class Conn(_FakeRemoveConn):
+            def execute(self, sql, args=()):
+                normalized = " ".join(sql.split())
+                self.executed.append((normalized, args))
+                result = unittest.mock.Mock()
+                if normalized.startswith("SELECT count(*) AS n FROM sources"):
+                    result.fetchone.return_value = {"n": self.siblings}
+                else:
+                    result.fetchall.return_value = [{"id": 5}, {"id": 9}]
+                return result
+
+        conn = Conn(None, siblings=0)
+        with unittest.mock.patch.object(admin_store.db, "connect", return_value=conn), \
+             unittest.mock.patch.object(admin_store.access, "require_current_access",
+                                        return_value=SimpleNamespace(project_id=1)):
+            adopted = admin_store.adopt_frozen_documents("confluence", 10)
+        self.assertEqual(adopted, 2)
+        sql, args = next((s, a) for s, a in conn.executed if s.startswith("UPDATE documents"))
+        # identity is rewritten onto the new source id, and a row whose
+        # rewritten identity a fresh sync already claimed stays frozen
+        self.assertIn("regexp_replace(external_id, %s, %s)", sql)
+        self.assertIn("NOT EXISTS", sql)
+        self.assertIn("source_id IS NULL", sql)
+        self.assertEqual(args[1:3], ("^confluence:[0-9]+:", "confluence:10:"))
+
+    def test_reconnect_adopts_nothing_beside_a_sibling_connection(self) -> None:
+        from types import SimpleNamespace
+        from mari_server.persistence.postgres import admin as admin_store
+
+        conn = _FakeRemoveConn(None, siblings=1)
+        with unittest.mock.patch.object(admin_store.db, "connect", return_value=conn), \
+             unittest.mock.patch.object(admin_store.access, "require_current_access",
+                                        return_value=SimpleNamespace(project_id=1)):
+            adopted = admin_store.adopt_frozen_documents("confluence", 10)
+        # two sites of one provider: no way to know whose snapshot this was
+        self.assertEqual(adopted, 0)
+        self.assertFalse(any(sql.startswith("UPDATE documents") for sql, _ in conn.executed))
+
+    def test_keeps_a_sibling_connections_checkpoints(self) -> None:
+        result, conn = self._remove(
+            {"id": 42, "kind": "connector", "provider": "confluence",
+             "display_name": "Confluence — ENG"}, siblings=1)
+        self.assertTrue(result)
+        deletes = [(sql, args) for sql, args in conn.executed if sql.startswith("DELETE")]
+        # checkpoint rows are keyed (provider, item), and the sibling shares
+        # the provider: only this connection's rows go
+        self.assertIn(("DELETE FROM ingest_checkpoints WHERE project_id = %s AND provider = %s AND item = %s",
+                       (1, "confluence", "Confluence — ENG")), deletes)
+        self.assertNotIn(("DELETE FROM ingest_checkpoints WHERE project_id = %s AND provider = %s",
+                          (1, "confluence")), deletes)
+
+    def test_can_keep_documents_as_a_disconnected_snapshot(self) -> None:
+        result, conn = self._remove(
+            {"id": 42, "kind": "connector", "provider": "confluence",
+             "display_name": "Confluence"}, delete_documents=False)
+        self.assertTrue(result)
+        self.assertIn(("UPDATE documents SET source_id = NULL WHERE project_id = %s AND source_id = %s",
+                       (1, 42)), conn.executed)
+        self.assertFalse(any(sql.startswith("DELETE FROM documents") for sql, _ in conn.executed))
+        event_args = next(args for sql, args in conn.executed
+                          if sql.startswith("INSERT INTO sync_events"))
+        self.assertEqual(event_args[3], "Removed by admin, documents retained")
+
 
 class _FakeRemoveConn:
     """Just enough connection for remove_source: the FOR UPDATE probe answers
     with the configured source row, the workflows scan answers with the
     configured flows, every statement is logged."""
 
-    def __init__(self, source_row, flows=()):
+    def __init__(self, source_row, flows=(), siblings=0):
         self.source_row = source_row
         self.flows = list(flows)
+        self.siblings = siblings
         self.executed = []
 
     def __enter__(self):
@@ -343,8 +462,184 @@ class _FakeRemoveConn:
         result = unittest.mock.Mock()
         if normalized.startswith("SELECT id, kind, provider, display_name FROM sources"):
             result.fetchone.return_value = self.source_row
+        elif normalized.startswith("SELECT count(*) AS n FROM sources"):
+            result.fetchone.return_value = {"n": self.siblings}
         elif normalized.startswith("SELECT id, nodes FROM workflows"):
             result.fetchall.return_value = self.flows
+        else:
+            result.fetchone.return_value = None
+            result.fetchall.return_value = []
+        return result
+
+
+class MergeConfigTests(unittest.TestCase):
+    """sources.config has three writers (poll worker, Confluence page webhook,
+    Drive Changes worker). Each used to replace the whole document from a
+    copy read at its start, so a webhook landing mid-sweep undid the
+    checkpoint and cleared the pending full snapshot."""
+
+    def test_merges_only_the_callers_keys_under_the_row_lock(self) -> None:
+        conn = _FakeSyncConn(status="active", count=12)
+        connect_sync.merge_config(conn, 42, {"cursor": "c2", "checkpoint": ""},
+                                  hashes={"p1": "h1"}, dropped=("p9",))
+        self.assertTrue(conn.executed[0][0].startswith("SELECT status FROM sources WHERE id = %s FOR UPDATE"))
+        sql, args = next((sql, args) for sql, args in conn.executed if sql.startswith("UPDATE sources"))
+        # a jsonb merge on the stored row, never a whole-document replace
+        self.assertIn("config || %(updates)s::jsonb", sql)
+        self.assertIn("- %(dropped)s::text[]) || %(hashes)s::jsonb", sql)
+        self.assertEqual(json.loads(args["updates"]), {"cursor": "c2", "checkpoint": ""})
+        self.assertEqual(args["dropped"], ["p9"])
+        self.assertEqual(json.loads(args["hashes"]), {"p1": "h1"})
+        self.assertEqual((args["count"], args["stat"], args["id"]), (12, "12", 42))
+
+    def test_a_whole_manifest_replaces_the_stored_map(self) -> None:
+        conn = _FakeSyncConn(status="active")
+        connect_sync.merge_config(conn, 42, {"item_hashes": {"a": "1"}})
+        sql, _ = next((sql, args) for sql, args in conn.executed if sql.startswith("UPDATE sources"))
+        # the caller's map wins over config->'item_hashes' when it sends one
+        self.assertIn("COALESCE(%(updates)s::jsonb -> 'item_hashes', config -> 'item_hashes'", sql)
+        with self.assertRaises(ValueError):
+            connect_sync.merge_config(conn, 42, {"item_hashes": {}}, hashes={"a": "1"})
+
+    def test_a_paused_row_is_never_revived(self) -> None:
+        conn = _FakeSyncConn(status="paused")
+        with self.assertRaises(connect_sync.SourcePaused):
+            connect_sync.merge_config(conn, 42, {"cursor": "c2"})
+        self.assertFalse(any(sql.startswith("UPDATE") for sql, _ in conn.executed))
+
+    def test_a_removed_row_is_an_error_not_a_silent_no_op(self) -> None:
+        conn = _FakeSyncConn(status=None)
+        with self.assertRaisesRegex(RuntimeError, "no longer exists"):
+            connect_sync.merge_config(conn, 42, {"cursor": "c2"})
+
+
+class SyncSourceEndingTests(unittest.TestCase):
+    """How a sweep ends when the provider throttles it or an admin pauses
+    the source mid-way. Both used to land as health='Error' and, for a
+    pause, be undone by the next page write."""
+
+    SRC = {"id": 42, "kind": "connector", "provider": "confluence", "display_name": "Confluence",
+           "status": "active",
+           "config": {"provider_key": "confluence", "api_token": "tok", "cursor": "cur-1",
+                      "item_hashes": {}}}
+
+    def _run(self, conn, poll_pages, *, full=False):
+        from types import SimpleNamespace
+        from mari_components.connectors.protocol import ValidationResult
+
+        definition = SimpleNamespace(name="Confluence",
+                                     validate=lambda _cfg, http=None: ValidationResult(True))
+        status = unittest.mock.Mock()
+        with patch.object(connect_sync.document_index, "connection", return_value=conn), \
+             patch.object(connect_sync.document_index, "chunk_settings", return_value=(100, 10)), \
+             patch.object(connect_sync.document_index, "upsert_documents", return_value=[]), \
+             patch.object(connect_sync, "connector_definition", return_value=definition), \
+             patch.object(connect_sync.connector_provider, "poll_pages", side_effect=poll_pages) as polls, \
+             patch.object(connect_sync, "retry_sleep") as sleep, \
+             patch.object(connect_sync.access, "require_current_access",
+                          return_value=SimpleNamespace(project_id=1)):
+            result = connect_sync.sync_source(
+                42, full, update_status=status, fire_document_triggers=lambda _ids, _kind: [],
+                invalidate_search=unittest.mock.Mock())
+        return result, status, sleep, polls
+
+    def test_a_rate_limited_page_fetch_waits_and_resumes_from_the_checkpoint(self) -> None:
+        from mari_components import PollPage
+        from mari_components.errors import RateLimitFailure
+
+        def poll_pages(_key, _cfg, _cursor, checkpoint, *, full):
+            if checkpoint is None:
+                yield PollPage(next_cursor="cur-1", next_checkpoint="ckpt-1", snapshot_complete=False)
+                raise RateLimitFailure("provider rate limit exceeded", retry_after=7)
+            yield PollPage(next_cursor="cur-2", snapshot_complete=True)
+
+        conn = _FakeSyncConn(status="active", source=self.SRC)
+        result, status, sleep, polls = self._run(conn, poll_pages)
+        self.assertNotIn("error", result)
+        self.assertNotIn("throttled", result)
+        # Retry-After honoured, and the listing reopened where the last
+        # committed page left off rather than from the start
+        sleep.assert_called_once_with(7.0)
+        self.assertEqual([call.args[3] for call in polls.call_args_list], [None, "ckpt-1"])
+        self.assertEqual(status.call_args.kwargs["state"], "idle")
+
+    def test_an_exhausted_rate_limit_ends_as_backfilling_not_error(self) -> None:
+        from mari_components.errors import RateLimitFailure
+
+        def poll_pages(*_args, **_kwargs):
+            raise RateLimitFailure("provider rate limit exceeded", retry_after=3)
+            yield  # noqa: unreachable — makes this a generator like the real one
+
+        conn = _FakeSyncConn(status="active", source=self.SRC)
+        result, status, sleep, _ = self._run(conn, poll_pages)
+        self.assertNotIn("error", result)
+        self.assertIn("retry after 3s", result["throttled"])
+        self.assertEqual(sleep.call_count, 2)  # three attempts, two waits
+        health = next(args for sql, args in conn.executed
+                      if sql.startswith("UPDATE sources SET config = config || jsonb_build_object('last_error'"))
+        self.assertEqual(health[1], connect_sync.THROTTLED_HEALTH)
+        self.assertEqual(connect_sync.THROTTLED_HEALTH, "Backfilling")
+        event = next(args for sql, args in conn.executed if sql.startswith("INSERT INTO sync_events"))
+        self.assertEqual(event[2], "sync throttled: Confluence")
+        self.assertEqual(status.call_args.kwargs["state"], "idle")
+        self.assertEqual(status.call_args.kwargs["phase"], "throttled")
+
+    def test_a_source_paused_before_the_sweep_is_left_alone(self) -> None:
+        conn = _FakeSyncConn(status="paused", source={**self.SRC, "status": "paused"})
+        result, status, _, polls = self._run(conn, lambda *a, **k: iter(()))
+        self.assertIn("paused", result["error"])
+        polls.assert_not_called()
+        self.assertFalse(any(sql.startswith(("UPDATE", "INSERT")) for sql, _ in conn.executed))
+        self.assertEqual(status.call_args.kwargs["state"], "idle")
+
+    def test_a_source_paused_mid_sweep_stops_the_worker_without_reviving_it(self) -> None:
+        from mari_components import PollPage
+
+        def poll_pages(*_args, **_kwargs):
+            yield PollPage(next_cursor="cur-1", next_checkpoint="ckpt-1", snapshot_complete=False)
+            yield PollPage(next_cursor="cur-2", snapshot_complete=True)
+
+        # the admin's pause lands between the sweep's start and its first page write
+        conn = _FakeSyncConn(status="paused", source=self.SRC)
+        result, status, _, _ = self._run(conn, poll_pages)
+        self.assertIn("paused", result["error"])
+        self.assertFalse(any(sql.startswith("UPDATE sources") for sql, _ in conn.executed))
+        checkpoint = next(args for sql, args in conn.executed if sql.startswith("INSERT INTO ingest_checkpoints"))
+        self.assertEqual(checkpoint[-1], "paused")
+        self.assertEqual(status.call_args.kwargs["state"], "idle")
+
+
+class _FakeSyncConn:
+    """Just enough connection for merge_config and sync_source: the source
+    row, the FOR UPDATE status probe, the document count, and a log of every
+    statement. Doubles as the context manager document_index.connection()
+    hands out."""
+
+    def __init__(self, *, status, count=0, source=None):
+        self.status = status
+        self.count = count
+        self.source = source
+        self.executed = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        return False
+
+    def commit(self):
+        return None
+
+    def execute(self, sql, args=()):
+        normalized = " ".join(sql.split())
+        self.executed.append((normalized, args))
+        result = unittest.mock.Mock()
+        if normalized.startswith("SELECT * FROM sources"):
+            result.fetchone.return_value = self.source
+        elif normalized.startswith("SELECT status FROM sources"):
+            result.fetchone.return_value = {"status": self.status} if self.status else None
+        elif normalized.startswith("SELECT count(*) AS n"):
+            result.fetchone.return_value = {"n": self.count}
         else:
             result.fetchone.return_value = None
             result.fetchall.return_value = []

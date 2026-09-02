@@ -22,13 +22,20 @@ def http_transport(request: HttpRequest) -> HttpResponse:
     return HttpResponse(response.status, dict(response.headers), response.body)
 
 
-def request(cursor: str | None, checkpoint: str | None, cfg: dict, *, full: bool = False) -> PollRequest:
+def request(key: str, cursor: str | None, checkpoint: str | None, cfg: dict,
+            *, full: bool = False) -> PollRequest:
+    # Confluence commonly holds thousands of pages. The generic 20-page
+    # safety budget (100 items/page) made every new connection stop at exactly
+    # 2,000 and wait for another scheduled run before the rest was searchable.
+    # Its cursor/checkpoint implementation is durable, so a larger bounded
+    # sweep is safe while still preventing an unbounded provider loop.
+    default_page_limit = 100 if key == "confluence" else 20
     return PollRequest(
         mode=SyncMode.FULL if full or cursor is None else SyncMode.INCREMENTAL,
         cursor=cursor,
         checkpoint=checkpoint,
         page_size=max(1, min(int(cfg.get("page_size") or 100), 200)),
-        page_limit=max(1, min(int(cfg.get("page_limit") or 20), 100)),
+        page_limit=max(1, min(int(cfg.get("page_limit") or default_page_limit), 100)),
     )
 
 
@@ -36,7 +43,7 @@ def poll_pages(key: str, cfg: dict, cursor: str | None, checkpoint: str | None =
                *, full: bool = False):
     """Yield the shared connector's native pages without a legacy translation."""
     definition = connector_definition(key)
-    poll_request = request(cursor, checkpoint, cfg, full=full)
+    poll_request = request(key, cursor, checkpoint, cfg, full=full)
     for page in definition.poll(cfg, poll_request, http=http_transport):
         if not page.snapshot_complete:
             page = replace(

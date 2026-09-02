@@ -34,7 +34,8 @@ from slack_sdk.socket_mode.response import SocketModeResponse
 from slack_sdk.web import WebClient
 
 from mari_server.identity import routes as auth
-from mari_server.persistence.postgres import document_index
+from mari_server.sources.provider_events import _body as bounded_body
+from mari_server.persistence.postgres import connector_sync, document_index
 from mari_server.identity import access
 from mari_server import settings as config
 from mari_server.providers import connectors as component_connectors
@@ -47,9 +48,11 @@ from mari_components.connectors.events import (
 )
 from mari_components import KnowledgeDocument
 from mari_components.destinations.chat import answer_search_query
+from mari_components.sync import document_fingerprint
 from mari_components.knowledge import answer_question as component_answer_question
 from mari_server.persistence.postgres.event_inbox import DEFAULT_INBOX, EventDispatcher
 from mari_server.persistence.postgres import bots as bot_store
+from mari_server.persistence.postgres import fact_intelligence as fact_store
 from mari_server.conversations.prompts import answer_system, workspace_style_text
 from mari_server.persistence.postgres import trajectories as trajectory_store
 
@@ -181,6 +184,22 @@ def answer_question(question: str, supplemental_context: str = "") -> str:
         label = _source_label(document.title, (getattr(document, "metadata", None) or {}).get("source"))
         if label not in cited:
             cited.append(label)
+    fact_quotes = [evidence.quote for evidence in result.evidence
+                   if evidence.document_id == "verified-facts" and evidence.quote]
+    cited_claims = [claim for claim in facts if any(claim in quote for quote in fact_quotes)]
+    if cited_claims:
+        answer_id = hashlib.sha256(f"{question}\n{result.answer}".encode()).hexdigest()
+        try:
+            for claim, fact_id in bot_store.verified_fact_ids(cited_claims).items():
+                fact_store.record_dependency(
+                    fact_id, downstream_type="answer", downstream_id=answer_id,
+                    downstream_label=question[:500], dependency_type="used_by_answer",
+                    provenance={"surface": "slack", "quote": next(
+                        quote for quote in fact_quotes if claim in quote
+                    )}, created_by="slack-assistant",
+                )
+        except Exception:  # noqa: BLE001 — lineage telemetry never hides a grounded answer
+            log.exception("Could not record fact dependency for grounded Slack answer")
     suffix = "\n\nSources: " + " · ".join(
         f"[{index + 1}] {label}" for index, label in enumerate(cited)) if cited else ""
     return result.answer + suffix
@@ -282,6 +301,7 @@ settings:
     bot_events:
       - app_mention
       - message.channels
+      - message.groups
       - message.im
   interactivity:
     is_enabled: false
@@ -408,27 +428,37 @@ def _refresh_slack_aggregate(project_id: int, token: str, channel: str,
     if document is None:
         return
     max_tokens, overlap = document_index.chunk_settings()
+    # The poll manifest stores document_fingerprint(); storing the raw Slack
+    # revision here made the next poll see a changed hash and re-chunk the
+    # thread it had just indexed.
+    content_hash = document_fingerprint(document)
     for source in sources:
         with document_index.connection() as conn:
             path = document.external_id
-            content_hash = document.revision or document_index.content_hash(
-                f"{document.title}\n\n{document.body}"
-            )
             doc_id, _inserted = document_index.upsert_document(
                 conn, source["id"], f"slack:{source['id']}:{path}", document.title,
                 document.body, f"slack/{path}", "page", content_hash, "Slack",
                 source="slack", initials="SL", acl_visibility="restricted",
                 acl_principals=(f"channel:{channel}",),
                 source_updated_at=document.updated_at,
+                metadata=dict(document.metadata),
             )
             document_index.sync_chunks(conn, doc_id, document.title, document.body,
                                 max_tokens, overlap)
-            cfg = source["config"] if isinstance(source["config"], dict) else json.loads(source["config"] or "{}")
-            hashes = dict(cfg.get("item_hashes") or {})
-            hashes[path] = content_hash
-            cfg["item_hashes"] = hashes
+            # This thread's hash entry is the only config the bot owns. It
+            # used to write the whole config dict back from a copy read
+            # before the upsert, undoing a concurrent sweep's cursor,
+            # checkpoint and snapshot flags; merge_config lands one entry
+            # under the row lock, in the same transaction as the document.
+            try:
+                connector_sync.merge_config(conn, int(source["id"]), {}, hashes={path: content_hash})
+            except connector_sync.SourcePaused:
+                # paused between the listing above and the row lock: drop the
+                # upsert too (psycopg commits on a clean exit) so the pause
+                # is what sticks
+                conn.rollback()
+                continue
             conn.commit()
-            bot_store.save_source_config(source["id"], cfg)
     invalidate_search(project_id)
 
 
@@ -649,19 +679,43 @@ def stop_event_dispatcher() -> None:
     _stop_socket_clients()
 
 
+def _slack_headers_plausible(timestamp: str, signature: str) -> bool:
+    """What can be checked before the body is touched: Slack signs every
+    delivery, url_verification included, so a request with no v0 signature or
+    a timestamp outside the replay window is refused unread. The HMAC itself
+    needs the team's signing secret, and the team id is inside the payload."""
+    if not signature.startswith("v0="):
+        return False
+    try:
+        return abs(time.time() - int(timestamp)) <= 300
+    except (TypeError, ValueError):
+        return False
+
+
 @router.post("/webhooks/slack")
 async def slack_webhook(request: Request):
-    raw = await request.body()
+    timestamp = request.headers.get("X-Slack-Request-Timestamp", "")
+    signature = request.headers.get("X-Slack-Signature", "")
+    if not _slack_headers_plausible(timestamp, signature):
+        return Response(status_code=401, content="bad signature")
+    # Same 1 MiB cap as GitHub and Confluence deliveries; a larger body is a
+    # 413 before it is read in full.
+    raw = await bounded_body(request)
     try:
         payload = json.loads(raw or b"{}")
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, RecursionError):
+        return Response(status_code=400, content="bad payload")
+    if not isinstance(payload, dict):
         return Response(status_code=400, content="bad payload")
 
-    # URL verification happens before the app is fully configured; echo per Slack docs.
+    # URL verification happens before the app is fully configured; echo per
+    # Slack docs. There is no secret to verify against yet, and the echo
+    # touches nothing but the challenge string.
     if payload.get("type") == "url_verification":
-        return {"challenge": payload.get("challenge", "")}
+        return {"challenge": str(payload.get("challenge", ""))[:512]}
 
-    team_id = str(payload.get("team_id") or (payload.get("team") or {}).get("id") or "")
+    team = payload.get("team") if isinstance(payload.get("team"), dict) else {}
+    team_id = str(payload.get("team_id") or team.get("id") or "")
     installation = bot_store.installation_by_team(team_id)
     if not installation:
         return Response(status_code=401, content="unknown Slack team")
@@ -669,12 +723,8 @@ async def slack_webhook(request: Request):
     if isinstance(cfg, str):
         cfg = json.loads(cfg)
     secret = (cfg.get("signing_secret") or "").strip()
-    if not verify_slack_signature(
-        raw,
-        request.headers.get("X-Slack-Request-Timestamp", ""),
-        request.headers.get("X-Slack-Signature", ""),
-        secret,
-    ):
+    # Nothing in the payload beyond the team id is acted on until this passes.
+    if not verify_slack_signature(raw, timestamp, signature, secret):
         return Response(status_code=401, content="bad signature")
 
     try:

@@ -20,7 +20,7 @@
 import type { SourcesActions } from "@mari-design/components/pages/SourcesPage";
 import { DuplicateSourceError } from "@mari-design/components/features/SourcesConnectorWizard";
 import type { Source } from "@mari-design/components/features/SourcesConnectorCard";
-import { clearQueryCache, gqlResult, projectHeaders } from "../../lib/api";
+import { gqlResult, invalidateQueries, projectHeaders } from "../../lib/api";
 import { mutate } from "./index";
 
 /* ── REST helpers (shared with the welcome/onboarding actions) ───────────── */
@@ -57,7 +57,7 @@ export async function uploadDocuments(files: File[]): Promise<void> {
   if (!res.ok) {
     throw new Error(typeof (json as any)?.detail === "string" ? (json as any).detail : `Upload failed with HTTP ${res.status}.`);
   }
-  clearQueryCache();
+  invalidateQueries();
   const rejected = ((json as UploadResult).files ?? []).filter((f) => f.error);
   if (rejected.length) {
     throw new Error(rejected.map((f) => `${f.name}: ${f.error}`).join(" · "));
@@ -84,7 +84,7 @@ export async function connectAny(provider: string, config: Record<string, string
     }
     throw new Error(r.error);
   }
-  clearQueryCache();
+  invalidateQueries();
   // The id is what lets the wizard follow the first sync it just started.
   return r.sourceId != null ? String(r.sourceId) : undefined;
 }
@@ -125,10 +125,10 @@ export function sourcesActions(): SourcesActions {
         // lastError is the live registry message, falling back server-side to
         // the stored config value. A crash before anything was stored has no
         // words anywhere, so only then does a generic line stand in.
-        clearQueryCache();
+        invalidateQueries();
         return { state: "failed" as const, error: st.lastError || "The sync failed without reporting a reason." };
       }
-      clearQueryCache();
+      invalidateQueries();
       return { state: "done" as const, done: st.done, total: st.total };
     },
     uploadFiles: uploadDocuments,
@@ -165,17 +165,27 @@ export function sourcesActions(): SourcesActions {
     // Destructive; the page puts it behind a ConfirmButton. The server pauses
     // the source and its running checkpoint rather than deleting documents,
     // which is what "disconnect" has always meant here.
-    disconnect: (s) => mutate(`mutation($id: Int!) { pauseSource(sourceId: $id) }`, { id: idOf(s) }),
+    // `false` is the server declining: pauseSource resolves the id among
+    // connector rows only, so a legacy row (an orphan the retired
+    // connectSource mutation left) answers false and nothing was paused.
+    // Throwing keeps the card from drawing it paused.
+    disconnect: async (s) => {
+      const d = await mutate(`mutation($id: Int!) { pauseSource(sourceId: $id) }`, { id: idOf(s) });
+      if (d?.pauseSource === false) throw new Error("This source has no connector behind it, so it cannot be paused. Remove it and connect again.");
+    },
 
     /* The real delete disconnect never was: the server drops the source row,
        its documents and everything hanging off them, its checkpoints, and its
-       scheduled sync flow, in one transaction. Refusals are the server's own
-       words — "Only connector sources can be removed.", "A sync for this
-       source is still running." — and they reach the confirm dialog verbatim.
+       scheduled sync flow, in one transaction. Connector and legacy rows
+       (an orphan the retired connectSource mutation left) both go; refusals
+       are the server's own words — the upload row, "A sync for this source
+       is still running." — and they reach the confirm dialog verbatim.
        `false` is the row already being gone, which is what removing wanted. */
-    removeSource: async (s) => {
-      await mutate(`mutation($id: Int!) { removeSource(sourceId: $id) }`, { id: idOf(s) });
-      clearQueryCache();
+    removeSource: async (s, deleteDocuments) => {
+      await mutate(`mutation($id: Int!, $deleteDocuments: Boolean!) {
+        removeSource(sourceId: $id, deleteDocuments: $deleteDocuments)
+      }`, { id: idOf(s), deleteDocuments });
+      invalidateQueries();
     },
 
     /* A first sync that failed left a real `sources` row behind — the connect

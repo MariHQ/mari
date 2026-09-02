@@ -43,6 +43,23 @@ FALLBACK_SECRET_KEYS = {"token", "api_token", "api_key", "apikey", "secret",
 
 MASK = "••••••"
 
+# health written when a provider quota ends a sweep early: the design
+# library's "catching up" state (attention tone), and one the console does
+# not colour red. 'Throttled' is not in either vocabulary.
+THROTTLED_HEALTH = "Backfilling"
+
+# longest single wait for a provider's Retry-After before a sweep gives up
+# and lets the next scheduled run resume from its checkpoint
+RATE_LIMIT_MAX_WAIT = 120.0
+
+# tests swap this for a no-op; a real sleep here stalls the suite
+retry_sleep = time.sleep
+
+
+class SourcePaused(RuntimeError):
+    """An admin paused the source while a worker held it. Raised under the
+    row lock, so the page in flight rolls back instead of reviving the row."""
+
 
 def provider_key_of(provider: str, cfg: dict) -> str:
     """sources.provider is `key` or `key:qualifier`; config.provider_key wins."""
@@ -153,10 +170,64 @@ def sweep_inputs(cfg: dict, full: bool) -> tuple[str | None, str | None, bool]:
     return cursor, checkpoint, authoritative_full
 
 
+def merge_config(conn, source_id: int, updates: dict, *, hashes: dict | None = None,
+                 dropped=(), synced: bool = True) -> None:
+    """Write one writer's share of sources.config, and the row's document
+    count, under the row lock.
+
+    Three writers share this document (the poll worker, the Confluence page
+    webhook, the Drive Changes worker) and each used to replace the whole
+    JSON from a copy read at its start: a webhook landing mid-sweep undid the
+    checkpoint and cleared a pending full snapshot, and any of them could put
+    back a credential another had just rotated. `updates` are the top-level
+    keys the caller owns, merged with ||. `hashes` and `dropped` are the
+    item_hashes entries it owns, merged into the stored map instead of
+    replacing it; a caller that owns the whole manifest passes it in
+    `updates` and the stored map is not consulted. Every other key survives.
+
+    A paused row is never revived here: the page write used to reset
+    status='active' on every page, so pausing during a sweep never stuck.
+
+    `synced=False` is for writers that only touched config (a refreshed
+    token, a recorded error): they must not stamp last_sync_at or declare
+    the source Healthy, which the page write legitimately does.
+    """
+    if hashes and "item_hashes" in updates:
+        raise ValueError("pass the whole manifest or per-path entries, not both")
+    row = conn.execute("SELECT status FROM sources WHERE id = %s FOR UPDATE",
+                       (source_id,)).fetchone()
+    if not row:
+        raise RuntimeError("source no longer exists")
+    if str(row.get("status") or "") == "paused":
+        raise SourcePaused("source is paused")
+    doc_count = conn.execute(
+        "SELECT count(*) AS n FROM documents WHERE source_id = %s", (source_id,),
+    ).fetchone()["n"]
+    conn.execute(
+        """UPDATE sources
+              SET config = jsonb_set(config || %(updates)s::jsonb, '{item_hashes}',
+                    (COALESCE(NULLIF(
+                       COALESCE(%(updates)s::jsonb -> 'item_hashes', config -> 'item_hashes', '{}'::jsonb),
+                       'null'::jsonb), '{}'::jsonb)
+                     - %(dropped)s::text[]) || %(hashes)s::jsonb),
+                  docs_count = %(count)s, stat_num = %(stat)s, stat_unit = 'docs',
+                  last_sync_at = CASE WHEN %(synced)s THEN now() ELSE last_sync_at END,
+                  health = CASE WHEN %(synced)s THEN 'Healthy' ELSE health END,
+                  status = 'active'
+            WHERE id = %(id)s""",
+        {"updates": json.dumps(updates), "dropped": [str(path) for path in dropped],
+         "hashes": json.dumps(hashes or {}), "count": doc_count, "stat": str(doc_count),
+         "synced": bool(synced), "id": source_id},
+    )
+
+
 def sync_source(source_id: int, full: bool, *, update_status, fire_document_triggers,
                 invalidate_search) -> dict:
     """Run one connector sync. Returns honest stats (plus 'error' on failure) —
-    the same shape flowengine's sync_source step reads from ingest.run_sync."""
+    the same shape flowengine's sync_source step reads from ingest.run_sync.
+    'snapshot_complete' says whether the provider declared the listing whole;
+    a throttled or page-limited pass returns without it, and the flow step
+    records a full reconcile only when it is set."""
     started = time.time()
     stats = {"files_changed": 0, "files_deleted": 0, "items_changed": 0,
              "chunks": 0, "embedded": 0, "skipped": 0}
@@ -175,9 +246,19 @@ def sync_source(source_id: int, full: bool, *, update_status, fire_document_trig
 
     provider_col = src["provider"]
     display = src["display_name"]
+    if str(src.get("status") or "") == "paused":
+        # The scheduled flow keeps firing for a paused source; answer without
+        # touching the provider or the row, so the pause is what sticks.
+        msg = "source is paused; resume it to sync"
+        update_status(source_id, state="idle", phase="", error=msg)
+        return {**stats, "error": msg}
     cfg = src["config"] if isinstance(src["config"], dict) else json.loads(src["config"] or "{}")
     key = provider_key_of(provider_col, cfg)
     sync_start_iso = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    done = 0
+    total = 0
+    # counts from pages already committed, so an early ending stays honest
+    partial = {"items_changed": 0, "files_deleted": 0, "chunks": 0, "embedded": 0, "skipped": 0}
 
     try:
         definition = connector_definition(key)
@@ -198,20 +279,44 @@ def sync_source(source_id: int, full: bool, *, update_status, fire_document_trig
             result = definition.validate(cfg, http=connector_provider.http_transport)
             if not result.ok:
                 raise validation_failure(result)
-        call_with_retry(validate_once, sleep=time.sleep)
+        call_with_retry(validate_once, sleep=retry_sleep)
 
         # —— poll and apply one page at a time ——
-        def provider_pages():
-            yield from connector_provider.poll_pages(
-                key, cfg, cursor, stored_checkpoint, full=authoritative_full)
+        latest_checkpoint = stored_checkpoint
 
-        done = 0
-        total = 0
+        def provider_pages():
+            # A generator that raised is closed, so a rate-limited page fetch
+            # cannot just be retried with next(): the listing is reopened at
+            # the last checkpoint a page write made durable, with Retry-After
+            # honoured in between. Before this, one 429 mid-sweep ended the
+            # run as Error and every scheduled tick repeated it.
+            pages = None
+
+            def next_page():
+                nonlocal pages
+                if pages is None:
+                    pages = connector_provider.poll_pages(
+                        key, cfg, cursor, latest_checkpoint, full=authoritative_full)
+                try:
+                    return next(pages)
+                except StopIteration:
+                    return None
+                except Exception:
+                    pages = None
+                    raise
+
+            while True:
+                page = call_with_retry(next_page, sleep=retry_sleep,
+                                       maximum_delay=RATE_LIMIT_MAX_WAIT)
+                if page is None:
+                    return
+                yield page
+
         initials = (key[:2] or "??").upper()
         author = definition.name
 
         def apply_page(plan, _page_number):
-            nonlocal done, total
+            nonlocal done, total, latest_checkpoint
             page_total = len(plan.upserts) + len(plan.unchanged) + len(plan.deletes)
             total += page_total
             inserted_ids: list[int] = []
@@ -238,6 +343,7 @@ def sync_source(source_id: int, full: bool, *, update_status, fire_document_trig
                         "content_hash": fingerprint, "author": document_author(document), "source": key,
                         "initials": initials, "acl_visibility": document.acl.visibility,
                         "acl_principals": principals, "source_updated_at": document.updated_at,
+                        "metadata": dict(document.metadata),
                     })
 
                 projected = document_index.upsert_documents(conn, projection_rows)
@@ -283,7 +389,9 @@ def sync_source(source_id: int, full: bool, *, update_status, fire_document_trig
                 hashes = {
                     path: manifest.fingerprint for path, manifest in plan.state.manifest.items()
                 }
-                cfg.update({
+                # Only the sweep's own keys: the manifest is authoritative for
+                # this sweep, credentials and provider fields are not ours.
+                merge_config(conn, source_id, {
                     "provider_key": key, "cursor": durable_cursor, "item_hashes": hashes,
                     "checkpoint": plan.state.checkpoint or "",
                     "last_sync_at": sync_start_iso, "last_error": "",
@@ -293,18 +401,15 @@ def sync_source(source_id: int, full: bool, *, update_status, fire_document_trig
                         if authoritative_full and not plan.snapshot_complete else []
                     ),
                 })
-                doc_count = conn.execute(
-                    "SELECT count(*) AS n FROM documents WHERE source_id = %s", (source_id,),
-                ).fetchone()["n"]
-                conn.execute(
-                    """UPDATE sources SET config = %s, last_sync_at = now(), docs_count = %s,
-                         stat_num = %s, stat_unit = 'docs', health = 'Healthy', status = 'active'
-                         WHERE id = %s""",
-                    (json.dumps(cfg), doc_count, str(doc_count), source_id),
-                )
                 _checkpoint(conn, provider_col, display, "embedded", done, total,
                             progress_marker, "running", started)
                 conn.commit()
+            latest_checkpoint = plan.state.checkpoint or None
+            partial["items_changed"] += len(plan.upserts)
+            partial["files_deleted"] += len(gone)
+            partial["chunks"] += page_chunks
+            partial["embedded"] += page_embeddings
+            partial["skipped"] += len(plan.unchanged)
             update_status(source_id, done=done, total=total)
             return AppliedPage(
                 tuple(inserted_ids), tuple(updated_ids), len(gone),
@@ -365,6 +470,7 @@ def sync_source(source_id: int, full: bool, *, update_status, fire_document_trig
             "items_changed": report.changed, "files_deleted": removed,
             "chunks": report.chunks, "embedded": report.embeddings,
             "skipped": report.unchanged,
+            "snapshot_complete": bool(report.snapshot_complete),
         })
         if report.changed or removed:
             invalidate_search(access.require_current_access().project_id)
@@ -413,14 +519,52 @@ def sync_source(source_id: int, full: bool, *, update_status, fire_document_trig
         update_status(source_id, state="idle", phase="done", done=done, total=total, error="")
         # flow step reads files_changed too — connectors count everything as items
         return {**stats, "files_changed": 0}
+    except SourcePaused:
+        # The page in flight rolled back under the row lock, so nothing this
+        # worker wrote can revive the row. Stop before the next page.
+        msg = "source is paused; resume it to sync"
+        update_status(source_id, state="idle", phase="", done=done, total=total, error=msg)
+        try:
+            with document_index.connection() as conn:
+                _event(conn, provider_col, f"sync stopped: {display}",
+                       "paused by admin; stopped before the next page")
+                _checkpoint(conn, provider_col, display, "embedded", done, total, "", "paused", started)
+                conn.commit()
+        except Exception:  # noqa: BLE001 — the pause itself is already durable
+            pass
+        return {**stats, **partial, "files_changed": 0, "error": msg}
+    except RateLimitFailure as e:
+        # Every committed page made its cursor and checkpoint durable, so a
+        # provider quota is a pause, not a failure: the next scheduled run
+        # resumes where this one stopped. Ending as Error turned the card red
+        # and hid the real state, which is "catching up".
+        wait = f" (retry after {e.retry_after:.0f}s)" if e.retry_after else ""
+        msg = f"{str(e)[:200]}{wait}; resumes from checkpoint on the next scheduled run"
+        update_status(source_id, state="idle", phase="throttled", done=done, total=total, error=msg)
+        try:
+            with document_index.connection() as conn:
+                conn.execute(
+                    """UPDATE sources SET config = config || jsonb_build_object('last_error', %s::text),
+                         health = %s WHERE id = %s""",
+                    (msg, THROTTLED_HEALTH, source_id))
+                _event(conn, provider_col, f"sync throttled: {display}", msg)
+                _checkpoint(conn, provider_col, display, "fetched", done, total,
+                            latest_checkpoint or "", "paused", started)
+                conn.commit()
+        except Exception:  # noqa: BLE001 — never mask the original error
+            pass
+        return {**stats, **partial, "files_changed": 0, "throttled": msg}
     except Exception as e:  # noqa: BLE001 — a sync must always land in a truthful state
         msg = str(e)[:300]
         update_status(source_id, state="error", phase="", error=msg)
         try:
             with document_index.connection() as conn:
-                cfg["last_error"] = msg
-                conn.execute("UPDATE sources SET config = %s, health = 'Error' WHERE id = %s",
-                             (json.dumps(cfg), source_id))
+                # merge, never a whole-document replace: the copy read at the
+                # start no longer reflects what other writers stored since
+                conn.execute(
+                    """UPDATE sources SET config = config || jsonb_build_object('last_error', %s::text),
+                         health = 'Error' WHERE id = %s""",
+                    (msg, source_id))
                 _event(conn, provider_col, f"sync failed: {provider_col}", msg)
                 _checkpoint(conn, provider_col, provider_col, "fetched", 0, 1, "", "paused", started)
                 conn.commit()

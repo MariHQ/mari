@@ -40,9 +40,23 @@ class KnowledgeRecipeTests(unittest.TestCase):
         return [{"document_id": "doc:1", "quote": "Retention is 30 days."}]
 
     def test_fact_extract_and_check_preserve_evidence(self):
-        facts = extract_facts([self.document], generate_json=self.generator({"facts": [{"claim": "Retention is 30 days.", "confidence": 0, "evidence": self.evidence()}]}))
+        facts = extract_facts([self.document], generate_json=self.generator({"facts": [{
+            "claim": "Retention is 30 days.",
+            "atomic_claims": ["Customer exports are retained for 30 days."],
+            "subject": {"canonical": "customer exports", "aliases": []},
+            "relation": "has retention period",
+            "object": "30 days",
+            "scopes": ["customer exports"],
+            "valid_from": None,
+            "valid_to": None,
+            "conditions": [],
+            "confidence": 0,
+            "evidence": self.evidence(),
+        }]}))
         self.assertEqual(facts[0].evidence[0].revision, "v1")
         self.assertEqual(facts[0].confidence, .9)
+        self.assertEqual(facts[0].qualifiers["relation"], "has retention period")
+        self.assertEqual(facts[0].qualifiers["object"], "30 days")
         checked = check_claims([facts[0].claim], [self.document], generate_json=self.generator({"assessments": [{"claim": facts[0].claim, "verdict": "supported", "explanation": "Direct", "confidence": 0, "evidence": self.evidence()}]}))
         self.assertEqual(checked[0].verdict, "supported")
         self.assertEqual(checked[0].confidence, .9)
@@ -142,6 +156,29 @@ class KnowledgeRecipeTests(unittest.TestCase):
             }),
         )
         self.assertEqual(digest.topics[0].evidence[0].document_id, "doc:1")
+
+    def test_digest_drops_ungrounded_citations_and_keeps_every_topic(self):
+        # A hallucinated citation used to erase the whole digest; on a weekly
+        # cadence that meant seven days of an empty Home. The citation is what
+        # drops — a topic survives on whatever citations held, down to none,
+        # because the digest is a summary, not the fact ledger.
+        digest = summarize_digest(
+            [self.document],
+            generate_json=self.generator({
+                "summary": "Retention changed.",
+                "topics": [
+                    {"title": "Ghost cited", "summary": "Cites a ghost.",
+                     "evidence": [{"document_id": "doc:404", "quote": "nope"}]},
+                    {"title": "Retention", "summary": "Thirty days.",
+                     "evidence": [{"document_id": "doc:404", "quote": "nope"}, *self.evidence()]},
+                ],
+                "evidence": [{"document_id": "doc:404", "quote": "nope"}],
+            }),
+        )
+        self.assertEqual([topic.title for topic in digest.topics], ["Ghost cited", "Retention"])
+        self.assertEqual(digest.topics[0].evidence, ())
+        self.assertEqual(digest.topics[1].evidence[0].document_id, "doc:1")
+        self.assertEqual(digest.evidence, ())
 
     def impact_documents(self):
         return [

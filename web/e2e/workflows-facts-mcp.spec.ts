@@ -21,13 +21,155 @@ test("facts can be verified and captured through the ledger", async ({ page }) =
   expect(api.calls.some((c) => c.query.includes("addFact") && c.variables.claim === "Deletion requests finish within 7 days.")).toBeTruthy();
 });
 
+test("high-impact facts expose temporal evidence before invalidation", async ({ page }) => {
+  await page.goto("/facts");
+  const row = page.getByRole("row").filter({ hasText: "Retention is 30 days." });
+  await expect(row.getByText("High impact", { exact: true })).toBeVisible();
+  await row.getByRole("button", { name: "Impact" }).click();
+  const drawer = page.getByRole("dialog", { name: "Fact impact neighborhood" });
+  await expect(drawer.getByText("Retention is 10 days.", { exact: true })).toBeVisible();
+  await expect(drawer.getByText("contradicts", { exact: true })).toBeVisible();
+  await drawer.getByRole("button", { name: "Close" }).click();
+  await row.getByRole("button", { name: "Invalidate" }).click();
+  await page.getByRole("button", { name: "Invalidate and preserve impact" }).click();
+  await expect(row.getByText("Invalidated", { exact: true })).toBeVisible();
+  expect(api.calls.some((call) => call.query.includes("invalidateFact"))).toBeTruthy();
+
+  // A changed mind has a way back: Restore reopens the claim as needs-review
+  // and the row offers Verify again — verification itself is not restored.
+  await row.getByRole("button", { name: "Restore" }).click();
+  await expect.poll(() => api.calls.some((call) => call.query.includes("restoreFact")
+    && call.variables.id === 1)).toBeTruthy();
+  await expect(row.getByText("Needs review", { exact: true })).toBeVisible();
+  await expect(row.getByRole("button", { name: "Verify" })).toBeVisible();
+});
+
 test("LLM fact scan starts a workflow and reports its grounded result", async ({ page }) => {
   await page.goto("/facts");
   await page.getByRole("button", { name: "Scan for facts" }).click();
+  const config = page.getByRole("dialog", { name: "Configure fact extraction" });
+  await config.getByLabel("Passage text", { exact: true }).fill("infrastructure");
+  await config.getByLabel("Documents per run").fill("25");
+  await config.getByLabel("Review strategy").selectOption("auto");
+  await expect(config.getByText("High-confidence recommendations are applied; uncertain candidates still wait for you"))
+    .toBeVisible();
+  await config.getByRole("button", { name: "Save & run now" }).click();
   await expect(page.getByText(/Fact scan · run #1900/)).toBeVisible();
-  await expect(page.getByText(/2 new claims captured/)).toBeVisible();
-  expect(api.calls.some((c) => c.query.includes("startFactScan"))).toBeTruthy();
+  await expect(page.getByText("2 new claims captured", { exact: true })).toBeVisible();
+  await expect(page.getByText("AI recommendation", { exact: true })).toBeVisible();
+  await expect(page.getByText("Accept as a new fact", { exact: true })).toBeVisible();
+  expect(api.calls.some((c) => c.query.includes("startFactScan")
+    && c.variables.config.query === "infrastructure"
+    && c.variables.config.limit === 25
+    && c.variables.config.adjudication_mode === "llm"
+    && c.variables.config.review_mode === "ai")).toBeTruthy();
   expect(api.calls.some((c) => c.query.includes("workflowRun"))).toBeTruthy();
+  // The run must survive a reload through the recovery path before a
+  // dismissal, or the "stays dismissed" assertion below proves nothing.
+  await page.reload();
+  await expect(page.getByText(/Fact scan · run #1900/)).toBeVisible();
+  await page.getByRole("button", { name: "Dismiss" }).click();
+  await expect(page.getByText(/Fact scan · run #1900/)).toHaveCount(0);
+  expect(api.calls.some((c) => c.query.includes("dismissWorkflowRun") && c.variables.runId === 99)).toBeTruthy();
+  await page.reload();
+  await expect(page.getByText(/Fact scan · run #1900/)).toHaveCount(0);
+});
+
+test("cancelling the fact scan dialog is a no-op, not an error", async ({ page }) => {
+  await page.goto("/facts");
+  const scanButton = page.getByRole("button", { name: "Scan for facts" });
+  await scanButton.click();
+  const config = page.getByRole("dialog", { name: "Configure fact extraction" });
+  // Focus lands on the first field, and Tab stays inside the dialog.
+  await expect(config.getByLabel("Passage text", { exact: true })).toBeFocused();
+  await config.getByRole("button", { name: "Save & run now" }).focus();
+  await page.keyboard.press("Tab");
+  await expect(config.getByLabel("Passage text", { exact: true })).toBeFocused();
+  await page.keyboard.press("Shift+Tab");
+  await expect(config.getByRole("button", { name: "Save & run now" })).toBeFocused();
+
+  // Escape cancels. A cancelled dialog used to throw "Fact scan cancelled."
+  // and the page drew it as a "Could not save" banner.
+  await page.keyboard.press("Escape");
+  await expect(config).toBeHidden();
+  await expect(scanButton).toBeFocused();
+  await expect(scanButton).toBeEnabled();
+  await expect(page.getByRole("alert").filter({ hasText: "Could not save" })).toHaveCount(0);
+  await expect(page.getByText("Fact scan cancelled.")).toHaveCount(0);
+  await expect(page.getByText(/Fact scan · starting/)).toHaveCount(0);
+  expect(api.calls.some((c) => c.query.includes("startFactScan"))).toBeFalsy();
+
+  // A click on the backdrop cancels the same way.
+  await scanButton.click();
+  await expect(config).toBeVisible();
+  await page.locator("div[role=presentation]").filter({ has: config }).click({ position: { x: 4, y: 4 } });
+  await expect(config).toBeHidden();
+  await expect(page.getByRole("alert").filter({ hasText: "Could not save" })).toHaveCount(0);
+  expect(api.calls.some((c) => c.query.includes("startFactScan"))).toBeFalsy();
+
+  // Two cancels leave the flow intact: reopening and saving starts exactly
+  // one run. The Scan button is disabled while the run is in flight, so
+  // focus parks on the main landmark rather than falling to body.
+  await scanButton.click();
+  await expect(config).toBeVisible();
+  await config.getByRole("button", { name: "Save & run now" }).click();
+  await expect(config).toBeHidden();
+  await expect(page.getByText(/Fact scan · run #1900/)).toBeVisible();
+  await expect(page.locator("#main-content")).toBeFocused();
+  expect(api.calls.filter((c) => c.query.includes("startFactScan"))).toHaveLength(1);
+});
+
+test("a failed fact scan offers Retry and a new scan starts from it", async ({ page }) => {
+  api.setData("factScanStatus", "failed");
+  await page.goto("/facts");
+  await page.getByRole("button", { name: "Scan for facts" }).click();
+  const config = page.getByRole("dialog", { name: "Configure fact extraction" });
+  await config.getByRole("button", { name: "Save & run now" }).click();
+  await expect(page.getByText(/Fact scan · run #1900/)).toBeVisible();
+  await expect(page.getByText("RuntimeError: model unreachable", { exact: false })).toBeVisible();
+  const before = api.calls.filter((c) => c.query.includes("startFactScan")).length;
+  await page.getByRole("button", { name: "Retry" }).click();
+  await expect.poll(() =>
+    api.calls.filter((c) => c.query.includes("startFactScan")).length).toBe(before + 1);
+});
+
+test("an unverified fact shows the date it was captured", async ({ page }) => {
+  await page.goto("/facts");
+  const row = page.getByRole("row").filter({ hasText: "Retention is 10 days." });
+  await expect(row.getByTitle("Captured, not yet verified")).toHaveText("Aug 19, 2026");
+});
+
+test("the facts filter bar narrows by owner and date range", async ({ page }) => {
+  await page.goto("/facts");
+  await expect(page.getByText("Retention is 30 days.", { exact: true })).toBeVisible();
+  await expect(page.getByText("Retention is 10 days.", { exact: true })).toBeVisible();
+
+  await page.getByLabel("Filter by owner").selectOption("Lee Chen");
+  await expect(page.getByText("Retention is 30 days.", { exact: true })).toBeVisible();
+  await expect(page.getByText("Retention is 10 days.", { exact: true })).toHaveCount(0);
+  await page.getByLabel("Filter by owner").selectOption("");
+
+  // fact 1 dates to its verification (Aug 18) even though it was captured
+  // Aug 1 — the filter ranks dates the way the column displays them, or a
+  // row reading one date passes a range that excludes it. fact 2 dates to
+  // its capture (Aug 19), having no verification.
+  await page.getByLabel("Date from").fill("2026-08-18");
+  await expect(page.getByText("Retention is 30 days.", { exact: true })).toBeVisible();
+  await expect(page.getByText("Retention is 10 days.", { exact: true })).toBeVisible();
+  await page.getByLabel("Date from").fill("2026-08-19");
+  await expect(page.getByText("Retention is 10 days.", { exact: true })).toBeVisible();
+  await expect(page.getByText("Retention is 30 days.", { exact: true })).toHaveCount(0);
+  await page.getByLabel("Date to").fill("2026-08-19");
+  await expect(page.getByText("Retention is 10 days.", { exact: true })).toBeVisible();
+
+  // Filters that narrow everything away name themselves and offer a way out;
+  // "nothing matches the current filter" named none of the four (2026-09-01).
+  await page.getByLabel("Date from").fill("2026-08-25");
+  await expect(page.getByText("No facts match these filters", { exact: true })).toBeVisible();
+  await expect(page.getByText(/narrowed by dates 2026-08-25/)).toBeVisible();
+  await page.getByRole("button", { name: "Clear filters" }).click();
+  await expect(page.getByText("Retention is 30 days.", { exact: true })).toBeVisible();
+  await expect(page.getByText("Retention is 10 days.", { exact: true })).toBeVisible();
 });
 
 test("fact write failures remain visible and do not close the form", async ({ page }) => {

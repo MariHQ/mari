@@ -13,6 +13,8 @@ test("admin creates, configures, and deploys a knowledge chat destination", asyn
   await page.getByLabel("Welcome message").fill("Ask about company policy.");
   await page.getByRole("button", { name: "Create knowledge chat" }).click();
   await expect(page).toHaveURL(/tab=chat&chat=7/);
+  await expect(page.getByLabel("Destination name")).toHaveValue("Company knowledge");
+  await expect(page.getByLabel("Assistant title")).toHaveValue("Ask Acme");
   expect(api.calls.some((call) => call.query.includes("createKnowledgeChatDestination") && call.variables.slug === "company-knowledge")).toBeTruthy();
 
   await page.getByLabel("Welcome message").fill("Ask about trusted company policy.");
@@ -61,4 +63,49 @@ test("knowledge chat admin and end-user surfaces remain usable on mobile", async
   await page.goto("/knowledge-chat/default/company-knowledge");
   await expect(page.getByLabel("Ask a question")).toBeVisible();
   await expect(page.locator("body")).not.toHaveCSS("overflow-x", "scroll");
+});
+
+const source = (n: number, title: string) => JSON.stringify({
+  n, source: "confluence", kind: "page", title, snippet: `${title} snippet`, meta: `${title} snippet`,
+  author: "Prabhat Sharma", updated: "2026-08-30T00:00:00Z", tags: [], document_id: n,
+  href: `/knowledge/doc?id=${n}`, source_url: `https://wiki.example.com/pages/${n}`, score: 1,
+});
+
+/** A stream in the server's shape: every retrieved page in meta, the answer,
+    then the settled rail in a sources event. Registered after the fixture's
+    route, so it wins for this test. */
+async function streamAnswer(page: import("@playwright/test").Page, answer: string, cited: string[]) {
+  await page.route("**/auth/me", (route) => route.fulfill({ json: {
+    user: null, needsSetup: false, bypassEnabled: false, registrationEnabled: false,
+    oauth: { github: true, google: true }, projects: [], activeProject: null, capabilities: [],
+  } }));
+  await page.route("**/knowledge-chat-api/*/*/chat", (route) => route.fulfill({ status: 200, contentType: "text/event-stream", body:
+    `event: meta\ndata: {"session_id":"41.tok","sources":[${source(1, "Playbook: Reverting a MongoDB migration")},${source(2, "Kubernetes cluster runbook")}]}\n\n` +
+    `event: token\ndata: ${JSON.stringify({ token: answer })}\n\n` +
+    `event: sources\ndata: {"sources":[${cited.join(",")}]}\n\nevent: done\ndata: {"session_id":"41.tok"}\n\n` }));
+}
+
+test("a not-found answer shows no sources and reads as plain prose", async ({ page }) => {
+  await streamAnswer(page, "I could not find this in the connected sources.", []);
+  await page.goto("/knowledge-chat/default/company-knowledge");
+  await page.getByLabel("Ask a question").fill("how do k8s clusters work here?");
+  await page.getByRole("button", { name: "Ask" }).click();
+  const answer = page.getByText("I could not find this in the connected sources.");
+  await expect(answer).toBeVisible();
+  // Not a code box: the sentence lives in a paragraph, not in <pre> or <code>.
+  await expect(page.locator("pre, code").filter({ hasText: "could not find" })).toHaveCount(0);
+  await expect(page.getByRole("list", { name: "Sources" })).toHaveCount(0);
+  await expect(page.getByText("MongoDB")).toHaveCount(0);
+});
+
+test("the sources rail shows only the pages the answer cites", async ({ page }) => {
+  await streamAnswer(page, "Clusters are provisioned per team [2].", [source(2, "Kubernetes cluster runbook")]);
+  await page.goto("/knowledge-chat/default/company-knowledge");
+  await page.getByLabel("Ask a question").fill("how do k8s clusters work here?");
+  await page.getByRole("button", { name: "Ask" }).click();
+  await expect(page.getByText("Clusters are provisioned per team", { exact: false })).toBeVisible();
+  const sources = page.getByRole("list", { name: "Sources" });
+  await expect(sources).toContainText("Kubernetes cluster runbook");
+  await expect(sources).not.toContainText("MongoDB");
+  await expect(sources.getByRole("listitem")).toHaveCount(1);
 });

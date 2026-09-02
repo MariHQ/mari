@@ -37,6 +37,7 @@ import { settingsMembersActions } from "./settings-members";
 import { settingsModelsActions } from "./settings-models";
 import { setupActions } from "./setup";
 import { sourcesActions } from "./sources";
+import { scheduledTasksActions } from "./scheduled-tasks";
 import { workflowsActions } from "./workflows";
 import { welcomeActions } from "./welcome";
 
@@ -89,6 +90,7 @@ export const ACTION_FACTORIES: Record<string, (ctx: ActionContext) => unknown> =
   "settings-models": settingsModelsActions,
   setup: setupActions,
   sources: sourcesActions,
+  "scheduled-tasks": scheduledTasksActions,
   welcome: welcomeActions,
   workflows: workflowsActions,
 };

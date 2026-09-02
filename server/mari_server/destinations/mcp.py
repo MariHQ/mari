@@ -140,7 +140,7 @@ async def mcp_endpoint(slug: str, request: Request,
         raise HTTPException(401, "Bearer token required")
     # Token lookup is the bootstrap boundary: after it succeeds every tool
     # executes with the server's immutable project context.
-    server = mcp_repository.authenticate(hashlib.sha256(token.encode()).hexdigest(), token)
+    server = mcp_repository.authenticate(hashlib.sha256(token.encode()).hexdigest())
     if not server or _slug(server["name"]) != slug:
         raise HTTPException(401, "Invalid MCP server or token")
     try:

@@ -6,9 +6,67 @@ import logging
 import unittest
 from io import StringIO
 
+from unittest.mock import patch
+
+from types import SimpleNamespace
+
+from fastapi import HTTPException
+from psycopg_pool import PoolTimeout
+
+from mari_server import settings
+from mari_server.operations import routes as operation_routes
 from mari_server.operations import telemetry as observability
 from starlette.requests import Request
 from starlette.responses import JSONResponse
+
+
+def metrics_request(authorization: str | None = None) -> Request:
+    headers = [(b"authorization", authorization.encode())] if authorization else []
+    return Request({
+        "type": "http", "method": "GET", "path": "/metrics", "query_string": b"",
+        "scheme": "http", "server": ("test", 80), "client": ("test", 1), "root_path": "",
+        "headers": headers,
+    })
+
+
+def readyz_request(ready: bool = True) -> Request:
+    request = Request({
+        "type": "http", "method": "GET", "path": "/readyz", "query_string": b"",
+        "scheme": "http", "server": ("test", 80), "client": ("test", 1), "root_path": "",
+        "headers": [], "app": SimpleNamespace(state=SimpleNamespace(ready=ready)),
+    })
+    return request
+
+
+class ReadinessProbeTests(unittest.TestCase):
+    def test_a_saturated_pool_answers_503_instead_of_hanging(self) -> None:
+        # The chart's probe allows 3 s; the pool's default wait is 30 s. The
+        # probe borrows with a short timeout, and the resulting PoolTimeout
+        # has to come back as a distinct 503, never as a hang or a 500.
+        with patch.object(operation_routes.system, "ready", side_effect=PoolTimeout("pool full")):
+            with self.assertRaises(HTTPException) as caught:
+                operation_routes.readyz(readyz_request())
+        self.assertEqual(caught.exception.status_code, 503)
+        self.assertEqual(caught.exception.detail, "Database connection pool is saturated.")
+
+    def test_probe_borrows_with_a_short_timeout(self) -> None:
+        from mari_server.persistence.postgres import connection, system
+        from unittest.mock import MagicMock
+        lease = MagicMock()
+        lease.__enter__.return_value.execute.return_value.fetchone.return_value = {"ok": 1}
+        process_pool = MagicMock()
+        process_pool.connection.return_value = lease
+        with patch.object(connection, "pool", return_value=process_pool):
+            system.ready()
+        process_pool.connection.assert_called_once_with(timeout=system.READY_POOL_TIMEOUT_SECONDS)
+        self.assertLessEqual(system.READY_POOL_TIMEOUT_SECONDS, 3.0)
+
+    def test_other_database_failures_keep_their_own_503(self) -> None:
+        with patch.object(operation_routes.system, "ready", side_effect=RuntimeError("down")):
+            with self.assertRaises(HTTPException) as caught:
+                operation_routes.readyz(readyz_request())
+        self.assertEqual(caught.exception.status_code, 503)
+        self.assertEqual(caught.exception.detail, "Database is unavailable.")
 
 
 class ObservabilityTests(unittest.TestCase):
@@ -96,6 +154,25 @@ class ObservabilityTests(unittest.TestCase):
         self.assertEqual(row["message"], "done")
         self.assertEqual(row["request_id"], "r-1")
         self.assertEqual(row["status"], 204)
+
+    def scrape(self, token: str, authorization: str | None) -> str:
+        metrics = observability.Metrics()
+        metrics.inc("mari_test_scrape_total")
+        with patch.dict(settings.CONFIG["server"], {"metrics_token": token}), \
+             patch.object(observability, "METRICS", metrics), \
+             patch.object(operation_routes.system, "connector_lag", return_value=[]):
+            return operation_routes.metrics(metrics_request(authorization))
+
+    def test_metrics_stay_open_until_a_token_is_configured(self) -> None:
+        self.assertIn("mari_test_scrape_total 1", self.scrape("", None))
+
+    def test_metrics_require_the_configured_bearer_token(self) -> None:
+        for header in (None, "Bearer wrong", "Basic scrape-secret", "scrape-secret"):
+            with self.assertRaises(HTTPException) as caught:
+                self.scrape("scrape-secret", header)
+            self.assertEqual(caught.exception.status_code, 401)
+            self.assertEqual(caught.exception.headers["WWW-Authenticate"], "Bearer")
+        self.assertIn("mari_test_scrape_total 1", self.scrape("scrape-secret", "Bearer scrape-secret"))
 
     def test_llm_hook_records_result_without_prompt_or_credentials(self) -> None:
         metrics = observability.Metrics()

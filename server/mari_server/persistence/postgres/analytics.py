@@ -7,10 +7,25 @@ from mari_server.identity import context as access
 def overview(since: str | None) -> dict:
     project_id = access.require_current_access().project_id
     with db.request_connection() as conn:
+        # "Changes" is every knowledge delta in the window, not only proposed
+        # document edits: a day spent publishing, verifying, invalidating and
+        # restoring facts used to leave the tile at 0, which read as a dead
+        # workspace on the week's busiest day. Documents carry only source-side
+        # timestamps, so document deltas still enter through `changes` rows.
+        floor_sql = "%s::timestamptz" if since else "(now() - interval '7 days')"
+        args = ((project_id, since) * 4) if since else ((project_id,) * 4)
         changes = conn.execute(
-            "SELECT count(*) AS n FROM changes WHERE project_id = %s AND created_at >= %s" if since else
-            "SELECT count(*) AS n FROM changes WHERE project_id = %s AND created_at >= now() - interval '7 days'",
-            (project_id, since) if since else (project_id,),
+            f"""SELECT
+                  (SELECT count(*) FROM changes
+                    WHERE project_id = %s AND created_at >= {floor_sql})
+                + (SELECT count(*) FROM facts
+                    WHERE project_id = %s AND created_at >= {floor_sql})
+                + (SELECT count(*) FROM facts
+                    WHERE project_id = %s AND verified_at >= ({floor_sql})::date)
+                + (SELECT count(*) FROM facts
+                    WHERE project_id = %s AND invalidated_at >= {floor_sql})
+                AS n""",
+            args,
         ).fetchone()["n"]
         facts = conn.execute("SELECT count(*) AS n FROM facts WHERE project_id = %s AND status <> 'Verified'",
                              (project_id,)).fetchone()["n"]

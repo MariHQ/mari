@@ -11,6 +11,8 @@ from unittest.mock import patch
 from mari_server.conversations import citations
 from mari_server.conversations.prompts import (
     CHAT_STYLE_RULES,
+    FORMAT,
+    NOT_FOUND,
     SURFACES,
     answer_system,
     default_style_text,
@@ -42,6 +44,13 @@ class ChatPromptTests(unittest.TestCase):
             for other, other_marker in SURFACE_MARKERS.items():
                 if other != surface:
                     self.assertNotIn(other_marker, prompt, f"{surface} leaked {other}")
+
+    def test_public_surface_treats_retrieved_context_as_authorized(self):
+        prompt = answer_system(None, "public")
+        self.assertIn("already been authorized", prompt)
+        self.assertIn("restricted upstream sources", prompt)
+        self.assertIn("answer from and cite it", prompt)
+        self.assertIn("never open with the not-found sentence", prompt)
 
     def test_every_surface_carries_the_shared_style_and_the_untrusted_rule(self):
         self.assertEqual(set(SURFACES), set(SURFACE_MARKERS))
@@ -179,6 +188,133 @@ class CitationPayloadTests(unittest.TestCase):
         self.assertEqual(source["updated"], "")
         self.assertEqual(source["author"], "")
         self.assertEqual(source["snippet"], "")
+
+
+class NotFoundSentenceTests(unittest.TestCase):
+    def test_the_constant_is_the_sentence_the_style_rules_ask_for(self):
+        self.assertTrue(any(NOT_FOUND in rule for rule in CHAT_STYLE_RULES))
+
+    def test_every_surface_tells_the_model_not_to_wrap_the_answer(self):
+        for surface in SURFACES:
+            self.assertIn(FORMAT, answer_system(None, surface), surface)
+        # Above the style pack, so a workspace rule cannot switch it off.
+        self.assertIn(FORMAT, answer_system("- Always answer in haiku.", "dock"))
+
+    def test_the_format_rule_governs_the_opening_and_still_allows_fenced_code(self):
+        # It must not contradict the style rule "Put code in a fenced block".
+        self.assertIn("Never open the answer with a code fence", FORMAT)
+        self.assertIn("fenced block with a language tag", FORMAT)
+        self.assertNotIn("never wrap the answer", FORMAT)
+
+
+class CitedSourcesTests(unittest.TestCase):
+    """The rail under an answer is what the answer cites, not what retrieval
+    happened to hand the model: a "could not find" answer arrived over four
+    MongoDB playbooks that had nothing to do with the question."""
+
+    def sources(self):
+        return citations.source_payload([row(), row(id=42, title="Oncall"), row(id=43, title="Cluster")])
+
+    def test_cite_numbers_reads_markers_outside_code(self):
+        answer = "Deploys run Tuesday [1]. See `arr[2]` and:\n```sh\necho [3]\n```\nAlso [3](https://x) and [1][3]."
+        self.assertEqual(citations.cite_numbers(answer), {1, 3})
+        self.assertEqual(citations.cite_numbers(""), set())
+
+    def test_cited_keeps_only_the_rows_the_answer_cites_with_their_numbers(self):
+        cited = citations.cited("Page one says so [1], and so does three [3].", self.sources())
+        self.assertEqual([s["n"] for s in cited], [1, 3])
+        self.assertEqual([s["title"] for s in cited], ["Deploy runbook", "Cluster"])
+
+    def test_a_not_found_answer_cites_nothing(self):
+        for answer in (
+            "I could not find this in the connected sources.",
+            "  I could not find this in the connected sources",
+            "```\nI could not find this in the connected sources.\n```",
+            "`I could not find this in the connected sources.`",
+            "Sorry, I could not find this in the connected sources!",
+        ):
+            self.assertTrue(citations.is_not_found(answer), answer)
+            self.assertEqual(citations.cited(answer, self.sources()), [], answer)
+
+    def test_a_paraphrased_refusal_cites_nothing(self):
+        # The customer's original symptom: the model reworded the sentence
+        # and the rail came back with every candidate.
+        for answer in (
+            "I couldn't find anything about that in the connected sources.",
+            "I could not find any information on retention in the context provided.",
+            "There is no information about retention in the knowledge base.",
+            "The sources say nothing about retention.",
+            "Retention is not covered in the connected sources.",
+            "I cannot find that in the context.",
+            "I couldn\u2019t find anything about that.",
+            "Nothing about that, sorry.",
+        ):
+            self.assertTrue(citations.is_not_found(answer), answer)
+            self.assertEqual(citations.cited(answer, self.sources()), [], answer)
+
+    def test_a_long_answer_that_mentions_a_gap_in_passing_is_not_a_refusal(self):
+        answer = ("Retention is 30 days for logs and 90 days for metrics, and backups roll "
+                  "over weekly. The retention job runs nightly and the alerts page shows "
+                  "when it last ran. I couldn't find who owns the job, though.")
+        self.assertGreater(len(answer), citations.REFUSAL_LIMIT)
+        self.assertFalse(citations.is_not_found(answer))
+
+    def test_not_found_prefix_followed_by_a_grounded_answer_keeps_sources(self):
+        answer = (
+            "I could not find this in the connected sources beyond the two messages shown: "
+            '"the sky is blue" and "this is a private test."'
+        )
+        self.assertFalse(citations.is_not_found(answer))
+        self.assertEqual(len(citations.cited(answer, self.sources())), 3)
+        self.assertEqual(len(citations.cited(answer, self.sources())), 3)
+
+    def test_a_cited_answer_is_never_a_refusal_however_it_hedges(self):
+        answer = "Retention is 30 days [1]. Encryption at rest is not covered by the sources."
+        self.assertEqual([s["n"] for s in citations.cited(answer, self.sources())], [1])
+
+    def test_markers_that_resolve_to_no_candidate_are_read_as_no_markers(self):
+        # [7] and [0] over three candidates: a slip, not a citation.
+        self.assertEqual(len(citations.cited("Deploys run Tuesday [7] [0].", self.sources())), 3)
+        self.assertEqual(citations.cited("I could not find this in the connected sources [7].",
+                                         self.sources()), [])
+        # A real marker beside a slip still narrows to the real one.
+        self.assertEqual([s["n"] for s in citations.cited("See [2] and [9].", self.sources())], [2])
+
+    def test_an_uncited_real_answer_keeps_every_candidate(self):
+        # The model drew on the context without saying where; hiding all
+        # provenance would be worse. This is also what keeps an approved
+        # answer's card, which nothing cites by number.
+        self.assertFalse(citations.is_not_found("Deploys run every Tuesday."))
+        self.assertEqual(len(citations.cited("Deploys run every Tuesday.", self.sources())), 3)
+
+    def test_clean_answer_drops_leading_indentation_the_renderer_would_read_as_code(self):
+        self.assertEqual(citations.clean_answer("    Deploys run Tuesday [1]."), "Deploys run Tuesday [1].")
+        self.assertEqual(citations.clean_answer("\n\n\tI could not find this in the connected sources."),
+                         "I could not find this in the connected sources.")
+
+    def test_clean_answer_unwraps_only_a_wrapped_not_found_sentence(self):
+        sentence = "I could not find this in the connected sources."
+        self.assertEqual(citations.clean_answer(f"```\n{sentence}\n```"), sentence)
+        self.assertEqual(citations.clean_answer(f"```text\n{sentence}\n```\n"), sentence + "\n")
+        self.assertEqual(citations.clean_answer(f"~~~\n{sentence}\n~~~"), sentence)
+        self.assertEqual(citations.clean_answer(f"`{sentence}`"), sentence)
+        code = "```python\nprint(1)\n```"
+        self.assertEqual(citations.clean_answer(code), code)
+        self.assertEqual(citations.clean_answer("Run `make` [1]."), "Run `make` [1].")
+        self.assertEqual(citations.clean_answer("`config.yml` is not in the sources [1]."),
+                         "`config.yml` is not in the sources [1].")
+
+    def test_clean_answer_unwraps_a_fenced_not_found_sentence_the_model_then_continued(self):
+        # What follows the wrapper is kept as written, so the stream (which
+        # releases at the closed fence) and the stored transcript agree.
+        sentence = "I could not find this in the connected sources."
+        self.assertEqual(citations.clean_answer(f"```\n{sentence}\n```\nThat said, deploys run Tuesday [1]."),
+                         f"{sentence}\nThat said, deploys run Tuesday [1].")
+        self.assertEqual(citations.clean_answer(f"`{sentence}` However, see [1]."),
+                         f"{sentence} However, see [1].")
+        # A fence that is not a wrapper around the sentence is left alone.
+        code = "```sh\necho hi\n```\nRun it [1]."
+        self.assertEqual(citations.clean_answer(code), code)
 
 
 class SlackSourceLineTests(unittest.TestCase):

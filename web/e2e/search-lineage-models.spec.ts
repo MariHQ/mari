@@ -119,7 +119,17 @@ test("Ollama embedding and generation settings save without cloud keys", async (
   await embedding.getByRole("combobox").selectOption("ollama:mxbai-embed-large");
   await page.getByRole("button", { name: "Save", exact: true }).first().click();
   await embedding.getByRole("button", { name: "Re-index everything?" }).click();
-  await page.getByRole("button", { name: "Save", exact: true }).nth(1).click();
+  // The LLM card's Save is disabled until something in it changes (both
+  // model Saves carry one rule), so pick the other local model first. The
+  // embedding save above refetches settings, and that refetch resets the
+  // card's selection when it lands, so keep choosing until the card holds
+  // the change and offers to save it.
+  const llmSave = page.getByRole("button", { name: "Save", exact: true }).nth(1);
+  await expect(async () => {
+    await llm.getByRole("combobox").selectOption("ollama:llama3.2");
+    await expect(llmSave).toBeEnabled({ timeout: 1_000 });
+  }).toPass();
+  await llmSave.click();
   await expect.poll(() => api.calls.filter((c) => c.query.includes("updateSetting")).length).toBeGreaterThanOrEqual(2);
   expect(api.calls.some((c) => c.variables.key === "embedding" && (c.variables.value as any).provider === "ollama")).toBeTruthy();
   expect(api.calls.some((c) => c.variables.key === "llm" && (c.variables.value as any).provider === "ollama")).toBeTruthy();

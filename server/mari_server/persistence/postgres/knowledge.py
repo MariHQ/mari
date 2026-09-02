@@ -2,13 +2,26 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import re
+import time
+import unicodedata
+from datetime import datetime, timezone
 
 from mari_server.persistence.postgres import connection as db
 from mari_server.identity import context as access
+from mari_server.identity.actor import SERVICE_ACTOR
+from mari_server.providers import models as llm
 
 
 _SCAN_COLUMNS = {"facts": "facts_scanned_at", "decisions": "decisions_scanned_at"}
+
+
+def normalize_claim(claim: str) -> str:
+    """Stable, conservative identity for punctuation/case/spacing variants."""
+    folded = unicodedata.normalize("NFKC", str(claim)).casefold()
+    return " ".join(re.sub(r"[\W_]+", " ", folded, flags=re.UNICODE).split())
 
 
 def scan_documents(kind: str, document_ids: list[int] | None, limit: int) -> list[dict]:
@@ -17,14 +30,17 @@ def scan_documents(kind: str, document_ids: list[int] | None, limit: int) -> lis
     with db.connect() as conn:
         if document_ids:
             rows = conn.execute(
-                f"""SELECT id, title, snippet, body, source, updated_src FROM documents
+                f"""SELECT id, title, snippet, body, source, updated_src, content_hash FROM documents
                      WHERE project_id = %s AND id = ANY(%s)
                      ORDER BY {column} NULLS FIRST, updated_src DESC NULLS LAST, id""",
                 (project_id, list(document_ids)),
             ).fetchall()
-            return rows[:limit] if limit else rows
+            # Explicit ids have already been bounded by the workflow fetch
+            # step. Reapplying the legacy default of eight here silently
+            # discarded the rest of a configured scope.
+            return rows
         return conn.execute(
-            f"""SELECT id, title, snippet, body, source, updated_src FROM documents
+            f"""SELECT id, title, snippet, body, source, updated_src, content_hash FROM documents
                  WHERE project_id = %s
                  ORDER BY {column} NULLS FIRST, updated_src DESC NULLS LAST, id
                  LIMIT %s""", (project_id, limit),
@@ -41,6 +57,76 @@ def mark_scanned(kind: str, document_ids: list[int]) -> None:
             f"UPDATE documents SET {column} = now() WHERE project_id = %s AND id = ANY(%s)",
             (project_id, list(document_ids)),
         )
+
+
+def fact_scan_passages(document_ids: list[int], query: str, limit: int) -> list[dict]:
+    """Return current chunks that have never been scanned at this exact hash.
+
+    Ordering by passage round distributes a bounded run across documents
+    before returning to a second chunk from any one long document.
+    """
+    if not document_ids or limit < 1:
+        return []
+    project_id = access.require_current_access().project_id
+    query = str(query or "").strip()
+    with db.connect() as conn:
+        return conn.execute(
+            """WITH pending AS (
+                 SELECT c.id AS chunk_id, c.document_id, c.idx, c.content,
+                        c.content_hash, d.title, d.source, d.updated_src,
+                        row_number() OVER (PARTITION BY c.document_id ORDER BY c.idx, c.id) AS passage_round
+                   FROM chunks c
+                   JOIN documents d ON d.project_id = c.project_id AND d.id = c.document_id
+                  WHERE c.project_id = %s AND c.document_id = ANY(%s)
+                    AND NOT EXISTS (
+                      SELECT 1 FROM fact_chunk_scans scanned
+                       WHERE scanned.project_id = c.project_id AND scanned.chunk_id = c.id
+                         AND scanned.content_hash = c.content_hash
+                    )
+                    AND (%s = '' OR to_tsvector('english', c.content) @@ plainto_tsquery('english', %s)
+                         OR c.content ILIKE %s)
+               )
+               SELECT * FROM pending
+                ORDER BY passage_round, updated_src DESC NULLS LAST, document_id, idx
+                LIMIT %s""",
+            (project_id, document_ids, query, query, f"%{query}%", limit),
+        ).fetchall()
+
+
+def _checkpoint_fact_passages(conn, project_id: int, passages: list[dict]) -> None:
+    """Checkpoint passage hashes using the caller's transaction."""
+    if not passages:
+        return
+    document_ids = sorted({int(row["document_id"]) for row in passages})
+    for row in passages:
+        conn.execute(
+            """INSERT INTO fact_chunk_scans (project_id, chunk_id, content_hash)
+               VALUES (%s, %s, %s) ON CONFLICT DO NOTHING""",
+            (project_id, int(row["chunk_id"]), str(row["content_hash"])),
+        )
+    conn.execute(
+        """UPDATE documents d
+              SET facts_scanned_at = now(),
+                  facts_scanned_hash = CASE WHEN NOT EXISTS (
+                    SELECT 1 FROM chunks c
+                     WHERE c.project_id = d.project_id AND c.document_id = d.id
+                       AND NOT EXISTS (
+                         SELECT 1 FROM fact_chunk_scans scanned
+                          WHERE scanned.project_id = c.project_id AND scanned.chunk_id = c.id
+                            AND scanned.content_hash = c.content_hash)
+                  ) THEN d.content_hash ELSE d.facts_scanned_hash END
+            WHERE d.project_id = %s AND d.id = ANY(%s)""",
+        (project_id, document_ids),
+    )
+
+
+def mark_fact_passages_scanned(passages: list[dict]) -> None:
+    """Checkpoint successful passage reads and close fully scanned documents."""
+    if not passages:
+        return
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn, conn.transaction():
+        _checkpoint_fact_passages(conn, project_id, passages)
 
 
 def decision_statements() -> set[str]:
@@ -67,7 +153,7 @@ def add_decision(statement: str, context: str, source: str, owner: str) -> bool:
 
 def fact_claims(*, verified_only: bool = False, original_case: bool = False) -> set[str]:
     project_id = access.require_current_access().project_id
-    sql = "SELECT claim FROM facts WHERE project_id = %s"
+    sql = "SELECT claim FROM facts WHERE project_id = %s AND merged_into_fact_id IS NULL"
     if verified_only:
         sql += " AND status = 'Verified'"
     with db.connect() as conn:
@@ -75,17 +161,458 @@ def fact_claims(*, verified_only: bool = False, original_case: bool = False) -> 
     return {str(row["claim"]) if original_case else str(row["claim"]).lower() for row in rows}
 
 
+def fact_claim_keys() -> set[str]:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn:
+        rows = conn.execute(
+            """SELECT normalized_key, claim FROM facts
+                WHERE project_id = %s AND merged_into_fact_id IS NULL""",
+            (project_id,),
+        ).fetchall()
+    return {str(row.get("normalized_key") or normalize_claim(row["claim"])) for row in rows}
+
+
 def add_fact(claim: str, source: str, owner: str, document_id: int | None) -> bool:
+    """Record a claim once per project. False means it was already on the
+    ledger — under any casing, because facts_project_canonical_key_idx (0031)
+    is unique on the casefolded key. Arbitrating on (project_id, claim) as
+    before let a case variant slip past the claim index and hit the key index
+    instead, which surfaced as a UniqueViolation through GraphQL."""
     project_id = access.require_current_access().project_id
     with db.connect() as conn, conn.transaction():
         row = conn.execute(
             """INSERT INTO facts
-               (project_id, claim, source, owner_name, owner_tint, status, verified, document_id)
-               VALUES (%s, %s, %s, %s, 1, 'Needs review', '—', %s)
-               ON CONFLICT (project_id, claim) DO NOTHING RETURNING id""",
-            (project_id, claim, source, owner, document_id),
+               (project_id, canonical_key, normalized_key, claim, source, owner_name, owner_tint,
+                status, verified, document_id, valid_from)
+               SELECT %s, %s, %s, %s, %s, %s, 1, 'Needs review', '—', %s, now()
+                WHERE NOT EXISTS (
+                  SELECT 1 FROM facts WHERE project_id = %s
+                    AND merged_into_fact_id IS NULL AND normalized_key = %s
+                )
+               ON CONFLICT DO NOTHING RETURNING id""",
+            (project_id, "claim:" + hashlib.sha256(normalize_claim(claim).encode()).hexdigest(),
+             normalize_claim(claim), claim, source, owner, document_id,
+             project_id, normalize_claim(claim)),
         ).fetchone()
     return bool(row)
+
+
+def stage_fact_candidates(run_id: int, candidates: list[dict],
+                          passages: list[dict] | None = None) -> int:
+    """Persist model output and its passage checkpoints atomically."""
+    project_id = access.require_current_access().project_id
+    added = 0
+    with db.connect() as conn, conn.transaction():
+        for candidate in candidates:
+            normalized_key = normalize_claim(candidate["claim"])
+            row = conn.execute(
+                """INSERT INTO fact_extraction_candidates
+                   (project_id, run_id, document_id, claim, normalized_key,
+                      source_chunk_id, source_content_hash, source_label, evidence, confidence,
+                      structured_claim, extraction_recipe)
+                   SELECT %s, r.id, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                     FROM workflow_runs r
+                    WHERE r.project_id = %s AND r.id = %s
+                      AND NOT EXISTS (
+                        SELECT 1 FROM fact_extraction_candidates prior
+                         WHERE prior.run_id = r.id AND prior.normalized_key = %s
+                      )
+                      AND NOT EXISTS (
+                        SELECT 1 FROM facts f WHERE f.project_id = r.project_id
+                          AND f.merged_into_fact_id IS NULL AND f.normalized_key = %s
+                      )
+                   ON CONFLICT DO NOTHING RETURNING id""",
+                (project_id, candidate.get("document_id"), candidate["claim"], normalized_key,
+                 candidate.get("chunk_id"), candidate.get("content_hash") or "",
+                 candidate.get("source") or "", candidate.get("evidence") or "",
+                 float(candidate.get("confidence") or 0),
+                 json.dumps(candidate.get("structured_claim") or {}),
+                 str(candidate.get("extraction_recipe") or "facts-extract-v3"),
+                 project_id, run_id, normalized_key, normalized_key),
+            ).fetchone()
+            added += bool(row)
+        _checkpoint_fact_passages(conn, project_id, passages or [])
+    return added
+
+
+def fact_candidates(run_id: int) -> list[dict]:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn:
+        return conn.execute(
+            """SELECT c.*, d.title AS document_title
+                 FROM fact_extraction_candidates c
+                 LEFT JOIN documents d ON d.project_id = c.project_id AND d.id = c.document_id
+                WHERE c.project_id = %s AND c.run_id = %s ORDER BY c.id""",
+            (project_id, run_id),
+        ).fetchall()
+
+
+def fact_embedding_subjects(run_id: int) -> list[dict]:
+    """Current claims that need to share one comparable embedding space."""
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn:
+        candidates = conn.execute(
+            """SELECT id, 'candidate' AS subject_type, claim
+                 FROM fact_extraction_candidates
+                WHERE project_id = %s AND run_id = %s ORDER BY id""",
+            (project_id, run_id),
+        ).fetchall()
+        facts = conn.execute(
+            """SELECT id, 'fact' AS subject_type, claim FROM facts
+                WHERE project_id = %s AND status NOT IN ('Retired', 'Invalidated') ORDER BY id""",
+            (project_id,),
+        ).fetchall()
+    return [*facts, *candidates]
+
+
+def upsert_fact_embedding(subject_type: str, subject_id: int, *, profile: str,
+                          provider: str, model: str, content_hash: str,
+                          embedding: list[float]) -> None:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn, conn.transaction():
+        conn.execute(
+            """INSERT INTO fact_embeddings
+                 (project_id, subject_type, subject_id, embedding_profile, provider,
+                  model, dimensions, content_hash, embedding)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::vector)
+               ON CONFLICT (project_id, subject_type, subject_id, embedding_profile, purpose)
+               DO UPDATE SET provider = EXCLUDED.provider, model = EXCLUDED.model,
+                 dimensions = EXCLUDED.dimensions, content_hash = EXCLUDED.content_hash,
+                 embedding = EXCLUDED.embedding, updated_at = now()""",
+            (project_id, subject_type, subject_id, profile, provider, model,
+             len(embedding), content_hash, str(embedding)),
+        )
+
+
+def current_fact_embedding_hashes(profile: str) -> dict[tuple[str, int], str]:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn:
+        rows = conn.execute(
+            """SELECT subject_type, subject_id, content_hash FROM fact_embeddings
+                WHERE project_id = %s AND embedding_profile = %s AND purpose = 'fact'""",
+            (project_id, profile),
+        ).fetchall()
+    return {(str(row["subject_type"]), int(row["subject_id"])): str(row["content_hash"])
+            for row in rows}
+
+
+def candidate_fact_neighbors(candidate_id: int, profile: str, *, limit: int = 8,
+                             minimum_similarity: float = .72) -> list[dict]:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn:
+        return conn.execute(
+            """SELECT f.id, f.claim AS label, f.status, f.document_id,
+                      d.updated_src AS target_updated_at, d.content_hash AS target_content_hash,
+                      1 - (target.embedding <=> query.embedding) AS similarity
+                 FROM fact_embeddings query
+                 JOIN fact_embeddings target ON target.project_id = query.project_id
+                   AND target.embedding_profile = query.embedding_profile
+                   AND target.purpose = query.purpose AND target.subject_type = 'fact'
+                 JOIN facts f ON f.project_id = target.project_id AND f.id = target.subject_id
+                 LEFT JOIN documents d ON d.project_id = f.project_id AND d.id = f.document_id
+                WHERE query.project_id = %s AND query.subject_type = 'candidate'
+                  AND query.subject_id = %s AND query.embedding_profile = %s
+                  AND f.status NOT IN ('Retired', 'Invalidated')
+                  AND 1 - (target.embedding <=> query.embedding) >= %s
+                ORDER BY target.embedding <=> query.embedding, f.id LIMIT %s""",
+            (project_id, candidate_id, profile, minimum_similarity, limit),
+        ).fetchall()
+
+
+def candidate_document_neighbors(candidate_id: int, profile: str, *, source_document_id: int | None,
+                                 limit: int = 6, minimum_similarity: float = .68) -> list[dict]:
+    """MaxSim over chunk vectors: each document may contribute its best passage."""
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn:
+        return conn.execute(
+            """SELECT d.id, d.title AS label, d.updated_src AS target_updated_at,
+                      d.content_hash AS target_content_hash,
+                      max(1 - (chunks.embedding <=> query.embedding)) AS similarity
+                 FROM fact_embeddings query
+                 JOIN chunk_embeddings chunks ON chunks.project_id = query.project_id
+                   AND chunks.embedding_profile = query.embedding_profile
+                   AND chunks.purpose = 'document'
+                 JOIN documents d ON d.project_id = chunks.project_id AND d.id = chunks.document_id
+                 JOIN chunks c ON c.project_id = chunks.project_id AND c.id = chunks.chunk_id
+                    AND c.content_hash = chunks.content_hash
+                WHERE query.project_id = %s AND query.subject_type = 'candidate'
+                  AND query.subject_id = %s AND query.embedding_profile = %s
+                  AND (%s::integer IS NULL OR d.id <> %s::integer)
+                GROUP BY d.id, d.title, d.updated_src, d.content_hash, query.embedding
+               HAVING max(1 - (chunks.embedding <=> query.embedding)) >= %s
+                ORDER BY similarity DESC, d.id LIMIT %s""",
+            (project_id, candidate_id, profile, source_document_id, source_document_id,
+             minimum_similarity, limit),
+        ).fetchall()
+
+
+def replace_candidate_semantic_links(candidate_id: int, profile: str, links: list[dict],
+                                     *, impact_score: int, high_impact: bool) -> None:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn, conn.transaction():
+        conn.execute(
+            """UPDATE fact_semantic_links SET active = false
+                WHERE project_id = %s AND subject_type = 'candidate' AND subject_id = %s
+                  AND embedding_profile = %s""",
+            (project_id, candidate_id, profile),
+        )
+        for link in links:
+            conn.execute(
+                """INSERT INTO fact_semantic_links
+                     (project_id, subject_type, subject_id, target_type, target_id,
+                      embedding_profile, similarity, relation, target_label,
+                      target_updated_at, target_content_hash, active)
+                   VALUES (%s, 'candidate', %s, %s, %s, %s, %s, %s, %s, %s, %s, true)
+                   ON CONFLICT (project_id, subject_type, subject_id, target_type, target_id, embedding_profile)
+                   DO UPDATE SET similarity = EXCLUDED.similarity, relation = EXCLUDED.relation,
+                     target_label = EXCLUDED.target_label,
+                     target_updated_at = EXCLUDED.target_updated_at,
+                     target_content_hash = EXCLUDED.target_content_hash,
+                     observed_at = now(), active = true""",
+                (project_id, candidate_id, link["target_type"], link["target_id"], profile,
+                 float(link["similarity"]), link["relation"], link["target_label"][:500],
+                 link.get("target_updated_at"), link.get("target_content_hash") or ""),
+            )
+        conn.execute(
+            """UPDATE fact_extraction_candidates SET impact_score = %s, high_impact = %s
+                WHERE project_id = %s AND id = %s""",
+            (impact_score, high_impact, project_id, candidate_id),
+        )
+
+
+def semantic_links(subject_type: str, subject_id: int) -> list[dict]:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn:
+        return conn.execute(
+            """SELECT target_type, target_id, relation, similarity, target_label,
+                      target_updated_at, target_content_hash, observed_at
+                 FROM fact_semantic_links
+                WHERE project_id = %s AND subject_type = %s AND subject_id = %s AND active
+                ORDER BY CASE relation WHEN 'contradicts' THEN 0 WHEN 'supports' THEN 1 ELSE 2 END,
+                         similarity DESC, id""",
+            (project_id, subject_type, subject_id),
+        ).fetchall()
+
+
+def review_fact_candidate(candidate_id: int, *, accepted: bool, reviewer: str,
+                          reason: str = "", kind: str = "human") -> bool:
+    project_id = access.require_current_access().project_id
+    status = "accepted" if accepted else "rejected"
+    with db.connect() as conn, conn.transaction():
+        return bool(conn.execute(
+            """UPDATE fact_extraction_candidates
+                  SET review_status = %s, review_kind = %s, review_reason = %s,
+                      reviewer = %s, reviewed_at = now()
+                WHERE project_id = %s AND id = %s AND published_fact_id IS NULL
+                RETURNING id""",
+            (status, kind[:20], reason[:1000], reviewer[:120], project_id, candidate_id),
+        ).fetchone())
+
+
+def fact_candidate_counts(run_id: int) -> dict[str, int]:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn:
+        rows = conn.execute(
+            """SELECT review_status, count(*) AS n FROM fact_extraction_candidates
+                WHERE project_id = %s AND run_id = %s GROUP BY review_status""",
+            (project_id, run_id),
+        ).fetchall()
+    counts = {"pending": 0, "accepted": 0, "rejected": 0}
+    counts.update({str(row["review_status"]): int(row["n"]) for row in rows})
+    return counts
+
+
+def publish_fact_candidates(run_id: int, owner: str, *, verified: bool = False) -> int:
+    """Idempotently promote accepted candidates to the durable fact ledger."""
+    project_id = access.require_current_access().project_id
+    status = "Verified" if verified else "Needs review"
+    published = 0
+    with db.connect() as conn, conn.transaction():
+        rows = conn.execute(
+            """SELECT * FROM fact_extraction_candidates
+                WHERE project_id = %s AND run_id = %s
+                  AND review_status = 'accepted' AND published_fact_id IS NULL
+                ORDER BY id FOR UPDATE""",
+            (project_id, run_id),
+        ).fetchall()
+        for candidate in rows:
+            # A fact belongs to the person who vouched for it. The publish
+            # step runs under the scheduler's automation identity, which
+            # stamped every scanned fact "Mari" even when a person clicked
+            # Accept; the candidate's own reviewer is the real owner. An
+            # AI-accepted candidate keeps the caller's actor, because no
+            # person vouched for that one.
+            fact_owner = (str(candidate["reviewer"])
+                          if candidate.get("review_kind") == "human" and candidate.get("reviewer")
+                          else owner)
+            assertion = conn.execute(
+                """SELECT * FROM fact_assertions
+                    WHERE project_id = %s AND candidate_id = %s FOR UPDATE""",
+                (project_id, candidate["id"]),
+            ).fetchone()
+            adjudication = assertion.get("adjudication") if assertion else {}
+            if isinstance(adjudication, str):
+                adjudication = json.loads(adjudication or "{}")
+            recommendation = str((adjudication or {}).get("recommendation") or "new_fact")
+            target_assertion_id = int((adjudication or {}).get("target_assertion_id") or 0)
+            target = None
+            if target_assertion_id and recommendation in {"supersede", "duplicate"}:
+                target = conn.execute(
+                    """SELECT a.id AS assertion_id,
+                              COALESCE(a.fact_id, candidate.published_fact_id) AS fact_id
+                         FROM fact_assertions a
+                         LEFT JOIN fact_extraction_candidates candidate
+                           ON candidate.project_id = a.project_id AND candidate.id = a.candidate_id
+                        WHERE a.project_id = %s AND a.id = %s
+                          AND COALESCE(a.fact_id, candidate.published_fact_id) IS NOT NULL
+                        FOR UPDATE OF a""",
+                    (project_id, target_assertion_id),
+                ).fetchone()
+            if target and recommendation == "duplicate":
+                fact = {"id": int(target["fact_id"])}
+                conn.execute(
+                    """UPDATE fact_assertions SET fact_id = %s, status = 'superseded',
+                              recorded_to = now()
+                        WHERE project_id = %s AND id = %s""",
+                    (fact["id"], project_id, assertion["id"]),
+                )
+            elif target and recommendation == "supersede":
+                fact = {"id": int(target["fact_id"])}
+                boundary = assertion.get("valid_from") or datetime.now(timezone.utc)
+                conn.execute(
+                    """UPDATE fact_assertions SET status = 'superseded',
+                              valid_to = COALESCE(valid_to, %s), recorded_to = COALESCE(recorded_to, now())
+                        WHERE project_id = %s AND id = %s""",
+                    (boundary, project_id, target["assertion_id"]),
+                )
+                conn.execute(
+                    """UPDATE fact_assertions SET fact_id = %s, status = 'active',
+                              valid_from = COALESCE(valid_from, %s), recorded_to = NULL
+                        WHERE project_id = %s AND id = %s""",
+                    (fact["id"], boundary, project_id, assertion["id"]),
+                )
+                conn.execute(
+                    """UPDATE facts SET claim = %s, source = %s, status = %s,
+                              verified = %s, verified_at = CASE WHEN %s THEN current_date ELSE verified_at END,
+                              document_id = %s, valid_from = %s, invalidated_at = NULL,
+                              invalidation_reason = '', current_assertion_id = %s
+                        WHERE project_id = %s AND id = %s""",
+                    (candidate["claim"], candidate["source_label"], status,
+                     time.strftime("%b %d, %Y") if verified else "—", verified,
+                     candidate["document_id"], boundary, assertion["id"], project_id, fact["id"]),
+                )
+            else:
+                normalized_key = normalize_claim(candidate["claim"])
+                canonical_key = "claim:" + hashlib.sha256(
+                    normalized_key.encode()
+                ).hexdigest()
+                fact = conn.execute(
+                    """INSERT INTO facts
+                         (project_id, canonical_key, normalized_key, claim, source,
+                          owner_name, owner_tint, status,
+                          verified, verified_at, document_id, valid_from)
+                       SELECT %s, %s, %s, %s, %s, %s, 1, %s, %s,
+                               CASE WHEN %s THEN current_date ELSE NULL END, %s,
+                               COALESCE((SELECT updated_src FROM documents
+                                          WHERE project_id = %s AND id = %s), now())
+                        WHERE NOT EXISTS (
+                          SELECT 1 FROM facts existing
+                           WHERE existing.project_id = %s
+                             AND existing.merged_into_fact_id IS NULL
+                             AND existing.normalized_key = %s)
+                       ON CONFLICT DO NOTHING
+                       RETURNING id, current_assertion_id""",
+                    (project_id, canonical_key, normalized_key, candidate["claim"],
+                     candidate["source_label"], fact_owner,
+                     status, time.strftime("%b %d, %Y") if verified else "—", verified,
+                     candidate["document_id"], project_id, candidate["document_id"],
+                     project_id, normalized_key),
+                ).fetchone()
+                created = bool(fact)
+                if not fact:
+                    fact = conn.execute(
+                        """SELECT id, current_assertion_id FROM facts
+                            WHERE project_id = %s AND merged_into_fact_id IS NULL
+                              AND (normalized_key = %s OR claim = %s OR canonical_key = %s)
+                            ORDER BY CASE WHEN normalized_key = %s THEN 0
+                                          WHEN claim = %s THEN 1 ELSE 2 END,
+                                     id LIMIT 1 FOR UPDATE""",
+                        (project_id, normalized_key, candidate["claim"], canonical_key,
+                         normalized_key, candidate["claim"]),
+                    ).fetchone()
+                if fact and assertion:
+                    if created or not fact.get("current_assertion_id"):
+                        conn.execute(
+                            """UPDATE fact_assertions SET fact_id = %s, status = 'active',
+                                      valid_from = COALESCE(valid_from,
+                                        (SELECT valid_from FROM facts WHERE project_id = %s AND id = %s))
+                                WHERE project_id = %s AND id = %s""",
+                            (fact["id"], project_id, fact["id"], project_id, assertion["id"]),
+                        )
+                        conn.execute(
+                            """UPDATE facts SET current_assertion_id = %s
+                                WHERE project_id = %s AND id = %s""",
+                            (assertion["id"], project_id, fact["id"]),
+                        )
+                    else:
+                        conn.execute(
+                            """UPDATE fact_assertions SET fact_id = %s, status = 'superseded',
+                                      recorded_to = COALESCE(recorded_to, now())
+                                WHERE project_id = %s AND id = %s""",
+                            (fact["id"], project_id, assertion["id"]),
+                        )
+            if fact and fact_owner != owner:
+                # A person adopting a machine-published fact vouches harder
+                # than the machine did, so the service identity yields to the
+                # human reviewer. The WHERE clause is the guard: a fact any
+                # real person owns keeps its owner, and a row just created
+                # with the reviewer's name is a no-op.
+                conn.execute(
+                    """UPDATE facts SET owner_name = %s
+                        WHERE project_id = %s AND id = %s AND owner_name = %s""",
+                    (fact_owner, project_id, fact["id"], SERVICE_ACTOR),
+                )
+            if fact:
+                conn.execute(
+                    """INSERT INTO fact_embeddings
+                         (project_id, subject_type, subject_id, embedding_profile, provider,
+                          model, purpose, representation, distance_metric, normalized,
+                          dimensions, content_hash, embedding)
+                       SELECT project_id, 'fact', %s, embedding_profile, provider, model,
+                              purpose, representation, distance_metric, normalized,
+                              dimensions, content_hash, embedding
+                         FROM fact_embeddings
+                        WHERE project_id = %s AND subject_type = 'candidate' AND subject_id = %s
+                       ON CONFLICT (project_id, subject_type, subject_id, embedding_profile, purpose)
+                       DO UPDATE SET content_hash = EXCLUDED.content_hash,
+                         embedding = EXCLUDED.embedding, updated_at = now()""",
+                    (fact["id"], project_id, candidate["id"]),
+                )
+                conn.execute(
+                    """INSERT INTO fact_semantic_links
+                         (project_id, subject_type, subject_id, target_type, target_id,
+                          embedding_profile, similarity, relation, target_label,
+                          target_updated_at, target_content_hash, observed_at, active)
+                       SELECT project_id, 'fact', %s, target_type, target_id,
+                              embedding_profile, similarity, relation, target_label,
+                              target_updated_at, target_content_hash, observed_at, active
+                         FROM fact_semantic_links
+                        WHERE project_id = %s AND subject_type = 'candidate' AND subject_id = %s
+                       ON CONFLICT (project_id, subject_type, subject_id, target_type, target_id, embedding_profile)
+                       DO UPDATE SET similarity = EXCLUDED.similarity, relation = EXCLUDED.relation,
+                         target_label = EXCLUDED.target_label,
+                         target_updated_at = EXCLUDED.target_updated_at,
+                         target_content_hash = EXCLUDED.target_content_hash,
+                         observed_at = EXCLUDED.observed_at, active = EXCLUDED.active""",
+                    (fact["id"], project_id, candidate["id"]),
+                )
+                conn.execute(
+                    """UPDATE fact_extraction_candidates SET published_fact_id = %s
+                        WHERE project_id = %s AND id = %s""",
+                    (fact["id"], project_id, candidate["id"]),
+                )
+                published += 1
+    return published
 
 
 def document(document_id: int) -> dict | None:
@@ -162,7 +689,8 @@ def verify_fact(fact_id: int) -> str | None:
     with db.connect() as conn, conn.transaction():
         row = conn.execute(
             """UPDATE facts SET status = 'Verified', verified_at = current_date
-                 WHERE project_id = %s AND id = %s RETURNING claim""",
+                 WHERE project_id = %s AND id = %s
+                   AND status NOT IN ('Invalidated', 'Retired') RETURNING claim""",
             (project_id, fact_id),
         ).fetchone()
     return str(row["claim"]) if row else None
@@ -248,12 +776,38 @@ def graph_views() -> list[dict]:
 
 def facts(document_id: int | None = None) -> list[dict]:
     project_id = access.require_current_access().project_id
-    clause = " AND document_id = %s" if document_id is not None else ""
-    args = (project_id, document_id) if document_id is not None else (project_id,)
+    profile = llm.embedding_profile()
+    clause = " AND f.document_id = %s" if document_id is not None else ""
     with db.connect() as conn:
         return conn.execute(
-            f"SELECT * FROM facts WHERE project_id = %s{clause} ORDER BY id", args,
+            f"""SELECT f.*, impact.impact_count,
+                       (impact.has_contradiction OR impact.impact_count >= 3) AS high_impact
+                  FROM facts f
+                  LEFT JOIN LATERAL (
+                    SELECT count(*)::integer AS impact_count,
+                           coalesce(bool_or(relation = 'contradicts'), false) AS has_contradiction
+                      FROM fact_semantic_links link
+                     WHERE link.project_id = f.project_id AND link.subject_type = 'fact'
+                       AND link.subject_id = f.id AND link.embedding_profile = %s AND link.active
+                  ) impact ON true
+                 WHERE f.project_id = %s AND f.merged_into_fact_id IS NULL{clause} ORDER BY f.id""",
+            # SQL reads profile inside the lateral before the outer project.
+            ((profile, project_id, document_id) if document_id is not None else (profile, project_id)),
         ).fetchall()
+
+
+def invalidate_fact(fact_id: int, reason: str) -> dict | None:
+    """Close a fact's validity interval without deleting its impact history."""
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn, conn.transaction():
+        return conn.execute(
+            """UPDATE facts SET status = 'Invalidated', invalidated_at = now(),
+                              invalidation_reason = %s
+                WHERE project_id = %s AND id = %s
+                  AND status NOT IN ('Invalidated', 'Retired')
+                RETURNING id, claim""",
+            (reason[:1000], project_id, fact_id),
+        ).fetchone()
 
 
 def tasks() -> list[dict]:
@@ -360,15 +914,20 @@ def document_templates() -> list[dict]:
 
 def upload_manifest() -> list[dict]:
     project_id = access.require_current_access().project_id
+    profile = llm.embedding_profile()
     with db.connect() as conn:
         return conn.execute(
             """SELECT d.id, d.source_path, d.external_id, d.updated_src,
-                      count(c.id) AS chunks, count(c.embedding) AS embedded
+                      count(DISTINCT c.id) AS chunks, count(DISTINCT e.chunk_id) AS embedded
                  FROM documents d
                  JOIN sources s ON s.project_id = d.project_id AND s.id = d.source_id
                                AND s.provider = 'upload'
                  LEFT JOIN chunks c ON c.project_id = d.project_id AND c.document_id = d.id
-                WHERE d.project_id = %s GROUP BY d.id ORDER BY d.id""", (project_id,),
+                 LEFT JOIN chunk_embeddings e
+                   ON e.project_id = c.project_id AND e.chunk_id = c.id
+                  AND e.embedding_profile = %s AND e.purpose = 'document'
+                  AND e.content_hash = c.content_hash
+                WHERE d.project_id = %s GROUP BY d.id ORDER BY d.id""", (profile, project_id),
         ).fetchall()
 
 
@@ -415,10 +974,15 @@ def harvest_source_counts() -> tuple[list[dict], int]:
 
 def index_stats() -> dict:
     project_id = access.require_current_access().project_id
+    profile = llm.embedding_profile()
     with db.connect() as conn:
         return conn.execute("""SELECT (SELECT count(*) FROM documents WHERE project_id = %s) AS docs,
-          count(*) AS chunks, count(*) FILTER (WHERE embedding IS NOT NULL) AS embedded
-          FROM chunks WHERE project_id = %s""", (project_id, project_id)).fetchone()
+          count(DISTINCT c.id) AS chunks, count(DISTINCT e.chunk_id) AS embedded
+          FROM chunks c LEFT JOIN chunk_embeddings e
+            ON e.project_id = c.project_id AND e.chunk_id = c.id
+           AND e.embedding_profile = %s AND e.purpose = 'document'
+           AND e.content_hash = c.content_hash
+          WHERE c.project_id = %s""", (project_id, profile, project_id)).fetchone()
 
 
 def decisions_with_supersession() -> list[dict]:

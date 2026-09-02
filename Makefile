@@ -1,9 +1,18 @@
-.PHONY: test test-server test-web test-browser test-contracts test-agent-evals test-live-ollama test-live-deepseek test-live-connectors test-integration test-reliability test-restore test-fly-image test-k8s
+.PHONY: test test-server test-components test-web test-browser test-contracts test-agent-evals test-live-ollama test-live-deepseek test-live-connectors test-integration test-reliability test-restore test-fly-image test-helm test-k8s
 
-test: test-server test-web test-browser
+test: test-server test-components test-web test-browser
 
 test-server:
 	PYTHONPATH=server server/.venv/bin/python -m unittest discover -s server/tests -v
+
+# The component packages carry their own suites; nothing else discovers them.
+test-components:
+	cd mari-components && ../server/.venv/bin/python -m unittest discover -s tests -v
+	for package in mari-components/packages/*; do \
+	  if [ -d "$$package/tests" ]; then \
+	    (cd "$$package" && ../../../server/.venv/bin/python -m unittest discover -s tests -v) || exit 1; \
+	  fi; \
+	done
 
 test-web:
 	npm --prefix web run check
@@ -37,6 +46,11 @@ test-restore:
 
 test-fly-image:
 	./deploy/fly/smoke.sh
+
+test-helm:
+	helm lint deploy/helm/mari --set secrets.databasePassword=release-validation-only
+	helm template mari deploy/helm/mari --namespace mari \
+		--set secrets.databasePassword=release-validation-only >/dev/null
 
 test-k8s:
 	./deploy/k8s/smoke.sh

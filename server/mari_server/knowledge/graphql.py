@@ -11,6 +11,7 @@ import time
 import typing as t
 
 import strawberry
+from strawberry.scalars import JSON
 
 from mari_server.automations import runtime as flowengine
 from mari_server.providers import models as llm
@@ -177,6 +178,40 @@ class MutKnowledge:
         audit("verified fact", claim)
         return True
 
+    @strawberry.mutation
+    def review_fact_candidate(self, id: int, accept: bool, reason: str = "") -> bool:
+        """Record a durable human verdict on staged extraction output."""
+        ok = knowledge_store.review_fact_candidate(
+            id, accepted=accept, reviewer=actor_name(), reason=reason, kind="human",
+        )
+        if ok:
+            audit("accepted" if accept else "rejected", f"fact candidate #{id}")
+        return ok
+
+    @strawberry.mutation
+    def invalidate_fact(self, id: int, reason: str = "Business context changed") -> bool:
+        """End a fact's validity interval while retaining its impact cluster."""
+        from mari_server.persistence.postgres import fact_intelligence as fact_store
+        row = fact_store.invalidate_fact(
+            id, reason=reason, actor=actor_name(),
+            effective_at=dt.datetime.now(dt.timezone.utc),
+        )
+        if not row:
+            return False
+        audit("invalidated fact", row["claim"])
+        return True
+
+    @strawberry.mutation
+    def restore_fact(self, id: int) -> bool:
+        """Reopen an invalidated fact as Needs review. Verification is not
+        restored — a person re-verifies deliberately."""
+        from mari_server.persistence.postgres import fact_intelligence as fact_store
+        row = fact_store.restore_fact(id)
+        if not row:
+            return False
+        audit("restored fact", row["claim"])
+        return True
+
     @strawberry.mutation(deprecation_reason=DEPRECATED_REVIEW)
     def create_task(self, title: str, kind: str = "factcheck", kind_label: str = "Fact check",
                     assignee: str = "", due: str | None = None,
@@ -239,7 +274,11 @@ class MutKnowledge:
         if doc_id and not knowledge_store.document_exists(doc_id):
             raise ValueError(f"No document {doc_id} to attribute this claim to")
         owner = owner.strip() or actor_name()
-        knowledge_store.add_fact(claim, source, owner, doc_id)
+        # The store answers False when the claim (under any casing) is already
+        # on the ledger. Nothing was written, so nothing is audited, and the
+        # console gets told rather than a silent True.
+        if not knowledge_store.add_fact(claim, source, owner, doc_id):
+            raise ValueError("That claim is already on the ledger.")
         audit("added fact", claim, detail=[("Owner", owner), ("Source", source)])
         return True
 
@@ -518,7 +557,7 @@ class MutKnowledge:
             return False
         vec = None
         if status == "approved":
-            vec = llm.embed(row["question"] + " " + row["answer"])
+            vec = llm.embed(row["question"] + " " + row["answer"], purpose="document")
         knowledge_store.set_answer_status(id, status, vec)
         audit(f"{status} answer", row["question"])
         return True
@@ -632,13 +671,15 @@ class MutKnowledge:
         return scan_facts_for()[0]
 
     @strawberry.mutation
-    def start_fact_scan(self) -> int:
+    def start_fact_scan(self, config: JSON | None = None) -> int:
         """Start the fact scan as a real background run and answer with the run
         id, so the page that asked can follow it. The scan reads the whole
         recent corpus through a model: it is a flow with steps and a history
         like every other long job here, not something a link fires and forgets.
         """
         wf_id = flowengine.ensure_fact_scan_flow()
+        if config is not None:
+            flowengine.configure_fact_scan_flow(wf_id, config)
         run = workflow_store.create_run(wf_id)
         n = run["number"]
         audit(f"started run #{n}", flowengine.FACT_SCAN_FLOW)

@@ -220,23 +220,24 @@ def ports(conn) -> DocumentPorts:
             """INSERT INTO documents
                  (project_id, source, external_id, title, snippet, body, author, author_initials,
                   kind, updated_src, created_src, content_hash, source_path, source_id,
-                  acl_visibility, acl_principals, observed_at)
+                  acl_visibility, acl_principals, observed_at, metadata)
                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                       %s, %s, %s, %s, %s, %s)
+                       %s, %s, %s, %s, %s, %s, %s)
                ON CONFLICT (project_id, source, external_id) DO UPDATE SET
                  title = EXCLUDED.title, snippet = EXCLUDED.snippet, body = EXCLUDED.body,
                  author = EXCLUDED.author, kind = EXCLUDED.kind,
                  updated_src = EXCLUDED.updated_src, observed_at = EXCLUDED.observed_at,
                  content_hash = EXCLUDED.content_hash, source_path = EXCLUDED.source_path,
                  source_id = EXCLUDED.source_id, acl_visibility = EXCLUDED.acl_visibility,
-                 acl_principals = EXCLUDED.acl_principals
+                 acl_principals = EXCLUDED.acl_principals, metadata = EXCLUDED.metadata
                RETURNING id, (xmax = 0) AS inserted""",
             (version.project_id, fields.source, version.external_id, version.title,
              excerpt(version.body, version.title), version.body, fields.author,
              fields.author_initials, fields.kind, version.source_updated_at,
              version.source_updated_at, version.revision, version.source_url,
              int(version.source_id), str(version.acl.get("visibility") or "project"),
-             json.dumps(version.acl.get("principals") or []), version.recorded_at),
+             json.dumps(version.acl.get("principals") or []), version.recorded_at,
+             json.dumps(dict(fields.metadata))),
         ).fetchone()
         return int(row["id"]), bool(row["inserted"])
 

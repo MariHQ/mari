@@ -248,6 +248,8 @@ class SlackSetupToAnswerTests(unittest.TestCase):
              patch.object(bots, "_EVENT_INBOX", inbox), \
              patch.object(bots, "_refresh_slack_aggregate"), \
              patch.object(search_service.search_store, "keyword_candidates", return_value=documents), \
+             patch.object(search_service.search_store, "documents_by_id",
+                          side_effect=lambda _project_id, ids: [dict(d) for d in documents if d["id"] in ids]), \
              patch.object(search_service.llm, "embed", return_value=None), \
              patch.object(bots.llm, "chat_stream",
                           side_effect=lambda messages, _system: prompts.append(messages[-1]["content"]) or iter(["Use the runbook [1]."])):
@@ -377,6 +379,69 @@ class SlackSetupToAnswerTests(unittest.TestCase):
 
         self.assertEqual(answered, [("tell me about mari", "")])
         observe.assert_called_once()
+
+
+
+class SlackThreadReingestTests(unittest.TestCase):
+    """The bot re-ingests the thread it answered in. It used to write the
+    whole sources.config back from a copy read before the upsert, undoing a
+    concurrent sweep's cursor, checkpoint and snapshot flags, and stored the
+    raw revision as the hash so the next poll re-chunked the thread."""
+
+    def _document(self):
+        from mari_components import KnowledgeDocument
+        return KnowledgeDocument("C1:1700000000.000100", "Deploy thread", "Production is ready.",
+                                 revision="1700000000.000200", updated_at="2026-09-01T00:00:00Z")
+
+    def test_reingest_merges_one_hash_entry_on_the_document_connection(self):
+        from mari_components.sync import document_fingerprint
+        document = self._document()
+        conn = unittest.mock.MagicMock()
+        conn.__enter__.return_value = conn
+        order = []
+        conn.commit.side_effect = lambda: order.append("commit")
+        sources = [{"id": 5, "config": {"token": "xoxb", "cursor": "sweep-cursor",
+                                        "checkpoint": "ckpt-9", "full_snapshot_pending": True,
+                                        "item_hashes": {"other": "h"}}}]
+        with patch.object(bots.bot_store, "slack_sources", return_value=sources), \
+             patch.object(bots, "fetch_slack_thread_by_id", return_value=(document, True)), \
+             patch.object(bots.document_index, "chunk_settings", return_value=(100, 10)), \
+             patch.object(bots.document_index, "connection", return_value=conn), \
+             patch.object(bots.document_index, "upsert_document", return_value=(31, False)) as upsert, \
+             patch.object(bots.document_index, "sync_chunks"), \
+             patch.object(bots.connector_sync, "merge_config",
+                          side_effect=lambda *a, **k: order.append(("merge", a, k))) as merge, \
+             patch.object(bots, "invalidate_search"):
+            bots._refresh_slack_aggregate(7, "xoxb", "C1", "1700000000.000100")
+
+        expected = document_fingerprint(document)
+        self.assertNotEqual(expected, document.revision)
+        self.assertEqual(upsert.call_args.args[7], expected)
+        merge.assert_called_once_with(conn, 5, {}, hashes={document.external_id: expected})
+        # one entry, merged under the row lock, in the same transaction as the document
+        self.assertEqual([step if isinstance(step, str) else step[0] for step in order],
+                         ["merge", "commit"])
+        self.assertFalse(hasattr(bots.bot_store, "save_source_config"))
+        # the sweep's keys were never read back and cannot be put back
+        self.assertEqual(sources[0]["config"]["cursor"], "sweep-cursor")
+
+    def test_a_source_paused_under_the_row_lock_is_rolled_back_not_revived(self):
+        document = self._document()
+        conn = unittest.mock.MagicMock()
+        conn.__enter__.return_value = conn
+        with patch.object(bots.bot_store, "slack_sources", return_value=[{"id": 5, "config": {}}]), \
+             patch.object(bots, "fetch_slack_thread_by_id", return_value=(document, True)), \
+             patch.object(bots.document_index, "chunk_settings", return_value=(100, 10)), \
+             patch.object(bots.document_index, "connection", return_value=conn), \
+             patch.object(bots.document_index, "upsert_document", return_value=(31, False)), \
+             patch.object(bots.document_index, "sync_chunks"), \
+             patch.object(bots.connector_sync, "merge_config",
+                          side_effect=bots.connector_sync.SourcePaused("source is paused")), \
+             patch.object(bots, "invalidate_search") as invalidate:
+            bots._refresh_slack_aggregate(7, "xoxb", "C1", "1700000000.000100")
+        conn.rollback.assert_called_once_with()
+        conn.commit.assert_not_called()
+        invalidate.assert_called_once_with(7)
 
 
 if __name__ == "__main__":

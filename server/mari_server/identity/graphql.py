@@ -38,6 +38,11 @@ from mari_server.persistence.postgres.database import audit
 #              destination/workflow transports), unchanged.
 #
 # Anything unlisted stays at "any authenticated user", which is what it was.
+#
+# The tier is read from the caller's membership in the project the request
+# names (X-Mari-Project), never from the global users.role column. A person
+# can be an admin in one project and a viewer in another, and every write
+# below is scoped to the resolved project, so the check must be too.
 ROLES = ("admin", "manager", "user")
 
 # Keys in sources.config that identify WHICH thing a source is: repointing them
@@ -55,17 +60,28 @@ def _actor(info: strawberry.Info) -> dict:
     return user
 
 
+def _project_access(info: strawberry.Info):
+    """The caller's membership in the request's project (app.graphql_context)."""
+    ctx = info.context if isinstance(info.context, dict) else {}
+    project = ctx.get("access")
+    if project is None:
+        raise PermissionError("Choose a project.")
+    return project
+
+
 def _require_admin(info: strawberry.Info) -> dict:
+    """Admin tier: only owner and admin memberships hold member.manage."""
     user = _actor(info)
-    if user.get("role") != "admin":
-        raise PermissionError("Admin role required for this operation")
+    if not _project_access(info).allows("member.manage"):
+        raise PermissionError("Admin role in this project required for this operation")
     return user
 
 
 def _require_manager(info: strawberry.Info) -> dict:
+    """Manager tier: manager, admin and owner memberships hold source.sync."""
     user = _actor(info)
-    if user.get("role") not in ("admin", "manager"):
-        raise PermissionError("Manager or admin role required for this operation")
+    if not _project_access(info).allows("source.sync"):
+        raise PermissionError("Manager or admin role in this project required for this operation")
     return user
 
 
@@ -90,20 +106,23 @@ class MutAdmin:
         return True
 
     @strawberry.mutation
-    def remove_source(self, info: strawberry.Info, source_id: int) -> bool:
+    def remove_source(self, info: strawberry.Info, source_id: int,
+                      delete_documents: bool = True) -> bool:
         """Real deletion, not the pause that disconnectSource performs: the
         source row, its documents and everything hanging off them, its
-        checkpoints, and its scheduled sync flow. Connector-kind rows only,
-        and never while a sync worker for the source is still running — a
-        worker writing documents for a deleted source must not be possible."""
+        checkpoints, and its scheduled sync flow. Connector and legacy rows
+        (only the upload row is refused in the store), and never while a sync
+        worker for the source is still running — a worker writing documents
+        for a deleted source must not be possible."""
         actor = _require_admin(info)
         if ingest.is_running(source_id):
             raise ValueError("A sync for this source is still running. Wait for it to finish, then remove.")
-        removed = admin_store.remove_source(source_id)
+        removed = admin_store.remove_source(source_id, delete_documents=delete_documents)
         if not removed:
             return False
         audit("removed source", str(removed["display_name"]), actor["name"],
-              detail=[("Provider", str(removed["provider"]))])
+              detail=[("Provider", str(removed["provider"])),
+                      ("Indexed documents", "deleted" if delete_documents else "retained")])
         return True
 
     # ——— members (admin-only; audit the real caller) ———
@@ -261,13 +280,16 @@ class MutAdmin:
 
     @strawberry.mutation
     def sync_source(self, info: strawberry.Info, source_id: int) -> bool:
-        """Diff-based incremental sync; returns immediately, progress via syncStatus."""
+        """Diff-based incremental sync; returns immediately, progress via syncStatus.
+        A row with no connector behind it is refused here with the words the
+        card shows (ingest.start_sync), never accepted and failed in the worker."""
         _require_manager(info)
         return ingest.start_sync(source_id)
 
     @strawberry.mutation
     def resync_source(self, info: strawberry.Info, source_id: int) -> bool:
-        """Full rebuild escape hatch: drops this source's chunks/hashes, then syncs."""
+        """Full rebuild escape hatch: drops this source's chunks/hashes, then syncs.
+        Refuses a non-connector row the same way syncSource does."""
         _require_manager(info)
         return ingest.start_sync(source_id, full=True)
 
@@ -291,11 +313,13 @@ class MutAdmin:
         # implementation, so we say so instead of faking progress.
         _require_manager(info)
         src = admin_store.source(provider)
-        if src and src.get("kind") == "connector":
-            ingest.start_sync(src["id"])
-            audit("triggered sync", provider)
-            return True
-        return False
+        if not src:
+            return False
+        if src.get("kind") != "connector":
+            raise ValueError(ingest.NOT_A_CONNECTOR)
+        ingest.start_sync(src["id"])
+        audit("triggered sync", provider)
+        return True
 
     # A source's config jsonb holds its stored credentials and the identity a
     # sync reads. Merging into it is therefore a credential write: admin-only,
@@ -308,6 +332,12 @@ class MutAdmin:
         before = admin_store.source(provider)
         if not before:
             raise ValueError(f"No source '{provider}' to configure")
+        # A row no connector owns (kind "" from the retired connectSource
+        # mutation, or any other legacy kind) has nothing that could read the
+        # credential this would store: refuse instead of writing it into a
+        # dead row that no sync will ever pick up.
+        if before.get("kind") != "connector":
+            raise ValueError(ingest.NOT_A_CONNECTOR)
         current = before["config"] if isinstance(before["config"], dict) else json.loads(before["config"] or "{}")
         for key in CONFIG_IDENTITY_KEYS:
             if key in config and str(config[key]) != str(current.get(key, "")):

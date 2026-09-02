@@ -27,6 +27,7 @@ from mari_server.providers import vectors as retrieval
 from mari_components import review as review_application
 from mari_server.persistence.postgres import review as review_repository
 from mari_server.persistence.postgres import knowledge as knowledge_store
+from mari_server.persistence.postgres import fact_intelligence as fact_store
 from mari_server.persistence.postgres import documents as document_repository, lineage as lineage_store
 from mari_server.persistence.postgres import trajectories as trajectory_store, workflows as workflow_store
 from mari_components.trajectories import project_embeddings_2d
@@ -40,7 +41,10 @@ from mari_server.product.types import (
     ActivityBucket, ActivityItem, ApiKey, ApprovedAnswer,
     AuditDetail, AuditEvent, AuditFinding, AuditRun, Change, ChatMessage,
     ChatSession, Checkpoint, Decision, DigestImpact, DigestTopic, DigestWhere,
-    DocHistory, Document, DocumentTemplate, Fact, FactContradiction, Finding,
+    DocHistory, Document, DocumentTemplate, Fact, FactContradiction, FactExtractionCandidate, FactSemanticLink,
+    FactIntelligence, FactRepresentationComponent, FactEvidenceSpan, FactEvidenceGroup,
+    FactAssertionRelation, FactClusterMembership, FactLlmBudget,
+    FactImpactItem, FactImpactPreview, Finding,
     FreshnessRow, GithubRepo, GithubTeamSync, GlossaryCandidate, GlossaryTerm,
     GraphStats, GraphView, InsightStats, LineageEdge, LineageNode, McpServer,
     Member, Notification, PromotedWorkflow, Provisioning, ReadabilityRow, RelatedDoc, Setting,
@@ -400,6 +404,82 @@ def _trajectories(rows: list[dict], steps: list[dict],
 # ————————————————— Query —————————————————
 
 
+def _iso(value: t.Any) -> str:
+    return value.isoformat() if hasattr(value, "isoformat") else str(value or "")
+
+
+def _fact_intelligence_value(data: dict | None) -> FactIntelligence | None:
+    if not data:
+        return None
+    assertion = data["assertion"]
+    return FactIntelligence(
+        assertion_id=int(assertion["id"]), fact_id=assertion.get("fact_id"),
+        candidate_id=assertion.get("candidate_id"), claim=str(assertion["claim"]),
+        structured_claim=assertion.get("structured_claim") or {},
+        adjudication=assertion.get("adjudication") or {}, status=str(assertion["status"]),
+        confidence=float(assertion.get("confidence") or 0),
+        confidence_reason=str(assertion.get("confidence_reason") or ""),
+        valid_from=_iso(assertion.get("valid_from")), valid_to=_iso(assertion.get("valid_to")),
+        recorded_from=_iso(assertion.get("recorded_from")),
+        recorded_to=_iso(assertion.get("recorded_to")),
+        criticality=str(assertion.get("criticality") or "normal"),
+        owner=str(assertion.get("owner_name") or ""),
+        components=[FactRepresentationComponent(
+            ordinal=int(row["ordinal"]), role=str(row["component_role"]),
+            text=str(row["rendered_text"]), content_hash=str(row["content_hash"]),
+            embedding_profile=str(row["embedding_profile"]),
+            representation_profile=str(row["representation_profile"]),
+            provider=str(row.get("provider") or ""), model=str(row.get("model") or ""),
+            dimensions=int(row["dimensions"]),
+        ) for row in data["components"]],
+        relations=[FactAssertionRelation(
+            target_assertion_id=int(row["target_assertion_id"]),
+            target_fact_id=row.get("target_fact_id"), target_claim=str(row["target_claim"]),
+            relation=str(row["relation"]),
+            approximate_score=(float(row["approximate_score"])
+                               if row.get("approximate_score") is not None else None),
+            exact_score=(float(row["exact_score"])
+                         if row.get("exact_score") is not None else None),
+            decision_kind=str(row["decision_kind"]),
+            decision_model=str(row.get("decision_model") or ""),
+            confidence=float(row.get("confidence") or 0),
+            rationale=str(row.get("rationale") or ""), observed_at=_iso(row.get("observed_at")),
+            target_valid_from=_iso(row.get("target_valid_from")),
+            target_valid_to=_iso(row.get("target_valid_to")),
+        ) for row in data["relations"]],
+        evidence_groups=[FactEvidenceGroup(
+            id=int(group["id"]), verdict=str(group["verdict"]),
+            sufficient=bool(group["sufficient"]), confidence=float(group["confidence"]),
+            rationale=str(group.get("rationale") or ""),
+            decision_kind=str(group["decision_kind"]),
+            decision_model=str(group.get("decision_model") or ""),
+            reviewer=str(group.get("reviewer") or ""),
+            reviewed_at=_iso(group.get("reviewed_at")),
+            spans=[FactEvidenceSpan(
+                id=int(span["id"]), document_id=int(span["document_id"]),
+                document_title=str(span["document_title"]), source=str(span["source"]),
+                quote=str(span["quote"]), content_hash=str(span["content_hash"]),
+                source_authority=str(span["source_authority"]),
+                published_at=_iso(span.get("published_at")),
+                effective_from=_iso(span.get("effective_from")),
+                effective_to=_iso(span.get("effective_to")),
+                revised_at=_iso(span.get("revised_at")),
+                ingested_at=_iso(span.get("ingested_at")), role=str(span["role"]),
+                similarity=(float(span["similarity"])
+                            if span.get("similarity") is not None else None),
+            ) for span in group["spans"]],
+        ) for group in data["evidence_groups"]],
+        clusters=[FactClusterMembership(
+            id=int(row["id"]), stable_key=str(row["stable_key"]),
+            label=str(row["label"]), summary=str(row["summary"]),
+            generation=str(row["generation"]), lifecycle=str(row["lifecycle"]),
+            label_kind=str(row["label_kind"]),
+            membership_score=float(row["membership_score"]),
+            explanation=str(row.get("explanation") or ""),
+        ) for row in data["clusters"]],
+    )
+
+
 @strawberry.type
 class Query:
     @strawberry.field
@@ -486,13 +566,14 @@ class Query:
             return [days.get(today - dt.timedelta(days=11 - i), 0) for i in range(12)]
 
         def safe_config(r: dict) -> dict:
-            """Never leak connector credentials: secret field values are masked
-            and bulky internal hash maps dropped (CONNECTORS-CONTRACT.md)."""
+            """Never leak credentials: secret field values are masked and bulky
+            internal hash maps dropped (CONNECTORS-CONTRACT.md). Every kind goes
+            through the same mask, not only connectors: a legacy row the retired
+            connectSource mutation wrote (kind "") can hold the token it was
+            given, and sourcePulse is read by every member of the project."""
             from mari_server.persistence.postgres import connector_sync
             cfg = jload(r["config"]) or {}
-            if r.get("kind") == "connector":
-                return connector_sync.masked_config(r["provider"], cfg)
-            return {k: v for k, v in cfg.items() if k != "shas"}
+            return connector_sync.masked_config(r["provider"], cfg)
 
         # A source's automatic cadence is not a column on `sources`: it is the
         # trigger of the "Sync <name>" flow flowengine.ensure_sync_flow creates
@@ -710,7 +791,10 @@ class Query:
         # and whose '—' placeholder parses as an invalid date.
         return [Fact(id=r["id"], claim=r["claim"], source=r["source"], owner=r["owner_name"],
                      owner_tint=r["owner_tint"], status=r["status"],
-                     verified=r["verified_at"].isoformat() if r["verified_at"] else "")
+                     verified=r["verified_at"].isoformat() if r["verified_at"] else "",
+                     valid_from=r["valid_from"].isoformat() if r.get("valid_from") else "",
+                     captured_at=r["created_at"].isoformat() if r.get("created_at") else "",
+                     impact_count=int(r.get("impact_count") or 0), high_impact=bool(r.get("high_impact")))
                 for r in knowledge_store.facts()]
 
     @strawberry.field
@@ -724,7 +808,10 @@ class Query:
         rows = knowledge_store.facts(document_id)
         return [Fact(id=r["id"], claim=r["claim"], source=r["source"], owner=r["owner_name"],
                      owner_tint=r["owner_tint"], status=r["status"],
-                     verified=r["verified_at"].isoformat() if r["verified_at"] else "")
+                     verified=r["verified_at"].isoformat() if r["verified_at"] else "",
+                     valid_from=r["valid_from"].isoformat() if r.get("valid_from") else "",
+                     captured_at=r["created_at"].isoformat() if r.get("created_at") else "",
+                     impact_count=int(r.get("impact_count") or 0), high_impact=bool(r.get("high_impact")))
                 for r in rows]
 
     @strawberry.field
@@ -952,6 +1039,10 @@ class Query:
         any window the console can hold, so the filter has to reach the whole
         table rather than narrowing the page already fetched."""
         floor, ceil = _iso_date_arg(date_from), _iso_date_arg(date_to)
+        # The console asks for a 200-row window; the store passes `limit`
+        # straight to LIMIT, so it is clamped here before it can name the
+        # whole table.
+        limit = max(1, min(int(limit), 500))
         return [AuditEvent(id=r["id"], actor=r["actor"], verb=r["verb"], target=r["target"],
                            at=r["occurred_at"].isoformat(), detail=_details(r))
                 for r in audit_store.events(query, floor, ceil, limit)]
@@ -974,10 +1065,23 @@ class Query:
 
     @strawberry.field
     def workflows(self) -> list[Workflow]:
-        return [Workflow(id=r["id"], name=r["name"], description=r["description"], color=r["color"],
-                         pinned=r["pinned"], status=r["status"], nodes=jload(r["nodes"]),
-                         trigger=jload(r.get("trigger")) or {})
-                for r in workflow_store.list_workflows()]
+        result = []
+        for r in workflow_store.list_workflows():
+            nodes = jload(r["nodes"]) or []
+            trigger = jload(r.get("trigger")) or {}
+            recurring_steps = {"sync_source", "scan_facts", "refresh_digest"}
+            result.append(Workflow(
+                id=r["id"], name=r["name"], description=r["description"], color=r["color"],
+                pinned=r["pinned"], status=r["status"], nodes=nodes, trigger=trigger,
+                schedule_capable=(r["status"] != "archived" and (
+                    trigger.get("on") == "schedule" or any(
+                        node.get("kind") in recurring_steps for node in nodes))),
+                last_run_number=r.get("last_run_number"),
+                last_run_status=r.get("last_run_status") or "",
+                last_run_started=(r["last_run_started"].isoformat()
+                                  if r.get("last_run_started") else ""),
+            ))
+        return result
 
     @strawberry.field
     def workflow_runs(self, workflow_id: int | None = None) -> list[WorkflowRun]:
@@ -1004,6 +1108,115 @@ class Query:
                            duration=r["duration"], progress=r["progress"],
                            stats=jload(r["stats"]), rows=jload(r["rows_data"]),
                            triggered_by=r.get("triggered_by") or "")
+
+    @strawberry.field
+    def latest_workflow_run(self, workflow_id: int) -> WorkflowRun | None:
+        """Newest run not explicitly dismissed by the current user."""
+        r = workflow_store.latest_visible_run(workflow_id)
+        if not r:
+            return None
+        return WorkflowRun(id=r["id"], workflow_id=r["workflow_id"], workflow_name=r["wf_name"],
+                           number=r["number"], status=r["status"],
+                           started=r["started_at"].isoformat() if r.get("started_at") else "",
+                           duration=r["duration"], progress=r["progress"],
+                           stats=jload(r["stats"]), rows=jload(r["rows_data"]),
+                           triggered_by=r.get("triggered_by") or "")
+
+    @strawberry.field
+    def fact_extraction_candidates(self, run_id: int) -> list[FactExtractionCandidate]:
+        def semantic_links(candidate_id: int) -> list[FactSemanticLink]:
+            return [FactSemanticLink(
+                target_type=link["target_type"], target_id=link["target_id"],
+                relation=link["relation"], similarity=float(link["similarity"]),
+                target_label=link["target_label"],
+                target_updated_at=(link["target_updated_at"].isoformat()
+                                   if link.get("target_updated_at") else ""),
+                observed_at=link["observed_at"].isoformat() if link.get("observed_at") else "",
+            ) for link in knowledge_store.semantic_links("candidate", candidate_id)]
+
+        return [FactExtractionCandidate(
+            id=row["id"], run_id=row["run_id"], document_id=row.get("document_id"),
+            document_title=row.get("document_title") or "Source unavailable",
+            claim=row["claim"], source=row["source_label"], evidence=row["evidence"],
+            confidence=float(row["confidence"]), review_status=row["review_status"],
+            review_kind=row["review_kind"], review_reason=row["review_reason"],
+            reviewer=row["reviewer"],
+            reviewed_at=row["reviewed_at"].isoformat() if row.get("reviewed_at") else "",
+            published_fact_id=row.get("published_fact_id"),
+            impact_score=int(row.get("impact_score") or 0), high_impact=bool(row.get("high_impact")),
+            semantic_links=semantic_links(row["id"]),
+        ) for row in knowledge_store.fact_candidates(run_id)]
+
+    @strawberry.field
+    def fact_semantic_links(self, fact_id: int) -> list[FactSemanticLink]:
+        return [FactSemanticLink(
+            target_type=link["target_type"], target_id=link["target_id"],
+            relation=link["relation"], similarity=float(link["similarity"]),
+            target_label=link["target_label"],
+            target_updated_at=(link["target_updated_at"].isoformat()
+                               if link.get("target_updated_at") else ""),
+            observed_at=link["observed_at"].isoformat() if link.get("observed_at") else "",
+        ) for link in knowledge_store.semantic_links("fact", fact_id)]
+
+    @strawberry.field
+    def fact_candidate_intelligence(self, candidate_id: int) -> FactIntelligence | None:
+        assertion_id = fact_store.candidate_assertion_id(candidate_id)
+        return _fact_intelligence_value(
+            fact_store.assertion_intelligence(
+                assertion_id, embedding_profile=llm.embedding_profile(),
+            ) if assertion_id else None
+        )
+
+    @strawberry.field
+    def fact_run_intelligence(self, run_id: int) -> list[FactIntelligence]:
+        values: list[FactIntelligence] = []
+        for assertion_id in fact_store.run_assertion_ids(run_id):
+            value = _fact_intelligence_value(fact_store.assertion_intelligence(
+                assertion_id, embedding_profile=llm.embedding_profile(),
+            ))
+            if value:
+                values.append(value)
+        return values
+
+    @strawberry.field
+    def fact_intelligence(self, fact_id: int) -> FactIntelligence | None:
+        assertion_id = fact_store.fact_current_assertion_id(fact_id)
+        return _fact_intelligence_value(
+            fact_store.assertion_intelligence(
+                assertion_id, embedding_profile=llm.embedding_profile(),
+            ) if assertion_id else None
+        )
+
+    @strawberry.field
+    def fact_llm_budgets(self, run_id: int) -> list[FactLlmBudget]:
+        return [FactLlmBudget(
+            stage=str(row["stage"]), purpose=str(row["purpose"]),
+            provider=str(row.get("provider") or ""), model=str(row.get("model") or ""),
+            recipe=str(row.get("recipe") or ""), max_calls=int(row["max_calls"]),
+            max_input_tokens=int(row["max_input_tokens"]),
+            max_output_tokens=int(row["max_output_tokens"]),
+            calls_used=int(row["calls_used"]), input_tokens=int(row["input_tokens"]),
+            output_tokens=int(row["output_tokens"]), cost_usd=float(row["cost_usd"]),
+            status=str(row["status"]), visible_config=jload(row.get("visible_config")) or {},
+        ) for row in fact_store.llm_budgets(run_id)]
+
+    @strawberry.field
+    def fact_impact_preview(self, fact_id: int) -> FactImpactPreview | None:
+        value = fact_store.impact_preview(fact_id)
+        if not value:
+            return None
+        return FactImpactPreview(
+            fact_id=value["fact_id"], assertion_id=value["assertion_id"],
+            claim=value["claim"], score=value["score"],
+            items=[FactImpactItem(
+                impact_kind=row["impact_kind"], target_type=row["target_type"],
+                target_id=row["target_id"], target_label=row["target_label"],
+                severity=int(row["severity"]), dependency_type=row["dependency_type"],
+                depth=int(row["depth"]),
+                similarity=(float(row["similarity"])
+                            if row.get("similarity") is not None else None),
+            ) for row in value["items"]],
+        )
 
     @strawberry.field
     def knowledge_chat_destinations(self) -> list[KnowledgeChatDestination]:

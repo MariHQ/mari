@@ -56,11 +56,11 @@ DEFAULT_OLLAMA = "http://localhost:11434"
 DEFAULT_EMBED_MODEL = "nomic-embed-text"
 DEFAULT_GEN_MODEL = "gemma3:4b"
 
-# The width of `documents.embedding` and `chunks.embedding` (init.sql:
-# vector(768)). A vector of any other length cannot be stored, so a provider
-# that cannot produce this width is refused with a reason rather than left to
-# fail deep inside an INSERT. OpenAI's text-embedding-3-* models take a
-# `dimensions` argument, which is why they can serve this schema at all.
+# The active retrieval width. Versioned vectors are canonical in
+# `chunk_embeddings`, while `documents.embedding` and `chunks.embedding`
+# remain 768-wide compatibility projections during the rolling migration.
+# OpenAI's text-embedding-3-* models take a `dimensions` argument, which is why
+# they can serve this profile without an extra dimensionality reduction step.
 EMBED_DIMS = 768
 
 #: Ollama context window bounds. The floor is its own default, so short calls
@@ -279,9 +279,25 @@ def _response_format(gateway: dict[str, t.Any] | None,
             **_thinking_control(gateway),
         }
     if isinstance(requested, dict):
+        def strict_schema(value: t.Any) -> t.Any:
+            """Make object schemas valid for OpenAI strict structured output."""
+            if isinstance(value, list):
+                return [strict_schema(item) for item in value]
+            if not isinstance(value, dict):
+                return value
+            out = {key: strict_schema(item) for key, item in value.items()}
+            if out.get("type") == "object":
+                properties = out.get("properties") or {}
+                out["additionalProperties"] = False
+                out["required"] = list(properties)
+            return out
+
         return {"response_format": {
             "type": "json_schema",
-            "json_schema": {"name": "mari_response", "strict": True, "schema": requested},
+            "json_schema": {
+                "name": "mari_response", "strict": True,
+                "schema": strict_schema(requested),
+            },
         }}
     return {"response_format": {"type": "json_object"}}
 
@@ -320,6 +336,14 @@ def generation_model() -> tuple[str, str]:
         return provider, model
     llm_cfg, _ = _settings()
     return _resolve(llm_cfg)
+
+
+def model_identity() -> str:
+    """The generation model as one printable identity, for reviewer labels."""
+    provider, model = generation_model()
+    if provider and model:
+        return f"{provider}:{model}"
+    return model or provider or "unconfigured model"
 
 
 # ————————————————— HTTP —————————————————
@@ -465,7 +489,18 @@ def _stream(url: str, payload: dict, headers: dict | None = None,
 def embedding_profile() -> str:
     """Stable, secret-free identity for cached derived vectors."""
     provider, model = embedding_model()
-    return f"{provider}:{model}:dimensions={EMBED_DIMS}:muvera-unit-v1"
+    task_mode = ":asymmetric-search-v1" if "nomic-embed-text" in model.lower() else ""
+    return f"{provider}:{model}:dimensions={EMBED_DIMS}:muvera-unit-v1{task_mode}"
+
+
+def _embedding_input(text: str, model: str, purpose: str) -> str:
+    """Apply model-native asymmetric retrieval instructions when required."""
+    value = str(text or "")
+    if "nomic-embed-text" not in model.lower():
+        return value
+    if purpose not in {"query", "document"}:
+        raise ValueError("embedding purpose must be query or document")
+    return f"search_{purpose}: {value}"
 
 
 def _http_embeddings(values: list[str], provider: str, model: str) -> list[list[float] | None]:
@@ -510,7 +545,7 @@ def _http_embeddings(values: list[str], provider: str, model: str) -> list[list[
     return result
 
 
-def embed(text: str) -> list[float] | None:
+def embed(text: str, *, purpose: str = "query") -> list[float] | None:
     """A vector for `text`, or None with `last_error()` explaining why.
 
     The vector is always EMBED_DIMS long, because that is the width of the
@@ -518,7 +553,7 @@ def embed(text: str) -> list[float] | None:
     refused here rather than at INSERT time, where the failure would read as a
     database error instead of a configuration one."""
     provider, model = embedding_model()
-    body = text[:4000]
+    body = _embedding_input(text, model, purpose)[:4000]
 
     if not provider or not model:
         _fail("embedding provider and model must both be configured")
@@ -547,14 +582,17 @@ def embed(text: str) -> list[float] | None:
     return vec
 
 
-def embed_many(texts: t.Iterable[str]) -> list[list[float] | None]:
+def embed_many(texts: t.Iterable[str], *, purpose: str = "document") -> list[list[float] | None]:
     """Embed a batch while preserving input order."""
-    values = list(texts)
+    raw_values = list(texts)
+    provider, model = embedding_model()
+    values = [_embedding_input(value, model, purpose) for value in raw_values]
     if not values:
         return []
-    provider, model = embedding_model()
     if provider == "ollama":
-        return [embed(value) for value in values]
+        # Values are already task-prefixed; avoid applying the prefix twice.
+        return [embed(value.removeprefix(f"search_{purpose}: "), purpose=purpose)
+                for value in values]
     if provider not in {"openai", "gateway"} or not model:
         _fail("embedding provider and model must both be configured")
         return [None] * len(values)
@@ -595,14 +633,22 @@ def generate(prompt: str, system: str = "", timeout: float = 120.0,
         # JSON cut off mid-row. Size the window to the prompt being sent,
         # bounded so one long call cannot ask a laptop for a 262k window.
         budget = max_tokens or (1500 if json_format else 700)
+        # Bucketed, not exact: Ollama restarts the model runner whenever the
+        # requested num_ctx changes, and a per-prompt context size made nearly
+        # every call in a multi-stage scan pay a multi-second reload. Rounding
+        # up to the next power of two lets consecutive calls of similar size
+        # reuse the loaded runner.
+        needed = max(OLLAMA_MIN_CONTEXT, _tokens(prompt) + _tokens(system) + budget + 512)
+        bucket = OLLAMA_MIN_CONTEXT
+        while bucket < needed and bucket < OLLAMA_MAX_CONTEXT:
+            bucket *= 2
         payload: dict[str, t.Any] = {
             "model": model, "prompt": prompt, "system": system, "stream": False,
             "think": False,
             "options": {
                 "temperature": 0.3,
                 "num_predict": budget,
-                "num_ctx": min(OLLAMA_MAX_CONTEXT,
-                               max(OLLAMA_MIN_CONTEXT, _tokens(prompt) + _tokens(system) + budget + 512)),
+                "num_ctx": min(OLLAMA_MAX_CONTEXT, bucket),
             },
         }
         if json_format:
@@ -782,7 +828,7 @@ def chat_stream(messages: list[dict], system: str = "") -> t.Iterator[str]:
         if not key:
             _fail("settings.llm names the anthropic provider but no Anthropic API key is set")
             return
-        payload = {"model": model, "max_tokens": max_tokens or 1024, "stream": True, "messages": messages}
+        payload = {"model": model, "max_tokens": 1024, "stream": True, "messages": messages}
         if system:
             payload["system"] = system
         for line in _stream(f"{ANTHROPIC_BASE}/messages", payload,

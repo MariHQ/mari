@@ -1,10 +1,10 @@
 # Mari Helm chart
 
-Mari v0.1.3 deploys one API pod, one web pod, PostgreSQL/pgvector, and persistent
+The Mari chart deploys one API pod, one web pod, PostgreSQL/pgvector, and persistent
 volumes for PostgreSQL and `/data`. The API migration init container brings a
-new database to the current schema before traffic starts. The images are public,
-multi-architecture releases in Amazon ECR Public; customers do not need an AWS
-account or image pull credential.
+new database to the current schema before traffic starts. The images and chart
+are multi-architecture/public OCI releases in GitHub Container Registry;
+customers do not need an image pull credential.
 
 Install one Mari release per dedicated namespace. The stable internal Service
 names (`api`, `web`, and `postgres`) are part of the application contract.
@@ -27,7 +27,7 @@ URL-safe password. No cloud or object-storage credentials are required.
 Provider and source credentials are configured in Mari after installation; do
 not add them to the Kubernetes Secret.
 
-All v0.1.3 application files stay on the `mari-api-data` persistent volume:
+All application files stay on the `mari-api-data` persistent volume:
 vectors under `/data/mari/vectors`, Iceberg data under `/data/mari/iceberg`,
 repository audit data under `/data/mari/repo-audit`, and caches under `/data/cache`.
 No object store is required.
@@ -46,6 +46,28 @@ helm upgrade --install mari deploy/helm/mari \
   --set secrets.existingSecret=mari-secrets \
   --set ingress.enabled=true \
   --set ingress.className=REPLACE_WITH_THE_CUSTOMER_INGRESS_CLASS \
+  --wait --timeout 10m
+```
+
+Released charts are also available from GitHub Container Registry. Helm OCI
+versions omit the leading `v` used by the Git tag:
+
+```sh
+helm upgrade --install mari oci://ghcr.io/marihq/charts/mari \
+  --version 0.2.2 \
+  --namespace mari --create-namespace \
+  --set secrets.existingSecret=mari-secrets \
+  --wait --timeout 10m
+```
+
+The same packaged chart and its SHA-256 checksum are attached to each GitHub
+Release. This is useful before the GHCR package has been made public:
+
+```sh
+helm upgrade --install mari \
+  https://github.com/MariHQ/mari/releases/download/v0.2.2/mari-0.2.2.tgz \
+  --namespace mari --create-namespace \
+  --set secrets.existingSecret=mari-secrets \
   --wait --timeout 10m
 ```
 

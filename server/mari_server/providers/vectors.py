@@ -370,15 +370,24 @@ def rebuild_from_database() -> dict | None:
     rows = vectors.embedded_chunks(context.project_id, profile)
     grouped: dict[int, list[np.ndarray]] = defaultdict(list)
     hashes: dict[int, list[str]] = defaultdict(list)
+    chunk_ids: dict[int, list[str]] = defaultdict(list)
     for row in rows:
         vector = _parse_vector(row.get("embedding"))
         if vector is not None:
             grouped[int(row["document_id"])].append(vector)
             hashes[int(row["document_id"])].append(str(row.get("content_hash") or ""))
+            chunk_ids[int(row["document_id"])].append(str(row.get("chunk_id") or ""))
     if not grouped:
         return None
     matrices = {doc_id: np.stack(vectors) for doc_id, vectors in grouped.items()}
-    hash_rows = {doc_id: "|".join(values) for doc_id, values in hashes.items()}
+    # The digest binds each vector to its ordered canonical chunk identity and
+    # content. It is sufficient to detect whether a tiered artifact can be
+    # reproduced byte-for-input from the selected Postgres profile.
+    hash_rows = {
+        doc_id: "|".join(f"{chunk_id}:{content_hash}"
+                         for chunk_id, content_hash in zip(chunk_ids[doc_id], hashes[doc_id], strict=True))
+        for doc_id in grouped
+    }
     return index_for(context.project_id).build(
         matrices, hash_rows, embedding_profile=profile,
     )

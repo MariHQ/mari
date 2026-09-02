@@ -119,3 +119,40 @@ class ProjectAccessTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AdminTierUsesMembershipTests(unittest.TestCase):
+    """A global users.role must not open another project's admin mutations."""
+
+    class _Info:
+        def __init__(self, context):
+            self.context = context
+
+    def _info(self, role: str):
+        from mari_server.identity import access as access_module
+        return self._Info({
+            "user": {"id": 1, "name": "Dana", "role": "admin"},
+            "access": access_module.AccessContext(
+                1, 9, "beta", "Beta", role, access_module.capabilities_for_role(role)),
+        })
+
+    def test_global_admin_who_is_a_viewer_here_is_refused(self):
+        from mari_server.identity import graphql as mutations_admin
+        with self.assertRaises(PermissionError):
+            mutations_admin._require_admin(self._info("viewer"))
+        with self.assertRaises(PermissionError):
+            mutations_admin._require_manager(self._info("viewer"))
+
+    def test_membership_role_decides_the_tier(self):
+        from mari_server.identity import graphql as mutations_admin
+        self.assertEqual(mutations_admin._require_admin(self._info("admin"))["name"], "Dana")
+        self.assertEqual(mutations_admin._require_admin(self._info("owner"))["name"], "Dana")
+        self.assertEqual(mutations_admin._require_manager(self._info("manager"))["name"], "Dana")
+        with self.assertRaises(PermissionError):
+            mutations_admin._require_admin(self._info("manager"))
+
+    def test_no_project_in_context_is_refused(self):
+        from mari_server.identity import graphql as mutations_admin
+        with self.assertRaises(PermissionError):
+            mutations_admin._require_admin(self._Info({"user": {"id": 1, "name": "Dana", "role": "admin"}}))
+

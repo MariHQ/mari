@@ -447,6 +447,8 @@ test("LIVE configured-LLM fact scan completes through the browser", async ({ pag
   await signIn(page);
   await page.goto("/facts");
   await page.getByRole("button", { name: "Scan for facts" }).click();
+  await page.getByRole("dialog", { name: "Configure fact extraction" })
+    .getByRole("button", { name: "Save & run now" }).click();
   await expect(page.getByText(/SUCCEEDED|FAILED/)).toBeVisible({ timeout: 120_000 });
   await expect(page.getByText("FAILED", { exact: true })).toHaveCount(0);
 });

@@ -81,9 +81,26 @@ def _run_guarded(source_id: int, full: bool, project_access=None) -> dict:
             _RUNNING.discard(source_id)
 
 
+# The one refusal every sync entry point and the config write share, worded
+# for the card: a legacy row (kind "" from the retired connectSource mutation,
+# or any kind the connector worker does not own) cannot be synced or edited,
+# only removed and connected again.
+NOT_A_CONNECTOR = "This source has no connector behind it. Remove it and connect again."
+
+
+def require_connector(source_id: int) -> None:
+    """Raise ValueError(NOT_A_CONNECTOR) unless a connector owns this source.
+    Checked before a run is accepted, so a dead row is refused with words the
+    card can show instead of a True that turns into a worker error later."""
+    if source_store.source_kind(source_id) != "connector":
+        raise ValueError(NOT_A_CONNECTOR)
+
+
 def start_sync(source_id: int, full: bool = False) -> bool:
-    """Kick off a background sync; returns False if one is already running."""
+    """Kick off a background sync; returns False if one is already running.
+    Raises ValueError for a row no connector owns (require_connector)."""
     project_access = access.require_current_access()
+    require_connector(source_id)
     with _LOCK:
         if source_id in _RUNNING:
             return False

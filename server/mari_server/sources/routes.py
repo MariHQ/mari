@@ -25,6 +25,7 @@ from mari_server.persistence.postgres import connector_sync
 from mari_server.providers import connectors as component_connectors
 from mari_server.automations import runtime as flowengine
 from mari_server.sources import sync as ingest
+from mari_server.persistence.postgres import admin as admin_store
 from mari_server.persistence.postgres import sources as source_store
 from mari_server.persistence.postgres.database import audit
 from mari_components.connectors import connector_definition, connector_definitions
@@ -37,7 +38,7 @@ router = APIRouter(prefix="/connectors")
 # source row: those are the admin operations the GraphQL side calls
 # connectSource, so they carry the same guard here (AUTH-4). The router-level
 # `dependencies=_authed` in app.py stays; this narrows the two that write.
-_admin = [Depends(auth.require_admin)]
+_admin = [Depends(access.require_capability("source.manage"))]
 
 class ProviderIn(BaseModel):
     provider: str
@@ -204,6 +205,12 @@ def connect(body: ProviderIn) -> dict:
                                   "name": blocking["display_name"]}
         return answer
     audit("connected source", display)
+    # A keep-documents snapshot of this provider is re-adopted before the
+    # first sync, so reconnecting resumes ownership of the frozen rows
+    # instead of ingesting a full duplicate set beside them.
+    adopted = admin_store.adopt_frozen_documents(key, source_id)
+    if adopted:
+        audit("adopted retained documents", f"{adopted} into {display}")
     # every connected source gets a scheduled sync flow (Flows UI owns cadence)
     flowengine.ensure_sync_flow(source_id, display)
     ingest.start_sync(source_id)  # dispatches to connect_sync by kind

@@ -21,13 +21,25 @@ def pause_source(provider: str) -> None:
           to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))""", (project_id, provider))
 
 
-def remove_source(source_id: int) -> dict | None:
+def remove_source(source_id: int, *, delete_documents: bool = True) -> dict | None:
     """Delete a connector source outright, in one transaction: the row, its
     documents and everything hanging off them, its ingest checkpoints, and its
     scheduled "Sync <name>" flow. Returns the deleted row's provider and
     display_name, or None when no source with this id exists in the project.
-    Raises ValueError for a non-connector row — GitHub and legacy sources have
-    no removal story yet, and silently deleting one would be a lie.
+
+    Legacy rows are deleted the same way. A legacy row is any kind that is not
+    connector or upload: '' from the onboarding seed, a bare provider string
+    the pre-0.1.3 connectSource mutation wrote with no kind at all, or a
+    'github' row that somehow escaped migration 0007 (which rewrites every
+    github row to connector at startup; no writer inserts the kind any more).
+    Such a row owns no sync flow (only ensure_sync_flow creates one, and it
+    keys on a connector's source id), so the flow scan below finds nothing
+    for it; checkpoint rows keyed by its provider string may exist from an
+    old-style sync and are swept with the same rule as a connector's.
+
+    Raises ValueError for the upload row: it is the project's single upload
+    bucket (onboarding.upload_source), recreated on the next upload, so
+    removing it would be a no-op that reads as a delete.
 
     What init.sql actually cascades from documents: only chunks
     (ON DELETE CASCADE). facts.document_id and glossary.evidence_doc_id are
@@ -47,23 +59,49 @@ def remove_source(source_id: int) -> dict | None:
             (project_id, source_id)).fetchone()
         if not row:
             return None
-        if row["kind"] != "connector":
-            raise ValueError("Only connector sources can be removed.")
-        docs = "SELECT id FROM documents WHERE project_id = %s AND source_id = %s"
-        for sql in (
-            f"DELETE FROM tags WHERE document_id IN ({docs})",
-            f"DELETE FROM edges WHERE from_doc IN ({docs}) OR to_doc IN ({docs})",
-            f"DELETE FROM findings WHERE document_id IN ({docs})",
-            f"DELETE FROM changes WHERE document_id IN ({docs})",
-            f"DELETE FROM watches WHERE document_id IN ({docs})",
-        ):
-            args = (project_id, source_id) * sql.count("SELECT id FROM documents")
-            conn.execute(sql, args)
-        # chunks cascade from documents; facts/glossary references become NULL
-        conn.execute("DELETE FROM documents WHERE project_id = %s AND source_id = %s",
-                     (project_id, source_id))
-        conn.execute("DELETE FROM ingest_checkpoints WHERE project_id = %s AND provider = %s",
-                     (project_id, row["provider"]))
+        if row["kind"] == "upload":
+            raise ValueError("The upload source cannot be removed.")
+        if delete_documents:
+            docs = "SELECT id FROM documents WHERE project_id = %s AND source_id = %s"
+            for sql in (
+                f"DELETE FROM tags WHERE document_id IN ({docs})",
+                f"DELETE FROM edges WHERE from_doc IN ({docs}) OR to_doc IN ({docs})",
+                f"DELETE FROM findings WHERE document_id IN ({docs})",
+                f"DELETE FROM changes WHERE document_id IN ({docs})",
+                f"DELETE FROM watches WHERE document_id IN ({docs})",
+            ):
+                args = (project_id, source_id) * sql.count("SELECT id FROM documents")
+                conn.execute(sql, args)
+            # chunks cascade from documents; facts/glossary references become NULL
+            conn.execute("DELETE FROM documents WHERE project_id = %s AND source_id = %s",
+                         (project_id, source_id))
+        else:
+            # Retained documents become ordinary disconnected knowledge. The
+            # provider/title/source metadata stays on each row; only the live
+            # connector identity is severed so a future connector cannot own
+            # or mutate this frozen snapshot.
+            conn.execute("UPDATE documents SET source_id = NULL WHERE project_id = %s AND source_id = %s",
+                         (project_id, source_id))
+        # Checkpoint rows are keyed (provider, item), and a provider connected
+        # twice shares that keyspace — the failure row even uses the provider
+        # string as its item. A provider-wide delete therefore wiped the
+        # surviving sibling's progress rows too. Sweep the whole provider only
+        # when this was its last connection.
+        # NOTE: sources_project_provider_uidx (init.sql) makes (project_id,
+        # provider) unique, so the sibling branch is unreachable today; it is
+        # kept as the rule that would apply if two rows ever shared a provider.
+        siblings = conn.execute(
+            """SELECT count(*) AS n FROM sources
+                WHERE project_id = %s AND provider = %s AND id <> %s""",
+            (project_id, row["provider"], source_id)).fetchone()["n"]
+        if siblings:
+            conn.execute(
+                """DELETE FROM ingest_checkpoints
+                    WHERE project_id = %s AND provider = %s AND item = %s""",
+                (project_id, row["provider"], row["display_name"]))
+        else:
+            conn.execute("DELETE FROM ingest_checkpoints WHERE project_id = %s AND provider = %s",
+                         (project_id, row["provider"]))
         conn.execute("DELETE FROM sources WHERE project_id = %s AND id = %s",
                      (project_id, source_id))
         # The scheduled "Sync <name>" flow: seeded with project_id NULL
@@ -77,11 +115,56 @@ def remove_source(source_id: int) -> dict | None:
                    for step in nodes):
                 conn.execute("DELETE FROM workflow_runs WHERE workflow_id = %s", (flow["id"],))
                 conn.execute("DELETE FROM workflows WHERE id = %s", (flow["id"],))
+        detail = ("Removed by admin, documents deleted" if delete_documents
+                  else "Removed by admin, documents retained")
         conn.execute("""INSERT INTO sync_events (project_id, provider, event, detail, at_label)
-          VALUES (%s, %s, %s, 'Removed by admin, documents deleted',
+          VALUES (%s, %s, %s, %s,
           to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))""",
-          (project_id, row["provider"], f"removed: {row['display_name']}"))
+          (project_id, row["provider"], f"removed: {row['display_name']}", detail))
     return row
+
+
+def adopt_frozen_documents(key: str, new_source_id: int) -> int:
+    """Re-adopt a keep-documents snapshot into a new connection of the same
+    provider, so reconnecting resumes ownership instead of ingesting a full
+    duplicate set beside the frozen one (document identity embeds the source
+    id, so a new connection could never match the old rows on its own).
+
+    Conservative on purpose: adoption happens only when this is the
+    provider's ONLY connection. documents.source holds the bare provider key,
+    so with two sites of one provider there is no way to know whose snapshot
+    the frozen rows were, and guessing would graft one site's pages onto the
+    other. The collision guard skips any row whose rewritten identity a
+    fresh sync already claimed; that row stays frozen rather than clobbered.
+
+    Adopted rows keep their content and chunks: the first sync then upserts
+    in place, and unchanged content hashes are never re-embedded."""
+    project_id = access.require_current_access().project_id
+    pattern = f"^{key}:[0-9]+:"
+    replacement = f"{key}:{new_source_id}:"
+    with db.connect() as conn, conn.transaction():
+        siblings = conn.execute(
+            """SELECT count(*) AS n FROM sources
+                WHERE project_id = %s AND id <> %s
+                  AND (provider = %s OR provider LIKE %s)""",
+            (project_id, new_source_id, key, key + ":%")).fetchone()["n"]
+        if siblings:
+            return 0
+        rows = conn.execute(
+            """UPDATE documents
+                  SET source_id = %s,
+                      external_id = regexp_replace(external_id, %s, %s)
+                WHERE project_id = %s AND source_id IS NULL AND source = %s
+                  AND external_id ~ %s
+                  AND NOT EXISTS (
+                    SELECT 1 FROM documents live
+                     WHERE live.project_id = documents.project_id
+                       AND live.source = documents.source
+                       AND live.external_id = regexp_replace(documents.external_id, %s, %s))
+                RETURNING id""",
+            (new_source_id, pattern, replacement, project_id, key,
+             pattern, pattern, replacement)).fetchall()
+    return len(rows)
 
 
 def change_member_role(user_id: int, role: str) -> dict | None:

@@ -222,6 +222,23 @@ class GatewayContractTests(unittest.TestCase):
         self.assertEqual(payload["thinking"], {"type": "disabled"})
         self.assertNotIn("json_schema", payload["response_format"])
 
+    def test_openai_strict_schema_closes_every_nested_object(self) -> None:
+        schema = {"type": "object", "properties": {"facts": {
+            "type": "array", "items": {"type": "object", "properties": {
+                "claim": {"type": "string"},
+                "evidence": {"type": "array", "items": {
+                    "type": "object", "properties": {"quote": {"type": "string"}},
+                }},
+            }},
+        }}}
+        formatted = llm._response_format(None, schema)
+        strict = formatted["response_format"]["json_schema"]["schema"]
+        fact = strict["properties"]["facts"]["items"]
+        evidence = fact["properties"]["evidence"]["items"]
+        for obj in (strict, fact, evidence):
+            self.assertFalse(obj["additionalProperties"])
+            self.assertEqual(obj["required"], list(obj["properties"]))
+
 
 @unittest.skipUnless(os.environ.get("MARI_TEST_LIVE_DEEPSEEK") == "1" and
                      os.environ.get("MARI_DEEPSEEK_API_KEY"),

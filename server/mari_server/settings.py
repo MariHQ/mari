@@ -16,7 +16,12 @@ import typing as t
 _DEFAULTS: dict[str, t.Any] = {
     "database": {"url": "postgresql://localhost/mari_cloud", "pool_max": 10},
     "server": {"host": "0.0.0.0", "port": 8000,
-               "cors_origins": ["http://localhost:5173"], "trusted_proxies": []},
+               "cors_origins": ["http://localhost:5173"], "trusted_proxies": [],
+               # Bearer token for GET /metrics. Empty leaves the endpoint open,
+               # which is right where nginx never proxies it and Prometheus
+               # scrapes the internal Service; a deployment that serves the
+               # API straight to the internet (the Lambda) must set it.
+               "metrics_token": ""},
     "ollama": {"host": "http://localhost:11434", "embed_model": "nomic-embed-text", "gen_model": "gemma3:4b"},
     # Optional deployment-owned selection. Provider and model are an atomic
     # pair; a partial pair is an explicit configuration error in llm.py.
@@ -55,6 +60,11 @@ _DEFAULTS: dict[str, t.Any] = {
     "audit": {"languages": ["es", "fr"], "default_tag": "customer-facing"},
     "github": {"token": "", "webhook_secret": ""},
     "runtime": {"flow_workers": 4},
+    # Brakes on the published knowledge chat, the one surface that answers
+    # without a sign-in. Per-minute windows are per API process; the daily
+    # budget counts usage_log rows so it holds across a fleet. 0 disables one.
+    "knowledge_chat": {"ip_per_minute": 20, "destination_per_minute": 120,
+                       "daily_budget": 2000},
 }
 
 
@@ -130,6 +140,10 @@ def _load() -> dict:
         "MARI_GITHUB_TOKEN": ("github", "token"),
         "MARI_GITHUB_WEBHOOK_SECRET": ("github", "webhook_secret"),
         "MARI_FLOW_WORKERS": ("runtime", "flow_workers"),
+        "MARI_METRICS_TOKEN": ("server", "metrics_token"),
+        "MARI_KNOWLEDGE_CHAT_IP_PER_MINUTE": ("knowledge_chat", "ip_per_minute"),
+        "MARI_KNOWLEDGE_CHAT_DESTINATION_PER_MINUTE": ("knowledge_chat", "destination_per_minute"),
+        "MARI_KNOWLEDGE_CHAT_DAILY_BUDGET": ("knowledge_chat", "daily_budget"),
     }
     for env, (section, key) in env_map.items():
         if os.environ.get(env):
@@ -145,7 +159,8 @@ def _load() -> dict:
                     continue
                 if not isinstance(value, dict):
                     continue
-            elif key in ("max_retries", "pool_max", "flow_workers"):
+            elif key in ("max_retries", "pool_max", "flow_workers",
+                         "ip_per_minute", "destination_per_minute", "daily_budget"):
                 try:
                     value = int(value)
                 except ValueError:

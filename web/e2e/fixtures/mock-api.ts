@@ -18,6 +18,10 @@ export type MockApi = {
 
 const now = "2026-08-19T12:00:00Z";
 
+/** The server's refusal for a sync on a row no connector owns
+ *  (mari_server.sources.sync.NOT_A_CONNECTOR), verbatim. */
+export const NOT_A_CONNECTOR = "This source has no connector behind it. Remove it and connect again.";
+
 function initialData() {
   return {
     overviewStats: { changes: 12, factsReview: 1, workflowsActive: 0, documents: 3 },
@@ -47,9 +51,16 @@ function initialData() {
     searchTotal: 1,
     sourcePulse: [
       { id: 1, provider: "github", name: "acme/handbook", status: "active", stat: "1", unit: "docs", docsCount: 1, health: "Healthy", kind: "github", lastSyncAt: now, bars: [1, 2, 1], syncIntervalMinutes: 10, syncFlowId: 11 },
-      { id: 2, provider: "confluence", name: "Confluence — ENG", status: "active", stat: "1", unit: "docs", docsCount: 1, health: "Healthy", kind: "connector", lastSyncAt: now, bars: [1], syncIntervalMinutes: 60, syncFlowId: 12 },
+      { id: 2, provider: "confluence:acme.atlassian.net", name: "Confluence — ENG", status: "active", stat: "1", unit: "docs", docsCount: 1, health: "Healthy", kind: "connector", lastSyncAt: now, bars: [1], syncIntervalMinutes: 60, syncFlowId: 12 },
+      { id: 3, provider: "upload", name: "Uploads", status: "active", stat: "6", unit: "docs", docsCount: 6, health: "Healthy", kind: "upload", lastSyncAt: now, bars: [1] },
+      // An orphan the pre-0.1.3 connectSource mutation left: no kind, no
+      // documents, never synced, under the bare catalog key the old mutation
+      // wrote (a made-up key would hide the Edit entry and test a card the
+      // console never draws). Remove is the only thing that works on it; the
+      // sync mutations refuse it below, as the server does.
+      { id: 4, provider: "confluence", name: "Confluence (old)", status: "active", stat: "0", unit: "docs", docsCount: 0, health: "Never synced", kind: "", lastSyncAt: "", bars: [], syncIntervalMinutes: null, syncFlowId: null },
     ],
-    workflows: [{ id: 1, name: "Fact review", description: "Scan and approve facts", color: "#5c7a4c", pinned: true, status: "active", trigger: { on: "schedule", every_minutes: 60 }, nodes: [
+    workflows: [{ id: 1, name: "Fact review", description: "Scan and approve facts", color: "#5c7a4c", pinned: true, status: "active", trigger: { on: "schedule", every_minutes: 60 }, scheduleCapable: true, lastRunNumber: 1801, lastRunStatus: "waiting", lastRunStarted: now, nodes: [
       { kind: "trigger", label: "Every hour", config: {} },
       { kind: "scan_facts", label: "Scan facts", config: {} },
       { kind: "approval", label: "Approve", config: { assignee: "Dana" } },
@@ -60,8 +71,8 @@ function initialData() {
       { step: "Approve", status: "waiting", detail: "awaiting Dana", duration: "00:00:00" },
     ] }],
     facts: [
-      { id: 1, claim: "Retention is 30 days.", source: "Retention runbook", owner: "Dana", status: "Verified", verified: "2026-08-18" },
-      { id: 2, claim: "Retention is 10 days.", source: "Old handbook", owner: "Dana", status: "Needs review", verified: "" },
+      { id: 1, claim: "Retention is 30 days.", source: "Retention runbook", owner: "Lee Chen", status: "Verified", verified: "2026-08-18", validFrom: "2026-01-01", capturedAt: "2026-08-01", impactCount: 3, highImpact: true },
+      { id: 2, claim: "Retention is 10 days.", source: "Old handbook", owner: "Dana", status: "Needs review", verified: "", validFrom: "2025-01-01", capturedAt: "2026-08-19", impactCount: 0, highImpact: false },
     ],
     factContradictions: [{ factId: 1, claim: "Retention is 30 days.", otherFactId: 2, otherClaim: "Retention is 10 days.", reason: "numeric conflict", detail: "30 versus 10 days" }],
     decisions: [{ id: 1, statement: "Use Postgres for metadata", context: "Queryable state stays relational.", status: "ratified", sourceLabel: "GitHub · ADR-14", owners: ["Dana"], decidedOn: "2026-08-18", supersededBy: null, supersededByStatement: "", impactSummary: "Affects storage design", impactCount: 2 }],
@@ -179,6 +190,10 @@ export async function installMockApi(page: Page, options: {
     } });
   });
   await page.route("**/auth/logout", (route) => { signedIn = false; return route.fulfill({ json: { ok: true } }); });
+  await page.route("**/onboard/upload", (route) => {
+    restCalls.push({ path: "/onboard/upload", body: route.request().postData()?.length ?? 0 });
+    return route.fulfill({ json: { accepted: 1, rejected: [] } });
+  });
   await page.route("**/auth/setup", async (route) => {
     const body = route.request().postDataJSON();
     restCalls.push({ path: "/auth/setup", body });
@@ -234,6 +249,37 @@ export async function installMockApi(page: Page, options: {
         trajectoryStatuses: state.trajectoryStatuses
           ?? [...new Set(state.trajectories.map((row: any) => String(row.status)))],
       };
+    } else if (/setWorkflowStatus/.test(query)) {
+      // Mutate the fixture the way the server would: a reload must show the
+      // written state, or a no-op mutation passes the persistence tests.
+      const workflow = state.workflows.find((row: any) =>
+        row.id === Number(variables.taskId ?? variables.id ?? variables.workflowId));
+      if (workflow) workflow.status = String(variables.status);
+      data = { setWorkflowStatus: true };
+    } else if (/setWorkflowTrigger/.test(query)) {
+      const workflow = state.workflows.find((row: any) =>
+        row.id === Number(variables.workflowId ?? variables.taskId ?? variables.id));
+      if (workflow) workflow.trigger = JSON.parse(String(variables.trigger || "{}"));
+      data = { setWorkflowTrigger: true };
+    } else if (/createScheduledTask/.test(query)) {
+      const digest = variables.kind === "digest";
+      const minutes = Number(variables.everyMinutes) || 0;
+      state.workflows.push({
+        id: 90, name: digest ? "Weekly digest refresh" : "Fact extraction",
+        description: digest ? "Regenerates the Home digest." : "Scans documents for claims.",
+        color: "#5c7a4c", pinned: false, status: "active",
+        trigger: minutes ? { on: "schedule", every_minutes: minutes } : { on: "" },
+        scheduleCapable: true, lastRunNumber: null, lastRunStatus: "", lastRunStarted: "",
+        nodes: [{ kind: "trigger", label: "", config: {} },
+                { kind: digest ? "refresh_digest" : "scan_facts", label: "", config: {} }],
+      });
+      data = { createScheduledTask: 90 };
+    } else if (/removeScheduledTask/.test(query)) {
+      state.workflows = state.workflows.filter((row: any) =>
+        row.id !== Number(variables.taskId));
+      data = { removeScheduledTask: true };
+    } else if (/runWorkflow/.test(query)) {
+      data = { runWorkflow: 1802 };
     } else if (/inviteMember/.test(query)) {
       state.members.push({
         id: state.members.length + 1,
@@ -248,6 +294,21 @@ export async function installMockApi(page: Page, options: {
         provider: "invite",
       });
       data = { inviteMember: true };
+    } else if (/invalidateFact/.test(query)) {
+      const fact = state.facts.find((f: any) => f.id === variables.id);
+      if (fact) fact.status = "Invalidated";
+      data = { invalidateFact: true };
+    } else if (/restoreFact/.test(query)) {
+      const fact = state.facts.find((f: any) => f.id === variables.id);
+      if (fact) fact.status = "Needs review";
+      data = { restoreFact: true };
+    } else if (/factSemanticLinks/.test(query)) {
+      data = { factSemanticLinks: [
+        { targetType: "document", targetId: 1, relation: "source", similarity: 1,
+          targetLabel: "Retention runbook", targetUpdatedAt: "2026-01-01", observedAt: "2026-08-31" },
+        { targetType: "fact", targetId: 2, relation: "contradicts", similarity: .94,
+          targetLabel: "Retention is 10 days.", targetUpdatedAt: "2026-08-20", observedAt: "2026-08-31" },
+      ] };
     } else if (/verifyFact/.test(query)) {
       const fact = state.facts.find((f: any) => f.id === variables.id);
       if (fact) { fact.status = "Verified"; fact.verified = "2026-08-19"; }
@@ -256,7 +317,18 @@ export async function installMockApi(page: Page, options: {
       state.facts.push({ id: state.facts.length + 1, claim: variables.claim, source: variables.source, owner: variables.owner, status: "Needs review", verified: "" });
       data = { addFact: true };
     } else if (/startFactScan/.test(query)) {
+      state.factScanRunStarted = true;
       data = { startFactScan: 99 };
+    } else if (/dismissWorkflowRun/.test(query)) {
+      state.dismissedRuns = [...(state.dismissedRuns ?? []), Number(variables.runId)];
+      data = { dismissWorkflowRun: true };
+    } else if (/latestWorkflowRun/.test(query)) {
+      // The Facts recovery path: a started scan survives reloads until this
+      // user dismisses it. Hardcoding null here made the dismissal reload
+      // assertion pass even when the mutation was a no-op.
+      const dismissed = (state.dismissedRuns ?? []).includes(99);
+      data = { latestWorkflowRun: state.factScanRunStarted && !dismissed
+        ? { id: 99, status: "passed" } : null };
     } else if (/tuneTrajectoryStep/.test(query)) {
       data = { tuneTrajectoryStep: true };
     } else if (/tuneTrajectoryEvidence/.test(query)) {
@@ -292,7 +364,28 @@ export async function installMockApi(page: Page, options: {
     } else if (/deleteAssistantWorkflow/.test(query)) {
       data = { deleteAssistantWorkflow: true };
     } else if (/workflowRun\(/.test(query)) {
-      data = { workflowRun: { id: 99, number: 1900, workflowName: "Fact scan", status: "passed", progress: 100, stats: { facts: 2 }, rows: [{ step: "Scan facts", status: "passed", detail: "2 claims", duration: "00:00:01" }] } };
+      // `factScanStatus` is settable so a spec can exercise the failed run
+      // path (the Retry button) against the same fixture.
+      const scanStatus = String(state.factScanStatus || "passed");
+      data = {
+        workflowRun: { id: 99, number: 1900, workflowName: "Fact scan", status: scanStatus, progress: 100,
+          stats: { facts: 2 }, rows: [{ step: "Scan facts", status: scanStatus, detail: scanStatus === "failed" ? "RuntimeError: model unreachable" : "2 new claims captured", duration: "00:00:01" }] },
+        factExtractionCandidates: [{
+          id: 501, runId: 99, documentId: 11, documentTitle: "Infrastructure runbook",
+          claim: "Production clusters use Kubernetes.", source: "Confluence", evidence: "Production runs on Kubernetes.",
+          confidence: .94, reviewStatus: "accepted", reviewKind: "human", reviewReason: "Grounded in the runbook",
+          reviewer: "Dana", reviewedAt: "2026-08-31", publishedFactId: 41, impactScore: .86, highImpact: true,
+          semanticLinks: [],
+        }],
+        factLlmBudgets: [{ stage: "adjudicate_facts", purpose: "temporal evidence and relation proposals",
+          model: "gateway:model", maxCalls: 10, maxInputTokens: 24000, maxOutputTokens: 8000,
+          callsUsed: 1, inputTokens: 420, outputTokens: 120, status: "completed" }],
+        factRunIntelligence: [{
+          candidateId: 501, structuredClaim: {}, validFrom: "", validTo: "", components: [], relations: [],
+          evidenceGroups: [], clusters: [], adjudication: { recommendation: "new_fact", relation: "supports",
+            confidence: .94, reason: "The cited runbook directly supports this durable claim.", needs_human_review: false },
+        }],
+      };
     } else if (/approveRun/.test(query)) {
       data = { approveRun: true };
     } else if (/runWorkflow/.test(query)) {
@@ -324,7 +417,25 @@ export async function installMockApi(page: Page, options: {
     } else if (/updateMcpServer/.test(query)) {
       data = { updateMcpServer: true };
     } else if (/syncSource|resyncSource/.test(query)) {
+      // The server refuses a row no connector owns (ingest.start_sync) with
+      // the words the card shows; a legacy row is any kind outside the live
+      // three. A row the fixture does not know (a source connect just created)
+      // is accepted, as on the server.
+      const row = state.sourcePulse.find((s: any) => s.id === Number(variables.id));
+      if (row && !["github", "connector", "upload"].includes(row.kind)) {
+        return route.fulfill({ json: { errors: [{ message: NOT_A_CONNECTOR }] } });
+      }
       data = { syncSource: true, resyncSource: true };
+    } else if (/pauseSource/.test(query)) {
+      // Resolved among connector rows only: a legacy row answers false.
+      const row = state.sourcePulse.find((s: any) => s.id === Number(variables.id));
+      data = { pauseSource: Boolean(row && row.kind === "connector") };
+    } else if (/removeSource/.test(query)) {
+      // The real delete: the row leaves sourcePulse, so the next read of the
+      // page draws one card fewer. false is the row already being gone.
+      const index = state.sourcePulse.findIndex((s: any) => s.id === Number(variables.id));
+      if (index >= 0) state.sourcePulse.splice(index, 1);
+      data = { removeSource: index >= 0 };
     } else if (/testLlmGateway/.test(query)) {
       data = { testLlmGateway: { ok: true, detail: "LLM gateway is reachable and authenticated", models: 4, latency_ms: 12 } };
     } else if (/updateSetting/.test(query)) {
@@ -393,7 +504,7 @@ oauth_config:
 settings:
   event_subscriptions:
     request_url: https://mari.example.test/webhooks/slack
-    bot_events: [app_mention, message.channels, message.im]
+    bot_events: [app_mention, message.channels, message.groups, message.im]
   socket_mode_enabled: true` });
   });
   await page.route("**/bots/slack/setup", async (route) => {

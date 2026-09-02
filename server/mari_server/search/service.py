@@ -17,7 +17,7 @@ from mari_server.persistence.postgres.database import jload
 from mari_server.persistence.postgres import search as search_store
 from mari_components.acl import document_visible
 from mari_components.retrieval import keyword_score
-from mari_server.persistence.postgres.search import keyword_patterns, like_pattern
+from mari_server.persistence.postgres.search import keyword_terms, like_pattern
 
 # ————————————————— hybrid search ranking constants —————————————————
 
@@ -114,35 +114,81 @@ def _within_days(rows: list[dict], days: int | None) -> list[dict]:
 
 def hybrid_search(query: str, k: int = 10, offset: int = 0,
                   days: int | None = None) -> list[dict]:
-    rows = _within_days(_rank_hybrid(query), days)
+    ranked, loaded = _rank_hybrid(query)
+    entries = _within_days(ranked, days)
     start = max(0, int(offset))
     stop = start + max(1, min(int(k), MAX_K))
-    return rows[start:stop]
+    return _hydrate(entries[start:stop], loaded)
+
+
+def slack_channel_search(channel_name: str, k: int = 8) -> list[dict]:
+    """Recent visible Slack documents for an explicit human channel name."""
+    ctx = access.require_current_access()
+    rows = search_store.slack_channel_candidates(ctx.project_id, channel_name, k)
+    return [row for row in rows if _document_visible(row, ctx)][:k]
 
 
 def hybrid_count(query: str, days: int | None = None) -> int:
     """How many documents this query matches, corpus-wide — not how many were
     returned. The console says "showing N of M" and M has to be the corpus's
     answer, or the sentence is a claim nobody can trace."""
+    ranked, _loaded = _rank_hybrid(query)
     if days:
         # The freshness window is applied to the ranked candidate set, so this
         # count describes exactly the rows `search` pages through.
-        return len(_within_days(_rank_hybrid(query), days))
-    ranked_count = len(_rank_hybrid(query))
+        return len(_within_days(ranked, days))
     ctx = access.require_current_access()
     if ctx.principal_type == "slack":
-        return ranked_count
-    patterns = keyword_patterns(query) if query.strip() else None
-    return max(ranked_count, search_store.document_count(ctx.project_id, patterns))
+        return len(ranked)
+    return max(len(ranked), search_store.document_count(
+        ctx.project_id, query if query.strip() else None))
 
 
 # MUVERA/PolarQuant replaces the pgvector ANN half of the old CTE above. The
 # keyword half remains canonical-content SQL during the Iceberg migration;
 # both result lists are fused and cached together so `search` and
 # `searchTotal` still describe exactly the same approximate candidate set.
+#
+# What is cached is the ranking, not the documents: one entry per document
+# holding its id, score and update date. The cache used to keep the full rows,
+# bodies included — up to 128 lists of up to 1,000 documents, which on a
+# corpus of long pages is gigabytes resident in one API process. A page of
+# results is re-read by id when it is served, so memory is bounded by the
+# corpus's row count, not by its text.
 _RANK_TTL_SECONDS = 120.0
 _rank_cache: dict[tuple[t.Any, ...], tuple[float, list[dict]]] = {}
 _rank_lock = threading.Lock()
+
+
+def _entry(row: dict, score: float) -> dict:
+    return {"id": int(row["id"]), "score": score, "updated_src": row.get("updated_src")}
+
+
+def _hydrate(entries: list[dict], loaded: dict[int, dict] | None) -> list[dict]:
+    """The full rows for one page of ranked entries, in ranking order. `loaded`
+    is the row set the ranking pass just read, when this call did the ranking;
+    a cache hit re-reads the page from the store instead. A document that has
+    gone missing in between is skipped rather than served as a hole."""
+    if not entries:
+        return []
+    ctx = access.require_current_access()
+    if loaded is None:
+        loaded = {}
+        for row in search_store.documents_by_id(ctx.project_id, [entry["id"] for entry in entries]):
+            # Visibility is re-checked on the re-read: the ranking honoured it
+            # at cache time, and an ACL that has tightened since should hide
+            # the row rather than wait for the entry to expire.
+            if _document_visible(row, ctx):
+                loaded[int(row["id"])] = row
+    rows = []
+    for entry in entries:
+        row = loaded.get(entry["id"])
+        if row is None:
+            continue
+        row.pop("boost", None)
+        row["score"] = entry["score"]
+        rows.append(row)
+    return rows
 
 
 def invalidate_search(project_id: int) -> None:
@@ -176,7 +222,9 @@ def _document_visible(row: dict, ctx: access.AccessContext) -> bool:
     )
 
 
-def _rank_hybrid(query: str) -> list[dict]:
+def _rank_hybrid(query: str) -> tuple[list[dict], dict[int, dict] | None]:
+    """The ranked entries for this query, plus the full rows this call read
+    while ranking — None on a cache hit, when nothing was read."""
     ctx = access.require_current_access()
     project_id = ctx.project_id
     cache_key = (project_id, ctx.principal_type, ctx.principal_id,
@@ -185,11 +233,10 @@ def _rank_hybrid(query: str) -> list[dict]:
     with _rank_lock:
         hit = _rank_cache.get(cache_key)
         if hit and now - hit[0] < _RANK_TTL_SECONDS:
-            return hit[1]
+            return hit[1], None
 
-    patterns = keyword_patterns(query)
     keyword_rows = search_store.keyword_candidates(
-        project_id, patterns if query.strip() else None, MAX_K * 2,
+        project_id, query if query.strip() else None, MAX_K * 2,
     )
 
     semantic: dict[int, float] = {}
@@ -211,7 +258,11 @@ def _rank_hybrid(query: str) -> list[dict]:
         for row in search_store.documents_by_id(project_id, missing):
             rows_by_id[int(row["id"])] = row
 
-    terms = [word for word in re.findall(r"[a-z0-9][a-z0-9_-]*", query.lower()) if len(word) > 1]
+    # Candidate selection and scoring must use the same vocabulary. Scoring
+    # conversational filler ("how", "work", "company") after SQL correctly
+    # ignored it promoted unrelated documents that happened to contain those
+    # common words.
+    terms = keyword_terms(query)
     ranked = []
     for doc_id, row in rows_by_id.items():
         if not _document_visible(row, ctx):
@@ -227,16 +278,14 @@ def _rank_hybrid(query: str) -> list[dict]:
         if doc_id not in keyword_ids and sim <= SIM_FLOOR:
             continue
         boost = float(row.get("boost", 1.0) or 1.0)
-        row.pop("boost", None)
-        row["score"] = (kw * 2.0 + max(sim - SIM_FLOOR, 0.0) * 3.0) * boost
-        ranked.append(row)
-    ranked.sort(key=lambda row: (
-        -float(row["score"]),
-        -(row.get("updated_src") or dt.date.min).toordinal(),
-        -int(row["id"]),
+        ranked.append(_entry(row, (kw * 2.0 + max(sim - SIM_FLOOR, 0.0) * 3.0) * boost))
+    ranked.sort(key=lambda entry: (
+        -float(entry["score"]),
+        -(entry.get("updated_src") or dt.date.min).toordinal(),
+        -entry["id"],
     ))
     with _rank_lock:
         if len(_rank_cache) >= _VEC_CACHE_MAX:
             _rank_cache.pop(next(iter(_rank_cache)), None)
         _rank_cache[cache_key] = (now, ranked)
-    return ranked
+    return ranked, rows_by_id

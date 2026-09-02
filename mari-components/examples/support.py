@@ -203,6 +203,11 @@ class FakeSlack:
                 "channels": [{"id": "C-ENG", "name": "engineering", "is_member": True}],
                 "response_metadata": {"next_cursor": ""},
             })
+        if method == "conversations.info" and params.get("channel") == ["C-ENG"]:
+            return json_response({
+                "ok": True,
+                "channel": {"id": "C-ENG", "name": "engineering", "is_member": True},
+            })
         if method == "conversations.history":
             oldest = float((params.get("oldest") or ["0"])[0])
             if not oldest:

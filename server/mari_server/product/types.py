@@ -158,6 +158,10 @@ class Fact:
     owner_tint: int
     status: str
     verified: str  # ISO date of the last verification, "" when never verified
+    valid_from: str
+    captured_at: str  # ISO timestamp the fact entered the ledger
+    impact_count: int
+    high_impact: bool
 
 
 @strawberry.type
@@ -506,6 +510,12 @@ class Workflow:
     # {"on": "document_changed"|"document_added"|"", "source_id", "tag", "path_glob"};
     # empty "on" = manual-only.
     trigger: JSON
+    # Scheduler-manager read model. A workflow is schedule-capable when it is
+    # scheduled now or contains one of the product's recurring job steps.
+    schedule_capable: bool
+    last_run_number: int | None
+    last_run_status: str
+    last_run_started: str
 
 
 @strawberry.type
@@ -521,6 +531,175 @@ class WorkflowRun:
     stats: JSON
     rows: JSON
     triggered_by: str  # provenance for auto-started runs, '' for manual
+
+
+@strawberry.type
+class FactExtractionCandidate:
+    id: int
+    run_id: int
+    document_id: int | None
+    document_title: str
+    claim: str
+    source: str
+    evidence: str
+    confidence: float
+    review_status: str
+    review_kind: str
+    review_reason: str
+    reviewer: str
+    reviewed_at: str
+    published_fact_id: int | None
+    impact_score: int
+    high_impact: bool
+    semantic_links: list[FactSemanticLink]
+
+
+@strawberry.type
+class FactSemanticLink:
+    target_type: str
+    target_id: int
+    relation: str
+    similarity: float
+    target_label: str
+    target_updated_at: str
+    observed_at: str
+
+
+@strawberry.type
+class FactRepresentationComponent:
+    ordinal: int
+    role: str
+    text: str
+    content_hash: str
+    embedding_profile: str
+    representation_profile: str
+    provider: str
+    model: str
+    dimensions: int
+
+
+@strawberry.type
+class FactEvidenceSpan:
+    id: int
+    document_id: int
+    document_title: str
+    source: str
+    quote: str
+    content_hash: str
+    source_authority: str
+    published_at: str
+    effective_from: str
+    effective_to: str
+    revised_at: str
+    ingested_at: str
+    role: str
+    similarity: float | None
+
+
+@strawberry.type
+class FactEvidenceGroup:
+    id: int
+    verdict: str
+    sufficient: bool
+    confidence: float
+    rationale: str
+    decision_kind: str
+    decision_model: str
+    reviewer: str
+    reviewed_at: str
+    spans: list[FactEvidenceSpan]
+
+
+@strawberry.type
+class FactAssertionRelation:
+    target_assertion_id: int
+    target_fact_id: int | None
+    target_claim: str
+    relation: str
+    approximate_score: float | None
+    exact_score: float | None
+    decision_kind: str
+    decision_model: str
+    confidence: float
+    rationale: str
+    observed_at: str
+    target_valid_from: str
+    target_valid_to: str
+
+
+@strawberry.type
+class FactClusterMembership:
+    id: int
+    stable_key: str
+    label: str
+    summary: str
+    generation: str
+    lifecycle: str
+    label_kind: str
+    membership_score: float
+    explanation: str
+
+
+@strawberry.type
+class FactIntelligence:
+    assertion_id: int
+    fact_id: int | None
+    candidate_id: int | None
+    claim: str
+    structured_claim: JSON
+    adjudication: JSON
+    status: str
+    confidence: float
+    confidence_reason: str
+    valid_from: str
+    valid_to: str
+    recorded_from: str
+    recorded_to: str
+    criticality: str
+    owner: str
+    components: list[FactRepresentationComponent]
+    relations: list[FactAssertionRelation]
+    evidence_groups: list[FactEvidenceGroup]
+    clusters: list[FactClusterMembership]
+
+
+@strawberry.type
+class FactLlmBudget:
+    stage: str
+    purpose: str
+    provider: str
+    model: str
+    recipe: str
+    max_calls: int
+    max_input_tokens: int
+    max_output_tokens: int
+    calls_used: int
+    input_tokens: int
+    output_tokens: int
+    cost_usd: float
+    status: str
+    visible_config: JSON
+
+
+@strawberry.type
+class FactImpactItem:
+    impact_kind: str
+    target_type: str
+    target_id: str
+    target_label: str
+    severity: int
+    dependency_type: str
+    depth: int
+    similarity: float | None
+
+
+@strawberry.type
+class FactImpactPreview:
+    fact_id: int
+    assertion_id: int
+    claim: str
+    score: int
+    items: list[FactImpactItem]
 
 
 @strawberry.type

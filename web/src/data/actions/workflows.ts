@@ -72,7 +72,7 @@ export function workflowsActions({ replace }: ActionContext): WorkflowsActions {
       if (value) params.set(key, value);
       else params.delete(key);
     };
-    if ("tab" in changes) set("tab", changes.tab === "answers" ? "answers" : null);
+    if ("tab" in changes) set("tab", changes.tab === "observed" ? null : changes.tab);
     // Every filter change resets paging: page 4 of the old filter is not page 4
     // of the new one, and landing on an empty page reads as "no results".
     for (const key of ["category", "status", "failures", "q"] as const) {
@@ -90,7 +90,7 @@ export function workflowsActions({ replace }: ActionContext): WorkflowsActions {
 
   return {
     /* ── view state ── */
-    setTab: (tab) => route({ tab, trajectory: tab === "answers" ? null : undefined }),
+    setTab: (tab) => route({ tab, trajectory: tab === "observed" ? undefined : null }),
     setCategory: (category) => route({ category }),
     setStatusFilter: (status) => route({ status }),
     setFailures: (failures) => route({ failures }),

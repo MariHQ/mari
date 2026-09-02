@@ -27,7 +27,9 @@ def _fixture(_prompt: str, version: str) -> object:
     release_evidence = [{
         "document_id": "runbook", "quote": "Mari deploys the tested main branch.",
     }]
-    if version == "facts-extract-v2":
+    # The recipe version follows facts.FACT_EXTRACTION_VERSION; the fixture
+    # answers any revision of the fact recipe rather than pinning one.
+    if version.startswith("facts-extract-v"):
         return {"facts": [{
             "claim": "Mari deploys the tested main branch.",
             "evidence": release_evidence,

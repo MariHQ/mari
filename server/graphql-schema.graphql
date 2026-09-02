@@ -183,6 +183,38 @@ type Fact {
   ownerTint: Int!
   status: String!
   verified: String!
+  validFrom: String!
+  capturedAt: String!
+  impactCount: Int!
+  highImpact: Boolean!
+}
+
+type FactAssertionRelation {
+  targetAssertionId: Int!
+  targetFactId: Int
+  targetClaim: String!
+  relation: String!
+  approximateScore: Float
+  exactScore: Float
+  decisionKind: String!
+  decisionModel: String!
+  confidence: Float!
+  rationale: String!
+  observedAt: String!
+  targetValidFrom: String!
+  targetValidTo: String!
+}
+
+type FactClusterMembership {
+  id: Int!
+  stableKey: String!
+  label: String!
+  summary: String!
+  generation: String!
+  lifecycle: String!
+  labelKind: String!
+  membershipScore: Float!
+  explanation: String!
 }
 
 type FactContradiction {
@@ -194,6 +226,136 @@ type FactContradiction {
   otherStatus: String!
   reason: String!
   detail: String!
+}
+
+type FactEvidenceGroup {
+  id: Int!
+  verdict: String!
+  sufficient: Boolean!
+  confidence: Float!
+  rationale: String!
+  decisionKind: String!
+  decisionModel: String!
+  reviewer: String!
+  reviewedAt: String!
+  spans: [FactEvidenceSpan!]!
+}
+
+type FactEvidenceSpan {
+  id: Int!
+  documentId: Int!
+  documentTitle: String!
+  source: String!
+  quote: String!
+  contentHash: String!
+  sourceAuthority: String!
+  publishedAt: String!
+  effectiveFrom: String!
+  effectiveTo: String!
+  revisedAt: String!
+  ingestedAt: String!
+  role: String!
+  similarity: Float
+}
+
+type FactExtractionCandidate {
+  id: Int!
+  runId: Int!
+  documentId: Int
+  documentTitle: String!
+  claim: String!
+  source: String!
+  evidence: String!
+  confidence: Float!
+  reviewStatus: String!
+  reviewKind: String!
+  reviewReason: String!
+  reviewer: String!
+  reviewedAt: String!
+  publishedFactId: Int
+  impactScore: Int!
+  highImpact: Boolean!
+  semanticLinks: [FactSemanticLink!]!
+}
+
+type FactImpactItem {
+  impactKind: String!
+  targetType: String!
+  targetId: String!
+  targetLabel: String!
+  severity: Int!
+  dependencyType: String!
+  depth: Int!
+  similarity: Float
+}
+
+type FactImpactPreview {
+  factId: Int!
+  assertionId: Int!
+  claim: String!
+  score: Int!
+  items: [FactImpactItem!]!
+}
+
+type FactIntelligence {
+  assertionId: Int!
+  factId: Int
+  candidateId: Int
+  claim: String!
+  structuredClaim: JSON!
+  adjudication: JSON!
+  status: String!
+  confidence: Float!
+  confidenceReason: String!
+  validFrom: String!
+  validTo: String!
+  recordedFrom: String!
+  recordedTo: String!
+  criticality: String!
+  owner: String!
+  components: [FactRepresentationComponent!]!
+  relations: [FactAssertionRelation!]!
+  evidenceGroups: [FactEvidenceGroup!]!
+  clusters: [FactClusterMembership!]!
+}
+
+type FactLlmBudget {
+  stage: String!
+  purpose: String!
+  provider: String!
+  model: String!
+  recipe: String!
+  maxCalls: Int!
+  maxInputTokens: Int!
+  maxOutputTokens: Int!
+  callsUsed: Int!
+  inputTokens: Int!
+  outputTokens: Int!
+  costUsd: Float!
+  status: String!
+  visibleConfig: JSON!
+}
+
+type FactRepresentationComponent {
+  ordinal: Int!
+  role: String!
+  text: String!
+  contentHash: String!
+  embeddingProfile: String!
+  representationProfile: String!
+  provider: String!
+  model: String!
+  dimensions: Int!
+}
+
+type FactSemanticLink {
+  targetType: String!
+  targetId: Int!
+  relation: String!
+  similarity: Float!
+  targetLabel: String!
+  targetUpdatedAt: String!
+  observedAt: String!
 }
 
 type Finding {
@@ -362,6 +524,9 @@ type Mutation {
   setTaskDone(id: Int!, done: Boolean!): Boolean! @deprecated(reason: "The Review page was removed. The review projection stays one more release as the backend for policy auto-approval and inline approvals.")
   clearDoneTasks: Int! @deprecated(reason: "The Review page was removed. The review projection stays one more release as the backend for policy auto-approval and inline approvals.")
   verifyFact(id: Int!): Boolean!
+  reviewFactCandidate(id: Int!, accept: Boolean!, reason: String! = ""): Boolean!
+  invalidateFact(id: Int!, reason: String! = "Business context changed"): Boolean!
+  restoreFact(id: Int!): Boolean!
   createTask(title: String!, kind: String! = "factcheck", kindLabel: String! = "Fact check", assignee: String! = "", due: String = null, subjectType: String! = "", subjectId: String! = "", subjectTitle: String! = "", subjectHref: String! = ""): Boolean! @deprecated(reason: "The Review page was removed. The review projection stays one more release as the backend for policy auto-approval and inline approvals.")
   setTaskDue(id: Int!, due: String = null): Boolean!
   addFact(claim: String!, source: String!, owner: String! = "", documentId: Int = null): Boolean!
@@ -400,7 +565,7 @@ type Mutation {
   promoteGlossaryCandidate(id: Int!, accept: Boolean!): Boolean!
   scanDecisions: Int!
   scanFacts: Int!
-  startFactScan: Int!
+  startFactScan(config: JSON = null): Int!
   startDecisionScan: Int!
   scanAnswerCandidates(sources: [String!]!): [AnswerCandidate!]!
   setWorkflowTrigger(workflowId: Int!, trigger: String!): Boolean!
@@ -408,6 +573,9 @@ type Mutation {
   toggleWatch(documentId: Int!): Boolean!
   runWorkflow(workflowId: Int!, dryRun: Boolean! = false): Int!
   approveRun(runId: Int!): Boolean!
+  dismissWorkflowRun(runId: Int!): Boolean!
+  createScheduledTask(kind: String!, everyMinutes: Int! = 0): Int!
+  removeScheduledTask(taskId: Int!): Boolean!
   saveWorkflow(name: String!, description: String!, steps: JSON!, id: Int = null, color: String! = "#5c7a4c", pinned: Boolean! = true): Int! @deprecated(reason: "The Flows pipeline editor was removed; nothing in the product authors workflows any more. Scheduled syncs and promoted workflows still run. Kept for one release for existing API clients.")
   deleteWorkflow(id: Int!): Boolean! @deprecated(reason: "The Flows pipeline editor was removed; nothing in the product authors workflows any more. Scheduled syncs and promoted workflows still run. Kept for one release for existing API clients.")
   setWorkflowStatus(id: Int!, status: String!): Boolean!
@@ -433,7 +601,7 @@ type Mutation {
   rejectTrajectory(trajectoryId: Int!, rejected: Boolean! = true): Boolean!
   deleteTrajectory(trajectoryId: Int!): Boolean!
   pauseSource(sourceId: Int!): Boolean!
-  removeSource(sourceId: Int!): Boolean!
+  removeSource(sourceId: Int!, deleteDocuments: Boolean! = true): Boolean!
   inviteMember(name: String!, email: String!, role: String! = "user"): Boolean!
   setMemberRole(id: Int!, role: String!): Boolean!
   removeMember(id: Int!): Boolean!
@@ -529,6 +697,14 @@ type Query {
   workflows: [Workflow!]!
   workflowRuns(workflowId: Int = null): [WorkflowRun!]!
   workflowRun(id: Int!): WorkflowRun
+  latestWorkflowRun(workflowId: Int!): WorkflowRun
+  factExtractionCandidates(runId: Int!): [FactExtractionCandidate!]!
+  factSemanticLinks(factId: Int!): [FactSemanticLink!]!
+  factCandidateIntelligence(candidateId: Int!): FactIntelligence
+  factRunIntelligence(runId: Int!): [FactIntelligence!]!
+  factIntelligence(factId: Int!): FactIntelligence
+  factLlmBudgets(runId: Int!): [FactLlmBudget!]!
+  factImpactPreview(factId: Int!): FactImpactPreview
   knowledgeChatDestinations: [KnowledgeChatDestination!]!
   notifications: [Notification!]!
   workspace: Workspace!
@@ -803,6 +979,10 @@ type Workflow {
   status: String!
   nodes: JSON!
   trigger: JSON!
+  scheduleCapable: Boolean!
+  lastRunNumber: Int
+  lastRunStatus: String!
+  lastRunStarted: String!
 }
 
 type WorkflowRun {

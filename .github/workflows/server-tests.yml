@@ -1,0 +1,61 @@
+name: Server tests
+
+# Restored 2026-09-02. Commit 58acf9c removed every workflow along with the
+# retired Fly, desktop and canary pipelines; this one and browser-tests are
+# the two that guard main.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: server/requirements.txt
+      - run: python -m pip install ../mari-components/packages/*
+      - run: python -m pip install -r requirements.txt
+      # Unit tests must never reach a database. An unreachable MARI_DB makes
+      # any test that forgets to patch the pool fail loudly instead of
+      # writing to whatever Postgres the runner has.
+      - run: python -m unittest discover -s tests -p 'test_*.py'
+        env:
+          MARI_DB: postgresql://nobody@127.0.0.1:1/unit_tests_must_not_connect
+      - run: python -m mari_server.scripts.export_graphql_schema
+      - run: python -m compileall -q mari_server
+
+  components:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: mari-components
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: mari-components/packages/*/pyproject.toml
+      - run: python -m pip install packages/*
+      - run: |
+          python -m unittest discover -s tests -v
+          for package in packages/*; do
+            if [ -d "$package/tests" ]; then
+              python -m unittest discover -s "$package/tests" -v
+            fi
+          done

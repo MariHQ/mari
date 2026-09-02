@@ -1,5 +1,9 @@
 # Mari API — FastAPI + psycopg + pgvector client.
 # Build context is the REPO ROOT (see docker-compose.yml), not server/.
+#
+# The base image is pinned by tag only. To pin by digest, resolve it with
+#   docker buildx imagetools inspect python:3.12-slim --format '{{.Manifest.Digest}}'
+# and write FROM python:3.12-slim@sha256:<digest>.
 FROM python:3.12-slim
 
 # git is required at runtime: the repo audit clones the connected GitHub

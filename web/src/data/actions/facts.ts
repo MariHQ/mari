@@ -10,15 +10,35 @@
  * and no Retire rather than a control that would report success and change
  * nothing. */
 
-import type { FactScan, FactsActions } from "@mari-design/components/pages/FactsPage";
+import type { FactIntelligence, FactLlmBudget, FactScan, FactsActions, FactSemanticImpactLink } from "@mari-design/components/pages/FactsPage";
 import type { RunStatus } from "@mari-design/components/workflow/RunHistory";
 import { gqlResult } from "../../lib/api";
 import { mutate, type ActionContext } from "../actions";
 import { factsChanged } from "../facts";
+import { requestFactScanConfiguration } from "../../components/FactScanConfiguration";
 
 // `rows` and `stats` are JSON scalars on the run, so they arrive whole.
 const RUN_QUERY = `query($id: Int!) {
   workflowRun(id: $id) { id number workflowName status progress stats rows }
+  factExtractionCandidates(runId: $id) {
+    id runId documentId documentTitle claim source evidence confidence reviewStatus
+    reviewKind reviewReason reviewer reviewedAt publishedFactId impactScore highImpact
+    semanticLinks { targetType targetId relation similarity targetLabel targetUpdatedAt observedAt }
+  }
+  factLlmBudgets(runId: $id) {
+    stage purpose model maxCalls maxInputTokens maxOutputTokens
+    callsUsed inputTokens outputTokens status
+  }
+  factRunIntelligence(runId: $id) {
+    candidateId structuredClaim adjudication validFrom validTo
+    components { role text }
+    relations { targetClaim relation exactScore approximateScore decisionKind rationale }
+    evidenceGroups {
+      verdict sufficient confidence rationale decisionKind
+      spans { documentTitle quote role similarity }
+    }
+    clusters { label stableKey labelKind membershipScore }
+  }
 }`;
 
 type RunRes = {
@@ -27,6 +47,23 @@ type RunRes = {
     stats: { facts?: number } | null;
     rows: { step?: string; status?: string; detail?: string; duration?: string }[] | null;
   } | null;
+  factExtractionCandidates: {
+    id: number; runId: number; documentId: number | null; documentTitle: string;
+    claim: string; source: string; evidence: string; confidence: number;
+    reviewStatus: string; reviewKind: string; reviewReason: string; reviewer: string;
+    reviewedAt: string; publishedFactId: number | null;
+    impactScore: number; highImpact: boolean;
+    semanticLinks: {
+      targetType: "fact" | "document"; targetId: number; relation: string;
+      similarity: number; targetLabel: string; targetUpdatedAt: string; observedAt: string;
+    }[];
+  }[];
+  factLlmBudgets: FactLlmBudget[];
+  factRunIntelligence: (Omit<FactIntelligence, "relations"> & {
+    candidateId: number | null;
+    relations: { targetClaim: string; relation: string; exactScore: number | null;
+      approximateScore: number | null; decisionKind: string; rationale: string }[];
+  })[];
 };
 
 /* The engine's step vocabulary is the library's, one word for one word. An
@@ -37,7 +74,7 @@ const asStatus = (s: string): RunStatus => (RUN_STATUS.has(s as RunStatus) ? (s 
 const invalidatedRuns = new Set<string>();
 
 function invalidateFactsOnce(id: string, status: RunStatus) {
-  if ((status === "running" || status === "pending") || invalidatedRuns.has(id)) return;
+  if ((status === "running" || status === "pending" || status === "waiting") || invalidatedRuns.has(id)) return;
   invalidatedRuns.add(id);
   factsChanged();
   if (invalidatedRuns.size > 200) invalidatedRuns.delete(invalidatedRuns.values().next().value!);
@@ -50,6 +87,16 @@ function mapRun(res: RunRes | null, id: string): FactScan {
   // A run that has stopped has landed whatever it was going to land, so the
   // ledger under the page re-reads instead of showing yesterday's rows.
   invalidateFactsOnce(id, status);
+  const intelligence = new Map((res?.factRunIntelligence ?? [])
+    .filter((row) => row.candidateId !== null)
+    .map((row) => [row.candidateId!, {
+      ...row,
+      relations: row.relations.map((relation) => ({
+        targetClaim: relation.targetClaim, relation: relation.relation,
+        similarity: relation.exactScore ?? relation.approximateScore,
+        decisionKind: relation.decisionKind, rationale: relation.rationale,
+      })),
+    }]));
   return {
     id,
     label: `${run.workflowName} · run #${run.number}`,
@@ -61,6 +108,21 @@ function mapRun(res: RunRes | null, id: string): FactScan {
     // Only a run that scanned reports a count; until then the page says nothing
     // about how many claims landed.
     added: typeof run.stats?.facts === "number" ? run.stats.facts : null,
+    llmBudgets: res?.factLlmBudgets ?? [],
+    candidates: (res?.factExtractionCandidates ?? []).map((candidate) => ({
+      id: candidate.id,
+      documentTitle: candidate.documentTitle,
+      claim: candidate.claim,
+      evidence: candidate.evidence,
+      confidence: candidate.confidence,
+      status: candidate.reviewStatus as "pending" | "accepted" | "rejected",
+      reviewReason: candidate.reviewReason,
+      reviewer: candidate.reviewer,
+      impactScore: candidate.impactScore,
+      highImpact: candidate.highImpact,
+      semanticLinks: candidate.semanticLinks ?? [],
+      intelligence: intelligence.get(candidate.id),
+    })).sort((a, b) => Number(b.highImpact) - Number(a.highImpact) || b.impactScore - a.impactScore),
   };
 }
 
@@ -70,10 +132,61 @@ async function readRun(id: string): Promise<FactScan> {
   return mapRun(r.data, id);
 }
 
+async function latestRun(): Promise<FactScan | null> {
+  const workflows = await gqlResult<{
+    workflows: { id: number; nodes: { kind?: string }[] }[];
+  }>("{ workflows { id nodes } }");
+  if (!workflows.ok) throw new Error(workflows.error);
+  const workflow = workflows.data?.workflows.find((row) =>
+    (row.nodes ?? []).some((node) => node.kind === "scan_facts"));
+  if (!workflow) return null;
+  const runs = await gqlResult<{
+    latestWorkflowRun: { id: number; status: string } | null;
+  }>("query($id: Int!) { latestWorkflowRun(workflowId: $id) { id status } }", { id: workflow.id });
+  if (!runs.ok) throw new Error(runs.error);
+  const latest = runs.data?.latestWorkflowRun;
+  return latest ? readRun(String(latest.id)) : null;
+}
+
 export function factsActions({ currentUserName }: ActionContext): FactsActions {
   return {
     verifyFact: async (id: number) => {
       await mutate("mutation($id: Int!) { verifyFact(id: $id) }", { id });
+    },
+    restoreFact: async (id: number) => {
+      await mutate("mutation($id: Int!) { restoreFact(id: $id) }", { id });
+    },
+    retireFact: async (id: number) => {
+      await mutate(
+        "mutation($id: Int!) { invalidateFact(id: $id, reason: \"Invalidated from the fact ledger\") }",
+        { id },
+      );
+      factsChanged();
+    },
+    inspectFactImpact: async (id: number): Promise<FactSemanticImpactLink[]> => {
+      const result = await gqlResult<{ factImpactPreview: null | { items: {
+        impactKind: string; targetType: string; targetId: string; targetLabel: string;
+        dependencyType: string; similarity: number | null;
+      }[] }; factSemanticLinks: FactSemanticImpactLink[] }>(
+        `query($id: Int!) {
+          factImpactPreview(factId: $id) {
+            items { impactKind targetType targetId targetLabel dependencyType similarity }
+          }
+          factSemanticLinks(factId: $id) {
+            targetType targetId relation similarity targetLabel targetUpdatedAt observedAt
+          }
+        }`,
+        { id },
+      );
+      if (!result.ok) throw new Error(result.error);
+      const items = result.data?.factImpactPreview?.items;
+      if (!items?.length) return result.data?.factSemanticLinks ?? [];
+      return items.map((item) => ({
+        targetType: item.targetType, targetId: item.targetId,
+        relation: item.impactKind === "possible" ? "embedding neighbor" : item.dependencyType,
+        similarity: item.similarity ?? (item.impactKind === "direct" ? 1 : .75),
+        targetLabel: item.targetLabel, targetUpdatedAt: "", observedAt: "",
+      }));
     },
     addFact: async ({ claim, source, owner }) => {
       // `owner` defaults server-side, so an unowned claim is still accepted
@@ -90,10 +203,52 @@ export function factsActions({ currentUserName }: ActionContext): FactsActions {
      * scan" flow and the engine executes the steps on a background thread, so
      * this returns as soon as the run exists and the page follows it. */
     scanFacts: async () => {
+      const config = await requestFactScanConfiguration();
+      // A cancelled dialog is a no-op, not a failure. Throwing here landed in
+      // the page's WriteError as a "Could not save" banner for a scan nobody
+      // asked to start. FactsPage.launchScan does `setScan(started || null)`,
+      // so a null result clears its "starting" placeholder and draws nothing.
+      // The library type says `FactScan`, not `FactScan | null`, hence the
+      // cast; widening `FactsActions.scanFacts` lives in vendor, not here.
+      if (!config) return null as unknown as FactScan;
+      const d = await mutate(
+        "mutation($config: JSON) { startFactScan(config: $config) }",
+        { config },
+      );
+      return readRun(String(d.startFactScan));
+    },
+    /* Retry after a failure reuses the configuration the workflow already
+     * carries: startFactScan without a config runs the stored pipeline, and
+     * the failed documents were never marked scanned, so the rotation picks
+     * them straight back up. */
+    retryFactScan: async () => {
       const d = await mutate("mutation { startFactScan }");
       return readRun(String(d.startFactScan));
     },
     scanProgress: (id: string) => readRun(id),
+    latestFactScan: latestRun,
+    reviewFactCandidate: async (runId, candidateId, accept, reason = "") => {
+      await mutate(
+        "mutation($id: Int!, $accept: Boolean!, $reason: String!) { reviewFactCandidate(id: $id, accept: $accept, reason: $reason) }",
+        { id: candidateId, accept, reason },
+      );
+      return readRun(runId);
+    },
+    completeFactReview: async (runId) => {
+      const data = await mutate(
+        "mutation($runId: Int!) { approveRun(runId: $runId) }",
+        { runId: Number(runId) },
+      );
+      if (!data.approveRun) throw new Error("Review every candidate before continuing the workflow.");
+      return readRun(runId);
+    },
+    dismissFactScan: async (runId) => {
+      const data = await mutate(
+        "mutation($runId: Int!) { dismissWorkflowRun(runId: $runId) }",
+        { runId: Number(runId) },
+      );
+      if (!data.dismissWorkflowRun) throw new Error("The workflow run could not be dismissed.");
+    },
     createReviewTask: async (fact) => {
       // `factCheck` is the fact-check *detector* and takes a document, not a
       // claim, so re-verification is a task on the ledger row: the same

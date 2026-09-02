@@ -1,0 +1,107 @@
+name: Validate and publish Helm chart
+
+on:
+  pull_request:
+    paths:
+      - deploy/helm/mari/**
+      - .github/workflows/helm-release.yml
+  push:
+    branches: [main]
+    tags: ["v*.*.*"]
+    paths:
+      - deploy/helm/mari/**
+      - .github/workflows/helm-release.yml
+  workflow_dispatch:
+
+concurrency:
+  group: helm-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Lint and render
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      - uses: azure/setup-helm@v5.0.1
+        with:
+          version: v3.21.4
+      - name: Validate release metadata
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          set -euo pipefail
+          MARI_CHART_VERSION="$(helm show chart deploy/helm/mari | awk '$1 == "version:" {print $2}')"
+          MARI_APP_VERSION="$(helm show chart deploy/helm/mari | awk '$1 == "appVersion:" {gsub(/\"/, "", $2); print $2}')"
+          MARI_IMAGE_TAG_COUNT="$(helm show values deploy/helm/mari | awk -v expected="$GITHUB_REF_NAME" \
+            '$1 == "tag:" && $2 == expected {count++} END {print count + 0}')"
+          if [[ ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "Release tag must be vMAJOR.MINOR.PATCH with an optional SemVer prerelease suffix." >&2
+            exit 1
+          fi
+          if [[ "$GITHUB_REF_NAME" != "v$MARI_CHART_VERSION" ]]; then
+            echo "Tag $GITHUB_REF_NAME does not match Chart.yaml version $MARI_CHART_VERSION." >&2
+            exit 1
+          fi
+          if [[ "$MARI_APP_VERSION" != "$MARI_CHART_VERSION" ]]; then
+            echo "Chart appVersion $MARI_APP_VERSION does not match version $MARI_CHART_VERSION." >&2
+            exit 1
+          fi
+          if [[ "$MARI_IMAGE_TAG_COUNT" != "2" ]]; then
+            echo "The API and web image tags in values.yaml must both be $GITHUB_REF_NAME." >&2
+            exit 1
+          fi
+      - name: Lint, render, and package
+        run: |
+          helm lint deploy/helm/mari --set secrets.databasePassword=release-validation-only
+          helm template mari deploy/helm/mari \
+            --namespace mari \
+            --set secrets.databasePassword=release-validation-only \
+            >/dev/null
+          helm package deploy/helm/mari --destination "$RUNNER_TEMP"
+
+  publish:
+    name: Publish OCI chart
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: validate
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: azure/setup-helm@v5.0.1
+        with:
+          version: v3.21.4
+      - name: Package chart
+        shell: bash
+        run: |
+          set -euo pipefail
+          MARI_CHART_VERSION="${GITHUB_REF_NAME#v}"
+          mkdir -p .release
+          helm package deploy/helm/mari --destination .release
+          sha256sum ".release/mari-$MARI_CHART_VERSION.tgz" \
+            > ".release/mari-$MARI_CHART_VERSION.tgz.sha256"
+      - name: Publish chart to GHCR
+        env:
+          MARI_GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          printf '%s' "$MARI_GH_TOKEN" | helm registry login ghcr.io \
+            --username "$GITHUB_ACTOR" --password-stdin
+          helm push ".release/mari-${GITHUB_REF_NAME#v}.tgz" \
+            oci://ghcr.io/marihq/charts
+      - name: Attach chart to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MARI_RELEASE_TAG: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$MARI_RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$MARI_RELEASE_TAG" .release/* --clobber
+          else
+            gh release create "$MARI_RELEASE_TAG" .release/* \
+              --verify-tag --generate-notes --title "Mari $MARI_RELEASE_TAG"
+          fi

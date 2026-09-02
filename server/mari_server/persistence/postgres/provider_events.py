@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import datetime as dt
-import json
 
 from mari_server.persistence.postgres import connection as db
 
@@ -72,6 +71,32 @@ def installation_active(installation_id: int, project_id: int, provider: str) ->
           AND provider = %s AND status = 'connected'""", (installation_id, project_id, provider)).fetchone())
 
 
+def factcheck_runs_last_hour(project_id: int, repository: str, number: int) -> int:
+    """Fact validation runs the durable inbox recorded for one pull request
+    in the last hour (see mark_factcheck_run)."""
+    with db.connect() as conn:
+        row = conn.execute(
+            """SELECT count(*) AS n FROM event_inbox
+                WHERE provider = 'github' AND project_id = %s
+                  AND payload -> 'hint' ->> 'repository' = %s
+                  AND payload -> 'hint' ->> 'number' = %s
+                  AND (payload ->> 'factcheck_at')::timestamptz > now() - interval '1 hour'""",
+            (project_id, repository, str(number))).fetchone()
+    return int((row or {}).get("n") or 0)
+
+
+def mark_factcheck_run(row_id: int) -> None:
+    """Stamp the inbox row whose delivery started a fact validation run. The
+    inbox already keeps every delivery per project and PR, so the hourly cap
+    needs no table of its own."""
+    if row_id < 1:
+        return
+    with db.connect() as conn, conn.transaction():
+        conn.execute(
+            """UPDATE event_inbox SET payload = payload || jsonb_build_object('factcheck_at', now())
+                WHERE id = %s""", (row_id,))
+
+
 def mark_github_delivery(project_id: int) -> None:
     with db.connect() as conn, conn.transaction():
         conn.execute(
@@ -134,10 +159,13 @@ def observe_drive_message(channel_id: str, resource_id: str, number: int) -> Non
           WHERE channel_id = %s""", (resource_id, number, channel_id))
 
 
-def update_drive_cursor(source_id: int, config: dict, page_token: str) -> None:
+def update_drive_cursor(source_id: int, cursor: str, page_token: str) -> None:
+    # Only the cursor is this worker's to write. Replacing the whole config
+    # from the copy read at the start of the drain put back whatever the poll
+    # worker or a credential edit had changed since.
     with db.connect() as conn, conn.transaction():
-        conn.execute("UPDATE sources SET config = %s, last_sync_at = now(), health = 'Healthy' WHERE id = %s",
-                     (json.dumps(config), source_id))
+        conn.execute("""UPDATE sources SET config = config || jsonb_build_object('cursor', %s::text),
+          last_sync_at = now(), health = 'Healthy' WHERE id = %s""", (cursor, source_id))
         conn.execute("""UPDATE gdrive_watch_channels SET page_token = %s, last_error = '', updated_at = now()
           WHERE source_id = %s""", (page_token, source_id))
 

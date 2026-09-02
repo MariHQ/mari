@@ -8,6 +8,7 @@ const ROUTES = [
   ["/insights", "Insights", "Analytics"], ["/audit", "Repository audit", "Knowledge"], ["/lineage", "Lineage", "Lineage"],
   ["/library", "Library", "Knowledge"], ["/publish", "Destinations", "Destinations"],
   ["/workflows", "Workflows", "Workflows"],
+  ["/scheduled-tasks", "Scheduled tasks", "Scheduled tasks"],
   ["/sources", "Sources", "Sources"], ["/settings/general", "General", "Settings"],
   ["/settings/models", "Models", "Settings"], ["/settings/design", "Design & brand", "Settings"],
   ["/settings/members", "Members", "Settings"], ["/settings/api-keys", "API keys", "Settings"],
@@ -15,7 +16,7 @@ const ROUTES = [
 ] as const;
 
 const PRIMARY_DESTINATIONS = [
-  "Home", "Knowledge", "Facts", "Decisions", "Lineage", "Workflows", "Destinations", "Analytics", "Sources", "Settings",
+  "Home", "Knowledge", "Facts", "Decisions", "Lineage", "Workflows", "Scheduled tasks", "Destinations", "Analytics", "Sources", "Settings",
 ] as const;
 
 const LEGACY_PRIMARY_LABELS = [

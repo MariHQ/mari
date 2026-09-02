@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import statistics
 import datetime as dt
 from mari_server.providers import models as llm
@@ -13,6 +14,9 @@ from mari_components.documents import DocumentVersion
 from mari_components.retrieval import chunk_text, content_hash, title_from_markdown
 from mari_server.persistence.postgres import documents as document_repository
 from mari_server.persistence.postgres import connection as postgres
+
+log = logging.getLogger(__name__)
+
 
 def connection():
     return postgres.connect()
@@ -43,7 +47,8 @@ def upsert_document(conn, source_id: int, external_id: str, title: str, body: st
                      source: str = "github", initials: str = "GH",
                      acl_visibility: str = "project",
                      acl_principals: tuple[str, ...] = (),
-                     source_updated_at: str = "") -> tuple[int, bool]:
+                     source_updated_at: str = "",
+                     metadata: dict | None = None) -> tuple[int, bool]:
     """Upsert one document. Returns (doc_id, inserted) — inserted is True for a
     brand-new row, False for an update (xmax = 0 only on fresh inserts).
     `source`/`initials` default to github; connect_sync passes the provider key."""
@@ -65,6 +70,7 @@ def upsert_document(conn, source_id: int, external_id: str, title: str, body: st
         version,
         document_application.ProjectionFields(
             source=source, kind=kind, author=author, author_initials=initials,
+            metadata=metadata or {},
         ),
         ports=document_repository.ports(conn),
     )
@@ -96,6 +102,7 @@ def upsert_documents(conn, documents: list[dict]) -> list[tuple[int, bool]]:
         ), document_application.ProjectionFields(
             source=document["source"], kind="page", author=document["author"],
             author_initials=document["initials"],
+            metadata=document.get("metadata") or {},
         )))
     results = document_application.upsert_many(
         prepared, ports=document_repository.ports(conn),
@@ -104,51 +111,70 @@ def upsert_documents(conn, documents: list[dict]) -> list[tuple[int, bool]]:
     return results
 
 
+# A failed embed (provider down, model missing) must not erase the previous
+# profile's vector for unchanged content: a profile rotation retries at every
+# startup, and each failed pass used to null the legacy vector it still needed
+# until a retry finally succeeded. The old vector only goes when the content
+# itself changed, because then it describes text that no longer exists.
+_CHUNK_UPSERT = """
+    INSERT INTO chunks (project_id, document_id, idx, content, content_hash,
+                        embedding_profile, embedding)
+    VALUES (%s, %s, %s, %s, %s, %s, %s::vector)
+    ON CONFLICT (document_id, idx) DO UPDATE SET
+      content = EXCLUDED.content, content_hash = EXCLUDED.content_hash,
+      embedding_profile = CASE
+        WHEN EXCLUDED.embedding IS NOT NULL
+          OR chunks.content_hash IS DISTINCT FROM EXCLUDED.content_hash
+        THEN EXCLUDED.embedding_profile ELSE chunks.embedding_profile END,
+      embedding = CASE
+        WHEN EXCLUDED.embedding IS NOT NULL
+          OR chunks.content_hash IS DISTINCT FROM EXCLUDED.content_hash
+        THEN EXCLUDED.embedding ELSE chunks.embedding END
+    RETURNING id"""
+
+
 def sync_chunks(conn, doc_id: int, title: str, body: str,
                  max_tokens: int, overlap: int) -> tuple[int, int]:
     """Chunk + hash + embed-only-changed. Returns (chunks, newly_embedded)."""
     pieces = chunk_text(f"{title}\n\n{body}", max_tokens, overlap)
     project_id = access.require_current_access().project_id
     profile = llm.embedding_profile()
+    provider, model = llm.embedding_model()
     existing = {r["idx"]: r for r in conn.execute(
-        """SELECT idx, content_hash, embedding_profile, embedding IS NOT NULL AS embedded
-             FROM chunks WHERE project_id = %s AND document_id = %s""",
-        (project_id, doc_id)).fetchall()}
+        """SELECT c.id, c.idx, c.content_hash,
+                  EXISTS (SELECT 1 FROM chunk_embeddings e
+                           WHERE e.chunk_id = c.id AND e.project_id = c.project_id
+                             AND e.embedding_profile = %s AND e.purpose = 'document'
+                             AND e.content_hash = c.content_hash) AS embedded
+             FROM chunks c WHERE c.project_id = %s AND c.document_id = %s""",
+        (profile, project_id, doc_id)).fetchall()}
     embedded = 0
     for idx, piece in enumerate(pieces):
         h = content_hash(piece)
         prior = existing.get(idx)
-        if (prior and prior["content_hash"] == h
-                and prior["embedding_profile"] == profile and prior["embedded"]):
+        if prior and prior["content_hash"] == h and prior["embedded"]:
             continue
-        vec = llm.embed(piece)
+        vec = llm.embed(piece, purpose="document")
         if vec:
             embedded += 1
-        conn.execute("""
-            INSERT INTO chunks (project_id, document_id, idx, content, content_hash,
-                                embedding_profile, embedding)
-            VALUES (%s, %s, %s, %s, %s, %s, %s::vector)
-            ON CONFLICT (document_id, idx) DO UPDATE SET
-              content = EXCLUDED.content, content_hash = EXCLUDED.content_hash,
-              embedding_profile = EXCLUDED.embedding_profile,
-              embedding = EXCLUDED.embedding""",
-            (project_id, doc_id, idx, piece, h, profile, str(vec) if vec else None))
+        elif prior and prior["content_hash"] == h:
+            # No vector and the row already holds this content: the upsert
+            # would rewrite the row to its current state (see _CHUNK_UPSERT).
+            continue
+        chunk = conn.execute(
+            _CHUNK_UPSERT,
+            (project_id, doc_id, idx, piece, h, profile, str(vec) if vec else None)).fetchone()
+        if vec:
+            _store_embedding(
+                conn, project_id, int(chunk["id"]), doc_id, profile,
+                provider, model, h, vec,
+            )
     conn.execute("DELETE FROM chunks WHERE project_id = %s AND document_id = %s AND idx >= %s",
                  (project_id, doc_id, len(pieces)))
-    # doc-level embedding = mean of chunk embeddings (keeps existing doc search working)
-    vecs = [r["embedding"] for r in conn.execute(
-        """SELECT embedding::text AS embedding FROM chunks
-           WHERE project_id = %s AND document_id = %s AND embedding IS NOT NULL""",
-        (project_id, doc_id)).fetchall()]
-    if vecs:
-        parsed = [json.loads(v) for v in vecs]
-        mean = [statistics.fmean(col) for col in zip(*parsed)]
-        conn.execute("""UPDATE documents SET embedding = %s::vector
-                        WHERE id = %s AND project_id = %s""", (str(mean), doc_id, project_id))
+    _update_document_mean(conn, project_id, doc_id, profile)
     conn.commit()
-    # Chunk vectors are derived and intentionally live outside canonical
-    # storage. A burst of changed documents produces one atomic MUVERA /
-    # PolarQuant snapshot instead of rewriting an index per document.
+    # PolarQuant/MUVERA is disposable acceleration state. The ordered chunk
+    # vectors needed to reconstruct it remain versioned in Postgres.
     if embedded:
         retrieval.schedule_rebuild()
     return len(pieces), embedded
@@ -159,49 +185,50 @@ def sync_chunks_many(conn, documents: list[tuple[int, str, str]],
     """Synchronize derived chunks for several documents with one model batch."""
     project_id = access.require_current_access().project_id
     profile = llm.embedding_profile()
-    prepared: list[tuple[int, int, str, str]] = []
+    provider, model = llm.embedding_model()
+    prepared: list[tuple[int, int, str, str, bool]] = []  # (..., row already holds this content)
     piece_counts: dict[int, int] = {}
     for doc_id, title, body in documents:
         pieces = chunk_text(f"{title}\n\n{body}", max_tokens, overlap)
         piece_counts[doc_id] = len(pieces)
         existing = {r["idx"]: r for r in conn.execute(
-            """SELECT idx, content_hash, embedding_profile, embedding IS NOT NULL AS embedded
-                 FROM chunks WHERE project_id = %s AND document_id = %s""",
-            (project_id, doc_id)).fetchall()}
+            """SELECT c.id, c.idx, c.content_hash,
+                      EXISTS (SELECT 1 FROM chunk_embeddings e
+                               WHERE e.chunk_id = c.id AND e.project_id = c.project_id
+                                 AND e.embedding_profile = %s AND e.purpose = 'document'
+                                 AND e.content_hash = c.content_hash) AS embedded
+                 FROM chunks c WHERE c.project_id = %s AND c.document_id = %s""",
+            (profile, project_id, doc_id)).fetchall()}
         for idx, piece in enumerate(pieces):
             h = content_hash(piece)
             prior = existing.get(idx)
-            if not (prior and prior["content_hash"] == h
-                    and prior["embedding_profile"] == profile and prior["embedded"]):
-                prepared.append((doc_id, idx, piece, h))
+            if not (prior and prior["content_hash"] == h and prior["embedded"]):
+                prepared.append((doc_id, idx, piece, h, bool(prior and prior["content_hash"] == h)))
 
     vectors = llm.embed_many(row[2] for row in prepared)
     embedded = 0
-    for (doc_id, idx, piece, h), vec in zip(prepared, vectors, strict=True):
+    for (doc_id, idx, piece, h, unchanged), vec in zip(prepared, vectors, strict=True):
         if vec:
             embedded += 1
-        conn.execute("""
-            INSERT INTO chunks (project_id, document_id, idx, content, content_hash,
-                                embedding_profile, embedding)
-            VALUES (%s, %s, %s, %s, %s, %s, %s::vector)
-            ON CONFLICT (document_id, idx) DO UPDATE SET
-              content = EXCLUDED.content, content_hash = EXCLUDED.content_hash,
-              embedding_profile = EXCLUDED.embedding_profile,
-              embedding = EXCLUDED.embedding""",
-            (project_id, doc_id, idx, piece, h, profile, str(vec) if vec else None))
+        elif unchanged:
+            # The provider answered nothing and the row already holds this
+            # content: _CHUNK_UPSERT would keep every column as it is, so the
+            # write is pure churn. With the embedder down, a boot reindex used
+            # to rewrite every chunk row in the table this way, every boot.
+            continue
+        chunk = conn.execute(
+            _CHUNK_UPSERT,
+            (project_id, doc_id, idx, piece, h, profile, str(vec) if vec else None)).fetchone()
+        if vec:
+            _store_embedding(
+                conn, project_id, int(chunk["id"]), doc_id, profile,
+                provider, model, h, vec,
+            )
 
     for doc_id, count in piece_counts.items():
         conn.execute("DELETE FROM chunks WHERE project_id = %s AND document_id = %s AND idx >= %s",
                      (project_id, doc_id, count))
-        vecs = [r["embedding"] for r in conn.execute(
-            """SELECT embedding::text AS embedding FROM chunks
-               WHERE project_id = %s AND document_id = %s AND embedding IS NOT NULL""",
-            (project_id, doc_id)).fetchall()]
-        if vecs:
-            parsed = [json.loads(value) for value in vecs]
-            mean = [statistics.fmean(column) for column in zip(*parsed)]
-            conn.execute("UPDATE documents SET embedding = %s::vector WHERE id = %s AND project_id = %s",
-                         (str(mean), doc_id, project_id))
+        _update_document_mean(conn, project_id, doc_id, profile)
     conn.commit()
     if embedded:
         retrieval.schedule_rebuild()
@@ -214,6 +241,12 @@ def reindex_all(batch_size: int = 100) -> tuple[int, int]:
     Chunks whose content and profile already match are reused without an HTTP
     call. Batches commit independently because vectors are derived and a
     stopped run can safely resume from the cache boundary.
+
+    Stops after the first batch the provider fails outright: a pass that
+    embeds nothing cannot make needs_reindex false, so continuing only reads
+    every document for nothing and the next boot starts over anyway. The
+    project's sources are marked so the console stops reporting Healthy over
+    a corpus whose search is keyword-only.
     """
     project_id = access.require_current_access().project_id
     max_tokens, overlap = chunk_settings()
@@ -237,7 +270,108 @@ def reindex_all(batch_size: int = 100) -> tuple[int, int]:
         documents += len(rows)
         embedded += changed
         offset += len(rows)
+        # last_error is per thread and this worker has its own, so a message
+        # here is this batch's. A batch that embedded nothing while the
+        # provider reported a failure is the provider being down, not a
+        # partial miss worth pushing through.
+        error = llm.last_error()
+        if error and not changed:
+            _mark_embedding_degraded(project_id, error)
+            log.warning("embedding reindex stopped: project=%s documents=%s error=%s",
+                        project_id, documents, error)
+            break
     return documents, embedded
+
+
+def _mark_embedding_degraded(project_id: int, error: str) -> None:
+    """Surface a stopped reindex where an operator already looks.
+
+    sources.health is the word the Sources cards colour, and the console
+    treats any word it does not know as healthy — so 'Error', the word the
+    sync path already writes for a failed sync, is the only one that shows.
+    Only sources currently reporting Healthy are touched; Syncing and Paused
+    are someone else's truthful state. The next successful sync writes
+    Healthy again. The sync log carries the provider's own reason."""
+    with connection() as conn:
+        conn.execute(
+            """UPDATE sources SET health = 'Error'
+                WHERE project_id = %s AND kind = 'connector' AND health = 'Healthy'""",
+            (project_id,),
+        )
+        conn.execute(
+            """INSERT INTO sync_events (project_id, provider, event, detail, at_label)
+               VALUES (%s, 'embeddings', 'embedding reindex stopped', %s,
+                       to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))""",
+            (project_id, error[:300]),
+        )
+        conn.commit()
+
+
+def needs_reindex() -> bool:
+    """Whether any projected chunk is missing the active embedding profile."""
+    project_id = access.require_current_access().project_id
+    profile = llm.embedding_profile()
+    with connection() as conn:
+        row = conn.execute(
+            """SELECT EXISTS (
+                   SELECT 1 FROM chunks c
+                    WHERE c.project_id = %s
+                      AND NOT EXISTS (
+                        SELECT 1 FROM chunk_embeddings e
+                         WHERE e.project_id = c.project_id AND e.chunk_id = c.id
+                           AND e.embedding_profile = %s AND e.purpose = 'document'
+                           AND e.content_hash = c.content_hash
+                      )
+               ) AS stale""",
+            (project_id, profile),
+        ).fetchone()
+    return bool(row and row["stale"])
+
+
+def _store_embedding(conn, project_id: int, chunk_id: int, document_id: int,
+                     profile: str, provider: str, model: str, content_hash_value: str,
+                     vector: list[float]) -> None:
+    """Append or refresh one profile without deleting vectors from another."""
+    conn.execute(
+        """INSERT INTO chunk_embeddings (
+           project_id, chunk_id, document_id, embedding_profile, provider,
+             model, purpose, representation, distance_metric, normalized,
+             dimensions, content_hash, embedding
+           ) VALUES (%s, %s, %s, %s, %s, %s, 'document',
+                     'dense-chunk-set-v1', 'cosine-maxsim', false, %s, %s, %s::vector)
+           ON CONFLICT (chunk_id, embedding_profile, purpose) DO UPDATE SET
+             project_id = EXCLUDED.project_id,
+             document_id = EXCLUDED.document_id,
+             provider = EXCLUDED.provider,
+             model = EXCLUDED.model,
+             dimensions = EXCLUDED.dimensions,
+             content_hash = EXCLUDED.content_hash,
+             embedding = EXCLUDED.embedding,
+             updated_at = now()""",
+        (project_id, chunk_id, document_id, profile, provider, model,
+         len(vector), content_hash_value, str(vector)),
+    )
+
+
+def _update_document_mean(conn, project_id: int, document_id: int, profile: str) -> None:
+    """Maintain the legacy document centroid; multi-vector retrieval never reads it."""
+    vecs = [row["embedding"] for row in conn.execute(
+        """SELECT e.embedding::text AS embedding
+             FROM chunks c JOIN chunk_embeddings e
+               ON e.project_id = c.project_id AND e.chunk_id = c.id
+            WHERE c.project_id = %s AND c.document_id = %s
+              AND e.embedding_profile = %s AND e.purpose = 'document'
+              AND e.content_hash = c.content_hash
+            ORDER BY c.idx""",
+        (project_id, document_id, profile)).fetchall()]
+    if not vecs:
+        return
+    parsed = [json.loads(value) for value in vecs]
+    mean = [statistics.fmean(column) for column in zip(*parsed)]
+    conn.execute(
+        "UPDATE documents SET embedding = %s::vector WHERE id = %s AND project_id = %s",
+        (str(mean), document_id, project_id),
+    )
 
 
 def delete_documents(conn, doc_ids: list[int]) -> None:

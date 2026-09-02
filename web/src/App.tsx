@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, type ReactNode } from "react";
 import { BrowserRouter, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { PAGES, type PageModule } from "@mari-design/components/pages";
 import { landingPageFor, type ShellChrome } from "@mari-design/components/pages/PageFrame";
@@ -9,8 +9,9 @@ import { useChrome } from "./data/chrome";
 import { SEARCH_SCOPES, globalSearch } from "./data/search";
 import { ACTION_FACTORIES } from "./data/actions";
 import { AuthProvider, useAuth } from "./lib/auth";
-import { AgentDock } from "./components/AgentDock";
+import { AgentDock, AgentDockProvider } from "./components/AgentDock";
 import { KnowledgeChatDestination } from "./components/KnowledgeChatDestination";
+import { FactScanConfiguration } from "./components/FactScanConfiguration";
 import { useIsMobile } from "./lib/mobile";
 
 /* The whole console, routed off the component library's own page registry.
@@ -47,6 +48,7 @@ const APP_PAGES = PAGES.filter((p) => !LIBRARY_ONLY.has(p.id));
 function useShellChrome(): ShellChrome {
   const { user, logout, projects, activeProject, selectProject } = useAuth();
   const navigate = useNavigate();
+  const { pathname } = useLocation();
   // The bell and the search overlay are the same on every page, so they are
   // fetched here rather than by 25 page adapters.
   const { notifications, recentSearches } = useChrome();
@@ -84,7 +86,12 @@ function useShellChrome(): ShellChrome {
     // page and the search overlay's "recent" list permanently empty.
     notifications,
     recentSearches,
-  }), [user, logout, projects, activeProject, selectProject, navigate, notifications, recentSearches]);
+    // The agent rides beside every routed page and survives route changes:
+    // its transcript lives in AgentDockProvider, so the surface can remount
+    // with each page's frame. The published knowledge chat is its own
+    // conversation and gets no second one floating over it.
+    aside: pathname.startsWith("/knowledge-chat/") ? undefined : <AgentDock />,
+  }), [user, logout, projects, activeProject, selectProject, navigate, notifications, recentSearches, pathname]);
 }
 
 
@@ -160,6 +167,19 @@ function PublicOnly({ id, children }: { id: string; children: React.ReactNode })
  *  hold are `/answers?answer=4` (a Review item, a chat citation) and
  *  `/trajectories?category=…` (a bookmark). Everything the old route carried
  *  is carried through, with `tab` set to the half that used to be the page. */
+/** The retired ?tab=scheduled half of Workflows is /scheduled-tasks now.
+ *
+ *  Old notifications and bookmarks still carry the query. Without this the
+ *  unknown tab falls back to Observed, which reads like the schedule vanished
+ *  rather than moved. */
+function LegacyScheduledTab({ children }: { children: ReactNode }) {
+  const { search } = useLocation();
+  if (new URLSearchParams(search).get("tab") === "scheduled") {
+    return <Navigate to="/scheduled-tasks" replace />;
+  }
+  return <>{children}</>;
+}
+
 function MovedToWorkflows({ tab }: { tab: "observed" | "answers" }) {
   const { search } = useLocation();
   const params = new URLSearchParams(search);
@@ -178,6 +198,7 @@ function Routed() {
   const navigate = useNavigate();
   return (
     <NavProvider navigate={navigate}>
+      <AgentDockProvider>
       <RouteFocus />
       <Routes>
           <Route path="/knowledge-chat/:project/:slug" element={<KnowledgeChatDestination />} />
@@ -188,7 +209,9 @@ function Routed() {
               path={page.route}
               element={PUBLIC.has(page.id)
                 ? <PublicOnly id={page.id}><Element /></PublicOnly>
-                : <Gate><Element /></Gate>}
+                : page.id === "workflows"
+                  ? <Gate><LegacyScheduledTab><Element /></LegacyScheduledTab></Gate>
+                  : <Gate><Element /></Gate>}
             />
           ))}
         {/* Retired surfaces. The Flows pipeline editor and the Review page
@@ -210,18 +233,10 @@ function Routed() {
             missing. */}
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
-      {/* The agent dock floats over every routed page and survives route
-          changes — which is the point: the agent's navigate events move the
-          SPA underneath it while the conversation stays open. Renders nothing
-          until there is a session. */}
-      <RouteAgentDock />
+      <FactScanConfiguration />
+      </AgentDockProvider>
     </NavProvider>
   );
-}
-
-function RouteAgentDock() {
-  const { pathname } = useLocation();
-  return pathname.startsWith("/knowledge-chat/") ? null : <AgentDock />;
 }
 
 /** Move keyboard/screen-reader context after an SPA page navigation. Skip the

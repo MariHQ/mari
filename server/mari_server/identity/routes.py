@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import contextvars
 import hashlib
+import ipaddress
 import json
 import logging
 import os
@@ -69,16 +70,109 @@ _ATTEMPTS: dict[str, list[float]] = {}
 _ATTEMPTS_LOCK = threading.Lock()
 
 
+def _trusted_proxy_entries() -> list[str]:
+    return [str(value).strip() for value in (config.get("server", "trusted_proxies") or [])]
+
+
+def _address_is_listed(address: str, entries: list[str]) -> bool:
+    """Does `address` match one of the trusted_proxies entries (an exact
+    address or a CIDR range)? "*" is deliberately NOT handled here: it means
+    "the peer is the proxy", not "every hop in a forwarded chain is one"."""
+    if not address:
+        return False
+    try:
+        parsed = ipaddress.ip_address(address)
+    except ValueError:
+        return address in entries
+    for entry in entries:
+        if "/" in entry:
+            try:
+                if parsed in ipaddress.ip_network(entry, strict=False):
+                    return True
+            except ValueError:
+                continue
+        elif entry == address:
+            return True
+    return False
+
+
+def _peer_is_trusted_proxy(peer: str) -> bool:
+    """server.trusted_proxies entries are an address, a CIDR range, or "*".
+    The range form is for clusters where the proxy is a pod with a dynamic
+    address; "*" is for deployments where the API port is not reachable by
+    anything except the proxy in front of it (the chart's ClusterIP service,
+    the compose network), so every peer is that proxy by construction."""
+    entries = _trusted_proxy_entries()
+    if "*" in entries:
+        return True
+    return _address_is_listed(peer, entries)
+
+
+def _forwarded_values(request: Request, header: str) -> list[str]:
+    """Every value of an X-Forwarded-* header, left to right, and only when
+    the peer is a configured proxy (server.trusted_proxies). Anyone who can
+    reach the port can write these headers, so from any other peer they are
+    ignored: the rate limiter, the cookie's Secure flag and the access log
+    all used to read them and only the first one checked who sent them."""
+    peer = request.client.host if request.client else ""
+    if not _peer_is_trusted_proxy(peer):
+        return []
+    values = (request.headers.get(header) or "").split(",")
+    return [value.strip() for value in values if value.strip()]
+
+
+def _forwarded(request: Request, header: str) -> str:
+    """The RIGHTMOST value of an X-Forwarded-* header from a trusted peer.
+
+    Proxies append: nginx's $proxy_add_x_forwarded_for and API Gateway both
+    keep whatever the request already carried and add their own value on the
+    right. So the rightmost entry is the one the nearest proxy wrote and the
+    leftmost is whatever the internet client chose to send. This used to
+    return the leftmost value, which let a client pick its own scheme."""
+    values = _forwarded_values(request, header)
+    return values[-1] if values else ""
+
+
+def _forwarded_client_ip(request: Request) -> str:
+    """The client address from X-Forwarded-For, read from the right.
+
+    Each proxy appends the address it saw the request come from, so the
+    chain reads "client-supplied..., client, proxy2, proxy1" by the time it
+    reaches the API and only the entries written by a proxy we trust say
+    anything. Walk from the right, skip hops that are themselves listed in
+    trusted_proxies (the address of a proxy behind another proxy), skip
+    anything that is not an address, and take the first hop left over: the
+    address the outermost trusted proxy saw, which the client cannot forge.
+
+    With "*" there is no way to tell one hop from another, so the rightmost
+    value is taken: it is what the nearest proxy wrote and, when exactly one
+    proxy fronts the API (the chart, compose), the only value not under the
+    client's control. Behind a chain of proxies, list them instead of "*".
+    Returns "" when nothing usable is left (the caller falls back to the
+    peer)."""
+    values = _forwarded_values(request, "X-Forwarded-For")
+    if not values:
+        return ""
+    entries = _trusted_proxy_entries()
+    if "*" in entries:
+        values = values[-1:]
+        entries = []
+    for hop in reversed(values):
+        try:
+            ipaddress.ip_address(hop)
+        except ValueError:
+            continue
+        if _address_is_listed(hop, entries):
+            continue
+        return hop
+    return ""
+
+
 def _client_ip(request: Request | None) -> str:
     if request is None:
         return "unknown"
     peer = request.client.host if request.client else "unknown"
-    trusted = {str(value).strip() for value in (config.get("server", "trusted_proxies") or [])}
-    if peer in trusted:
-        forwarded = (request.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
-        if forwarded:
-            return forwarded
-    return peer
+    return _forwarded_client_ip(request) or peer
 
 
 def _rate_limit(bucket: str, key: str, limit: int, window_s: int) -> None:
@@ -132,6 +226,25 @@ def _normalize_email(value: str | None) -> str:
     return str(value or "").strip().lower()
 
 
+# users.role is what an administrator picked in inviteMember, and it is the
+# label the avatar shows, but authorization is the caller's project membership
+# (identity/context.py ROLE_CAPABILITIES). Redeeming an invitation has to turn
+# the invited tier into a membership role or the invited admin has no admin
+# power. Anything that is not a privileged tier joins as a plain member.
+_INVITED_MEMBERSHIP_ROLE = {"admin": "admin", "manager": "manager"}
+
+
+def _invited_membership_role(role: str | None) -> str:
+    return _INVITED_MEMBERSHIP_ROLE.get(str(role or "").strip().lower(), "member")
+
+
+def _is_pending_invitation(user: dict) -> bool:
+    """An admin-created row nobody has claimed yet: inviteMember is the only
+    writer of `invited_by`, and a credential of any kind means it was claimed."""
+    return bool(user.get("invited_by") and not user.get("password_hash")
+                and not user.get("github_id") and not user.get("google_id"))
+
+
 def issue_invitation(name: str, email: str, role: str, invited_by: str) -> str:
     """Create or rotate an invitation and return its one-time bearer token.
 
@@ -154,9 +267,7 @@ def issue_invitation(name: str, email: str, role: str, invited_by: str) -> str:
                 raise ValueError("That name and email belong to different accounts.")
             user = by_email or by_name
             if user:
-                pending = (user.get("invited_by") and not user.get("password_hash")
-                           and not user.get("github_id") and not user.get("google_id"))
-                if not pending or _normalize_email(user.get("email")) != email or user.get("name") != name:
+                if not _is_pending_invitation(user) or _normalize_email(user.get("email")) != email or user.get("name") != name:
                     raise ValueError("An account with that email or name already exists.")
                 conn.execute("UPDATE users SET role = %s, invited_by = %s WHERE id = %s",
                              (role, invited_by, user["id"]))
@@ -238,8 +349,8 @@ def _is_https(request: Request | None) -> bool:
     in production while localhost HTTP dev keeps working."""
     if request is None:
         return False
-    proto = request.headers.get("X-Forwarded-Proto", request.url.scheme)
-    return proto.split(",")[0].strip().lower() == "https"
+    proto = _forwarded(request, "X-Forwarded-Proto") or request.url.scheme
+    return proto.strip().lower() == "https"
 
 
 def _set_session_cookie(response: Response, token: str, request: Request | None,
@@ -267,8 +378,7 @@ def _client_detail(request: Request | None) -> list[dict]:
     header is recorded as unknown, never guessed."""
     if request is None:
         return []
-    forwarded = (request.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
-    ip = forwarded or (request.client.host if request.client else "")
+    ip = _forwarded_client_ip(request) or (request.client.host if request.client else "")
     return [{"label": "IP address", "value": ip or "unknown"},
             {"label": "User agent", "value": (request.headers.get("User-Agent") or "unknown")[:200]}]
 
@@ -314,6 +424,10 @@ def current_user(request: Request) -> dict | None:
         if session:
             with _conn() as conn:
                 user = conn.execute("SELECT * FROM users WHERE id = %s", (session["user_id"],)).fetchone()
+            # A deactivated account (SCIM deprovision, admin disable) keeps no
+            # identity even if a session row outlived the revocation.
+            if user and user.get("status", "active") != "active":
+                user = None
     if isinstance(scope, dict):
         scope["mari_user"] = user
     set_caller(user)
@@ -374,19 +488,13 @@ def require_user(request: Request) -> dict:
     return user
 
 
-def require_role(request: Request, *roles: str) -> dict:
-    user = require_user(request)
-    if user.get("role") not in roles:
-        raise HTTPException(403, f"This action needs the {' or '.join(roles)} role.")
-    return user
-
-
-def require_admin(request: Request) -> dict:
-    return require_role(request, "admin")
-
-
-# Project-aware REST dependencies live in access.py, but are re-exported here
-# for callers that already treat auth.py as the dependency surface.
+# The admin and manager tiers are properties of the caller's membership in the
+# project named by X-Mari-Project, never of the global users.role column: a
+# person can be an admin in one project and a viewer in another, and every
+# write is scoped to the resolved project. Project-aware REST dependencies
+# live in access.py (require_capability("member.manage") is the admin gate),
+# re-exported here for callers that already treat auth.py as the dependency
+# surface.
 require_project = access_module.require_project
 require_capability = access_module.require_capability
 
@@ -561,7 +669,8 @@ def register(body: Credentials, request: Request, response: Response):
 
       • Claiming an invite — an admin created the row (invite_member) and it
         has no credential yet. Registering with that email sets the password
-        on the row the admin made, keeping the role they were invited with.
+        on the row the admin made and joins the project with the tier they
+        were invited with (admin, manager, or plain member).
       • Open registration — only when auth.registration_enabled is set, for
         workspaces that genuinely want anyone to sign up.
 
@@ -631,7 +740,12 @@ def register(body: Credentials, request: Request, response: Response):
                             VALUES (%s, %s, %s, %s, 'user', 'manual', %s)""",
                          (body.name, initials, (hash(body.name) % 4) + 1, email, _hash(body.password)))
             user = conn.execute("SELECT * FROM users WHERE lower(email) = lower(%s)", (email,)).fetchone()
-        _join_single_project(conn, user["id"], "member")
+        # An invited admin or manager joins with that tier. Open registration
+        # stays a plain member. If a membership row already exists (an admin
+        # placed this person explicitly), it is left as is: an invite claim
+        # never silently raises a role someone chose on purpose.
+        _join_single_project(conn, user["id"],
+                             _invited_membership_role(user.get("role")) if invited else "member")
     _rate_clear("register", _client_ip(request))
     _create_session(user["id"], response, request)
     return {"user": _user_out(user)}
@@ -649,6 +763,11 @@ def login(body: Credentials, request: Request, response: Response):
                  AND password_hash <> ''""",
             (identifier, identifier),
         ).fetchone()
+    # The OAuth and OIDC paths refuse deactivated accounts; the password path
+    # must too, or a SCIM-deprovisioned person signs straight back in. Fold it
+    # into the same "wrong credentials" answer so status is not enumerable.
+    if user and user.get("status", "active") != "active":
+        user = None
     valid_password = _verify(body.password, user["password_hash"] if user else _DUMMY_PASSWORD_HASH)
     if not user or not valid_password:
         raise HTTPException(401, "Wrong email or password.")
@@ -712,6 +831,7 @@ def _link_or_create_oauth_user(provider: str, ext_id: str, name: str, email: str
     email = _normalize_email(email)
     if not ext_id:
         raise HTTPException(400, "OAuth provider returned no account id.")
+    claiming_invite = False
     with _conn() as conn:
         user = conn.execute("""SELECT u.* FROM external_identities ei
                                JOIN users u ON u.id = ei.user_id
@@ -735,6 +855,9 @@ def _link_or_create_oauth_user(provider: str, ext_id: str, name: str, email: str
                 raise HTTPException(403, "A provider-verified email is required for first sign-in.")
             user = conn.execute("SELECT * FROM users WHERE lower(email) = %s", (email,)).fetchone()
             if user:
+                # A verified provider email landing on an unclaimed invitation
+                # is that invitation being redeemed: honour the invited tier.
+                claiming_invite = _is_pending_invitation(user)
                 if user.get("status", "active") != "active":
                     raise HTTPException(403, "Account is deactivated.")
                 existing_identity = conn.execute(
@@ -772,7 +895,11 @@ def _link_or_create_oauth_user(provider: str, ext_id: str, name: str, email: str
             (provider, ext_id)).fetchone()
         if not linked or linked["user_id"] != user["id"]:
             raise HTTPException(409, "OAuth identity belongs to another account.")
-        _join_single_project(conn, user["id"], "member")
+        # Fresh OAuth sign-ups are plain members; only a redeemed invitation
+        # carries the tier the administrator chose. An existing membership row
+        # is never upgraded here (see register).
+        _join_single_project(conn, user["id"],
+                             _invited_membership_role(user.get("role")) if claiming_invite else "member")
         return user
 
 

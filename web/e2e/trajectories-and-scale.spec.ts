@@ -105,6 +105,97 @@ test("stale reviewed-answer workflows can be reconciled together", async ({ page
     call.query.includes("reconcileStaleAssistantWorkflows"))).toBeTruthy();
 });
 
+test("a stale ?tab=scheduled link lands on the Scheduled tasks page", async ({ page }) => {
+  await page.goto("/workflows?tab=scheduled");
+  await expect(page).toHaveURL(/\/scheduled-tasks$/);
+  await expect(page.getByRole("heading", { name: "Scheduled tasks" })).toBeVisible();
+});
+
+test("scheduled tasks can be paused, rescheduled, and run without losing their cadence", async ({ page }) => {
+  await page.goto("/scheduled-tasks");
+  await expect(page.getByRole("heading", { name: "Scheduled tasks" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Fact review" })).toBeVisible();
+  await expect(page.getByText("#1801 waiting", { exact: false })).toBeVisible();
+
+  await page.getByRole("button", { name: "Pause" }).click();
+  await expect.poll(() => api.calls.some((call) => call.query.includes("setWorkflowStatus")
+    && call.variables.status === "paused")).toBeTruthy();
+  await expect(page.getByRole("button", { name: "Resume" })).toBeVisible();
+  await expect(page.getByLabel("Fact review cadence")).toHaveValue("60");
+
+  await page.getByLabel("Fact review cadence").selectOption("");
+  await expect.poll(() => api.calls.some((call) => call.query.includes("setWorkflowTrigger")
+    && String(call.variables.trigger).includes('"on":""'))).toBeTruthy();
+  await expect(page.getByText("Manual", { exact: true })).toBeVisible();
+
+  await page.getByRole("button", { name: "Run now" }).click();
+  await expect.poll(() => api.calls.some((call) => call.query.includes("runWorkflow"))).toBeTruthy();
+  await expect(page.getByText("Run #1802 started.", { exact: false })).toBeVisible();
+
+  // The mock persists the writes, so a reload proves the page renders the
+  // stored state rather than its own optimistic memory of it.
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "Fact review" })).toBeVisible();
+  await expect(page.getByText("Manual", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("Fact review cadence")).toHaveValue("");
+});
+
+test("sync rows offer the sub-hourly cadences that Sources set", async ({ page }) => {
+  api.setData("workflows", [{
+    id: 11, name: "Sync acme/handbook", description: "Keeps acme/handbook indexed.",
+    color: "#5c7a4c", pinned: false, status: "active",
+    trigger: { on: "schedule", every_minutes: 10 }, scheduleCapable: true,
+    lastRunNumber: 1901, lastRunStatus: "passed", lastRunStarted: "2026-08-19T12:00:00Z",
+    nodes: [{ kind: "trigger", label: "Every 10 min", config: {} },
+            { kind: "sync_source", label: "Sync", config: { source_id: 1 } }],
+  }]);
+  await page.goto("/scheduled-tasks");
+  const cadence = page.getByLabel("Sync acme/handbook cadence");
+  // a real option, not a synthesized orphan you could leave but never rejoin
+  await expect(cadence).toHaveValue("10");
+  await expect(cadence.locator('option[value="15"]')).toHaveText("Every 15 min");
+});
+
+test("a removed recurring job can be scheduled again with New task", async ({ page }) => {
+  await page.goto("/scheduled-tasks");
+  await page.getByRole("button", { name: "New task" }).click();
+  const dialog = page.getByRole("dialog", { name: "New scheduled task" });
+  await dialog.getByLabel("Task kind").selectOption("digest");
+  await dialog.getByLabel("Task cadence").selectOption("10080");
+  await dialog.getByRole("button", { name: "Create task" }).click();
+  await expect.poll(() => api.calls.some((call) => call.query.includes("createScheduledTask")
+    && call.variables.kind === "digest" && call.variables.everyMinutes === 10080)).toBeTruthy();
+  await expect(page.getByRole("heading", { name: "Weekly digest refresh" })).toBeVisible();
+});
+
+test("a scheduled task can be removed from the task manager", async ({ page }) => {
+  await page.goto("/scheduled-tasks");
+  await expect(page.getByRole("heading", { name: "Fact review" })).toBeVisible();
+  await page.getByRole("button", { name: "Remove" }).click();
+  await page.getByRole("button", { name: "Confirm remove" }).click();
+  await expect.poll(() => api.calls.some((call) => call.query.includes("removeScheduledTask")
+    && call.variables.taskId === 1)).toBeTruthy();
+  await expect(page.getByRole("heading", { name: "Fact review" })).toHaveCount(0);
+  // Server-driven, not the row's local removed flag: the mock deleted it.
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "Fact review" })).toHaveCount(0);
+  await expect(page.getByText("No scheduled tasks", { exact: true })).toBeVisible();
+});
+
+test("scheduled tasks read failures replace the list rather than masquerading as empty", async ({ page }) => {
+  await page.route("**/graphql", async (route) => {
+    const query = (route.request().postDataJSON() as { query?: string }).query ?? "";
+    if (query.includes("query ScheduledTasks")) {
+      await route.fulfill({ json: { errors: [{ message: "Scheduled tasks are temporarily unavailable." }] } });
+    } else {
+      await route.fallback();
+    }
+  });
+  await page.goto("/scheduled-tasks");
+  await expect(page.getByText("Scheduled tasks are temporarily unavailable.", { exact: false })).toBeVisible();
+  await expect(page.getByText("No scheduled tasks", { exact: true })).toHaveCount(0);
+});
+
 test("a codified workflow can be deleted without deleting its observed trajectory", async ({ page }) => {
   const row = api.getData("trajectories")[0];
   api.setData("trajectories", [{

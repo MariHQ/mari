@@ -8,12 +8,8 @@ from typing import Any
 
 
 def answer_search_query(message: str) -> str:
-    """Turn terse entity prompts into useful, non-generative retrieval queries."""
-    clean = " ".join((message or "").strip().split())
-    words = clean.rstrip("?.!").split()
-    if clean and len(words) <= 3 and not clean.endswith("?"):
-        return f"what is {clean}?"
-    return clean
+    """Normalize whitespace without rewriting the user's retrieval intent."""
+    return " ".join((message or "").strip().split())
 
 
 @dataclass(frozen=True, slots=True)
@@ -23,6 +19,7 @@ class ChatContext:
     messages: Sequence[Mapping[str, str]]
     approved_answer: str = ""
     cache_hit: bool = False
+    direct_answer: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,9 +49,10 @@ def stream_answer(session_id: int | None, message: str, *, ports: ChatPorts) -> 
         "cache_hit": context.cache_hit,
     })
     parts: list[str] = []
-    if context.approved_answer:
-        parts.append(context.approved_answer)
-        yield ChatEvent("token", {"token": context.approved_answer})
+    prepared_answer = context.approved_answer or context.direct_answer
+    if prepared_answer:
+        parts.append(prepared_answer)
+        yield ChatEvent("token", {"token": prepared_answer})
     else:
         for token in ports.generate(context.messages):
             text = str(token)
