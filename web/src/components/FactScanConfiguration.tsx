@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { useQuery } from "../lib/api";
+import { useAuth } from "../lib/auth";
 
 export type FactScanConfig = {
   source_ids: number[];
@@ -51,7 +52,11 @@ type ConfigQuery = {
 };
 
 export function FactScanConfiguration() {
-  const sources = useQuery<ConfigQuery>(SOURCE_QUERY);
+  const { user } = useAuth();
+  // Mounted outside the session gate (it floats over every route), so the
+  // read has to gate itself: signed out, this query would 401 on /login and
+  // spend one of the session-recovery attempts on a visitor who has none.
+  const sources = useQuery<ConfigQuery>(user ? SOURCE_QUERY : "");
   const [request, setRequest] = useState<RequestDetail | null>(null);
   const [selected, setSelected] = useState<number[]>([]);
   const [query, setQuery] = useState("");

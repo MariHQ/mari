@@ -4,7 +4,7 @@
  * it in two places, and the page should not have to know that. */
 
 import type { LineageTuning, SettingsGeneralActions, WorkspaceIdentity } from "@mari-design/components/pages/SettingsGeneralPage";
-import { gql } from "../../lib/api";
+import { gqlResult } from "../../lib/api";
 import { mutate } from "./index";
 
 const SET_NAME = `mutation($name: String!) { setWorkspaceName(name: $name) }`;
@@ -16,8 +16,11 @@ const WORKSPACE_ROW = `{ settings { key value } }`;
  *  read back and carried across, or saving a timezone would quietly drop
  *  every other key the row holds. */
 async function currentWorkspaceRow(): Promise<Record<string, unknown>> {
-  const res = await gql<{ settings: { key: string; value: unknown }[] }>(WORKSPACE_ROW);
-  const row = (res?.settings ?? []).find((s) => s.key === "workspace")?.value;
+  // A failed read must stop the save: falling back to {} and then replacing
+  // the row would erase every key this form does not edit.
+  const res = await gqlResult<{ settings: { key: string; value: unknown }[] }>(WORKSPACE_ROW);
+  if (!res.ok) throw new Error(`Could not read the current settings (${res.error}). Nothing was saved.`);
+  const row = (res.data?.settings ?? []).find((s) => s.key === "workspace")?.value;
   return row && typeof row === "object" ? { ...(row as Record<string, unknown>) } : {};
 }
 

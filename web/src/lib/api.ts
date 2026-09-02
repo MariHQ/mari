@@ -61,7 +61,12 @@ function recoverSession(): Promise<boolean> {
     recoveriesUsed += 1;
     const attempt = recoverSessionFn().catch(() => false);
     recoveryInFlight = attempt;
-    void attempt.then(() => { if (recoveryInFlight === attempt) recoveryInFlight = null; });
+    void attempt.then((ok) => {
+      // A recovery that worked was not a failed attempt: a long session that
+      // hops instances a few times an hour must keep its route to /login.
+      if (ok) recoveriesUsed = 0;
+      if (recoveryInFlight === attempt) recoveryInFlight = null;
+    });
   }
   return recoveryInFlight;
 }

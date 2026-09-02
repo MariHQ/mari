@@ -185,6 +185,12 @@ export function useDocReview(): PageData<DocReviewData> {
     // the first visit asked for.
     data,
     loading: valid ? q.loading : false,
-    error: q.error ? (q.errorText ?? "This document is temporarily unavailable.") : null,
+    // A resolved query with no document is a document that does not exist in
+    // this workspace, not an empty one that saved fine.
+    error: q.error
+      ? (q.errorText ?? "This document is temporarily unavailable.")
+      : valid && !q.loading && q.data !== null && q.data.title === "" && q.data.doc === EMPTY_DOC
+        ? "No document with that id in this workspace."
+        : null,
   };
 }

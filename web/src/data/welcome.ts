@@ -164,10 +164,15 @@ export function useWelcome(): PageData<WelcomeData> {
   // A connection starts a background ingest after this page's initial read.
   // Keep the remaining onboarding steps live so the just-added source moves
   // from queued/syncing to its actual terminal state without leaving setup.
+  // Only while something is actually moving: the query fans out to five root
+  // fields (one of them a GitHub listing), and a reader parked on the hero
+  // screen should not have the API and GitHub polled every two seconds.
+  const inFlight = (q.data?.syncRows ?? []).some((row) => row.state === "queued" || row.state === "syncing");
   useEffect(() => {
+    if (!inFlight) return;
     const timer = window.setInterval(refetch, 2_000);
     return () => window.clearInterval(timer);
-  }, [refetch]);
+  }, [refetch, inFlight]);
   return {
     data: q.data ?? EMPTY,
     loading: q.loading,

@@ -1,7 +1,7 @@
 // Auth context: cookie-session state fetched from /auth/me, shared app-wide.
 
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
-import { clearQueryCache, projectHeaders, setActiveProject, setSessionRecovery } from "./api";
+import { invalidateQueries, projectHeaders, setActiveProject, setSessionRecovery } from "./api";
 
 export type AuthUser = {
   id: number | string;
@@ -138,13 +138,20 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     } catch {
       /* the refresh below reflects whatever state the server is in */
     }
+    // The remembered workspace belongs to the person who chose it. The next
+    // sign-in on this browser starts from the server's default, not theirs.
+    localStorage.removeItem("mari.project");
+    setActiveProject(null);
     await refresh();
   }, [refresh]);
 
   const selectProject = useCallback(async (project: AuthProject) => {
     setActiveProject(project.slug || project.id);
     localStorage.setItem("mari.project", project.slug || String(project.id));
-    clearQueryCache();
+    // Clearing the cache alone only affects a future mount; the page that is
+    // open right now keeps the old workspace's data until something asks it
+    // to refetch. Invalidation does that ask.
+    invalidateQueries();
     await refresh();
   }, [refresh]);
 

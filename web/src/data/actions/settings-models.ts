@@ -11,7 +11,7 @@
  * is no provider-reachability mutation to call. */
 
 import type { SettingsModelsActions } from "@mari-design/components/pages/SettingsModelsPage";
-import { gql } from "../../lib/api";
+import { gqlResult } from "../../lib/api";
 import { mutate } from "./index";
 
 const UPDATE_SETTING = `mutation($key: String!, $value: JSON!) { updateSetting(key: $key, value: $value) }`;
@@ -19,8 +19,11 @@ const SETTINGS = `{ settings { key value } }`;
 const TEST_GATEWAY = `mutation { testLlmGateway }`;
 
 async function settingRow(key: string): Promise<Record<string, unknown>> {
-  const res = await gql<{ settings: { key: string; value: unknown }[] }>(SETTINGS);
-  const row = (res?.settings ?? []).find((s) => s.key === key)?.value;
+  // A failed read must stop the save: falling back to {} and then replacing
+  // the row would erase the provider keys and gateway config it holds.
+  const res = await gqlResult<{ settings: { key: string; value: unknown }[] }>(SETTINGS);
+  if (!res.ok) throw new Error(`Could not read the current settings (${res.error}). Nothing was saved.`);
+  const row = (res.data?.settings ?? []).find((s) => s.key === key)?.value;
   return row && typeof row === "object" ? { ...(row as Record<string, unknown>) } : {};
 }
 

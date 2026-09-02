@@ -195,7 +195,6 @@ function Routed() {
       <RouteFocus />
       <Routes>
           <Route path="/knowledge-chat/:project/:slug" element={<KnowledgeChatDestination />} />
-          <Route path="/trajectories" element={<Navigate to="/workflows" replace />} />
           {ROUTES.map(({ page, Element }) => (
             <Route
               key={page.id}

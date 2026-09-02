@@ -42,6 +42,12 @@ export function AgentDock() {
     inFlightRef.current = false;
     abortRef.current?.abort();
     abortRef.current = null;
+    // The dock outlives the session (it is mounted once, above the routes),
+    // so signing out has to drop the transcript and the server session id or
+    // the next person on this tab inherits both.
+    setMessages([]);
+    setStreaming(false);
+    sessionRef.current = null;
   }, [user]);
 
   if (!user) return null;
