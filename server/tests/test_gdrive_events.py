@@ -10,8 +10,10 @@ from fastapi import HTTPException
 
 from mari_server.identity import access
 from mari_server.sources import gdrive_events
-from mari_components import PollPage
+from mari_components import KnowledgeDocument, PollPage
 from mari_components.connectors import GoogleDriveWatch
+from mari_components.errors import TransientFailure
+from mari_components.types import Tombstone
 
 
 class MemoryInbox:
@@ -121,17 +123,19 @@ class DriveWatchSetupTests(unittest.TestCase):
 
 
 class DriveChangesTests(unittest.TestCase):
+    CHANNEL = {"channel_id": "channel-1", "source_id": 5, "project_id": 9,
+               "config": {"cursor": "changes:start", "access_token": "ya29.secret"},
+               "provider": "gdrive", "display_name": "Drive", "source_status": "active",
+               "project_status": "active", "project_slug": "acme", "project_name": "Acme"}
+
     def test_worker_drains_all_pages_and_persists_each_checkpoint(self):
-        channel = {"channel_id": "channel-1", "source_id": 5, "project_id": 9,
-                   "config": {"cursor": "changes:start"}, "provider": "gdrive",
-                   "display_name": "Drive", "source_status": "active", "project_status": "active",
-                   "project_slug": "acme", "project_name": "Acme"}
         pages = [PollPage(next_cursor="changes:start", next_checkpoint="changes:middle",
                           snapshot_complete=False),
                  PollPage(next_cursor="changes:end", snapshot_complete=True)]
         definition = Mock()
         definition.poll.side_effect = lambda _cfg, _request, **_kwargs: iter([pages.pop(0)])
-        with patch.object(gdrive_events.event_store, "drive_channel", return_value=channel), \
+        with patch.object(gdrive_events.event_store, "drive_channel", return_value=dict(self.CHANNEL)), \
+             patch.object(gdrive_events.ingest, "is_running", return_value=False), \
              patch.object(gdrive_events, "connector_definition", return_value=definition), \
              patch.object(gdrive_events, "_apply_poll") as apply_poll, \
              patch.object(gdrive_events.event_store, "update_drive_cursor") as update_cursor:
@@ -140,7 +144,46 @@ class DriveChangesTests(unittest.TestCase):
         self.assertEqual([call.args[1].cursor for call in definition.poll.call_args_list],
                          ["changes:start", "changes:middle"])
         self.assertEqual(apply_poll.call_count, 2)
-        self.assertEqual(update_cursor.call_count, 2)
+        # the cursor alone travels to the store, never the whole config copy
+        self.assertEqual([call.args for call in update_cursor.call_args_list],
+                         [(5, "changes:middle", "middle"), (5, "changes:end", "end")])
+
+    def test_worker_yields_to_a_running_sweep_and_retries_later(self):
+        definition = Mock()
+        with patch.object(gdrive_events.event_store, "drive_channel", return_value=dict(self.CHANNEL)), \
+             patch.object(gdrive_events.ingest, "is_running", return_value=True), \
+             patch.object(gdrive_events, "connector_definition", return_value=definition), \
+             patch.object(gdrive_events.event_store, "update_drive_cursor") as update_cursor:
+            with self.assertRaisesRegex(TransientFailure, "scheduled sync .* is running"):
+                gdrive_events.process_gdrive_delivery({"project_id": 9,
+                    "payload": {"channel_id": "channel-1"}})
+        definition.poll.assert_not_called()
+        update_cursor.assert_not_called()
+
+    def test_page_apply_writes_only_its_own_hash_entries(self):
+        # The poll worker owns the manifest; this worker owns the entries for
+        # the files this page touched, merged in the documents transaction.
+        source = {"id": 5, "project_id": 9}
+        config = {"access_token": "ya29.secret", "item_hashes": {"kept": "k1", "gone": "g1"}}
+        poll = PollPage(
+            upserts=(KnowledgeDocument("doc-1", "Doc", "Body", revision="r7"),),
+            tombstones=(Tombstone("gone"),), next_cursor="changes:end", snapshot_complete=True)
+        conn = Mock()
+        with patch.object(gdrive_events.document_index, "connection", return_value=_Context(conn)), \
+             patch.object(gdrive_events.document_index, "chunk_settings", return_value=(100, 10)), \
+             patch.object(gdrive_events.document_index, "upsert_document", return_value=(91, True)), \
+             patch.object(gdrive_events.document_index, "sync_chunks"), \
+             patch.object(gdrive_events.document_repository, "source_document_paths",
+                          return_value=[{"id": 92, "source_path": "gdrive/gone"}]), \
+             patch.object(gdrive_events.document_index, "delete_documents") as delete, \
+             patch.object(gdrive_events.connector_sync, "merge_config") as merge, \
+             patch.object(gdrive_events, "invalidate_search"):
+            gdrive_events._apply_poll(source, config, poll)
+        delete.assert_called_once_with(conn, [92])
+        merge.assert_called_once_with(conn, 5, {}, hashes={"doc-1": "r7"}, dropped=["gone"])
+        conn.commit.assert_called_once()
+        # the in-memory copy still tracks what was seen for this drain
+        self.assertEqual(config["item_hashes"], {"kept": "k1", "doc-1": "r7"})
 
     def test_410_runs_full_poll_reconciliation_and_replaces_cursor(self):
         source = {"id": 5, "source_id": 5, "project_id": 9, "channel_id": "channel-1"}
@@ -152,6 +195,17 @@ class DriveChangesTests(unittest.TestCase):
             gdrive_events._full_reconcile(source, {}, "channel-1")
         mark.assert_called_once_with("channel-1")
         restore.assert_called_once_with(5, "fresh")
+
+
+class _Context:
+    def __init__(self, value):
+        self.value = value
+
+    def __enter__(self):
+        return self.value
+
+    def __exit__(self, *_args):
+        return False
 
 
 if __name__ == "__main__":

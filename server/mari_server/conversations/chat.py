@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import secrets
 
 from mari_server.identity import context as access
 from mari_server.providers import models as llm
@@ -22,6 +23,65 @@ from mari_server.conversations.workflows import cached_response as workflow_cach
 
 def live_destination(project_slug: str, destination_slug: str):
     return chat_store.live_destination(project_slug, destination_slug)
+
+
+def answers_since(project_id: int, usage_detail: str, hours: int = 24) -> int:
+    return chat_store.answers_since(project_id, usage_detail, hours)
+
+
+# ————— session references on the wire —————
+#
+# A signed-in caller's session is its row id. A public visitor's is
+# "<id>.<token>": the published widget stores whatever `session_id` the meta
+# event carries and echoes it on the next turn, so the token rides inside that
+# one field and an already-deployed widget round-trips it unchanged.
+
+def public_handle(session_id: int, token: str) -> str:
+    return f"{session_id}.{token}"
+
+
+def parse_session(value: int | str | None) -> tuple[int | None, str | None]:
+    """(row id, public token) from a wire reference; (None, None) for none.
+    Anything that is not an id, optionally followed by a token, is a session
+    that does not exist rather than a parse error."""
+    if value is None:
+        return None, None
+    row, _, token = str(value).partition(".")
+    if not row.isdigit():
+        raise LookupError("Chat session not found.")
+    return int(row), token or None
+
+
+def session_row(value: int | str) -> int:
+    return int(parse_session(value)[0])
+
+
+def resolve_session(project_access: access.AccessContext, session_id: int | str | None,
+                    title: str) -> tuple[int, int | str]:
+    """The row to write to and the reference to hand back.
+
+    Anonymous access (a published destination) continues a session only with
+    its token; a bare id starts a new one, so a widget that still holds an id
+    from before tokens keeps working and never lands in someone else's
+    conversation. A signed-in caller continues only a session they own.
+    """
+    project_id = project_access.project_id
+    row_id, token = parse_session(session_id)
+    if not project_access.user_id:
+        if row_id is not None and token is not None:
+            if not chat_store.public_session_exists(project_id, row_id, token):
+                raise LookupError("Chat session not found.")
+        else:
+            token = secrets.token_urlsafe(24)
+            row_id = chat_store.create_session(project_id, None, title, public_token=token)
+        return row_id, public_handle(row_id, token)
+    if token is not None:
+        raise LookupError("Chat session not found.")
+    if row_id is None:
+        row_id = chat_store.create_session(project_id, project_access.user_id, title)
+    elif not chat_store.session_exists(project_id, project_access.user_id, row_id):
+        raise LookupError("Chat session not found.")
+    return row_id, row_id
 
 
 def _pinned_first(documents: list[dict]) -> list[dict]:
@@ -50,23 +110,20 @@ def ports(project_access: access.AccessContext, usage_detail: str,
         system = answer_system(workspace_style_text(), surface)
     selected_state: dict[str, object] = {"workflow": None, "execution_mode": "generation"}
 
-    def prepare(session_id: int | None, message: str) -> ChatContext:
+    def prepare(session_id: int | str | None, message: str) -> ChatContext:
         retrieval_question = answer_search_query(message)
         selected_state["workflow"] = workflow = select_workflow(retrieval_question, {"search"})
         cached = workflow_cached_response(workflow)
         retrieval_question = workflow_retrieval_query(retrieval_question, workflow)
-        if session_id is None:
-            session_id = chat_store.create_session(
-                project_id, project_access.user_id or None, message,
-            )
-        elif not chat_store.session_exists(project_id, project_access.user_id, session_id):
-            raise LookupError("Chat session not found.")
+        # `session_id` below is the row; `session_ref` is what the client
+        # gets back and echoes, which for a public visitor carries the token.
+        session_id, session_ref = resolve_session(project_access, session_id, message)
         chat_store.add_message(project_id, session_id, "user", message)
 
         if cached:
             selected_state["execution_mode"] = "cache"
             return ChatContext(
-                session_id, cached.get("sources") or (), (), cached["answer"], True,
+                session_ref, cached.get("sources") or (), (), cached["answer"], True,
             )
 
         approved = (chat_store.approved_answer(project_id, message, llm.embed(message))
@@ -82,7 +139,7 @@ def ports(project_access: access.AccessContext, usage_detail: str,
                         "href": f"/answers?answer={approved['id']}",
                         "source_url": None, "score": 1.0}]
             selected_state["execution_mode"] = "approved_answer"
-            return ChatContext(session_id, sources, (), str(approved["answer"]))
+            return ChatContext(session_ref, sources, (), str(approved["answer"]))
 
         selected_state["execution_mode"] = "workflow_generation" if workflow else "generation"
         source_urls: dict[int, str] = {}
@@ -114,7 +171,7 @@ def ports(project_access: access.AccessContext, usage_detail: str,
         messages = [{"role": row["role"], "content": row["content"]}
                     for row in reversed(history)]
         messages[-1]["content"] = f"Context:\n{context}\n\nQuestion: {retrieval_question}"
-        return ChatContext(session_id, sources, messages)
+        return ChatContext(session_ref, sources, messages)
 
     return ChatPorts(
         prepare=prepare,
@@ -123,11 +180,11 @@ def ports(project_access: access.AccessContext, usage_detail: str,
             system + workflow_guidance(selected_state["workflow"]),
         ),
         persist=lambda session_id, answer, sources: chat_store.add_message(
-            project_id, session_id, "assistant", answer, json.dumps(list(sources)),
+            project_id, session_row(session_id), "assistant", answer, json.dumps(list(sources)),
         ),
         record_usage=lambda: log_usage("chat_answer", usage_detail),
         observe=lambda session_id, message, sources, approved: trajectory_store.harvest(
-            session_id, message, [{
+            session_row(session_id), message, [{
                 "kind": "tool",
                 "name": "read_approved_answer" if approved else "search",
                 "args": {"query": message[:200]},

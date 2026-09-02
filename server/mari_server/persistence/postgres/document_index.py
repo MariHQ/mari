@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import statistics
 import datetime as dt
 from mari_server.providers import models as llm
@@ -13,6 +14,9 @@ from mari_components.documents import DocumentVersion
 from mari_components.retrieval import chunk_text, content_hash, title_from_markdown
 from mari_server.persistence.postgres import documents as document_repository
 from mari_server.persistence.postgres import connection as postgres
+
+log = logging.getLogger(__name__)
+
 
 def connection():
     return postgres.connect()
@@ -150,6 +154,10 @@ def sync_chunks(conn, doc_id: int, title: str, body: str,
         vec = llm.embed(piece, purpose="document")
         if vec:
             embedded += 1
+        elif prior and prior["content_hash"] == h:
+            # No vector and the row already holds this content: the upsert
+            # would rewrite the row to its current state (see _CHUNK_UPSERT).
+            continue
         chunk = conn.execute(
             _CHUNK_UPSERT,
             (project_id, doc_id, idx, piece, h, profile, str(vec) if vec else None)).fetchone()
@@ -175,7 +183,7 @@ def sync_chunks_many(conn, documents: list[tuple[int, str, str]],
     project_id = access.require_current_access().project_id
     profile = llm.embedding_profile()
     provider, model = llm.embedding_model()
-    prepared: list[tuple[int, int, str, str]] = []
+    prepared: list[tuple[int, int, str, str, bool]] = []  # (..., row already holds this content)
     piece_counts: dict[int, int] = {}
     for doc_id, title, body in documents:
         pieces = chunk_text(f"{title}\n\n{body}", max_tokens, overlap)
@@ -192,13 +200,19 @@ def sync_chunks_many(conn, documents: list[tuple[int, str, str]],
             h = content_hash(piece)
             prior = existing.get(idx)
             if not (prior and prior["content_hash"] == h and prior["embedded"]):
-                prepared.append((doc_id, idx, piece, h))
+                prepared.append((doc_id, idx, piece, h, bool(prior and prior["content_hash"] == h)))
 
     vectors = llm.embed_many(row[2] for row in prepared)
     embedded = 0
-    for (doc_id, idx, piece, h), vec in zip(prepared, vectors, strict=True):
+    for (doc_id, idx, piece, h, unchanged), vec in zip(prepared, vectors, strict=True):
         if vec:
             embedded += 1
+        elif unchanged:
+            # The provider answered nothing and the row already holds this
+            # content: _CHUNK_UPSERT would keep every column as it is, so the
+            # write is pure churn. With the embedder down, a boot reindex used
+            # to rewrite every chunk row in the table this way, every boot.
+            continue
         chunk = conn.execute(
             _CHUNK_UPSERT,
             (project_id, doc_id, idx, piece, h, profile, str(vec) if vec else None)).fetchone()
@@ -224,6 +238,12 @@ def reindex_all(batch_size: int = 100) -> tuple[int, int]:
     Chunks whose content and profile already match are reused without an HTTP
     call. Batches commit independently because vectors are derived and a
     stopped run can safely resume from the cache boundary.
+
+    Stops after the first batch the provider fails outright: a pass that
+    embeds nothing cannot make needs_reindex false, so continuing only reads
+    every document for nothing and the next boot starts over anyway. The
+    project's sources are marked so the console stops reporting Healthy over
+    a corpus whose search is keyword-only.
     """
     project_id = access.require_current_access().project_id
     max_tokens, overlap = chunk_settings()
@@ -247,7 +267,41 @@ def reindex_all(batch_size: int = 100) -> tuple[int, int]:
         documents += len(rows)
         embedded += changed
         offset += len(rows)
+        # last_error is per thread and this worker has its own, so a message
+        # here is this batch's. A batch that embedded nothing while the
+        # provider reported a failure is the provider being down, not a
+        # partial miss worth pushing through.
+        error = llm.last_error()
+        if error and not changed:
+            _mark_embedding_degraded(project_id, error)
+            log.warning("embedding reindex stopped: project=%s documents=%s error=%s",
+                        project_id, documents, error)
+            break
     return documents, embedded
+
+
+def _mark_embedding_degraded(project_id: int, error: str) -> None:
+    """Surface a stopped reindex where an operator already looks.
+
+    sources.health is the word the Sources cards colour, and the console
+    treats any word it does not know as healthy — so 'Error', the word the
+    sync path already writes for a failed sync, is the only one that shows.
+    Only sources currently reporting Healthy are touched; Syncing and Paused
+    are someone else's truthful state. The next successful sync writes
+    Healthy again. The sync log carries the provider's own reason."""
+    with connection() as conn:
+        conn.execute(
+            """UPDATE sources SET health = 'Error'
+                WHERE project_id = %s AND kind = 'connector' AND health = 'Healthy'""",
+            (project_id,),
+        )
+        conn.execute(
+            """INSERT INTO sync_events (project_id, provider, event, detail, at_label)
+               VALUES (%s, 'embeddings', 'embedding reindex stopped', %s,
+                       to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))""",
+            (project_id, error[:300]),
+        )
+        conn.commit()
 
 
 def needs_reindex() -> bool:

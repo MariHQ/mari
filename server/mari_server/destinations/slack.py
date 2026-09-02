@@ -34,6 +34,7 @@ from slack_sdk.socket_mode.response import SocketModeResponse
 from slack_sdk.web import WebClient
 
 from mari_server.identity import routes as auth
+from mari_server.sources.provider_events import _body as bounded_body
 from mari_server.persistence.postgres import document_index
 from mari_server.identity import access
 from mari_server import settings as config
@@ -666,19 +667,43 @@ def stop_event_dispatcher() -> None:
     _stop_socket_clients()
 
 
+def _slack_headers_plausible(timestamp: str, signature: str) -> bool:
+    """What can be checked before the body is touched: Slack signs every
+    delivery, url_verification included, so a request with no v0 signature or
+    a timestamp outside the replay window is refused unread. The HMAC itself
+    needs the team's signing secret, and the team id is inside the payload."""
+    if not signature.startswith("v0="):
+        return False
+    try:
+        return abs(time.time() - int(timestamp)) <= 300
+    except (TypeError, ValueError):
+        return False
+
+
 @router.post("/webhooks/slack")
 async def slack_webhook(request: Request):
-    raw = await request.body()
+    timestamp = request.headers.get("X-Slack-Request-Timestamp", "")
+    signature = request.headers.get("X-Slack-Signature", "")
+    if not _slack_headers_plausible(timestamp, signature):
+        return Response(status_code=401, content="bad signature")
+    # Same 1 MiB cap as GitHub and Confluence deliveries; a larger body is a
+    # 413 before it is read in full.
+    raw = await bounded_body(request)
     try:
         payload = json.loads(raw or b"{}")
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, RecursionError):
+        return Response(status_code=400, content="bad payload")
+    if not isinstance(payload, dict):
         return Response(status_code=400, content="bad payload")
 
-    # URL verification happens before the app is fully configured; echo per Slack docs.
+    # URL verification happens before the app is fully configured; echo per
+    # Slack docs. There is no secret to verify against yet, and the echo
+    # touches nothing but the challenge string.
     if payload.get("type") == "url_verification":
-        return {"challenge": payload.get("challenge", "")}
+        return {"challenge": str(payload.get("challenge", ""))[:512]}
 
-    team_id = str(payload.get("team_id") or (payload.get("team") or {}).get("id") or "")
+    team = payload.get("team") if isinstance(payload.get("team"), dict) else {}
+    team_id = str(payload.get("team_id") or team.get("id") or "")
     installation = bot_store.installation_by_team(team_id)
     if not installation:
         return Response(status_code=401, content="unknown Slack team")
@@ -686,12 +711,8 @@ async def slack_webhook(request: Request):
     if isinstance(cfg, str):
         cfg = json.loads(cfg)
     secret = (cfg.get("signing_secret") or "").strip()
-    if not verify_slack_signature(
-        raw,
-        request.headers.get("X-Slack-Request-Timestamp", ""),
-        request.headers.get("X-Slack-Signature", ""),
-        secret,
-    ):
+    # Nothing in the payload beyond the team id is acted on until this passes.
+    if not verify_slack_signature(raw, timestamp, signature, secret):
         return Response(status_code=401, content="bad signature")
 
     try:

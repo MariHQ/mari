@@ -275,5 +275,225 @@ class WorkflowStepTests(unittest.TestCase):
         flowengine.stop_scheduler(timeout=1)
 
 
+class _ScriptedConnection:
+    """A psycopg stand-in: each execute pops the next scripted result.
+    Records normalized SQL so a test can assert on the statements issued."""
+
+    def __init__(self, results):
+        self.results = list(results)
+        self.calls: list[tuple[str, tuple]] = []
+        self._current = None
+
+    def execute(self, sql, args=()):
+        self.calls.append((" ".join(sql.split()), args))
+        self._current = self.results.pop(0) if self.results else None
+        return self
+
+    def fetchone(self):
+        return self._current
+
+    def fetchall(self):
+        return self._current or []
+
+    def transaction(self):
+        return self
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+
+class ScheduledFullReconcileTests(unittest.TestCase):
+    """Item 1: the scheduled sync step sweeps deleted records with a periodic
+    authoritative full pass, recorded on a dedicated sources column."""
+
+    def _run(self, cfg, *, due, stats):
+        with patch.object(flowengine.workflow_store, "source_name", return_value="Confluence"), \
+             patch.object(flowengine.workflow_store, "full_sync_due", return_value=due) as is_due, \
+             patch.object(flowengine.workflow_store, "record_full_sync") as record, \
+             patch("mari_server.sources.sync.run_sync", return_value=stats) as run_sync:
+            result = flowengine._step_sync_source(cfg, {})
+        return result, is_due, record, run_sync
+
+    def test_full_pass_when_the_last_reconcile_is_older_than_the_cadence(self) -> None:
+        stats = {"files_changed": 0, "items_changed": 3, "embedded": 4, "skipped": 9}
+        (status, detail, _), is_due, record, run_sync = self._run({"source_id": 7}, due=True, stats=stats)
+        self.assertEqual(status, "passed")
+        is_due.assert_called_once_with(7, flowengine.FULL_SYNC_EVERY_HOURS)
+        run_sync.assert_called_once_with(7, full=True)
+        record.assert_called_once_with(7)
+        self.assertIn("full reconcile", detail)
+
+    def test_incremental_pass_when_a_recent_full_reconcile_exists(self) -> None:
+        stats = {"files_changed": 0, "items_changed": 1, "embedded": 1, "skipped": 0}
+        (status, detail, _), _, record, run_sync = self._run(
+            {"source_id": 7, "full_every_hours": 6}, due=False, stats=stats)
+        self.assertEqual(status, "passed")
+        run_sync.assert_called_once_with(7, full=False)
+        record.assert_not_called()
+        self.assertNotIn("full reconcile", detail)
+
+    def test_failed_full_pass_is_not_recorded_so_it_retries_next_tick(self) -> None:
+        (status, _, _), _, record, run_sync = self._run({"source_id": 7}, due=True, stats={"error": "boom"})
+        self.assertEqual(status, "failed")
+        run_sync.assert_called_once_with(7, full=True)
+        record.assert_not_called()
+
+    def test_zero_cadence_disables_the_sweep(self) -> None:
+        stats = {"files_changed": 0, "items_changed": 0, "embedded": 0, "skipped": 2}
+        _, is_due, record, run_sync = self._run({"source_id": 7, "full_every_hours": 0}, due=True, stats=stats)
+        is_due.assert_not_called()
+        run_sync.assert_called_once_with(7, full=False)
+        record.assert_not_called()
+
+    def test_seeded_sync_flow_carries_the_cadence_so_it_is_editable(self) -> None:
+        context = access.external_access(3, "acme", "Acme", "test", "seed")
+        with access.use_access(context), \
+             patch.object(flowengine.workflow_store, "find_by_step", return_value=None), \
+             patch.object(flowengine.workflow_store, "create_default_workflow", return_value=18) as create:
+            flowengine.ensure_sync_flow(7, "Confluence")
+        self.assertEqual(create.call_args.kwargs["nodes"][1]["config"],
+                         {"source_id": 7, "full_every_hours": flowengine.FULL_SYNC_EVERY_HOURS})
+
+    def test_full_sync_bookkeeping_lives_on_its_own_sources_column(self) -> None:
+        context = access.external_access(3, "acme", "Acme", "test", "seed")
+        conn = _ScriptedConnection([{"due": True}, None])
+        with access.use_access(context), patch.object(flowengine.workflow_store.db, "connect", return_value=conn):
+            self.assertTrue(flowengine.workflow_store.full_sync_due(7, 24))
+            flowengine.workflow_store.record_full_sync(7)
+        due_sql, due_args = conn.calls[0]
+        self.assertIn("last_full_sync_at IS NULL OR last_full_sync_at < now() - make_interval", due_sql)
+        self.assertEqual(due_args, (24 * 3600.0, 3, 7))
+        record_sql, record_args = conn.calls[1]
+        self.assertIn("UPDATE sources SET last_full_sync_at = now()", record_sql)
+        self.assertNotIn("config", record_sql)
+        self.assertEqual(record_args, (3, 7))
+
+
+class RunLeaseTests(unittest.TestCase):
+    """Item 2: runs hold a heartbeat lease, lost leases are swept, and every
+    run insert takes the same row lock and concurrency check."""
+
+    def test_persist_stamps_the_heartbeat(self) -> None:
+        context = access.external_access(3, "acme", "Acme", "test", "runner")
+        conn = _ScriptedConnection([None])
+        with access.use_access(context), patch.object(flowengine.workflow_store.db, "connect", return_value=conn):
+            flowengine._persist(9, [], "running", 10, {"ctx": {}}, flowengine.time.time())
+        sql, _ = conn.calls[0]
+        self.assertIn("heartbeat_at = now()", sql)
+
+    def test_run_keeps_a_ticker_alive_for_its_whole_execution(self) -> None:
+        run = {"rows_data": [], "stats": {"ctx": {}}}
+        workflow = {"nodes": [{"kind": "trigger", "label": "Trigger", "config": {}}]}
+        stop = Mock()
+        with patch.object(flowengine.workflow_store, "load_run", return_value=(run, workflow)), \
+             patch.object(flowengine, "_run_step", return_value=("passed", "ok", {})), \
+             patch.object(flowengine, "_persist"), \
+             patch.object(flowengine, "_keep_alive", return_value=stop) as keep_alive:
+            flowengine.execute_run(9)
+        keep_alive.assert_called_once_with(9, None)
+        stop.set.assert_called_once_with()
+
+    def test_ticker_stops_even_when_a_step_raises(self) -> None:
+        run = {"rows_data": [], "stats": {"ctx": {}}}
+        workflow = {"nodes": [{"kind": "trigger", "label": "Trigger", "config": {}}]}
+        stop = Mock()
+        with patch.object(flowengine.workflow_store, "load_run", return_value=(run, workflow)), \
+             patch.object(flowengine, "_run_step", side_effect=RuntimeError("db blip")), \
+             patch.object(flowengine, "_persist"), \
+             patch.object(flowengine, "_keep_alive", return_value=stop):
+            with self.assertRaises(RuntimeError):
+                flowengine.execute_run(9)
+        stop.set.assert_called_once_with()
+
+    def test_ticker_touches_the_heartbeat_without_rewriting_rows(self) -> None:
+        import threading
+        beat = threading.Event()
+        context = access.external_access(3, "acme", "Acme", "test", "runner")
+        with patch.object(flowengine, "HEARTBEAT_SECONDS", 0.01), \
+             patch.object(flowengine.workflow_store, "touch_run_heartbeat",
+                          side_effect=lambda _id: beat.set()) as touch:
+            stop = flowengine._keep_alive(9, context)
+            self.assertTrue(beat.wait(2))
+            stop.set()
+        touch.assert_called_with(9)
+
+    def test_scheduler_pass_sweeps_lost_leases_and_survives_a_refused_insert(self) -> None:
+        workflows = [
+            {"id": 1, "project_id": 3, "name": "A", "trigger": {"on": "schedule", "every_minutes": 10}},
+            {"id": 2, "project_id": 3, "name": "B", "trigger": {"on": "schedule", "every_minutes": 10}},
+        ]
+        with patch.object(flowengine.workflow_store, "fail_stale_runs", return_value=1) as sweep, \
+             patch.object(flowengine.workflow_store, "scheduled_workflows", return_value=workflows), \
+             patch.object(flowengine.workflow_store, "latest_run", return_value=None), \
+             patch.object(flowengine.workflow_store, "create_scheduled_run",
+                          side_effect=[ValueError("in progress"), 44]), \
+             patch.object(flowengine, "start_run") as start:
+            self.assertEqual(flowengine.run_due_schedules(), [44])
+        sweep.assert_called_once_with(flowengine.RUN_STALE_AFTER_SECONDS)
+        start.assert_called_once_with(44)
+
+    def test_document_trigger_skips_a_workflow_with_a_run_in_flight(self) -> None:
+        docs = [{"id": 1, "title": "Runbook", "source_id": 4, "source_path": "docs/runbook.md"}]
+        workflows = [
+            {"id": 1, "name": "A", "trigger": {"on": "document_changed"}},
+            {"id": 2, "name": "B", "trigger": {"on": "document_changed"}},
+        ]
+        with patch.object(flowengine.workflow_store, "trigger_inputs", return_value=(docs, workflows, {})), \
+             patch.object(flowengine.workflow_store, "create_triggered_run",
+                          side_effect=[ValueError("in progress"), 45]), \
+             patch.object(flowengine, "start_run") as start:
+            self.assertEqual(flowengine.fire_document_triggers([1], "document_changed"), [45])
+        start.assert_called_once_with(45)
+
+    def test_startup_reconciliation_also_sweeps_lost_heartbeats(self) -> None:
+        with patch.object(flowengine.workflow_store, "reconcile_stale_runs", return_value=1), \
+             patch.object(flowengine.workflow_store, "fail_stale_runs", return_value=2) as sweep:
+            self.assertEqual(flowengine.reconcile_stale_runs(), 3)
+        sweep.assert_called_once_with(flowengine.RUN_STALE_AFTER_SECONDS)
+
+    def test_stale_sweep_fails_only_running_rows_past_the_heartbeat_threshold(self) -> None:
+        conn = _ScriptedConnection([[{"id": 5}], None])
+        with patch.object(flowengine.workflow_store.db, "connect", return_value=conn):
+            self.assertEqual(flowengine.workflow_store.fail_stale_runs(600), 1)
+        sql, args = conn.calls[0]
+        self.assertIn("SET status = 'failed'", sql)
+        self.assertIn("WHERE status = 'running' AND heartbeat_at < now() - make_interval(secs => %s)", sql)
+        self.assertEqual(args, ("no heartbeat for 10 min; marked failed", 600.0))
+        self.assertIn("INSERT INTO events", conn.calls[1][0])
+
+    def test_scheduled_run_takes_the_workflow_lock_and_refuses_a_concurrent_run(self) -> None:
+        workflow = {"id": 1, "project_id": 3, "name": "A"}
+        conn = _ScriptedConnection([{"?column?": 1}, {"?column?": 1}])
+        with patch.object(flowengine.workflow_store.db, "connect", return_value=conn):
+            with self.assertRaisesRegex(ValueError, "already has a run in progress"):
+                flowengine.workflow_store.create_scheduled_run(workflow, {"on": "schedule"}, "label")
+        self.assertIn("FROM workflows WHERE project_id IS NOT DISTINCT FROM %s AND id = %s FOR UPDATE",
+                      conn.calls[0][0])
+        self.assertEqual(conn.calls[0][1], (3, 1))
+        self.assertIn("status = 'running'", conn.calls[1][0])
+        self.assertFalse(any("INSERT INTO workflow_runs" in sql for sql, _ in conn.calls))
+
+    def test_scheduled_run_inserts_once_the_lock_shows_no_run_in_flight(self) -> None:
+        workflow = {"id": 1, "project_id": 3, "name": "A"}
+        conn = _ScriptedConnection([{"?column?": 1}, None, {"id": 8, "number": 100008}, None])
+        with patch.object(flowengine.workflow_store.db, "connect", return_value=conn):
+            self.assertEqual(flowengine.workflow_store.create_scheduled_run(workflow, {"on": "schedule"}, "label"), 8)
+        self.assertIn("INSERT INTO workflow_runs", conn.calls[2][0])
+
+    def test_triggered_run_takes_the_same_lock_and_check(self) -> None:
+        context = access.external_access(3, "acme", "Acme", "test", "runner")
+        workflow = {"id": 1, "name": "A"}
+        conn = _ScriptedConnection([None])
+        with access.use_access(context), patch.object(flowengine.workflow_store.db, "connect", return_value=conn):
+            with self.assertRaisesRegex(ValueError, "no longer exists"):
+                flowengine.workflow_store.create_triggered_run(workflow, [1], {"on": "document_changed"}, "note")
+        self.assertIn("FOR UPDATE", conn.calls[0][0])
+        self.assertEqual(conn.calls[0][1], (3, 1))
+        self.assertFalse(any("INSERT INTO workflow_runs" in sql for sql, _ in conn.calls))
+
+
 if __name__ == "__main__":
     unittest.main()

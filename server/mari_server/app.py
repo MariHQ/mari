@@ -23,6 +23,8 @@ import strawberry
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
+from graphql import GraphQLError
+from strawberry.extensions import MaskErrors, MaxAliasesLimiter, MaxTokensLimiter, QueryDepthLimiter
 from strawberry.fastapi import GraphQLRouter
 
 from mari_server import settings as config
@@ -55,7 +57,35 @@ class Mutation(MutKnowledge, WorkflowMutations, DestinationMutations, Trajectory
     pass
 
 
-schema = strawberry.Schema(query=Query, mutation=Mutation)
+# Query shape limits. Measured on 2026-09-02 over every document in
+# web/src/data: the deepest console query nests three selection sets (facts.ts,
+# Strawberry's count) and the largest lexes to 130 tokens; no query uses an
+# alias. The limits sit far above that and still refuse the document built to
+# exhaust the resolver tree.
+GRAPHQL_MAX_DEPTH = 10
+GRAPHQL_MAX_ALIASES = 15
+GRAPHQL_MAX_TOKENS = 5000
+GRAPHQL_MASKED_MESSAGE = "Something went wrong on the server. The error has been logged."
+# Resolvers raise these on purpose, with a message written for the console.
+# Anything else (psycopg with the SQL text in it, a provider's RuntimeError)
+# is logged with its traceback by Schema.process_errors, which runs before
+# the extension below replaces what the client sees.
+USER_FACING_ERRORS = (ValueError, PermissionError, LookupError, HTTPException)
+
+
+def mask_graphql_error(error: GraphQLError) -> bool:
+    original = error.original_error
+    # No original error: graphql-core's own parse/validation wording, which
+    # names the query, never the database.
+    return original is not None and not isinstance(original, USER_FACING_ERRORS)
+
+
+schema = strawberry.Schema(query=Query, mutation=Mutation, extensions=[
+    QueryDepthLimiter(max_depth=GRAPHQL_MAX_DEPTH),
+    MaxAliasesLimiter(max_alias_count=GRAPHQL_MAX_ALIASES),
+    MaxTokensLimiter(max_token_count=GRAPHQL_MAX_TOKENS),
+    MaskErrors(should_mask_error=mask_graphql_error, error_message=GRAPHQL_MASKED_MESSAGE),
+])
 
 
 def graphql_context(request: Request) -> dict[str, t.Any]:

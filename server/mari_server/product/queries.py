@@ -1038,6 +1038,10 @@ class Query:
         any window the console can hold, so the filter has to reach the whole
         table rather than narrowing the page already fetched."""
         floor, ceil = _iso_date_arg(date_from), _iso_date_arg(date_to)
+        # The console asks for a 200-row window; the store passes `limit`
+        # straight to LIMIT, so it is clamped here before it can name the
+        # whole table.
+        limit = max(1, min(int(limit), 500))
         return [AuditEvent(id=r["id"], actor=r["actor"], verb=r["verb"], target=r["target"],
                            at=r["occurred_at"].isoformat(), detail=_details(r))
                 for r in audit_store.events(query, floor, ceil, limit)]

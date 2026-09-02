@@ -169,6 +169,23 @@ def _step_trigger(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
     return "passed", note or cfg.get("label", "manual run"), {}
 
 
+# How often the scheduled sync step runs a full, authoritative pass instead of
+# an incremental one. An incremental poll deletes only on explicit tombstones,
+# and only dropbox, gdrive and github files emit those — a Confluence page,
+# Jira issue or Slack message deleted at the provider stayed searchable and
+# citable until someone clicked resync. Absence is authoritative only on a
+# complete full snapshot, so a full pass on a cadence is what makes deletions
+# land. Per-flow `full_every_hours` overrides this; 0 turns the sweep off.
+FULL_SYNC_EVERY_HOURS = 24.0
+
+
+def _full_sync_cadence(cfg: dict) -> float:
+    try:
+        return max(0.0, float(cfg.get("full_every_hours", FULL_SYNC_EVERY_HOURS) or 0))
+    except (TypeError, ValueError):
+        return FULL_SYNC_EVERY_HOURS
+
+
 def _step_sync_source(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
     """Run the real diff-based ingest sync for one source, synchronously, and
     report honest per-step stats from the sync result."""
@@ -179,13 +196,22 @@ def _step_sync_source(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
         return "failed", f"source #{source_id} not found", {}
     if ctx.get("dry_run"):
         return "passed", f"would sync {name} (dry run)", {}
-    stats = ingest.run_sync(source_id)
+    # The last full pass lives in sources.last_full_sync_at, a column of its
+    # own: sources.config is the sync worker's and is rewritten wholesale.
+    every = _full_sync_cadence(cfg)
+    full = every > 0 and workflow_store.full_sync_due(source_id, every)
+    stats = ingest.run_sync(source_id, full=full)
     if stats is None:
         return "skipped", f"{name}: a sync is already running", {}
     if stats.get("error"):
         return "failed", f"{name}: {stats['error']}"[:140], {}
+    if full:
+        # Recorded only after the pass returned without error, so a failed
+        # full sync is retried on the next tick rather than in a day.
+        workflow_store.record_full_sync(source_id)
     detail = (f"{name}: {stats['files_changed']} files · {stats['items_changed']} items changed · "
-              f"{stats['embedded']} chunks embedded · {stats['skipped']} unchanged")
+              f"{stats['embedded']} chunks embedded · {stats['skipped']} unchanged"
+              + (" · full reconcile" if full else ""))
     return "passed", detail, {"files_changed": stats["files_changed"],
                               "items_changed": stats["items_changed"], "embedded": stats["embedded"]}
 
@@ -425,10 +451,50 @@ def _run_step(kind: str, impl: t.Callable | None, cfg: dict, ctx: dict) -> tuple
 
 
 def _persist(run_id: int, rows: list[dict], status: str, progress: int, stats: dict, start: float) -> None:
+    # Also the run's heartbeat: save_run_progress stamps heartbeat_at.
     workflow_store.save_run_progress(
         run_id, rows=rows, status=status, progress=progress,
         stats=stats, duration=_elapsed(start),
     )
+
+
+# ————— run lease —————
+#
+# A run persists between steps and whenever a step's percentage moves, and
+# every persist stamps workflow_runs.heartbeat_at. That is not enough on its
+# own: a sync_source step syncing a large Confluence, or an adjudication step
+# working through its LLM budget, can run for a long time without a persist,
+# and a lease that only steps refresh would expire under exactly the runs
+# that take longest. So a run also keeps a ticker that touches the heartbeat
+# every HEARTBEAT_SECONDS while execute_run is on the stack. A 'running' row
+# whose heartbeat is older than RUN_STALE_AFTER_SECONDS therefore has no
+# process behind it — _persist raised on a DB blip and the fallback
+# fail_running_run was swallowed, or the worker died — and the scheduler
+# fails it instead of treating it as live forever.
+HEARTBEAT_SECONDS = 30
+RUN_STALE_AFTER_SECONDS = max(
+    HEARTBEAT_SECONDS * 4, int(config.get("runtime", "run_stale_after_seconds", 600)))
+
+
+def _keep_alive(run_id: int, project_access: access.AccessContext | None) -> threading.Event:
+    """Start the heartbeat ticker for one run; set the returned event to stop it.
+    A missed beat is not a failed run — the ticker swallows its own errors and
+    keeps trying, because the stale threshold is several beats wide."""
+    stop = threading.Event()
+
+    def tick() -> None:
+        while not stop.wait(HEARTBEAT_SECONDS):
+            try:
+                if project_access is None:
+                    workflow_store.touch_run_heartbeat(run_id)
+                else:
+                    with access.use_access(project_access):
+                        workflow_store.touch_run_heartbeat(run_id)
+            except Exception:  # noqa: BLE001 — see docstring
+                pass
+
+    threading.Thread(target=tick, daemon=True, name=f"mari-flow-heartbeat-{run_id}").start()
+    return stop
 
 
 def execute_run(run_id: int, resume_from: int = 0) -> None:
@@ -436,6 +502,14 @@ def execute_run(run_id: int, resume_from: int = 0) -> None:
     loaded = workflow_store.load_run(run_id)
     if not loaded:
         return
+    keep_alive = _keep_alive(run_id, access.current_access())
+    try:
+        _execute_steps(run_id, resume_from, loaded)
+    finally:
+        keep_alive.set()
+
+
+def _execute_steps(run_id: int, resume_from: int, loaded: tuple[dict, dict]) -> None:
     run, wf = loaded
     steps = wf["nodes"] if isinstance(wf["nodes"], list) else json.loads(wf["nodes"] or "[]")
     rows = run["rows_data"] if isinstance(run["rows_data"], list) else json.loads(run["rows_data"] or "[]")
@@ -590,9 +664,16 @@ def fire_document_triggers(doc_ids: list[int], change: str) -> list[int]:
         note = f"Triggered by: {first} {verb}" + (
             f" (+{len(matched) - 1} more)" if len(matched) > 1 else "")
         trigger_meta = {"on": change, "doc_ids": [doc["id"] for doc in matched], "note": note}
-        run_ids.append(workflow_store.create_triggered_run(
-            workflow, trigger_meta["doc_ids"], trigger_meta, note,
-        ))
+        try:
+            run_ids.append(workflow_store.create_triggered_run(
+                workflow, trigger_meta["doc_ids"], trigger_meta, note,
+            ))
+        except ValueError:
+            # The workflow already has a run in flight (or was just deleted).
+            # Two concurrent runs of one workflow interleave their staged
+            # candidates, so the batch is dropped for this workflow rather
+            # than started alongside; the next change batch fires it again.
+            continue
     for run_id in run_ids:
         start_run(run_id)
     return run_ids
@@ -621,8 +702,13 @@ def reconcile_stale_runs() -> int:
     and told the person waiting on it that their sign-off had been "interrupted
     by restart", which was not true: nothing was interrupted, the server was
     simply started again. A waiting run needs no process to be alive; approveRun
-    resumes it from `paused_at` whenever someone gets to it."""
-    return workflow_store.reconcile_stale_runs(PROCESS_START_TS)
+    resumes it from `paused_at` whenever someone gets to it.
+
+    Runs that predate this process are one case; runs whose heartbeat has
+    gone quiet are the other, and a restart is as good a moment as any tick
+    to sweep them."""
+    return (workflow_store.reconcile_stale_runs(PROCESS_START_TS)
+            + workflow_store.fail_stale_runs(RUN_STALE_AFTER_SECONDS))
 
 
 def run_due_schedules() -> list[int]:
@@ -631,6 +717,9 @@ def run_due_schedules() -> list[int]:
     whose latest run is still running/waiting is never double-started.
     Returns the started run ids."""
     started: list[int] = []
+    # Sweep lost leases first, so a run that died mid-flight reads as failed
+    # by the time latest_run asks whether the workflow is still busy.
+    workflow_store.fail_stale_runs(RUN_STALE_AFTER_SECONDS)
     for workflow in workflow_store.scheduled_workflows():
         trigger = (workflow["trigger"] if isinstance(workflow["trigger"], dict)
                    else json.loads(workflow["trigger"] or "{}"))
@@ -647,9 +736,15 @@ def run_due_schedules() -> list[int]:
             continue
         label = f"Scheduled · every {every} min"
         trigger_meta = {"on": "schedule", "every_minutes": every, "note": label}
-        started.append(workflow_store.create_scheduled_run(
-            workflow, trigger_meta, label,
-        ))
+        try:
+            started.append(workflow_store.create_scheduled_run(
+                workflow, trigger_meta, label,
+            ))
+        except ValueError:
+            # Lost the race under the row lock: a manual Run now landed
+            # between latest_run and the insert, or the workflow was deleted.
+            # The next tick re-evaluates; nothing is owed now.
+            continue
     for rid in started:
         start_run(rid)
     return started
@@ -710,7 +805,8 @@ def ensure_sync_flow(source_id: int, repo: str) -> int | None:
         return None
     nodes = [
         {"kind": "trigger", "label": "Every 10 min", "config": {"label": "Scheduled · every 10 min"}},
-        {"kind": "sync_source", "label": f"Sync {repo}", "config": {"source_id": source_id}},
+        {"kind": "sync_source", "label": f"Sync {repo}",
+         "config": {"source_id": source_id, "full_every_hours": FULL_SYNC_EVERY_HOURS}},
     ]
     return workflow_store.create_default_workflow(
         name=f"Sync {repo}"[:120],

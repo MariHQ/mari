@@ -17,23 +17,56 @@ def live_destination(project_slug: str, destination_slug: str):
         ).fetchone()
 
 
-def create_session(project_id: int, owner_user_id: int | None, title: str) -> int:
+def create_session(project_id: int, owner_user_id: int | None, title: str,
+                   public_token: str | None = None) -> int:
+    """A session with no owner is a public knowledge-chat one; it carries the
+    token its visitor has to echo back, because the sequential id alone is
+    guessable (migration 0034)."""
     with db.connect() as conn:
         row = conn.execute(
-            """INSERT INTO chat_sessions (project_id, owner_user_id, title)
-                 VALUES (%s, %s, %s) RETURNING id""",
-            (project_id, owner_user_id, title[:60]),
+            """INSERT INTO chat_sessions (project_id, owner_user_id, title, public_token)
+                 VALUES (%s, %s, %s, %s) RETURNING id""",
+            (project_id, owner_user_id, title[:60], public_token),
         ).fetchone()
         return int(row["id"])
 
 
 def session_exists(project_id: int, owner_user_id: int, session_id: int) -> bool:
+    """A signed-in caller continues only a session they own. Ownerless rows are
+    public visitors' conversations and never attach to an account, however
+    the id was obtained."""
     with db.connect() as conn:
         return bool(conn.execute(
             """SELECT id FROM chat_sessions WHERE id = %s AND project_id = %s
-                 AND (owner_user_id = %s OR owner_user_id IS NULL)""",
+                 AND owner_user_id = %s""",
             (session_id, project_id, owner_user_id),
         ).fetchone())
+
+
+def public_session_exists(project_id: int, session_id: int, public_token: str) -> bool:
+    """The id and the token both have to match. Rows created before the token
+    column have NULL there and are not continuable at all."""
+    with db.connect() as conn:
+        return bool(conn.execute(
+            """SELECT id FROM chat_sessions WHERE id = %s AND project_id = %s
+                 AND owner_user_id IS NULL AND public_token IS NOT NULL
+                 AND public_token = %s""",
+            (session_id, project_id, public_token),
+        ).fetchone())
+
+
+def answers_since(project_id: int, usage_detail: str, hours: int = 24) -> int:
+    """Answers one surface produced in the window, from the same usage_log rows
+    log_usage('chat_answer', detail) writes. Counting the log rather than a
+    process-local counter keeps the budget honest across several instances."""
+    with db.connect() as conn:
+        row = conn.execute(
+            """SELECT count(*) AS n FROM usage_log
+                WHERE project_id = %s AND kind = 'chat_answer' AND detail = %s
+                  AND at > now() - make_interval(hours => %s)""",
+            (project_id, usage_detail[:120], int(hours)),
+        ).fetchone()
+        return int(row["n"]) if row else 0
 
 
 def add_message(project_id: int, session_id: int, role: str, content: str, sources=None) -> None:
