@@ -9,6 +9,7 @@ remain the reconciliation path for missed or out-of-order deliveries.
 from __future__ import annotations
 
 import json
+import logging
 import typing as t
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -25,8 +26,9 @@ from mari_server.search.service import invalidate_search
 from mari_server.persistence.postgres.event_inbox import DEFAULT_INBOX
 from mari_components.connectors import ConfluenceConfig, fetch_confluence_page
 from mari_components.sync import document_fingerprint
-from mari_server.persistence.postgres.connector_sync import document_author
+from mari_server.persistence.postgres import connector_sync
 from mari_components.destinations import requests_fact_validation
+from mari_components.errors import TransientFailure
 from mari_components.connectors.events import (
     MAX_DIRTY_PATHS, confluence_change_hint, github_change_hint,
     verify_hmac_sha256,
@@ -39,6 +41,14 @@ MAX_WEBHOOK_BYTES = 1_048_576
 DEFAULT_FACTCHECK_LABEL = "mari:factcheck"
 _MENTION_TRIGGER_PR_ACTIONS = {"opened", "edited"}
 _LABEL_TRIGGER_PR_ACTIONS = {"labeled", "opened", "synchronize"}
+# GitHub's author_association values that may summon the bot by mention.
+# Anyone can comment on a public repository's pull request, and each run is
+# an LLM call plus a bot comment; the label trigger needs no such gate because
+# GitHub only lets triage-or-better users apply labels.
+TRUSTED_ASSOCIATIONS = {"OWNER", "MEMBER", "COLLABORATOR"}
+# fact validation runs one pull request may start in an hour, however triggered
+MAX_FACTCHECKS_PER_PR_PER_HOUR = 3
+log = logging.getLogger("mari.provider_events")
 
 
 def _json(value: t.Any) -> dict[str, t.Any]:
@@ -114,10 +124,14 @@ def _github_hint(event: str, payload: dict[str, t.Any]) -> dict[str, t.Any]:
     pull = _json(payload.get("pull_request"))
     subject = pull or issue
     actor = _json(comment.get("user") or _json(payload.get("sender")))
+    # the comment's author on issue_comment; the pull request's author when
+    # the trigger is the PR body itself
+    association = comment.get("author_association") or subject.get("author_association") or ""
     hint.update(
         comment_body=str(comment.get("body") or subject.get("body") or "")[:10_000],
         comment_author=str(actor.get("login") or "")[:200],
         comment_author_type=str(actor.get("type") or "")[:40],
+        comment_author_association=str(association)[:40].upper(),
         is_pull_request=bool(pull or issue.get("pull_request")),
         labels=[str(_json(label).get("name") or "")[:200] for label in list(pull.get("labels") or [])[:50]],
     )
@@ -130,7 +144,8 @@ def requests_fact_check(hint: dict[str, t.Any], bot_login: str, label: str) -> b
     Two independent triggers, both scoped to pull requests and gated by the
     same bot-author guard: a bare @mention of the bot in an issue comment or
     in the PR body on open/edit, or the configured label being present on
-    labeled/opened/synchronize.
+    labeled/opened/synchronize. A mention only counts from a repository
+    owner, member, or collaborator.
     """
     if not hint.get("is_pull_request"):
         return False
@@ -139,10 +154,11 @@ def requests_fact_check(hint: dict[str, t.Any], bot_login: str, label: str) -> b
     event = str(hint.get("event") or "")
     action = str(hint.get("action") or "")
     body = str(hint.get("comment_body") or "")
-    if event == "issue_comment" and requests_fact_validation(body, bot_login):
+    trusted = str(hint.get("comment_author_association") or "").upper() in TRUSTED_ASSOCIATIONS
+    if event == "issue_comment" and trusted and requests_fact_validation(body, bot_login):
         return True
     if event == "pull_request":
-        if action in _MENTION_TRIGGER_PR_ACTIONS and requests_fact_validation(body, bot_login):
+        if action in _MENTION_TRIGGER_PR_ACTIONS and trusted and requests_fact_validation(body, bot_login):
             return True
         if action in _LABEL_TRIGGER_PR_ACTIONS:
             wanted = label.strip().casefold()
@@ -285,6 +301,17 @@ def _worker_access(source: dict[str, t.Any], provider: str):
     )
 
 
+def require_idle(source_id: int, what: str) -> None:
+    """A webhook worker must not write beside a running sweep: the sweep's
+    page writes carry the checkpoint and the pending full snapshot, and a
+    targeted write landing between them used to clobber both. Transient is
+    the honest kind here: the inbox keeps the delivery and retries it with
+    backoff once the sweep has released the source."""
+    if ingest.is_running(source_id):
+        raise TransientFailure(f"{what}: a scheduled sync for source {source_id} is running; "
+                               "retrying after it finishes")
+
+
 def process_github_delivery(row: dict[str, t.Any]) -> None:
     envelope = _json(row.get("payload"))
     installation_id = int(envelope.get("installation_id") or 0)
@@ -305,10 +332,17 @@ def process_github_delivery(row: dict[str, t.Any]) -> None:
         bot_login = str(envelope.get("bot_login") or "mari")
         factcheck_label = str(envelope.get("factcheck_label") or DEFAULT_FACTCHECK_LABEL)
         if requests_fact_check(hint, bot_login, factcheck_label):
-            from mari_server.knowledge.service import validate_github_pull_request
-            validate_github_pull_request(
-                source, int(hint.get("number") or 0), str(row.get("delivery_id") or ""),
-            )
+            number = int(hint.get("number") or 0)
+            recent = event_store.factcheck_runs_last_hour(int(row["project_id"]), expected_repo, number)
+            if recent >= MAX_FACTCHECKS_PER_PR_PER_HOUR:
+                # silently: a bot comment saying "too many" is itself a run
+                # someone could provoke over and over
+                log.warning("fact validation skipped for %s#%s: %s runs in the last hour",
+                            expected_repo, number, recent)
+            else:
+                from mari_server.knowledge.service import validate_github_pull_request
+                validate_github_pull_request(source, number, str(row.get("delivery_id") or ""))
+                event_store.mark_factcheck_run(int(row.get("id") or 0))
         result = ingest.run_sync(int(source["id"]), False)
     if result is None:
         raise RuntimeError("GitHub source sync is already running")
@@ -332,12 +366,11 @@ def _sync_confluence_page(source: dict[str, t.Any], page_id: str) -> None:
             and str(document.metadata.get("space_key") or "") != configured_space):
         document = None
     path = str(page_id)
-    hashes = dict(cfg.get("item_hashes") or {})
     with document_index.connection() as conn:
         if document is None:
             document_index.delete_documents(conn, document_repository.ids_for_source_path(
                 conn, source["project_id"], source["id"], f"confluence/{path}"))
-            hashes.pop(path, None)
+            page_hashes, dropped = {}, (path,)
         else:
             title = document.title or path
             body = document.body
@@ -347,7 +380,8 @@ def _sync_confluence_page(source: dict[str, t.Any], page_id: str) -> None:
             content_hash = document_fingerprint(document)
             doc_id, _ = document_index.upsert_document(
                 conn, int(source["id"]), f"confluence:{source['id']}:{path}", title, body,
-                f"confluence/{path}", "page", content_hash, document_author(document) or "Confluence",
+                f"confluence/{path}", "page", content_hash,
+                connector_sync.document_author(document) or "Confluence",
                 source="confluence", initials="CO", acl_visibility="connector_scope",
                 source_updated_at=document.updated_at,
             )
@@ -356,9 +390,9 @@ def _sync_confluence_page(source: dict[str, t.Any], page_id: str) -> None:
                 document_index.sync_chunks(conn, doc_id, title, body, max_tokens, overlap)
             else:
                 document_repository.clear_derived_content(conn, doc_id)
-            hashes[path] = content_hash
-        cfg["item_hashes"] = hashes
-        document_repository.finalize_source(conn, source["project_id"], source["id"], cfg)
+            page_hashes, dropped = {path: content_hash}, ()
+        # this page's hash entry is the only config this worker owns
+        connector_sync.merge_config(conn, int(source["id"]), {}, hashes=page_hashes, dropped=dropped)
         conn.commit()
     invalidate_search(int(source["project_id"]))
 
@@ -372,8 +406,13 @@ def process_confluence_delivery(row: dict[str, t.Any]) -> None:
     if not source:
         raise RuntimeError("Confluence source is no longer active")
     hint = _json(envelope.get("hint"))
+    if str(source.get("status") or "") == "paused":
+        # nothing to do while paused; the poll after resume reconciles
+        log.info("Confluence delivery skipped: source %s is paused", source["id"])
+        return
     with access.use_access(_worker_access(source, "confluence")):
         if hint.get("page_id"):
+            require_idle(int(source["id"]), "Confluence page sync")
             _sync_confluence_page(source, str(hint["page_id"]))
         else:
             result = ingest.run_sync(int(source["id"]), False)

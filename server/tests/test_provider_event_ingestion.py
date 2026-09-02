@@ -11,6 +11,7 @@ from fastapi import HTTPException, Request
 
 from mari_server.sources import provider_events
 from mari_components import KnowledgeDocument
+from mari_components.errors import TransientFailure
 from mari_components.sync import document_fingerprint
 
 
@@ -113,54 +114,99 @@ class GitHubEventTests(unittest.TestCase):
             provider_events.process_github_delivery(row)
         run.assert_called_once_with(41, False)
 
-    def test_pull_request_mention_runs_fact_validation_before_reconciliation(self):
-        source = {"id": 41, "project_id": 3, "project_slug": "acme", "project_name": "Acme",
-                  "config": {"repo": "acme/docs", "token": "token"}}
-        row = {"project_id": 3, "delivery_id": "mention-1", "payload": {
-            "installation_id": 0, "source_id": 41, "bot_login": "mari",
-            "hint": {"repository": "acme/docs", "number": 8, "is_pull_request": True,
-                     "event": "issue_comment", "comment_body": "@Mari validate facts",
-                     "comment_author_type": "User"}}}
+    SOURCE = {"id": 41, "project_id": 3, "project_slug": "acme", "project_name": "Acme",
+              "config": {"repo": "acme/docs", "token": "token"}}
+
+    def _deliver(self, delivery_id, hint, *, recent=0, factcheck_label=None):
+        """Run one PR delivery through the worker with every store call
+        patched; answers the (validate, mark) mocks so tests read what ran."""
         from mari_server.knowledge import service
-        with patch.object(provider_events, "_source", return_value=source), \
+        payload = {"installation_id": 0, "source_id": 41, "bot_login": "mari", "hint": hint}
+        if factcheck_label:
+            payload["factcheck_label"] = factcheck_label
+        row = {"id": 500, "project_id": 3, "delivery_id": delivery_id, "payload": payload}
+        with patch.object(provider_events, "_source", return_value=self.SOURCE), \
              patch.object(service, "validate_github_pull_request") as validate, \
-             patch.object(provider_events.ingest, "run_sync", return_value={}), \
+             patch.object(provider_events.ingest, "run_sync", return_value={}) as run, \
+             patch.object(provider_events.event_store, "factcheck_runs_last_hour",
+                          return_value=recent) as counted, \
+             patch.object(provider_events.event_store, "mark_factcheck_run") as mark, \
              patch.object(provider_events.event_store, "mark_github_delivery"):
             provider_events.process_github_delivery(row)
-        validate.assert_called_once_with(source, 8, "mention-1")
+        run.assert_called_once_with(41, False)
+        if counted.called:
+            counted.assert_called_once_with(3, "acme/docs", 8)
+        return validate, mark
+
+    def test_pull_request_mention_runs_fact_validation_before_reconciliation(self):
+        validate, mark = self._deliver("mention-1", {
+            "repository": "acme/docs", "number": 8, "is_pull_request": True,
+            "event": "issue_comment", "comment_body": "@Mari validate facts",
+            "comment_author_type": "User", "comment_author_association": "MEMBER"})
+        validate.assert_called_once_with(self.SOURCE, 8, "mention-1")
+        # the run is stamped on its inbox row so the hourly cap can count it
+        mark.assert_called_once_with(500)
 
     def test_bare_mention_runs_fact_validation_without_validate_phrase(self):
-        source = {"id": 41, "project_id": 3, "project_slug": "acme", "project_name": "Acme",
-                  "config": {"repo": "acme/docs", "token": "token"}}
-        row = {"project_id": 3, "delivery_id": "mention-2", "payload": {
-            "installation_id": 0, "source_id": 41, "bot_login": "mari",
-            "hint": {"repository": "acme/docs", "number": 8, "is_pull_request": True,
-                     "event": "issue_comment", "comment_body": "@mari does this look right to you?",
-                     "comment_author_type": "User"}}}
-        from mari_server.knowledge import service
-        with patch.object(provider_events, "_source", return_value=source), \
-             patch.object(service, "validate_github_pull_request") as validate, \
-             patch.object(provider_events.ingest, "run_sync", return_value={}), \
-             patch.object(provider_events.event_store, "mark_github_delivery"):
-            provider_events.process_github_delivery(row)
-        validate.assert_called_once_with(source, 8, "mention-2")
+        validate, _ = self._deliver("mention-2", {
+            "repository": "acme/docs", "number": 8, "is_pull_request": True,
+            "event": "issue_comment", "comment_body": "@mari does this look right to you?",
+            "comment_author_type": "User", "comment_author_association": "COLLABORATOR"})
+        validate.assert_called_once_with(self.SOURCE, 8, "mention-2")
+
+    def test_mention_from_outside_the_repository_never_runs_fact_validation(self):
+        # Anyone can comment on a public repository's PR; each run is an LLM
+        # call and a bot comment, so only owners, members, and collaborators
+        # may summon it. A missing association is an outsider too.
+        for association in ("NONE", "CONTRIBUTOR", "FIRST_TIME_CONTRIBUTOR", ""):
+            with self.subTest(association=association):
+                validate, mark = self._deliver("outsider", {
+                    "repository": "acme/docs", "number": 8, "is_pull_request": True,
+                    "event": "issue_comment", "comment_body": "@mari validate facts",
+                    "comment_author_type": "User", "comment_author_association": association})
+                validate.assert_not_called()
+                mark.assert_not_called()
+
+    def test_pr_body_mention_is_gated_by_the_pull_request_author(self):
+        hint = {"repository": "acme/docs", "number": 8, "is_pull_request": True,
+                "event": "pull_request", "action": "opened", "comment_body": "@mari check this",
+                "comment_author_type": "User", "comment_author_association": "NONE"}
+        validate, _ = self._deliver("body-outsider", hint)
+        validate.assert_not_called()
+        validate, _ = self._deliver("body-owner", {**hint, "comment_author_association": "OWNER"})
+        validate.assert_called_once_with(self.SOURCE, 8, "body-owner")
 
     def test_factcheck_label_runs_fact_validation_without_a_mention(self):
-        source = {"id": 41, "project_id": 3, "project_slug": "acme", "project_name": "Acme",
-                  "config": {"repo": "acme/docs", "token": "token"}}
-        row = {"project_id": 3, "delivery_id": "label-1", "payload": {
-            "installation_id": 0, "source_id": 41, "bot_login": "mari",
-            "factcheck_label": "mari:factcheck",
-            "hint": {"repository": "acme/docs", "number": 8, "is_pull_request": True,
-                     "event": "pull_request", "action": "labeled", "comment_body": "",
-                     "comment_author_type": "User", "labels": ["needs-review", "mari:factcheck"]}}}
-        from mari_server.knowledge import service
-        with patch.object(provider_events, "_source", return_value=source), \
-             patch.object(service, "validate_github_pull_request") as validate, \
-             patch.object(provider_events.ingest, "run_sync", return_value={}), \
-             patch.object(provider_events.event_store, "mark_github_delivery"):
-            provider_events.process_github_delivery(row)
-        validate.assert_called_once_with(source, 8, "label-1")
+        # No association gate here: GitHub only lets triage-or-better users
+        # apply a label, so the label is the authorization.
+        validate, _ = self._deliver("label-1", {
+            "repository": "acme/docs", "number": 8, "is_pull_request": True,
+            "event": "pull_request", "action": "labeled", "comment_body": "",
+            "comment_author_type": "User", "comment_author_association": "NONE",
+            "labels": ["needs-review", "mari:factcheck"]}, factcheck_label="mari:factcheck")
+        validate.assert_called_once_with(self.SOURCE, 8, "label-1")
+
+    def test_runs_per_pull_request_are_capped_per_hour(self):
+        validate, mark = self._deliver("mention-capped", {
+            "repository": "acme/docs", "number": 8, "is_pull_request": True,
+            "event": "issue_comment", "comment_body": "@mari again",
+            "comment_author_type": "User", "comment_author_association": "OWNER"},
+            recent=provider_events.MAX_FACTCHECKS_PER_PR_PER_HOUR)
+        validate.assert_not_called()
+        mark.assert_not_called()
+
+    def test_hint_carries_the_commenter_association_from_the_payload(self):
+        payload = {"repository": {"full_name": "acme/docs"}, "action": "created",
+                   "issue": {"number": 8, "pull_request": {}, "author_association": "NONE"},
+                   "comment": {"body": "@mari check", "author_association": "member",
+                               "user": {"login": "ana", "type": "User"}}}
+        hint = provider_events._github_hint("issue_comment", payload)
+        self.assertEqual(hint["comment_author_association"], "MEMBER")
+        # a PR-body trigger falls back to the pull request's own author
+        payload = {"repository": {"full_name": "acme/docs"}, "action": "opened",
+                   "pull_request": {"number": 9, "body": "@mari", "author_association": "OWNER"}}
+        self.assertEqual(provider_events._github_hint("pull_request", payload)["comment_author_association"],
+                         "OWNER")
 
     def test_push_event_never_runs_fact_validation(self):
         source = {"id": 41, "project_id": 3, "project_slug": "acme", "project_name": "Acme",
@@ -295,9 +341,35 @@ class ConfluenceEventTests(unittest.TestCase):
         row = {"project_id": 3, "payload": {"source_id": 8,
                "hint": {"event": "page_updated", "page_id": "123"}}}
         with patch.object(provider_events, "_source", return_value=source), \
+             patch.object(provider_events.ingest, "is_running", return_value=False), \
              patch.object(provider_events, "_sync_confluence_page") as sync_page:
             provider_events.process_confluence_delivery(row)
         sync_page.assert_called_once_with(source, "123")
+
+    def test_page_worker_yields_to_a_running_sweep_and_retries_later(self):
+        # A targeted write beside a running sweep clobbered its checkpoint
+        # and pending full snapshot. Transient keeps the delivery in the
+        # inbox for a later attempt instead of dropping it.
+        source = {**self.source, "project_slug": "acme", "project_name": "Acme"}
+        row = {"project_id": 3, "payload": {"source_id": 8,
+               "hint": {"event": "page_updated", "page_id": "123"}}}
+        with patch.object(provider_events, "_source", return_value=source), \
+             patch.object(provider_events.ingest, "is_running", return_value=True), \
+             patch.object(provider_events, "_sync_confluence_page") as sync_page:
+            with self.assertRaisesRegex(TransientFailure, "scheduled sync .* is running"):
+                provider_events.process_confluence_delivery(row)
+        sync_page.assert_not_called()
+
+    def test_page_worker_skips_a_paused_source_without_reviving_it(self):
+        source = {**self.source, "status": "paused", "project_slug": "acme", "project_name": "Acme"}
+        row = {"project_id": 3, "payload": {"source_id": 8,
+               "hint": {"event": "page_updated", "page_id": "123"}}}
+        with patch.object(provider_events, "_source", return_value=source), \
+             patch.object(provider_events, "_sync_confluence_page") as sync_page, \
+             patch.object(provider_events.ingest, "run_sync") as run:
+            provider_events.process_confluence_delivery(row)
+        sync_page.assert_not_called()
+        run.assert_not_called()
 
     def test_space_hint_uses_poll_reconciliation(self):
         source = {**self.source, "project_slug": "acme", "project_name": "Acme"}
@@ -318,13 +390,13 @@ class ConfluenceEventTests(unittest.TestCase):
              patch.object(provider_events.document_index, "connection", return_value=_Context(conn)), \
              patch.object(provider_events.document_repository, "ids_for_source_path", return_value=[91]), \
              patch.object(provider_events.document_index, "delete_documents") as delete, \
-             patch.object(provider_events.document_repository, "finalize_source") as finalize:
+             patch.object(provider_events.connector_sync, "merge_config") as merge:
             provider_events._sync_confluence_page(source, "123")
         delete.assert_called_once_with(conn, [91])
-        saved = finalize.call_args.args[3]
-        self.assertEqual(saved["cursor"], "durable-poll-cursor")
-        self.assertNotIn("123", saved["item_hashes"])
-        self.assertEqual(saved["item_hashes"]["456"], "2")
+        # Only this page's hash entry is dropped, in the documents
+        # transaction; the cursor and the rest of the map are not rewritten
+        # from the copy read at the start (a poll may have moved them since).
+        merge.assert_called_once_with(conn, 8, {}, hashes={}, dropped=("123",))
 
     def test_targeted_update_indexes_only_canonical_page(self):
         source = {"id": 8, "project_id": 3, "config": {
@@ -339,16 +411,15 @@ class ConfluenceEventTests(unittest.TestCase):
              patch.object(provider_events.document_index, "upsert_document", return_value=(91, True)) as upsert, \
              patch.object(provider_events.document_index, "chunk_settings", return_value=(100, 10)), \
              patch.object(provider_events.document_index, "sync_chunks") as chunks, \
-             patch.object(provider_events.document_repository, "finalize_source") as finalize:
+             patch.object(provider_events.connector_sync, "merge_config") as merge:
             provider_events._sync_confluence_page(source, "123")
         self.assertEqual(upsert.call_args.args[3:5], ("Canonical", "Trusted"))
         chunks.assert_called_once_with(conn, 91, "Canonical", "Trusted", 100, 10)
-        saved = finalize.call_args.args[3]
-        self.assertEqual(saved["cursor"], "durable-poll-cursor")
         # The webhook path must store the same fingerprint the poll manifest
         # computes, or the next scheduled poll re-upserts the page it just
         # synced (2026-08-23 connector sweep, finding 11).
-        self.assertEqual(saved["item_hashes"]["123"], document_fingerprint(canonical))
+        merge.assert_called_once_with(
+            conn, 8, {}, hashes={"123": document_fingerprint(canonical)}, dropped=())
 
 
 class _Context:

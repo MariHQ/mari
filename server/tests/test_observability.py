@@ -6,9 +6,24 @@ import logging
 import unittest
 from io import StringIO
 
+from unittest.mock import patch
+
+from fastapi import HTTPException
+
+from mari_server import settings
+from mari_server.operations import routes as operation_routes
 from mari_server.operations import telemetry as observability
 from starlette.requests import Request
 from starlette.responses import JSONResponse
+
+
+def metrics_request(authorization: str | None = None) -> Request:
+    headers = [(b"authorization", authorization.encode())] if authorization else []
+    return Request({
+        "type": "http", "method": "GET", "path": "/metrics", "query_string": b"",
+        "scheme": "http", "server": ("test", 80), "client": ("test", 1), "root_path": "",
+        "headers": headers,
+    })
 
 
 class ObservabilityTests(unittest.TestCase):
@@ -96,6 +111,25 @@ class ObservabilityTests(unittest.TestCase):
         self.assertEqual(row["message"], "done")
         self.assertEqual(row["request_id"], "r-1")
         self.assertEqual(row["status"], 204)
+
+    def scrape(self, token: str, authorization: str | None) -> str:
+        metrics = observability.Metrics()
+        metrics.inc("mari_test_scrape_total")
+        with patch.dict(settings.CONFIG["server"], {"metrics_token": token}), \
+             patch.object(observability, "METRICS", metrics), \
+             patch.object(operation_routes.system, "connector_lag", return_value=[]):
+            return operation_routes.metrics(metrics_request(authorization))
+
+    def test_metrics_stay_open_until_a_token_is_configured(self) -> None:
+        self.assertIn("mari_test_scrape_total 1", self.scrape("", None))
+
+    def test_metrics_require_the_configured_bearer_token(self) -> None:
+        for header in (None, "Bearer wrong", "Basic scrape-secret", "scrape-secret"):
+            with self.assertRaises(HTTPException) as caught:
+                self.scrape("scrape-secret", header)
+            self.assertEqual(caught.exception.status_code, 401)
+            self.assertEqual(caught.exception.headers["WWW-Authenticate"], "Bearer")
+        self.assertIn("mari_test_scrape_total 1", self.scrape("scrape-secret", "Bearer scrape-secret"))
 
     def test_llm_hook_records_result_without_prompt_or_credentials(self) -> None:
         metrics = observability.Metrics()

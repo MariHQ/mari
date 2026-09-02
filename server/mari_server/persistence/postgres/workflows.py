@@ -284,13 +284,56 @@ def source_name(source_id: int) -> str | None:
 
 def save_run_progress(run_id: int, *, rows: list[dict], status: str,
                       progress: int, stats: dict, duration: str) -> None:
+    # Every persist is also the run's heartbeat: a 'running' row whose
+    # heartbeat stops moving has no process behind it (see fail_stale_runs).
     project_id = access.require_current_access().project_id
     with db.connect() as conn, conn.transaction():
         conn.execute(
             """UPDATE workflow_runs SET rows_data = %s, status = %s, progress = %s,
-                   stats = %s, duration = %s WHERE project_id = %s AND id = %s""",
+                   stats = %s, duration = %s, heartbeat_at = now()
+                 WHERE project_id = %s AND id = %s""",
             (json.dumps(rows), status, progress, json.dumps(stats), duration,
              project_id, run_id),
+        )
+
+
+def touch_run_heartbeat(run_id: int) -> None:
+    """Prove the run is still alive without rewriting its rows. The runner's
+    heartbeat ticker calls this between persists, so a long step that never
+    narrates progress (a big connector sync, an LLM pass) keeps its lease."""
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn, conn.transaction():
+        conn.execute(
+            """UPDATE workflow_runs SET heartbeat_at = now()
+                 WHERE project_id = %s AND id = %s AND status = 'running'""",
+            (project_id, run_id),
+        )
+
+
+def full_sync_due(source_id: int, every_hours: float) -> bool:
+    """Whether this source is owed an authoritative full reconcile: never had
+    one, or the last one is older than `every_hours`. Compared in the database
+    so the clock that wrote last_full_sync_at is the clock that reads it."""
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn:
+        row = conn.execute(
+            """SELECT (last_full_sync_at IS NULL
+                       OR last_full_sync_at < now() - make_interval(secs => %s)) AS due
+                 FROM sources WHERE project_id = %s AND id = %s""",
+            (float(every_hours) * 3600.0, project_id, source_id),
+        ).fetchone()
+    return bool(row and row["due"])
+
+
+def record_full_sync(source_id: int) -> None:
+    """Called only after a full sync returned without error. A dedicated
+    column rather than sources.config, which the sync worker owns and
+    rewrites wholesale."""
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn, conn.transaction():
+        conn.execute(
+            "UPDATE sources SET last_full_sync_at = now() WHERE project_id = %s AND id = %s",
+            (project_id, source_id),
         )
 
 
@@ -346,10 +389,26 @@ def trigger_inputs(document_ids: list[int], change: str) -> tuple[list[dict], li
     return docs, workflows, tags
 
 
+def _lock_workflow(conn, project_id: int | None, workflow_id: int) -> None:
+    """Hold the workflow row so this insert serializes with every other run
+    creation and with delete. Scheduled and triggered runs used to skip this,
+    so a manual Run now racing the scheduler tick produced two interleaved
+    runs of one workflow; they now take the same lock and the same
+    concurrency check as create_run."""
+    row = conn.execute(
+        "SELECT 1 FROM workflows WHERE project_id IS NOT DISTINCT FROM %s AND id = %s FOR UPDATE",
+        (project_id, workflow_id),
+    ).fetchone()
+    if not row:
+        raise ValueError("This workflow no longer exists.")
+    _refuse_concurrent_run(conn, project_id, workflow_id)
+
+
 def create_triggered_run(workflow: dict, document_ids: list[int],
                          trigger: dict, note: str) -> int:
     project_id = access.require_current_access().project_id
     with db.connect() as conn, conn.transaction():
+        _lock_workflow(conn, project_id, workflow["id"])
         row = conn.execute(
             """INSERT INTO workflow_runs
                (project_id, workflow_id, number, status, started_label, duration,
@@ -411,8 +470,40 @@ def latest_run(workflow_id: int, every_minutes: int) -> dict | None:
         ).fetchone()
 
 
+def fail_stale_runs(stale_after_seconds: float) -> int:
+    """Fail every 'running' run whose heartbeat is older than the threshold.
+
+    The runner heartbeats on every persist, so a run that stopped touching
+    its row has no process behind it: _persist raised on a DB blip and the
+    fallback fail_running_run was swallowed, or the worker was killed. Left
+    alone it blocks that workflow's schedule until the next restart. The
+    scheduler calls this once per pass, before it asks which runs are live.
+    Returns how many were flipped."""
+    with db.connect() as conn, conn.transaction():
+        rows = conn.execute(
+            """UPDATE workflow_runs
+               SET status = 'failed', progress = 100,
+                   stats = coalesce(stats, '{}'::jsonb) ||
+                           jsonb_build_object('note', CAST(%s AS text))
+               WHERE status = 'running'
+                 AND heartbeat_at < now() - make_interval(secs => %s)
+               RETURNING id""",
+            (f"no heartbeat for {int(stale_after_seconds // 60)} min; marked failed",
+             float(stale_after_seconds)),
+        ).fetchall()
+        if rows:
+            conn.execute(
+                "INSERT INTO events (actor, verb, target) VALUES (%s, %s, %s)",
+                ("Flow scheduler",
+                 f"marked {len(rows)} stale run(s) failed (lost heartbeat)",
+                 "scheduler reconciliation"),
+            )
+    return len(rows)
+
+
 def create_scheduled_run(workflow: dict, trigger: dict, label: str) -> int:
     with db.connect() as conn, conn.transaction():
+        _lock_workflow(conn, workflow.get("project_id"), workflow["id"])
         row = conn.execute(
             """INSERT INTO workflow_runs
                (project_id, workflow_id, number, status, started_label, duration,

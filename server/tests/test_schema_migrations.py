@@ -39,6 +39,19 @@ class SchemaMigrationTests(unittest.TestCase):
         second = Migration("0002_next", Path("next.sql"), "two", "b")
         self.assertEqual(pending([first, second], {"0001_baseline": "a"}), [second])
 
+    def test_release_ships_the_heartbeat_and_full_sync_columns_as_one_migration(self):
+        # The ledger is immutable once applied, so the two runtime columns
+        # travel in a numbered file, not in init.sql (the baseline has not
+        # mirrored a numbered migration since the ledger release).
+        migrations = {item.version: item for item in discover()}
+        migration = migrations["0035_run_heartbeat_and_full_sync"]
+        self.assertIn("ALTER TABLE workflow_runs ADD COLUMN heartbeat_at timestamptz NOT NULL DEFAULT now()",
+                      migration.sql)
+        self.assertIn("ALTER TABLE sources ADD COLUMN last_full_sync_at timestamptz", migration.sql)
+        baseline = migrations["0001_baseline"].sql
+        self.assertNotIn("heartbeat_at", baseline)
+        self.assertNotIn("last_full_sync_at", baseline)
+
 
 if __name__ == "__main__":
     unittest.main()

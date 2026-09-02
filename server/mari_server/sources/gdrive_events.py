@@ -16,7 +16,7 @@ from pydantic import BaseModel
 
 from mari_server.identity import access
 from mari_server.identity import routes as auth
-from mari_server.persistence.postgres import document_index
+from mari_server.persistence.postgres import connector_sync, document_index
 from mari_server import settings as config
 from mari_server.sources import sync as ingest
 from mari_server.providers import connectors as component_connectors
@@ -29,7 +29,7 @@ from mari_components.connectors import (
     GoogleDriveConfig, connector_definition, start_google_drive_watch,
 )
 from mari_components.connectors.events import gdrive_change_hint
-from mari_components.errors import IncompleteSnapshot
+from mari_components.errors import IncompleteSnapshot, TransientFailure
 
 
 router = APIRouter()
@@ -149,6 +149,7 @@ async def gdrive_webhook(request: Request):
 def _apply_poll(source: dict, source_config: dict, poll) -> None:
     source_id = int(source["id"])
     hashes = dict(source_config.get("item_hashes") or {})
+    page_hashes: dict[str, str] = {}
     max_tokens, overlap = document_index.chunk_settings()
     with document_index.connection() as conn:
         for document in poll.upserts:
@@ -171,7 +172,7 @@ def _apply_poll(source: dict, source_config: dict, poll) -> None:
             )
             if hashes.get(path) != content_hash:
                 document_index.sync_chunks(conn, doc_id, title, body, max_tokens, overlap)
-            hashes[path] = content_hash
+            hashes[path] = page_hashes[path] = content_hash
         tombstones = {value.external_id for value in poll.tombstones if value.external_id}
         if tombstones:
             rows = document_repository.source_document_paths(conn, source_id)
@@ -181,6 +182,9 @@ def _apply_poll(source: dict, source_config: dict, poll) -> None:
             for path in tombstones:
                 hashes.pop(path, None)
         source_config["item_hashes"] = hashes
+        # Documents and this page's hash entries commit together, and only
+        # those entries: the poll worker owns the rest of the manifest.
+        connector_sync.merge_config(conn, source_id, {}, hashes=page_hashes, dropped=sorted(tombstones))
         conn.commit()
     if poll.upserts or poll.tombstones:
         invalidate_search(int(source["project_id"]))
@@ -218,6 +222,13 @@ def process_gdrive_delivery(row: dict) -> None:
     with access.use_access(project_access):
         try:
             while True:
+                # Checked per page: a scheduled sweep may start while a long
+                # Changes drain is in progress. Transient so the inbox retries
+                # the delivery after the sweep releases the source.
+                if ingest.is_running(int(source["id"])):
+                    raise TransientFailure(
+                        f"Google Drive changes: a scheduled sync for source {source['id']} "
+                        "is running; retrying after it finishes")
                 request = PollRequest(cursor=cursor, page_limit=1)
                 pages = connector_definition("gdrive").poll(
                     source_config, request, http=component_connectors.http_transport,
@@ -230,7 +241,7 @@ def process_gdrive_delivery(row: dict) -> None:
                 cursor = str(durable)
                 token = cursor[8:]
                 source_config["cursor"] = cursor
-                event_store.update_drive_cursor(source["id"], source_config, token)
+                event_store.update_drive_cursor(source["id"], cursor, token)
                 if poll.snapshot_complete:
                     break
         except IncompleteSnapshot:
