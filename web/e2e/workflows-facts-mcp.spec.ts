@@ -48,7 +48,7 @@ test("LLM fact scan starts a workflow and reports its grounded result", async ({
   await page.goto("/facts");
   await page.getByRole("button", { name: "Scan for facts" }).click();
   const config = page.getByRole("dialog", { name: "Configure fact extraction" });
-  await config.getByLabel("Search within documents").fill("infrastructure");
+  await config.getByLabel("Passage text", { exact: true }).fill("infrastructure");
   await config.getByLabel("Documents per run").fill("25");
   await config.getByLabel("Review strategy").selectOption("auto");
   await expect(config.getByText("High-confidence recommendations are applied; uncertain candidates still wait for you"))
@@ -81,10 +81,10 @@ test("cancelling the fact scan dialog is a no-op, not an error", async ({ page }
   await scanButton.click();
   const config = page.getByRole("dialog", { name: "Configure fact extraction" });
   // Focus lands on the first field, and Tab stays inside the dialog.
-  await expect(config.getByLabel("Search within documents")).toBeFocused();
+  await expect(config.getByLabel("Passage text", { exact: true })).toBeFocused();
   await config.getByRole("button", { name: "Save & run now" }).focus();
   await page.keyboard.press("Tab");
-  await expect(config.getByLabel("Search within documents")).toBeFocused();
+  await expect(config.getByLabel("Passage text", { exact: true })).toBeFocused();
   await page.keyboard.press("Shift+Tab");
   await expect(config.getByRole("button", { name: "Save & run now" })).toBeFocused();
 
