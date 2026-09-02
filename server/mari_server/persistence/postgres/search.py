@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
-from mari_server.persistence.postgres import connection as db
 import re
+import typing as t
+
+from mari_server.persistence.postgres import connection as db
 
 
 _LIKE_ESCAPE = str.maketrans({"\\": "\\\\", "%": "\\%", "_": "\\_"})
@@ -32,12 +34,41 @@ def keyword_patterns(query: str) -> list[str]:
     return [like_pattern(word) for word in words] or [like_pattern(query.strip())]
 
 
+_TSQUERY_UNSAFE = re.compile(r"[^A-Za-z0-9_-]+")
+_TSQUERY_TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
+
+
+def prefix_tsquery(terms: t.Iterable[str]) -> str:
+    """A to_tsquery input that prefix-matches each term: `auth:* | k8s:*`.
+
+    websearch_to_tsquery matches stemmed whole words only, which lost the
+    substring hits ILIKE used to give ("auth" no longer found
+    "authentication"). to_tsquery accepts the `:*` prefix operator but is
+    strict about syntax, so every term is reduced to [A-Za-z0-9_-] first:
+    quotes, ampersands, pipes, parentheses and the like are stripped rather
+    than escaped, and a term with nothing left is dropped. Hyphens survive
+    because the parser handles them (`k8s-migration:*` becomes a phrase
+    query, verified against Postgres 16), leading ones are trimmed so no term
+    starts with punctuation."""
+    cleaned = []
+    for term in terms:
+        term = _TSQUERY_UNSAFE.sub("", term).lstrip("_-")
+        if term and term not in cleaned:
+            cleaned.append(term)
+    return " | ".join(f"{term}:*" for term in cleaned)
+
+
 def search_text(query: str) -> str:
-    """The websearch_to_tsquery input for a query: the same meaningful terms
-    scoring uses, OR-ed so any one of them admits a candidate, exactly as the
-    ILIKE needle list did. A query with no such term (\"AI\", \"the\") is
-    handed over whole and the parser decides."""
-    return " OR ".join(keyword_terms(query)) or query.strip()
+    """The to_tsquery input for a query: the same meaningful terms scoring
+    uses, each as a prefix, OR-ed so any one of them admits a candidate,
+    exactly as the ILIKE needle list did. A query with no such term ("AI",
+    "the") falls back to the raw text's tokens of two characters or more (a
+    one-letter prefix would admit most of the corpus); one with no usable
+    token at all yields "" and the caller takes the ILIKE path."""
+    terms = keyword_terms(query) or [
+        token for token in _TSQUERY_TOKEN.findall(query) if len(token) >= 2
+    ]
+    return prefix_tsquery(terms)
 
 
 def _keyword_predicate(conn, query: str | None) -> tuple[str, tuple]:
@@ -56,10 +87,10 @@ def _keyword_predicate(conn, query: str | None) -> tuple[str, tuple]:
         return "", ()
     text = search_text(query)
     parsed = conn.execute(
-        "SELECT numnode(websearch_to_tsquery('english', %s)) > 0 AS usable", (text,),
-    ).fetchone()
+        "SELECT numnode(to_tsquery('english', %s)) > 0 AS usable", (text,),
+    ).fetchone() if text else None
     if parsed and parsed.get("usable"):
-        return "AND d.search_vec @@ websearch_to_tsquery('english', %s)", (text,)
+        return "AND d.search_vec @@ to_tsquery('english', %s)", (text,)
     return ("""AND EXISTS (SELECT 1 FROM unnest(%s::text[]) AS needle
                            WHERE d.title ILIKE needle OR d.snippet ILIKE needle
                               OR d.body ILIKE needle)""", (keyword_patterns(query),))

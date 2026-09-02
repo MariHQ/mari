@@ -19,10 +19,14 @@ set +a
 # posts and deletes Slack messages and runs a fact scan. Never against
 # production. This is a hard stop with no override: point the suite at a
 # sandbox or run it read-only.
+# Order matters: userinfo comes off before the port, or a URL like
+# https://user:pw@cloud.mari.guru/ parses to host "user" and the guard
+# below never fires. Lowercase so CLOUD.mari.guru is still production.
 host="${MARI_E2E_BASE_URL#*://}"
 host="${host%%/*}"
-host="${host%%:*}"
 host="${host##*@}"
+host="${host%%:*}"
+host="$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')"
 case "$host" in
   cloud.mari.guru|*.cloud.mari.guru)
     if [[ "${MARI_E2E_MUTATIONS:-0}" == "1" ]]; then

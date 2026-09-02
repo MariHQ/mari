@@ -52,6 +52,21 @@ type Res = {
 const tierOf = (kind: string): Tier =>
   kind === "github" || kind === "connector" || kind === "upload" ? "live" : "legacy";
 
+/* An orphan: a legacy row with nothing behind it. The pre-0.1.3 connectSource
+   mutation wrote a bare provider row with no kind and no documents; removing
+   it is the only thing left to do with it, and the card draws the Remove
+   action for the live and actionless tiers only. `actionless` is the
+   library's own name for "a live-kind source whose sync status is unknown",
+   and for a row with no documents it renders exactly what `legacy` renders
+   ("0 documents", "Sync status unavailable"), so nothing is invented: the row
+   gains its menu and keeps its blank. Keyed on the document count alone: a
+   legacy row that holds seeded documents stays legacy, where the honest count
+   is all it has, and a last-sync stamp on an empty row proves nothing about
+   what is behind it. The menu's other entries (sync, resync, edit, pause) are
+   refused by the server for such a row, and the refusal is shown on the card. */
+const isOrphan = (s: Res["sourcePulse"][number]): boolean =>
+  tierOf(s.kind) === "legacy" && s.docsCount === 0;
+
 /* sources.health is a display word the ingest side writes. The card has four
    states and colors each one; anything unrecognized reads as healthy, which is
    what a source nobody has reported a problem about is. */
@@ -77,7 +92,7 @@ function configOf(cfg: Record<string, unknown> | null): Record<string, string> |
 
 export function mapSources(res: Res): Source[] {
   return (res.sourcePulse ?? []).map<Source>((s) => {
-    const tier = tierOf(s.kind);
+    const tier: Tier = isOrphan(s) ? "actionless" : tierOf(s.kind);
     return {
       id: String(s.id),
       provider: s.provider,

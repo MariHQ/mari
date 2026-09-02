@@ -31,7 +31,21 @@ class ConfluenceConfig:
 
 
 class _StorageText(HTMLParser):
-    _BLOCK_END = {"p", "div", "ul", "ol", "table", "tr", "blockquote"}
+    _BLOCK_END = {"p", "div", "ul", "ol", "table", "tr", "blockquote",
+                  "ac:adf-node", "ac:adf-content", "ac:adf-extension"}
+    # New-editor markup arrives inside <ac:adf-extension>. Its attribute-style
+    # children are configuration, not prose: a panel's
+    # <ac:adf-attribute key="panel-type">note</ac:adf-attribute> and its
+    # <ac:adf-attribute key="local-id">f19de4a5-…</ac:adf-attribute> were being
+    # glued onto the panel text ("notef19de4a5-…As of November 2024"). The
+    # words live in <ac:adf-content>, which is kept. The one attribute a reader
+    # sees is an expand's key="title", the heading of the collapsed section;
+    # it is handled like a macro's title parameter in handle_starttag.
+    _ADF_CONFIG = {"ac:adf-parameter"}
+    # ac:placeholder is the editor's grey hint ("Type / to insert"), never
+    # something a reader of the page sees.
+    _SKIPPED = _ADF_CONFIG | {"ac:task-status", "ac:placeholder"}
+    _ADF_NODES = {"ac:adf-node", "ac:adf-extension"}
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
@@ -41,9 +55,37 @@ class _StorageText(HTMLParser):
         self.code_opener: str | None = None
         self.macro_names: list[str] = []
         self.param_keeps: list[bool] = []
+        # One flag per open <ac:adf-extension>: did its <ac:adf-content> emit
+        # any text? Decides whether the trailing <ac:adf-fallback> is a
+        # duplicate or the only rendering there is.
+        self.adf_content_seen: list[bool] = []
+        self.adf_content_depth = 0
+        self.fallback_skips: list[bool] = []
+        # One flag per open <ac:adf-attribute>, and where each open ADF node's
+        # attributes start in that stack. An attribute the page never closed
+        # would otherwise skip everything to the end of the page; the node
+        # that owns it unwinds it instead.
+        self.adf_attribute_keeps: list[bool] = []
+        self.adf_node_marks: list[int] = []
+
+    def _words(self, text: str) -> None:
+        """Visible words, wherever they come from: text, CDATA, an image's alt,
+        a link's page title. Inside <ac:adf-content> they also mark the node
+        as rendered, so its fallback is not read as well."""
+        if self.adf_content_depth and self.adf_content_seen and text.strip():
+            self.adf_content_seen[-1] = True
+        self.output.append(text)
+
+    def _unwind_attributes(self) -> None:
+        mark = self.adf_node_marks.pop() if self.adf_node_marks else 0
+        while len(self.adf_attribute_keeps) > mark:
+            if not self.adf_attribute_keeps.pop():
+                self.skip_depth = max(0, self.skip_depth - 1)
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         mapping = dict(attrs)
+        if tag in self._ADF_NODES:
+            self.adf_node_marks.append(len(self.adf_attribute_keeps))
         if tag == "ac:parameter":
             # Macro parameters are configuration, not content, and glued
             # straight into the body they read as garbage ("Team directorytrue").
@@ -54,12 +96,34 @@ class _StorageText(HTMLParser):
             if not keep:
                 self.skip_depth += 1
             return
-        if tag == "ac:task-status":
+        if tag == "ac:adf-attribute":
+            # Same rule for the new editor's attributes: only a title is
+            # something the reader sees.
+            keep = str(mapping.get("key") or "") == "title"
+            self.adf_attribute_keeps.append(keep)
+            if not keep:
+                self.skip_depth += 1
+            return
+        if tag in self._SKIPPED:
             self.skip_depth += 1
+            return
+        if tag == "ac:adf-fallback":
+            # The legacy rendering of the node before it, for editors that
+            # cannot draw ADF: the same words again. Indexing both put every
+            # panel in the body twice, so the fallback is read only when the
+            # node carried no text of its own.
+            duplicate = bool(self.adf_content_seen and self.adf_content_seen[-1])
+            self.fallback_skips.append(duplicate)
+            if duplicate:
+                self.skip_depth += 1
             return
         if self.skip_depth:
             return
-        if tag == "ac:structured-macro":
+        if tag == "ac:adf-extension":
+            self.adf_content_seen.append(False)
+        elif tag == "ac:adf-content":
+            self.adf_content_depth += 1
+        elif tag == "ac:structured-macro":
             name = str(mapping.get("ac:name") or "")
             self.macro_names.append(name)
             if name == "code" and self.code_opener is None:
@@ -68,11 +132,11 @@ class _StorageText(HTMLParser):
         elif tag == "ac:image":
             alt = str(mapping.get("ac:alt") or "")
             if alt:
-                self.output.append(alt + " ")
+                self._words(alt + " ")
         elif tag == "ri:page":
             title = str(mapping.get("ri:content-title") or "")
             if title:
-                self.output.append(title + " ")
+                self._words(title + " ")
         elif tag in {"h1", "h2", "h3", "h4", "h5", "h6"}:
             self.output.append("\n\n" + "#" * int(tag[1]) + " ")
         elif tag in {"ul", "ol"}:
@@ -93,6 +157,8 @@ class _StorageText(HTMLParser):
             self.output.append(" | ")
 
     def handle_endtag(self, tag: str) -> None:
+        if tag in self._ADF_NODES:
+            self._unwind_attributes()
         if tag == "ac:parameter":
             keep = self.param_keeps.pop() if self.param_keeps else False
             if keep:
@@ -100,12 +166,33 @@ class _StorageText(HTMLParser):
             else:
                 self.skip_depth = max(0, self.skip_depth - 1)
             return
-        if tag == "ac:task-status":
+        if tag == "ac:adf-attribute":
+            keep = self.adf_attribute_keeps.pop() if self.adf_attribute_keeps else False
+            if keep:
+                self.output.append("\n")
+            else:
+                self.skip_depth = max(0, self.skip_depth - 1)
+            return
+        if tag in self._SKIPPED:
             self.skip_depth = max(0, self.skip_depth - 1)
+            return
+        if tag == "ac:adf-fallback":
+            if self.fallback_skips and self.fallback_skips.pop():
+                self.skip_depth = max(0, self.skip_depth - 1)
             return
         if self.skip_depth:
             return
-        if tag == "ac:structured-macro":
+        if tag == "ac:adf-extension":
+            seen = self.adf_content_seen.pop() if self.adf_content_seen else False
+            # A nested extension that rendered words rendered them inside its
+            # parent's content, so the parent's fallback is a duplicate too.
+            if seen and self.adf_content_depth and self.adf_content_seen:
+                self.adf_content_seen[-1] = True
+            self.output.append("\n")
+        elif tag == "ac:adf-content":
+            self.adf_content_depth = max(0, self.adf_content_depth - 1)
+            self.output.append("\n")
+        elif tag == "ac:structured-macro":
             # Only the macro that opened the fence may close it; an info panel
             # inside inline code must not emit a stray fence.
             name = self.macro_names.pop() if self.macro_names else ""
@@ -128,15 +215,16 @@ class _StorageText(HTMLParser):
             self.output.append("\n")
 
     def handle_data(self, data: str) -> None:
-        if not self.skip_depth:
-            self.output.append(data)
+        if self.skip_depth:
+            return
+        self._words(data)
 
     def unknown_decl(self, data: str) -> None:
         # CDATA sections hold code samples verbatim; stripping the guards and
         # parsing the payload as HTML ate the markup a knowledge base exists
         # to index.
         if not self.skip_depth and data.startswith("CDATA["):
-            self.output.append(data[len("CDATA["):])
+            self._words(data[len("CDATA["):])
 
     def text(self) -> str:
         lines = [line.rstrip() for line in "".join(self.output).split("\n")]

@@ -26,8 +26,20 @@ def remove_source(source_id: int, *, delete_documents: bool = True) -> dict | No
     documents and everything hanging off them, its ingest checkpoints, and its
     scheduled "Sync <name>" flow. Returns the deleted row's provider and
     display_name, or None when no source with this id exists in the project.
-    Raises ValueError for a non-connector row — GitHub and legacy sources have
-    no removal story yet, and silently deleting one would be a lie.
+
+    Legacy rows are deleted the same way. A legacy row is any kind that is not
+    connector or upload: '' from the onboarding seed, a bare provider string
+    the pre-0.1.3 connectSource mutation wrote with no kind at all, or a
+    'github' row that somehow escaped migration 0007 (which rewrites every
+    github row to connector at startup; no writer inserts the kind any more).
+    Such a row owns no sync flow (only ensure_sync_flow creates one, and it
+    keys on a connector's source id), so the flow scan below finds nothing
+    for it; checkpoint rows keyed by its provider string may exist from an
+    old-style sync and are swept with the same rule as a connector's.
+
+    Raises ValueError for the upload row: it is the project's single upload
+    bucket (onboarding.upload_source), recreated on the next upload, so
+    removing it would be a no-op that reads as a delete.
 
     What init.sql actually cascades from documents: only chunks
     (ON DELETE CASCADE). facts.document_id and glossary.evidence_doc_id are
@@ -47,8 +59,8 @@ def remove_source(source_id: int, *, delete_documents: bool = True) -> dict | No
             (project_id, source_id)).fetchone()
         if not row:
             return None
-        if row["kind"] != "connector":
-            raise ValueError("Only connector sources can be removed.")
+        if row["kind"] == "upload":
+            raise ValueError("The upload source cannot be removed.")
         if delete_documents:
             docs = "SELECT id FROM documents WHERE project_id = %s AND source_id = %s"
             for sql in (
@@ -75,6 +87,9 @@ def remove_source(source_id: int, *, delete_documents: bool = True) -> dict | No
         # string as its item. A provider-wide delete therefore wiped the
         # surviving sibling's progress rows too. Sweep the whole provider only
         # when this was its last connection.
+        # NOTE: sources_project_provider_uidx (init.sql) makes (project_id,
+        # provider) unique, so the sibling branch is unreachable today; it is
+        # kept as the rule that would apply if two rows ever shared a provider.
         siblings = conn.execute(
             """SELECT count(*) AS n FROM sources
                 WHERE project_id = %s AND provider = %s AND id <> %s""",

@@ -294,10 +294,46 @@ class RemoveSourceTests(unittest.TestCase):
             self._remove({"id": 42, "kind": "connector", "provider": "confluence",
                           "display_name": "Confluence"}, running=True)
 
-    def test_refuses_a_non_connector_kind(self) -> None:
-        with self.assertRaisesRegex(ValueError, "Only connector sources"):
-            self._remove({"id": 42, "kind": "legacy", "provider": "notion",
-                          "display_name": "Notion"})
+    def test_removes_a_github_kind_row_like_any_legacy_row(self) -> None:
+        # Migration 0007 rewrites every github row to connector at startup and
+        # no writer inserts the kind any more, so a github-kind row is a legacy
+        # row like any other: it goes, it is never refused (a refusal would
+        # strand it with no path out).
+        result, conn = self._remove({"id": 42, "kind": "github", "provider": "github",
+                                     "display_name": "acme/handbook"})
+        self.assertTrue(result)
+        deletes = [(sql, args) for sql, args in conn.executed if sql.startswith("DELETE")]
+        self.assertIn(("DELETE FROM sources WHERE project_id = %s AND id = %s", (1, 42)), deletes)
+
+    def test_refuses_the_upload_kind(self) -> None:
+        with self.assertRaisesRegex(ValueError, "upload source"):
+            self._remove({"id": 42, "kind": "upload", "provider": "upload",
+                          "display_name": "Uploads"})
+
+    def test_removes_a_legacy_row_the_old_connect_mutation_left(self) -> None:
+        # The pre-0.1.3 connectSource mutation inserted a bare provider row
+        # with no kind. It owns no sync flow, so only the row, its documents
+        # and its checkpoints go, and the sync history keeps a "removed" event.
+        flows = [{"id": 10, "nodes": [{"kind": "sync_source", "config": {"source_id": 7}}]}]
+        # siblings=0: sources_project_provider_uidx makes (project_id, provider)
+        # unique, so the orphan is always its provider's only row.
+        result, conn = self._remove(
+            {"id": 42, "kind": "", "provider": "confluence", "display_name": "Confluence"},
+            flows=flows, siblings=0)
+        self.assertTrue(result)
+        deletes = [(sql, args) for sql, args in conn.executed if sql.startswith("DELETE")]
+        tables = [sql.split()[2] for sql, _ in deletes]
+        for table in ("tags", "edges", "findings", "changes", "watches", "documents"):
+            self.assertIn(table, tables)
+        self.assertIn(("DELETE FROM sources WHERE project_id = %s AND id = %s", (1, 42)), deletes)
+        # its provider's last (only) row: the provider-wide checkpoint sweep
+        self.assertIn(("DELETE FROM ingest_checkpoints WHERE project_id = %s AND provider = %s",
+                       (1, "confluence")), deletes)
+        self.assertNotIn("workflows", tables)
+        self.assertNotIn("sync_events", tables)
+        event_args = next(args for sql, args in conn.executed
+                          if sql.startswith("INSERT INTO sync_events"))
+        self.assertEqual(event_args[2], "removed: Confluence")
 
     def test_a_missing_row_answers_false_without_deleting(self) -> None:
         result, conn = self._remove(None)

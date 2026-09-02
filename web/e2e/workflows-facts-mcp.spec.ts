@@ -75,6 +75,50 @@ test("LLM fact scan starts a workflow and reports its grounded result", async ({
   await expect(page.getByText(/Fact scan · run #1900/)).toHaveCount(0);
 });
 
+test("cancelling the fact scan dialog is a no-op, not an error", async ({ page }) => {
+  await page.goto("/facts");
+  const scanButton = page.getByRole("button", { name: "Scan for facts" });
+  await scanButton.click();
+  const config = page.getByRole("dialog", { name: "Configure fact extraction" });
+  // Focus lands on the first field, and Tab stays inside the dialog.
+  await expect(config.getByLabel("Search within documents")).toBeFocused();
+  await config.getByRole("button", { name: "Save & run now" }).focus();
+  await page.keyboard.press("Tab");
+  await expect(config.getByLabel("Search within documents")).toBeFocused();
+  await page.keyboard.press("Shift+Tab");
+  await expect(config.getByRole("button", { name: "Save & run now" })).toBeFocused();
+
+  // Escape cancels. A cancelled dialog used to throw "Fact scan cancelled."
+  // and the page drew it as a "Could not save" banner.
+  await page.keyboard.press("Escape");
+  await expect(config).toBeHidden();
+  await expect(scanButton).toBeFocused();
+  await expect(scanButton).toBeEnabled();
+  await expect(page.getByRole("alert").filter({ hasText: "Could not save" })).toHaveCount(0);
+  await expect(page.getByText("Fact scan cancelled.")).toHaveCount(0);
+  await expect(page.getByText(/Fact scan · starting/)).toHaveCount(0);
+  expect(api.calls.some((c) => c.query.includes("startFactScan"))).toBeFalsy();
+
+  // A click on the backdrop cancels the same way.
+  await scanButton.click();
+  await expect(config).toBeVisible();
+  await page.locator("div[role=presentation]").filter({ has: config }).click({ position: { x: 4, y: 4 } });
+  await expect(config).toBeHidden();
+  await expect(page.getByRole("alert").filter({ hasText: "Could not save" })).toHaveCount(0);
+  expect(api.calls.some((c) => c.query.includes("startFactScan"))).toBeFalsy();
+
+  // Two cancels leave the flow intact: reopening and saving starts exactly
+  // one run. The Scan button is disabled while the run is in flight, so
+  // focus parks on the main landmark rather than falling to body.
+  await scanButton.click();
+  await expect(config).toBeVisible();
+  await config.getByRole("button", { name: "Save & run now" }).click();
+  await expect(config).toBeHidden();
+  await expect(page.getByText(/Fact scan · run #1900/)).toBeVisible();
+  await expect(page.locator("#main-content")).toBeFocused();
+  expect(api.calls.filter((c) => c.query.includes("startFactScan"))).toHaveLength(1);
+});
+
 test("a failed fact scan offers Retry and a new scan starts from it", async ({ page }) => {
   api.setData("factScanStatus", "failed");
   await page.goto("/facts");

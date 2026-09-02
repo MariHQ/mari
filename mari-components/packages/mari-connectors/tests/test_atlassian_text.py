@@ -86,6 +86,99 @@ class StorageTextTests(unittest.TestCase):
                  '<ac:task-body>Seed the space</ac:task-body></ac:task></ac:task-list>')
         self.assertNotIn("completeSeed", storage_to_text(xhtml))
 
+    def test_adf_panel_attributes_do_not_leak_into_the_panel_text(self):
+        # The new editor's note panel, as Confluence Cloud stores it: the
+        # panel type and a local id are attribute nodes, the words are in
+        # adf-content, and adf-fallback repeats them for old editors.
+        body = "<p>As of November 2024, this playbook is specific to Atlas MongoDB.</p>"
+        xhtml = ('<ac:adf-extension><ac:adf-node type="panel">'
+                 '<ac:adf-attribute key="panel-type">note</ac:adf-attribute>'
+                 '<ac:adf-attribute key="local-id">f19de4a5-4510-49ad-ab12-f4c53cd39a52</ac:adf-attribute>'
+                 f'<ac:adf-content>{body}</ac:adf-content>'
+                 '</ac:adf-node>'
+                 f'<ac:adf-fallback><div class="panel">{body}</div></ac:adf-fallback>'
+                 '</ac:adf-extension><p>Check the cluster first.</p>')
+        text = storage_to_text(xhtml)
+        self.assertTrue(text.startswith("As of November 2024"), text)
+        self.assertNotIn("note", text)
+        self.assertNotIn("f19de4a5", text)
+        self.assertEqual(text.count("As of November 2024"), 1, text)
+        self.assertNotIn("MongoDB.Check", text)
+        self.assertIn("Check the cluster first.", text)
+
+    def test_adf_fallback_is_read_when_the_node_has_no_content(self):
+        xhtml = ('<ac:adf-extension><ac:adf-node type="decision-list">'
+                 '<ac:adf-attribute key="local-id">1b0c</ac:adf-attribute>'
+                 '</ac:adf-node>'
+                 '<ac:adf-fallback><p>Decided: ship on Tuesday.</p></ac:adf-fallback>'
+                 '</ac:adf-extension>')
+        text = storage_to_text(xhtml)
+        self.assertEqual(text, "Decided: ship on Tuesday.")
+
+    def test_expand_title_is_kept_and_separated_from_its_body(self):
+        # An expand's heading is the one ADF attribute a reader sees.
+        xhtml = ('<ac:adf-extension><ac:adf-node type="expand">'
+                 '<ac:adf-attribute key="title">Rollback steps</ac:adf-attribute>'
+                 '<ac:adf-attribute key="local-id">9c1d</ac:adf-attribute>'
+                 '<ac:adf-content><p>Run the revert playbook.</p></ac:adf-content>'
+                 '</ac:adf-node>'
+                 '<ac:adf-fallback><div class="expand-container"><div class="expand-control">'
+                 'Rollback steps</div><p>Run the revert playbook.</p></div></ac:adf-fallback>'
+                 '</ac:adf-extension>')
+        text = storage_to_text(xhtml)
+        self.assertIn("Rollback steps", text)
+        self.assertIn("Run the revert playbook.", text)
+        self.assertNotIn("stepsRun", text)
+        self.assertNotIn("9c1d", text)
+        self.assertEqual(text.count("Run the revert playbook."), 1, text)
+
+    def test_cdata_only_content_still_counts_as_the_node_rendering(self):
+        xhtml = ('<ac:adf-extension><ac:adf-node type="codeBlock">'
+                 '<ac:adf-content><![CDATA[print(1)]]></ac:adf-content>'
+                 '</ac:adf-node>'
+                 '<ac:adf-fallback><pre>print(1)</pre></ac:adf-fallback>'
+                 '</ac:adf-extension>')
+        text = storage_to_text(xhtml)
+        self.assertEqual(text.count("print(1)"), 1, text)
+
+    def test_image_alt_and_page_title_content_still_count_as_the_node_rendering(self):
+        for inner in ('<ac:image ac:alt="Architecture diagram"><ri:attachment ri:filename="a.png" /></ac:image>',
+                      '<ac:link><ri:page ri:content-title="Architecture diagram" /></ac:link>'):
+            xhtml = ('<ac:adf-extension><ac:adf-node type="mediaSingle">'
+                     f'<ac:adf-content>{inner}</ac:adf-content></ac:adf-node>'
+                     '<ac:adf-fallback><p>Architecture diagram</p></ac:adf-fallback>'
+                     '</ac:adf-extension>')
+            text = storage_to_text(xhtml)
+            self.assertEqual(text.count("Architecture diagram"), 1, text)
+
+    def test_a_nested_extension_marks_its_parent_as_rendered(self):
+        body = "<p>Ship on Tuesday.</p>"
+        inner = ('<ac:adf-extension><ac:adf-node type="panel">'
+                 f'<ac:adf-content>{body}</ac:adf-content></ac:adf-node>'
+                 f'<ac:adf-fallback>{body}</ac:adf-fallback></ac:adf-extension>')
+        xhtml = ('<ac:adf-extension><ac:adf-node type="layoutSection">'
+                 f'<ac:adf-content>{inner}</ac:adf-content></ac:adf-node>'
+                 f'<ac:adf-fallback>{body}</ac:adf-fallback></ac:adf-extension>')
+        text = storage_to_text(xhtml)
+        self.assertEqual(text.count("Ship on Tuesday."), 1, text)
+
+    def test_an_unclosed_adf_attribute_does_not_swallow_the_rest_of_the_page(self):
+        xhtml = ('<ac:adf-extension><ac:adf-node type="panel">'
+                 '<ac:adf-attribute key="panel-type">note'
+                 '<ac:adf-content><p>Inside the panel.</p></ac:adf-content>'
+                 '</ac:adf-node></ac:adf-extension>'
+                 '<p>After the panel.</p>')
+        text = storage_to_text(xhtml)
+        self.assertIn("After the panel.", text)
+        self.assertNotIn("note", text)
+
+    def test_placeholder_hint_is_not_indexed(self):
+        xhtml = ('<p><ac:placeholder>Type / to insert content</ac:placeholder></p>'
+                 '<p>Real text</p>')
+        text = storage_to_text(xhtml)
+        self.assertNotIn("Type /", text)
+        self.assertIn("Real text", text)
+
 
 class AdfTextTests(unittest.TestCase):
     def test_code_block_does_not_run_into_the_next_paragraph(self):

@@ -184,12 +184,21 @@ _DEFINITIONS = (
     ConnectorDefinition(
         "slack", "Slack", "Threaded channel history visible to the installed application.",
         (
-            _field("bot_token", "Bot token", secret=True, placeholder="xoxb-…"),
-            _field("history_token", "User history token", secret=True, required=False, placeholder="xoxp-…"),
+            _field(
+                "bot_token", "Bot token", secret=True, placeholder="xoxb-…",
+                help=("Bot User OAuth Token from your Slack app. It reads the channels the app "
+                      "is a member of. Private channels also need the install to have "
+                      "groups:read and groups:history."),
+            ),
+            _field(
+                "history_token", "User history token", secret=True, required=False, placeholder="xoxp-…",
+                help="Optional User OAuth Token for reading thread replies. Leave blank to use the bot token.",
+            ),
             _field(
                 "channels", "Channels", required=False, placeholder="general, C0123456789",
-                help=("Comma-separated channel names or IDs. For private channels, invite the app "
-                      "to each channel and grant groups:read, groups:history, and users:read."),
+                help=("Comma-separated channel names or IDs. Invite the app to each one. "
+                      "For a private channel the app must be a member, and the install needs "
+                      "groups:read and groups:history (plus users:read)."),
             ),
         ),
         "https://api.slack.com/tutorials/tracks/getting-a-token",

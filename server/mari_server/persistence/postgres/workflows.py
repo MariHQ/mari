@@ -195,9 +195,10 @@ def create_run(workflow_id: int) -> dict:
                      (project_id, workflow_id))
         _refuse_concurrent_run(conn, project_id, workflow_id)
         return conn.execute("""INSERT INTO workflow_runs
-          (project_id, workflow_id, number, status, started_label, duration, progress, stats, rows_data)
+          (project_id, workflow_id, number, status, started_label, duration, progress, stats, rows_data,
+           heartbeat_at)
           VALUES (%s, %s, nextval('workflow_run_number_seq'), 'running',
-          to_char(now(), 'Mon DD, HH12:MI AM'), '00:00:00', 0, '{}', '[]') RETURNING id, number""",
+          to_char(now(), 'Mon DD, HH12:MI AM'), '00:00:00', 0, '{}', '[]', now()) RETURNING id, number""",
           (project_id, workflow_id)).fetchone()
 
 
@@ -282,32 +283,51 @@ def source_name(source_id: int) -> str | None:
     return str(row["display_name"]) if row else None
 
 
+# The only statuses a live runner may write over. A row the stale sweep
+# already flipped to 'failed' (or one that finished) is never rewritten: the
+# runner's later persist used to put status='running' back unconditionally,
+# so a run swept while it sat in the worker queue resurrected next to the
+# replacement run the scheduler had already started.
+_LIVE_RUN_STATUSES = ("running", "waiting")
+
+
 def save_run_progress(run_id: int, *, rows: list[dict], status: str,
-                      progress: int, stats: dict, duration: str) -> None:
-    # Every persist is also the run's heartbeat: a 'running' row whose
-    # heartbeat stops moving has no process behind it (see fail_stale_runs).
+                      progress: int, stats: dict, duration: str) -> bool:
+    """Persist the run's rows and stamp its heartbeat. Returns False when the
+    row is no longer live (swept by fail_stale_runs, or already terminal),
+    in which case nothing was written and the runner must stop.
+
+    Every persist is also the run's heartbeat: a 'running' row whose
+    heartbeat stops moving has no process behind it (see fail_stale_runs)."""
     project_id = access.require_current_access().project_id
     with db.connect() as conn, conn.transaction():
-        conn.execute(
+        row = conn.execute(
             """UPDATE workflow_runs SET rows_data = %s, status = %s, progress = %s,
                    stats = %s, duration = %s, heartbeat_at = now()
-                 WHERE project_id = %s AND id = %s""",
+                 WHERE project_id = %s AND id = %s AND status IN ('running', 'waiting')
+                 RETURNING id""",
             (json.dumps(rows), status, progress, json.dumps(stats), duration,
              project_id, run_id),
-        )
+        ).fetchone()
+    return row is not None
 
 
-def touch_run_heartbeat(run_id: int) -> None:
+def touch_run_heartbeat(run_id: int) -> bool:
     """Prove the run is still alive without rewriting its rows. The runner's
     heartbeat ticker calls this between persists, so a long step that never
-    narrates progress (a big connector sync, an LLM pass) keeps its lease."""
+    narrates progress (a big connector sync, an LLM pass) keeps its lease;
+    the queue ticker calls it for runs still waiting on a pool worker.
+    Returns False when the row is no longer live, so a swept run is never
+    revived by a beat."""
     project_id = access.require_current_access().project_id
     with db.connect() as conn, conn.transaction():
-        conn.execute(
+        row = conn.execute(
             """UPDATE workflow_runs SET heartbeat_at = now()
-                 WHERE project_id = %s AND id = %s AND status = 'running'""",
+                 WHERE project_id = %s AND id = %s AND status IN ('running', 'waiting')
+                 RETURNING id""",
             (project_id, run_id),
-        )
+        ).fetchone()
+    return row is not None
 
 
 def full_sync_due(source_id: int, every_hours: float) -> bool:
@@ -412,9 +432,9 @@ def create_triggered_run(workflow: dict, document_ids: list[int],
         row = conn.execute(
             """INSERT INTO workflow_runs
                (project_id, workflow_id, number, status, started_label, duration,
-                progress, stats, rows_data, triggered_by)
+                progress, stats, rows_data, triggered_by, heartbeat_at)
                VALUES (%s, %s, nextval('workflow_run_number_seq'), 'running',
-                       to_char(now(), 'Mon DD, HH12:MI AM'), '00:00:00', 0, %s, '[]', %s)
+                       to_char(now(), 'Mon DD, HH12:MI AM'), '00:00:00', 0, %s, '[]', %s, now())
                RETURNING id, number""",
             (project_id, workflow["id"],
              json.dumps({"ctx": {"trigger_doc_ids": document_ids, "trigger": trigger},
@@ -478,7 +498,11 @@ def fail_stale_runs(stale_after_seconds: float) -> int:
     fallback fail_running_run was swallowed, or the worker was killed. Left
     alone it blocks that workflow's schedule until the next restart. The
     scheduler calls this once per pass, before it asks which runs are live.
-    Returns how many were flipped."""
+    Returns how many were flipped.
+
+    A run waiting for a pool worker is alive too: the runtime's queue ticker
+    beats for it until a worker starts, and approveRun restamps the beat
+    when it resumes a waiting run, so neither reads as lost here."""
     with db.connect() as conn, conn.transaction():
         rows = conn.execute(
             """UPDATE workflow_runs
@@ -507,9 +531,9 @@ def create_scheduled_run(workflow: dict, trigger: dict, label: str) -> int:
         row = conn.execute(
             """INSERT INTO workflow_runs
                (project_id, workflow_id, number, status, started_label, duration,
-                progress, stats, rows_data, triggered_by)
+                progress, stats, rows_data, triggered_by, heartbeat_at)
                VALUES (%s, %s, nextval('workflow_run_number_seq'), 'running',
-                       to_char(now(), 'Mon DD, HH12:MI AM'), '00:00:00', 0, %s, '[]', %s)
+                       to_char(now(), 'Mon DD, HH12:MI AM'), '00:00:00', 0, %s, '[]', %s, now())
                RETURNING id, number""",
             (workflow.get("project_id"), workflow["id"],
              json.dumps({"ctx": {"trigger": trigger}, "trigger": trigger}), label),
@@ -682,9 +706,10 @@ def _create_run(project_id: int, workflow_id: int, dry_run: bool):
         _refuse_concurrent_run(conn, project_id, workflow_id)
         row = conn.execute(
             """INSERT INTO workflow_runs
-                 (project_id, workflow_id, number, status, started_label, duration, progress, stats, rows_data)
+                 (project_id, workflow_id, number, status, started_label, duration, progress, stats,
+                  rows_data, heartbeat_at)
                VALUES (%s, %s, nextval('workflow_run_number_seq'), 'running',
-                       to_char(now(), 'Mon DD, HH12:MI AM'), '00:00:00', 0, %s, '[]')
+                       to_char(now(), 'Mon DD, HH12:MI AM'), '00:00:00', 0, %s, '[]', now())
                RETURNING id, number""",
             (project_id, workflow_id,
              json.dumps({"ctx": {"dry_run": True}, "dry_run": True} if dry_run else {})),
@@ -712,8 +737,13 @@ def _approve(project_id: int, run_id: int, actor: str):
         paused_at = int(stats.get("paused_at", 0))
         if paused_at < len(rows):
             rows[paused_at].update(status="passed", detail=f"approved by {actor}")
+        # A waiting row's heartbeat is whatever the last persist stamped
+        # before it paused, hours or days ago. Restarting the lease here,
+        # not when a pool worker finally picks the run up, keeps the stale
+        # sweep from failing a run that is merely queued behind a busy pool.
         conn.execute(
-            """UPDATE workflow_runs SET rows_data = %s, status = 'running'
+            """UPDATE workflow_runs SET rows_data = %s, status = 'running',
+                   heartbeat_at = now()
                  WHERE project_id = %s AND id = %s""",
             (json.dumps(rows), project_id, run_id),
         )

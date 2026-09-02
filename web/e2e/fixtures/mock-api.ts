@@ -18,6 +18,10 @@ export type MockApi = {
 
 const now = "2026-08-19T12:00:00Z";
 
+/** The server's refusal for a sync on a row no connector owns
+ *  (mari_server.sources.sync.NOT_A_CONNECTOR), verbatim. */
+export const NOT_A_CONNECTOR = "This source has no connector behind it. Remove it and connect again.";
+
 function initialData() {
   return {
     overviewStats: { changes: 12, factsReview: 1, workflowsActive: 0, documents: 3 },
@@ -47,8 +51,14 @@ function initialData() {
     searchTotal: 1,
     sourcePulse: [
       { id: 1, provider: "github", name: "acme/handbook", status: "active", stat: "1", unit: "docs", docsCount: 1, health: "Healthy", kind: "github", lastSyncAt: now, bars: [1, 2, 1], syncIntervalMinutes: 10, syncFlowId: 11 },
-      { id: 2, provider: "confluence", name: "Confluence — ENG", status: "active", stat: "1", unit: "docs", docsCount: 1, health: "Healthy", kind: "connector", lastSyncAt: now, bars: [1], syncIntervalMinutes: 60, syncFlowId: 12 },
+      { id: 2, provider: "confluence:acme.atlassian.net", name: "Confluence — ENG", status: "active", stat: "1", unit: "docs", docsCount: 1, health: "Healthy", kind: "connector", lastSyncAt: now, bars: [1], syncIntervalMinutes: 60, syncFlowId: 12 },
       { id: 3, provider: "upload", name: "Uploads", status: "active", stat: "6", unit: "docs", docsCount: 6, health: "Healthy", kind: "upload", lastSyncAt: now, bars: [1] },
+      // An orphan the pre-0.1.3 connectSource mutation left: no kind, no
+      // documents, never synced, under the bare catalog key the old mutation
+      // wrote (a made-up key would hide the Edit entry and test a card the
+      // console never draws). Remove is the only thing that works on it; the
+      // sync mutations refuse it below, as the server does.
+      { id: 4, provider: "confluence", name: "Confluence (old)", status: "active", stat: "0", unit: "docs", docsCount: 0, health: "Never synced", kind: "", lastSyncAt: "", bars: [], syncIntervalMinutes: null, syncFlowId: null },
     ],
     workflows: [{ id: 1, name: "Fact review", description: "Scan and approve facts", color: "#5c7a4c", pinned: true, status: "active", trigger: { on: "schedule", every_minutes: 60 }, scheduleCapable: true, lastRunNumber: 1801, lastRunStatus: "waiting", lastRunStarted: now, nodes: [
       { kind: "trigger", label: "Every hour", config: {} },
@@ -407,7 +417,25 @@ export async function installMockApi(page: Page, options: {
     } else if (/updateMcpServer/.test(query)) {
       data = { updateMcpServer: true };
     } else if (/syncSource|resyncSource/.test(query)) {
+      // The server refuses a row no connector owns (ingest.start_sync) with
+      // the words the card shows; a legacy row is any kind outside the live
+      // three. A row the fixture does not know (a source connect just created)
+      // is accepted, as on the server.
+      const row = state.sourcePulse.find((s: any) => s.id === Number(variables.id));
+      if (row && !["github", "connector", "upload"].includes(row.kind)) {
+        return route.fulfill({ json: { errors: [{ message: NOT_A_CONNECTOR }] } });
+      }
       data = { syncSource: true, resyncSource: true };
+    } else if (/pauseSource/.test(query)) {
+      // Resolved among connector rows only: a legacy row answers false.
+      const row = state.sourcePulse.find((s: any) => s.id === Number(variables.id));
+      data = { pauseSource: Boolean(row && row.kind === "connector") };
+    } else if (/removeSource/.test(query)) {
+      // The real delete: the row leaves sourcePulse, so the next read of the
+      // page draws one card fewer. false is the row already being gone.
+      const index = state.sourcePulse.findIndex((s: any) => s.id === Number(variables.id));
+      if (index >= 0) state.sourcePulse.splice(index, 1);
+      data = { removeSource: index >= 0 };
     } else if (/testLlmGateway/.test(query)) {
       data = { testLlmGateway: { ok: true, detail: "LLM gateway is reachable and authenticated", models: 4, latency_ms: 12 } };
     } else if (/updateSetting/.test(query)) {

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import nullcontext
+import json
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -13,6 +14,7 @@ from mari_server.conversations import chat as conversation_chat
 from mari_server.identity import routes as auth
 from mari_server.persistence.postgres import chat as chat_store
 from mari_components.destinations import knowledge_chat
+from mari_components.destinations.chat import ChatEvent
 
 
 def info(project_id: int = 7):
@@ -118,6 +120,167 @@ class KnowledgeChatDestinationTests(unittest.TestCase):
         self.assertEqual(destination_access.capabilities, frozenset({"knowledge.read"}))
         self.assertEqual(answer.call_args.args[2], "knowledge_chat:2")
         self.assertEqual(answer.call_args.args[3], frozenset({"search"}))
+
+
+def sources(*titles):
+    return [{"n": n + 1, "source": "confluence", "kind": "page", "title": title, "snippet": "",
+             "meta": "", "author": "", "updated": "", "tags": [], "document_id": n + 1,
+             "href": f"/knowledge/doc?id={n + 1}", "source_url": None, "score": 1.0}
+            for n, title in enumerate(titles)]
+
+
+def stream(candidates, *tokens):
+    yield ChatEvent("meta", {"session_id": "9.tok", "sources": candidates, "approved": False, "cache_hit": False})
+    for token in tokens:
+        yield ChatEvent("token", {"token": token})
+    yield ChatEvent("done", {"session_id": "9.tok"})
+
+
+class NarrowedStreamTests(unittest.TestCase):
+    """What the widget receives: every candidate in meta so [n] can link from
+    the first token, then a sources event that is the answer's own list."""
+
+    def run_stream(self, candidates, *tokens):
+        events = list(chat_api.narrowed(stream(candidates, *tokens)))
+        return [event.kind for event in events], events
+
+    def test_a_plain_answer_streams_token_by_token_and_settles_on_cited_rows(self):
+        playbooks = sources("Mongo playbook", "Cluster runbook", "DocDB cursors")
+        kinds, events = self.run_stream(playbooks, "Clusters are ", "per team [2].")
+        self.assertEqual(kinds, ["meta", "token", "token", "sources", "done"])
+        self.assertEqual([e.payload["token"] for e in events if e.kind == "token"],
+                         ["Clusters are ", "per team [2]."])
+        self.assertEqual(events[0].payload["sources"], playbooks)
+        self.assertEqual([s["title"] for s in events[3].payload["sources"]], ["Cluster runbook"])
+
+    def test_a_not_found_answer_settles_on_no_sources(self):
+        kinds, events = self.run_stream(sources("Mongo playbook", "DocDB cursors"),
+                                        "I could not find this ", "in the connected sources.")
+        self.assertEqual(kinds, ["meta", "token", "token", "sources", "done"])
+        self.assertEqual(events[3].payload["sources"], [])
+
+    def test_a_fenced_not_found_sentence_is_held_and_released_bare(self):
+        kinds, events = self.run_stream(sources("Mongo playbook"),
+                                        "```", "\nI could not find this in the ", "connected sources.", "\n```")
+        self.assertEqual(kinds, ["meta", "token", "sources", "done"])
+        self.assertEqual(events[1].payload["token"], "I could not find this in the connected sources.")
+        self.assertEqual(events[2].payload["sources"], [])
+
+    def test_leading_whitespace_never_reaches_the_renderer(self):
+        kinds, events = self.run_stream(sources("Mongo playbook"), "\n\n    ", "I could not find this in the connected sources.")
+        self.assertEqual(kinds, ["meta", "token", "sources", "done"])
+        self.assertEqual(events[1].payload["token"], "I could not find this in the connected sources.")
+
+    def test_a_real_code_answer_is_released_once_it_is_clearly_code(self):
+        block = "```python\n" + "print('a very long line of code')\n" * 12 + "```"
+        kinds, events = self.run_stream(sources("Runbook"), block[:100], block[100:], "\nRun it [1].")
+        # The opening chunk is held while it could still be a wrapped
+        # sentence; once past the hold limit it is released whole and the
+        # rest streams token by token.
+        self.assertEqual(kinds, ["meta", "token", "token", "sources", "done"])
+        self.assertEqual("".join(e.payload["token"] for e in events if e.kind == "token"), block + "\nRun it [1].")
+        self.assertEqual([s["n"] for s in events[3].payload["sources"]], [1])
+
+    def test_an_unfinished_hold_is_flushed_at_the_end(self):
+        kinds, events = self.run_stream(sources("Runbook"), "`unterminated")
+        self.assertEqual(kinds, ["meta", "token", "sources", "done"])
+        self.assertEqual(events[1].payload["token"], "`unterminated")
+
+    def test_a_whitespace_only_stream_reads_as_the_model_unavailable_turn(self):
+        # The library warns only when the model sent nothing at all; nothing
+        # but whitespace used to reach the reader as an empty answer over a
+        # full rail.
+        kinds, events = self.run_stream(sources("Mongo playbook", "DocDB cursors"), "  ", "\n", "\t")
+        self.assertEqual(kinds, ["meta", "token", "sources", "done"])
+        self.assertEqual(events[1].payload["token"], conversation_chat.MODEL_UNAVAILABLE)
+        self.assertEqual(events[2].payload["sources"], [])
+
+    def test_the_librarys_own_warning_turn_settles_on_no_sources(self):
+        kinds, events = self.run_stream(sources("Mongo playbook"), conversation_chat.MODEL_UNAVAILABLE)
+        self.assertEqual(kinds, ["meta", "token", "sources", "done"])
+        self.assertEqual(events[2].payload["sources"], [])
+
+    def test_an_exception_mid_hold_flushes_the_held_text_before_it_propagates(self):
+        opening = "```\nI could not find this in the"
+
+        def failing():
+            yield ChatEvent("meta", {"session_id": "9.tok", "sources": sources("Runbook")})
+            yield ChatEvent("token", {"token": opening})
+            raise RuntimeError("model went away")
+
+        got = []
+        with self.assertRaisesRegex(RuntimeError, "went away"):
+            for event in chat_api.narrowed(failing()):
+                got.append(event)
+        self.assertEqual([event.kind for event in got], ["meta", "token"])
+        self.assertEqual(got[1].payload["token"], opening)
+
+    def test_closing_a_stream_mid_hold_does_not_yield_into_a_closed_generator(self):
+        stream = chat_api.narrowed(self.__class__.stream_forever())
+        next(stream)
+        next(stream)
+        stream.close()  # must not raise "generator ignored GeneratorExit"
+
+    @staticmethod
+    def stream_forever():
+        yield ChatEvent("meta", {"session_id": "9.tok", "sources": sources("Runbook")})
+        yield ChatEvent("token", {"token": "plain"})
+        yield ChatEvent("token", {"token": "```"})
+        while True:
+            yield ChatEvent("token", {"token": "x"})
+
+    def test_a_tilde_estimate_streams_immediately(self):
+        kinds, events = self.run_stream(sources("Retention runbook"), "~30 days [1]", " and counting.")
+        self.assertEqual(kinds, ["meta", "token", "token", "sources", "done"])
+        self.assertEqual([e.payload["token"] for e in events if e.kind == "token"],
+                         ["~30 days [1]", " and counting."])
+        self.assertEqual([s["n"] for s in events[3].payload["sources"]], [1])
+
+    def test_a_closed_fence_is_released_as_soon_as_prose_follows_it(self):
+        block = "```python\nprint(1)\n```"
+        kinds, events = self.run_stream(sources("Runbook"), block, "\nRun it [1].", " Then stop.")
+        # Held through the fence (it could still wrap the sentence), released
+        # on the first prose token, and streaming from there.
+        self.assertEqual(kinds, ["meta", "token", "token", "sources", "done"])
+        self.assertEqual(events[1].payload["token"], block + "\nRun it [1].")
+        self.assertEqual(events[2].payload["token"], " Then stop.")
+
+    def test_a_fenced_not_found_sentence_the_model_continues_past_matches_the_transcript(self):
+        opening = "```\nI could not find this in the connected sources.\n```\n"
+        rest = "That said, deploys run Tuesday [1]."
+        kinds, events = self.run_stream(sources("Runbook"), opening, rest)
+        emitted = "".join(e.payload["token"] for e in events if e.kind == "token")
+        self.assertEqual(emitted, "I could not find this in the connected sources.\n" + rest)
+        self.assertEqual(emitted, chat_api.citations.clean_answer(opening + rest))
+        self.assertEqual([s["n"] for s in events[-2].payload["sources"]], [1])
+
+    def test_a_hold_that_ran_out_on_whitespace_keeps_trimming_until_the_answer_starts(self):
+        kinds, events = self.run_stream(sources("Runbook"), " " * chat_api.HOLD_LIMIT, "  \n", "  Plain [1].")
+        self.assertEqual(kinds, ["meta", "token", "sources", "done"])
+        self.assertEqual(events[1].payload["token"], "Plain [1].")
+
+    def test_persist_stores_the_warning_for_a_blank_answer(self):
+        visitor = SimpleNamespace(project_id=7, user_id=0)
+        with patch.object(chat_store, "add_message") as add, \
+             patch.object(conversation_chat, "answer_system", return_value=""), \
+             patch.object(conversation_chat, "workspace_style_text", return_value=""):
+            conversation_chat.ports(visitor, "test", frozenset()).persist("9.tok", " \n ", sources("Runbook"))
+        self.assertEqual(add.call_args.args[3], conversation_chat.MODEL_UNAVAILABLE)
+        self.assertEqual(json.loads(add.call_args.args[4]), [])
+
+    def test_persist_stores_the_cleaned_answer_and_only_cited_sources(self):
+        visitor = SimpleNamespace(project_id=7, user_id=0)
+        with patch.object(chat_store, "add_message") as add, \
+             patch.object(conversation_chat, "answer_system", return_value=""), \
+             patch.object(conversation_chat, "workspace_style_text", return_value=""):
+            ports = conversation_chat.ports(visitor, "test", frozenset())
+            ports.persist("9.tok", "```\nI could not find this in the connected sources.\n```",
+                          sources("Mongo playbook", "DocDB cursors"))
+            ports.persist("9.tok", "Per team [2].", sources("Mongo playbook", "Cluster runbook"))
+        first, second = add.call_args_list
+        self.assertEqual(first.args, (7, 9, "assistant", "I could not find this in the connected sources.", "[]"))
+        self.assertEqual(second.args[3], "Per team [2].")
+        self.assertEqual([s["title"] for s in json.loads(second.args[4])], ["Cluster runbook"])
 
 
 class PublicChatThrottleTests(unittest.TestCase):

@@ -13,7 +13,37 @@ import { Button, ChatMessage, TypingIndicator } from "@mari-design/components";
 import type { ChatMessageData, ChatSourceData } from "@mari-design/components";
 
 type Config = { name: string; title: string; welcome: string; project: string };
-type Turn = { question: string; answer: string; sources: ChatSourceData[] };
+// `candidates` is everything the server retrieved (the meta event); `sources`
+// is what the finished answer cites (the sources event), or null until then.
+type Turn = { question: string; answer: string; candidates: ChatSourceData[]; sources: ChatSourceData[] | null };
+
+/** The [n] markers in the answer so far, read the way the library links them:
+    outside fenced code and inline code, and never a real link `[3](…)`. */
+function citedNumbers(text: string): Set<number> {
+  const cited = new Set<number>();
+  let fence = "";
+  const prose: string[] = [];
+  for (const line of text.split("\n")) {
+    const open = /^[ \t]{0,3}(`{3,}|~{3,})/.exec(line);
+    if (fence) { if (open && line.trim().startsWith(fence)) fence = ""; }
+    else if (open) fence = open[1].slice(0, 3);
+    else prose.push(line);
+  }
+  prose.join("\n").split(/(`[^`]*`)/).forEach((part, index) => {
+    if (index % 2) return;
+    for (const match of part.matchAll(/\[(\d{1,3})\](?!\()/g)) cited.add(Number(match[1]));
+  });
+  return cited;
+}
+
+/** The rail under an answer. Once the server has settled it, that list; while
+    the answer is still arriving, the candidates the text has cited so far. A
+    "could not find" answer therefore never shows the pages it did not use. */
+function sourcesFor(turn: Turn): ChatSourceData[] {
+  if (turn.sources) return turn.sources;
+  const cited = citedNumbers(turn.answer);
+  return turn.candidates.filter((source) => cited.has(source.n));
+}
 
 export function KnowledgeChatDestination() {
   const { project = "", slug = "" } = useParams();
@@ -22,7 +52,8 @@ export function KnowledgeChatDestination() {
   const [question, setQuestion] = useState("");
   const [turns, setTurns] = useState<Turn[]>([]);
   const [busy, setBusy] = useState(false);
-  const session = useRef<number | null>(null);
+  // A public session reference is "<id>.<token>", echoed back as given.
+  const session = useRef<number | string | null>(null);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -39,7 +70,7 @@ export function KnowledgeChatDestination() {
     const message = question.trim();
     if (!message || busy) return;
     setBusy(true); setError(""); setQuestion("");
-    const turn: Turn = { question: message, answer: "", sources: [] };
+    const turn: Turn = { question: message, answer: "", candidates: [], sources: null };
     setTurns((rows) => [...rows, turn]);
     try {
       const response = await fetch(`/knowledge-chat-api/${encodeURIComponent(project)}/${encodeURIComponent(slug)}/chat`, {
@@ -58,11 +89,16 @@ export function KnowledgeChatDestination() {
           if (line.startsWith("data:")) data.push(line.slice(5).trimStart());
         }
         if (!data.length || eventName === "done") return;
-        const payload = JSON.parse(data.join("\n")) as { token?: string; session_id?: number; sources?: ChatSourceData[] };
+        const payload = JSON.parse(data.join("\n")) as { token?: string; session_id?: number | string; sources?: ChatSourceData[] };
         if (payload.session_id) session.current = payload.session_id;
-        setTurns((rows) => rows.map((row, index) => index === rows.length - 1 ? {
-          ...row, answer: row.answer + (payload.token ?? ""), sources: payload.sources ?? row.sources,
-        } : row));
+        setTurns((rows) => rows.map((row, index) => {
+          if (index !== rows.length - 1) return row;
+          // The sources event is the server's final word on the rail; an
+          // older server that never sends one leaves the citation filter above
+          // in charge.
+          if (eventName === "sources") return { ...row, sources: payload.sources ?? [] };
+          return { ...row, answer: row.answer + (payload.token ?? ""), candidates: payload.sources ?? row.candidates };
+        }));
       };
       while (true) {
         const { done, value } = await reader.read(); buffer += decoder.decode(value, { stream: !done });
@@ -85,7 +121,7 @@ export function KnowledgeChatDestination() {
         const question: ChatMessageData = { id: `q${index}`, role: "user", content: turn.question };
         const answer: ChatMessageData = {
           id: `a${index}`, role: "assistant", content: turn.answer,
-          sources: turn.sources, streaming: pending && turn.answer !== "",
+          sources: sourcesFor(turn), streaming: pending && turn.answer !== "",
         };
         return (
           <article key={index} className="flex flex-col gap-1">

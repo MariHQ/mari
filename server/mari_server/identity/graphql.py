@@ -110,9 +110,10 @@ class MutAdmin:
                       delete_documents: bool = True) -> bool:
         """Real deletion, not the pause that disconnectSource performs: the
         source row, its documents and everything hanging off them, its
-        checkpoints, and its scheduled sync flow. Connector-kind rows only,
-        and never while a sync worker for the source is still running — a
-        worker writing documents for a deleted source must not be possible."""
+        checkpoints, and its scheduled sync flow. Connector and legacy rows
+        (only the upload row is refused in the store), and never while a sync
+        worker for the source is still running — a worker writing documents
+        for a deleted source must not be possible."""
         actor = _require_admin(info)
         if ingest.is_running(source_id):
             raise ValueError("A sync for this source is still running. Wait for it to finish, then remove.")
@@ -279,13 +280,16 @@ class MutAdmin:
 
     @strawberry.mutation
     def sync_source(self, info: strawberry.Info, source_id: int) -> bool:
-        """Diff-based incremental sync; returns immediately, progress via syncStatus."""
+        """Diff-based incremental sync; returns immediately, progress via syncStatus.
+        A row with no connector behind it is refused here with the words the
+        card shows (ingest.start_sync), never accepted and failed in the worker."""
         _require_manager(info)
         return ingest.start_sync(source_id)
 
     @strawberry.mutation
     def resync_source(self, info: strawberry.Info, source_id: int) -> bool:
-        """Full rebuild escape hatch: drops this source's chunks/hashes, then syncs."""
+        """Full rebuild escape hatch: drops this source's chunks/hashes, then syncs.
+        Refuses a non-connector row the same way syncSource does."""
         _require_manager(info)
         return ingest.start_sync(source_id, full=True)
 
@@ -309,11 +313,13 @@ class MutAdmin:
         # implementation, so we say so instead of faking progress.
         _require_manager(info)
         src = admin_store.source(provider)
-        if src and src.get("kind") == "connector":
-            ingest.start_sync(src["id"])
-            audit("triggered sync", provider)
-            return True
-        return False
+        if not src:
+            return False
+        if src.get("kind") != "connector":
+            raise ValueError(ingest.NOT_A_CONNECTOR)
+        ingest.start_sync(src["id"])
+        audit("triggered sync", provider)
+        return True
 
     # A source's config jsonb holds its stored credentials and the identity a
     # sync reads. Merging into it is therefore a credential write: admin-only,
@@ -326,6 +332,12 @@ class MutAdmin:
         before = admin_store.source(provider)
         if not before:
             raise ValueError(f"No source '{provider}' to configure")
+        # A row no connector owns (kind "" from the retired connectSource
+        # mutation, or any other legacy kind) has nothing that could read the
+        # credential this would store: refuse instead of writing it into a
+        # dead row that no sync will ever pick up.
+        if before.get("kind") != "connector":
+            raise ValueError(ingest.NOT_A_CONNECTOR)
         current = before["config"] if isinstance(before["config"], dict) else json.loads(before["config"] or "{}")
         for key in CONFIG_IDENTITY_KEYS:
             if key in config and str(config[key]) != str(current.get(key, "")):

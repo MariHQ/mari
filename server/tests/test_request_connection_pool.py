@@ -41,7 +41,9 @@ class RequestConnectionPoolTests(unittest.TestCase):
              patch.object(connection, "connect") as dial:
             system.ready()
         dial.assert_not_called()
-        process_pool.connection.assert_called_once_with()
+        # The probe borrows with its own short wait so a saturated pool
+        # answers within kubelet's 3 s window instead of the pool's 30 s.
+        process_pool.connection.assert_called_once_with(timeout=system.READY_POOL_TIMEOUT_SECONDS)
         leased.execute.assert_called_once_with("SELECT 1 AS ok")
         lease.__exit__.assert_called_once()
 

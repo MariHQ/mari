@@ -61,6 +61,8 @@ class WorkflowStepTests(unittest.TestCase):
             flowengine.start_run(91, resume_from=3)
         pool.submit.assert_called_once_with(flowengine._guarded_run, 91, 3, context)
         self.assertGreaterEqual(flowengine.FLOW_WORKERS, 1)
+        flowengine._dequeue(91)
+        flowengine._QUEUE_TICKER["stop"].set()
 
     def test_scan_steps_use_document_ids_selected_by_fetch_step(self) -> None:
         from mari_server.knowledge import service
@@ -318,7 +320,8 @@ class ScheduledFullReconcileTests(unittest.TestCase):
         return result, is_due, record, run_sync
 
     def test_full_pass_when_the_last_reconcile_is_older_than_the_cadence(self) -> None:
-        stats = {"files_changed": 0, "items_changed": 3, "embedded": 4, "skipped": 9}
+        stats = {"files_changed": 0, "items_changed": 3, "embedded": 4, "skipped": 9,
+                 "snapshot_complete": True}
         (status, detail, _), is_due, record, run_sync = self._run({"source_id": 7}, due=True, stats=stats)
         self.assertEqual(status, "passed")
         is_due.assert_called_once_with(7, flowengine.FULL_SYNC_EVERY_HOURS)
@@ -340,6 +343,27 @@ class ScheduledFullReconcileTests(unittest.TestCase):
         self.assertEqual(status, "failed")
         run_sync.assert_called_once_with(7, full=True)
         record.assert_not_called()
+
+    def test_throttled_full_pass_is_not_recorded_so_the_snapshot_resumes(self) -> None:
+        # A provider quota ends the pass without an error key; recording it
+        # as a full reconcile made the next day's polls incremental against a
+        # snapshot that never finished, and each 24h retry restarted from zero.
+        stats = {"files_changed": 0, "items_changed": 3, "embedded": 4, "skipped": 9,
+                 "throttled": "rate limited; resumes from checkpoint"}
+        (status, detail, _), _, record, run_sync = self._run({"source_id": 7}, due=True, stats=stats)
+        self.assertEqual(status, "passed")
+        run_sync.assert_called_once_with(7, full=True)
+        record.assert_not_called()
+        self.assertIn("full reconcile incomplete", detail)
+
+    def test_incomplete_full_snapshot_is_not_recorded(self) -> None:
+        stats = {"files_changed": 0, "items_changed": 3, "embedded": 4, "skipped": 9,
+                 "snapshot_complete": False}
+        (status, detail, _), _, record, _ = self._run({"source_id": 7}, due=True, stats=stats)
+        self.assertEqual(status, "passed")
+        record.assert_not_called()
+        self.assertFalse(detail.endswith("· full reconcile"))
+        self.assertIn("incomplete", detail)
 
     def test_zero_cadence_disables_the_sweep(self) -> None:
         stats = {"files_changed": 0, "items_changed": 0, "embedded": 0, "skipped": 2}
@@ -376,13 +400,108 @@ class RunLeaseTests(unittest.TestCase):
     """Item 2: runs hold a heartbeat lease, lost leases are swept, and every
     run insert takes the same row lock and concurrency check."""
 
-    def test_persist_stamps_the_heartbeat(self) -> None:
+    def test_persist_stamps_the_heartbeat_on_a_live_row_only(self) -> None:
         context = access.external_access(3, "acme", "Acme", "test", "runner")
-        conn = _ScriptedConnection([None])
+        conn = _ScriptedConnection([{"id": 9}])
         with access.use_access(context), patch.object(flowengine.workflow_store.db, "connect", return_value=conn):
             flowengine._persist(9, [], "running", 10, {"ctx": {}}, flowengine.time.time())
         sql, _ = conn.calls[0]
         self.assertIn("heartbeat_at = now()", sql)
+        # never over a row the sweep already failed (or one that finished)
+        self.assertIn("AND status IN ('running', 'waiting') RETURNING id", sql)
+
+    def test_a_swept_runs_persist_is_a_no_op_that_stops_the_runner(self) -> None:
+        context = access.external_access(3, "acme", "Acme", "test", "runner")
+        conn = _ScriptedConnection([None])  # UPDATE matched nothing: status is 'failed'
+        with access.use_access(context), patch.object(flowengine.workflow_store.db, "connect", return_value=conn):
+            self.assertFalse(flowengine.workflow_store.save_run_progress(
+                9, rows=[], status="running", progress=10, stats={}, duration="00:00:01"))
+            with self.assertRaises(flowengine.RunSwept):
+                flowengine._persist(9, [], "running", 10, {"ctx": {}}, flowengine.time.time())
+
+    def test_ticker_beat_never_revives_a_swept_row(self) -> None:
+        context = access.external_access(3, "acme", "Acme", "test", "runner")
+        conn = _ScriptedConnection([None])
+        with access.use_access(context), patch.object(flowengine.workflow_store.db, "connect", return_value=conn):
+            self.assertFalse(flowengine.workflow_store.touch_run_heartbeat(9))
+        sql, _ = conn.calls[0]
+        self.assertIn("status IN ('running', 'waiting') RETURNING id", sql)
+
+    def test_runner_aborts_when_its_row_was_swept_mid_run(self) -> None:
+        run = {"rows_data": [], "stats": {"ctx": {}}}
+        workflow = {"nodes": [{"kind": "trigger", "label": "Trigger", "config": {}},
+                              {"kind": "fetch_docs", "label": "Fetch", "config": {}}]}
+        stop = Mock()
+        # the first persist lands; the sweep flips the row before the second
+        with patch.object(flowengine.workflow_store, "load_run", return_value=(run, workflow)), \
+             patch.object(flowengine.workflow_store, "save_run_progress",
+                          side_effect=[True, False]) as save, \
+             patch.object(flowengine, "_run_step", return_value=("passed", "ok", {})) as step, \
+             patch.object(flowengine, "_keep_alive", return_value=stop):
+            flowengine.execute_run(9)  # returns quietly; nothing to fail twice
+        self.assertEqual(step.call_count, 1)
+        self.assertEqual(save.call_count, 2)
+        # the aborted runner wrote no 'passed' over the sweep's 'failed'
+        self.assertNotIn("passed", [call.kwargs["status"] for call in save.call_args_list])
+        stop.set.assert_called_once_with()
+
+    def test_approve_restamps_the_heartbeat_when_it_resumes_a_waiting_run(self) -> None:
+        waiting = {"id": 9, "number": 100009, "status": "waiting",
+                   "stats": {"paused_at": 1}, "rows_data": [{"step": "a"}, {"step": "b"}]}
+        conn = _ScriptedConnection([waiting, {"n": 0}, None])
+        with patch.object(flowengine.workflow_store, "transaction", side_effect=lambda fn: fn(conn)):
+            self.assertEqual(flowengine.workflow_store._approve(3, 9, "Eric"), (100009, 2))
+        sql, args = conn.calls[2]
+        self.assertIn("status = 'running', heartbeat_at = now()", sql)
+        self.assertEqual(args[1:], (3, 9))
+
+    def test_every_run_insert_stamps_a_fresh_heartbeat(self) -> None:
+        context = access.external_access(3, "acme", "Acme", "test", "runner")
+        workflow = {"id": 1, "project_id": 3, "name": "A"}
+        inserts = []
+        conn = _ScriptedConnection([{"?column?": 1}, None, {"id": 8, "number": 8}, None])
+        with patch.object(flowengine.workflow_store.db, "connect", return_value=conn):
+            flowengine.workflow_store.create_scheduled_run(workflow, {"on": "schedule"}, "label")
+        inserts.append(conn.calls[2][0])
+        conn = _ScriptedConnection([{"?column?": 1}, None, {"id": 8, "number": 8}, None])
+        with access.use_access(context), patch.object(flowengine.workflow_store.db, "connect", return_value=conn):
+            flowengine.workflow_store.create_triggered_run(workflow, [1], {"on": "document_changed"}, "n")
+        inserts.append(conn.calls[2][0])
+        conn = _ScriptedConnection([{"?column?": 1}, None, {"id": 8, "number": 8}])
+        with access.use_access(context), patch.object(flowengine.workflow_store.db, "connect", return_value=conn):
+            flowengine.workflow_store.create_run(1)
+        inserts.append(conn.calls[2][0])
+        conn = _ScriptedConnection([{"name": "A"}, None, {"id": 8, "number": 8}])
+        with patch.object(flowengine.workflow_store, "transaction", side_effect=lambda fn: fn(conn)):
+            flowengine.workflow_store._create_run(3, 1, False)
+        inserts.append(conn.calls[2][0])
+        for sql in inserts:
+            self.assertIn("INSERT INTO workflow_runs", sql)
+            self.assertIn("heartbeat_at", sql.split("VALUES")[0])
+            self.assertIn("now())", sql.split("VALUES")[1])
+
+    def test_a_queued_run_keeps_its_lease_until_a_worker_picks_it_up(self) -> None:
+        import threading
+        beat = threading.Event()
+        pool = Mock()  # never runs what it is handed: every worker is busy
+        context = access.external_access(3, "acme", "Acme", "test", "runner")
+        with patch.object(flowengine, "HEARTBEAT_SECONDS", 0.01), \
+             patch.object(flowengine, "_run_pool", pool), \
+             patch.object(flowengine.workflow_store, "touch_run_heartbeat",
+                          side_effect=lambda _id: beat.set()) as touch:
+            with access.use_access(context):
+                flowengine.start_run(77)
+            try:
+                self.assertTrue(beat.wait(2))
+                touch.assert_called_with(77)
+                self.assertIn(77, flowengine._QUEUED)
+                # a worker starting the run hands the lease to execute_run's own ticker
+                with patch.object(flowengine, "execute_run"):
+                    flowengine._guarded_run(77, 0, context)
+                self.assertNotIn(77, flowengine._QUEUED)
+            finally:
+                flowengine._dequeue(77)
+                flowengine._QUEUE_TICKER["stop"].set()
 
     def test_run_keeps_a_ticker_alive_for_its_whole_execution(self) -> None:
         run = {"rows_data": [], "stats": {"ctx": {}}}

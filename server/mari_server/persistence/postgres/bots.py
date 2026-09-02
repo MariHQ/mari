@@ -82,12 +82,6 @@ def slack_sources(project_id: int) -> list[dict]:
           AND split_part(provider, ':', 1) = 'slack' AND status = 'active'""", (project_id,)).fetchall()
 
 
-def save_source_config(source_id: int, config: dict) -> None:
-    with db.connect() as conn, conn.transaction():
-        conn.execute("UPDATE sources SET config = %s, last_sync_at = now() WHERE id = %s",
-                     (json.dumps(config), source_id))
-
-
 def installation(installation_id: int, project_id: int) -> dict | None:
     with db.connect() as conn:
         return conn.execute("""SELECT b.*, p.slug AS project_slug, p.name AS project_name

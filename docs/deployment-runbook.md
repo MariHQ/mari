@@ -46,6 +46,13 @@ For rollback, deploy the previous immutable image digest. Schema changes must
 remain backward-compatible for at least one release. A rollback is complete only
 after readiness is green and connector lag resumes falling.
 
+Note for 0.2.0: this release introduces migrations 0034 through 0036. The
+`schema-migrations` init container refuses to start a release against a
+database that holds migrations it does not ship, so once 0.2.0 has run its
+migrations an older API image will not come up. 0.2.0 is not downgradable
+past 0.1.3 without restoring a database backup taken before the upgrade.
+Take that backup before you roll out.
+
 ## Backup and restore
 
 - Back up the PostgreSQL and API persistent volumes on the same schedule.

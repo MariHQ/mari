@@ -206,7 +206,9 @@ def merge_config(conn, source_id: int, updates: dict, *, hashes: dict | None = N
     conn.execute(
         """UPDATE sources
               SET config = jsonb_set(config || %(updates)s::jsonb, '{item_hashes}',
-                    (COALESCE(%(updates)s::jsonb -> 'item_hashes', config -> 'item_hashes', '{}'::jsonb)
+                    (COALESCE(NULLIF(
+                       COALESCE(%(updates)s::jsonb -> 'item_hashes', config -> 'item_hashes', '{}'::jsonb),
+                       'null'::jsonb), '{}'::jsonb)
                      - %(dropped)s::text[]) || %(hashes)s::jsonb),
                   docs_count = %(count)s, stat_num = %(stat)s, stat_unit = 'docs',
                   last_sync_at = CASE WHEN %(synced)s THEN now() ELSE last_sync_at END,
@@ -222,7 +224,10 @@ def merge_config(conn, source_id: int, updates: dict, *, hashes: dict | None = N
 def sync_source(source_id: int, full: bool, *, update_status, fire_document_triggers,
                 invalidate_search) -> dict:
     """Run one connector sync. Returns honest stats (plus 'error' on failure) —
-    the same shape flowengine's sync_source step reads from ingest.run_sync."""
+    the same shape flowengine's sync_source step reads from ingest.run_sync.
+    'snapshot_complete' says whether the provider declared the listing whole;
+    a throttled or page-limited pass returns without it, and the flow step
+    records a full reconcile only when it is set."""
     started = time.time()
     stats = {"files_changed": 0, "files_deleted": 0, "items_changed": 0,
              "chunks": 0, "embedded": 0, "skipped": 0}
@@ -464,6 +469,7 @@ def sync_source(source_id: int, full: bool, *, update_status, fire_document_trig
             "items_changed": report.changed, "files_deleted": removed,
             "chunks": report.chunks, "embedded": report.embeddings,
             "skipped": report.unchanged,
+            "snapshot_complete": bool(report.snapshot_complete),
         })
         if report.changed or removed:
             invalidate_search(access.require_current_access().project_id)
