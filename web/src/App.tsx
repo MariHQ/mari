@@ -9,7 +9,7 @@ import { useChrome } from "./data/chrome";
 import { SEARCH_SCOPES, globalSearch } from "./data/search";
 import { ACTION_FACTORIES } from "./data/actions";
 import { AuthProvider, useAuth } from "./lib/auth";
-import { AgentDock } from "./components/AgentDock";
+import { AgentDock, AgentDockProvider } from "./components/AgentDock";
 import { KnowledgeChatDestination } from "./components/KnowledgeChatDestination";
 import { FactScanConfiguration } from "./components/FactScanConfiguration";
 import { useIsMobile } from "./lib/mobile";
@@ -48,6 +48,7 @@ const APP_PAGES = PAGES.filter((p) => !LIBRARY_ONLY.has(p.id));
 function useShellChrome(): ShellChrome {
   const { user, logout, projects, activeProject, selectProject } = useAuth();
   const navigate = useNavigate();
+  const { pathname } = useLocation();
   // The bell and the search overlay are the same on every page, so they are
   // fetched here rather than by 25 page adapters.
   const { notifications, recentSearches } = useChrome();
@@ -85,7 +86,12 @@ function useShellChrome(): ShellChrome {
     // page and the search overlay's "recent" list permanently empty.
     notifications,
     recentSearches,
-  }), [user, logout, projects, activeProject, selectProject, navigate, notifications, recentSearches]);
+    // The agent rides beside every routed page and survives route changes:
+    // its transcript lives in AgentDockProvider, so the surface can remount
+    // with each page's frame. The published knowledge chat is its own
+    // conversation and gets no second one floating over it.
+    aside: pathname.startsWith("/knowledge-chat/") ? undefined : <AgentDock />,
+  }), [user, logout, projects, activeProject, selectProject, navigate, notifications, recentSearches, pathname]);
 }
 
 
@@ -192,6 +198,7 @@ function Routed() {
   const navigate = useNavigate();
   return (
     <NavProvider navigate={navigate}>
+      <AgentDockProvider>
       <RouteFocus />
       <Routes>
           <Route path="/knowledge-chat/:project/:slug" element={<KnowledgeChatDestination />} />
@@ -226,19 +233,10 @@ function Routed() {
             missing. */}
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
-      {/* The agent dock floats over every routed page and survives route
-          changes — which is the point: the agent's navigate events move the
-          SPA underneath it while the conversation stays open. Renders nothing
-          until there is a session. */}
-      <RouteAgentDock />
       <FactScanConfiguration />
+      </AgentDockProvider>
     </NavProvider>
   );
-}
-
-function RouteAgentDock() {
-  const { pathname } = useLocation();
-  return pathname.startsWith("/knowledge-chat/") ? null : <AgentDock />;
 }
 
 /** Move keyboard/screen-reader context after an SPA page navigation. Skip the

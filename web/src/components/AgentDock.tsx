@@ -3,13 +3,17 @@
 // state machine over the /agent/chat SSE stream, and the router hookup so
 // `navigate` events from the server move the SPA while the dock stays open.
 //
-// Mounted once inside Routed() (it needs the router), rendered only for a
-// signed-in user. The transcript lives for the life of the mount; the
-// server persists sessions and threads multi-turn context via session_id.
-import { useEffect, useRef, useState } from "react";
+// Two pieces. AgentDockProvider is mounted once inside Routed() (it needs the
+// router) and owns the transcript, so it lives for the life of the session;
+// the server persists sessions and threads multi-turn context via session_id.
+// AgentDock is the surface, handed to the frame through ShellChrome.aside so
+// the open dock is a flex sibling of the page rather than a card floating over
+// half of it. Every page mounts its own frame, so the surface remounts on
+// navigation; that is why the state lives above it.
+import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
-import { Sparkles, X } from "lucide-react";
-import { ChatDock } from "@mari-design/components";
+import { X } from "lucide-react";
+import { ChatDock, DockLauncher, DockRail } from "@mari-design/components";
 import type { ChatMessageData, ToolCallData } from "@mari-design/components/chat/types";
 import { useAuth } from "../lib/auth";
 import { agentChatStream } from "../lib/agentStream";
@@ -22,7 +26,18 @@ const SUGGESTIONS = [
   "Which review tasks are open?",
 ];
 
-export function AgentDock() {
+type DockState = {
+  open: boolean;
+  toggle: (next: boolean) => void;
+  messages: ChatMessageData[];
+  streaming: boolean;
+  send: (text: string) => Promise<void>;
+  stop: () => void;
+};
+
+const DockContext = createContext<DockState | null>(null);
+
+export function AgentDockProvider({ children }: { children: ReactNode }) {
   const { user } = useAuth();
   const navigate = useNavigate();
   const [open, setOpen] = useState(() => localStorage.getItem("mari.dock") === "1");
@@ -43,8 +58,6 @@ export function AgentDock() {
     abortRef.current?.abort();
     abortRef.current = null;
   }, [user]);
-
-  if (!user) return null;
 
   const toggle = (next: boolean) => {
     setOpen(next);
@@ -140,28 +153,34 @@ export function AgentDock() {
     abortRef.current = null;
   };
 
-  if (!open) {
-    return (
-      <button
-        onClick={() => toggle(true)}
-        aria-label="Open the Mari agent"
-        title="Ask Mari"
-        className="fixed bottom-5 right-5 z-40 flex h-12 w-12 items-center justify-center rounded-full bg-ink text-paper shadow-lg hover:opacity-90"
-      >
-        <Sparkles size={20} />
-      </button>
-    );
-  }
+  return (
+    <DockContext.Provider value={{ open, toggle, messages, streaming, send, stop: () => abortRef.current?.abort() }}>
+      {children}
+    </DockContext.Provider>
+  );
+}
+
+/** The launcher when closed; when open, the library's DockRail, which the
+ *  frame lays out beside the page so the content narrows to make room (and
+ *  which floats below `lg`, where the mobile frame takes over). Renders
+ *  nothing without a session or outside the provider. */
+export function AgentDock() {
+  const dock = useContext(DockContext);
+  const { user } = useAuth();
+  if (!dock || !user) return null;
+  const { open, toggle, messages, streaming, send, stop } = dock;
+
+  if (!open) return <DockLauncher onClick={() => toggle(true)} label="Open the Mari agent" title="Ask Mari" />;
 
   return (
-    <div className="fixed bottom-5 right-5 z-40 flex h-[min(600px,calc(100dvh-2.5rem))] w-[min(400px,calc(100vw-2.5rem))]">
+    <DockRail>
       <ChatDock
-        className="flex-1 shadow-xl"
+        className="min-h-0 flex-1 max-lg:shadow-xl"
         title="Mari agent"
         messages={messages}
         isStreaming={streaming}
         onSend={send}
-        onStop={() => abortRef.current?.abort()}
+        onStop={stop}
         suggestions={messages.length === 0 ? SUGGESTIONS : undefined}
         hint="The agent can search and read knowledge, explain product workflows, and take you to the right screen. It reads; it does not change anything on its own."
         placeholder="Ask Mari…"
@@ -175,6 +194,6 @@ export function AgentDock() {
           </button>
         }
       />
-    </div>
+    </DockRail>
   );
 }
