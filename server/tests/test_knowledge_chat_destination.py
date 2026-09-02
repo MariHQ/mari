@@ -31,6 +31,31 @@ ROW = {"id": 2, "project_id": 7, "project_slug": "acme", "project_name": "Acme",
 
 
 class KnowledgeChatDestinationTests(unittest.TestCase):
+    def test_semantic_workflow_guidance_does_not_replace_the_users_search_query(self):
+        project = SimpleNamespace(project_id=7, user_id=0)
+        workflow = {
+            "id": 14,
+            "name": "ask about mari",
+            "steps": [{"tool": "search", "arguments": {"query": "what is mari?"}}],
+            "match": {"exact": False, "workflow_score": 0.59},
+        }
+        with patch.object(conversation_chat.chat_store, "create_session", return_value=9), \
+             patch.object(conversation_chat.chat_store, "add_message"), \
+             patch.object(conversation_chat, "select_workflow", return_value=workflow), \
+             patch.object(conversation_chat.chat_store, "approved_answer", return_value=None), \
+             patch.object(conversation_chat.chat_store, "verified_facts", return_value=[]), \
+             patch.object(conversation_chat.chat_store, "messages", return_value=[
+                 {"role": "user", "content": "how does mari do fact validation?"},
+             ]), patch.object(conversation_chat, "_pinned_first", side_effect=lambda rows: rows), \
+             patch.object(conversation_chat.document_store, "source_urls", return_value={}), \
+             patch.object(conversation_chat, "hybrid_search", return_value=[]) as search:
+            context = conversation_chat.ports(
+                project, "test", frozenset({"search", "facts", "answers"}),
+            ).prepare(None, "how does mari do fact validation?")
+
+        search.assert_called_once_with("how does mari do fact validation?", 8)
+        self.assertIn("Question: how does mari do fact validation?", context.messages[-1]["content"])
+
     def test_terse_entity_prompt_is_not_rewritten_for_retrieval_or_generation(self):
         project = SimpleNamespace(project_id=7, user_id=0)
         documents = [{"id": i, "title": f"Mari document {i}", "source": "github",

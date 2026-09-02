@@ -185,7 +185,12 @@ def guidance(selected: dict | None) -> str:
 
 
 def retrieval_query(query: str, selected: dict | None = None) -> str:
-    if not selected:
+    # A stored query is safe to replay only when the user actually repeated
+    # that reviewed trigger. A semantic workflow match supplies useful
+    # guidance, but replacing a more specific new question with the old query
+    # erases its subject (for example, "how does Mari do fact validation?"
+    # became "what is Mari?").
+    if not selected or not (selected.get("match") or {}).get("exact"):
         return query
     for step in selected["steps"]:
         arguments = step.get("arguments")
