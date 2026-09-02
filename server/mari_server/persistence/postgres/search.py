@@ -138,3 +138,22 @@ def documents_by_id(project_id: int, document_ids: list[int]) -> list[dict]:
                 WHERE d.project_id = %s AND d.id = ANY(%s) GROUP BY d.id""",
             (project_id, document_ids),
         ).fetchall()
+
+
+def slack_channel_candidates(project_id: int, channel_name: str, limit: int) -> list[dict]:
+    """Newest human Slack threads from one explicitly named channel."""
+    with db.connect() as conn:
+        return conn.execute(
+            """SELECT d.id, d.source, d.title, d.snippet, d.body, d.author,
+                      d.author_initials, d.updated_src, d.kind, d.acl_visibility,
+                      d.acl_principals, d.metadata,
+                      array_remove(array_agg(t.tag), NULL) AS tags,
+                      1.0 AS score
+                 FROM documents d
+                 LEFT JOIN tags t ON t.document_id = d.id AND t.project_id = d.project_id
+                WHERE d.project_id = %s AND d.source = 'slack'
+                  AND lower(d.metadata->>'channel_name') = lower(%s)
+                GROUP BY d.id ORDER BY d.updated_src DESC NULLS LAST, d.id DESC
+                LIMIT %s""",
+            (project_id, channel_name, max(1, min(int(limit), 50))),
+        ).fetchall()

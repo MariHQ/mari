@@ -121,6 +121,13 @@ def hybrid_search(query: str, k: int = 10, offset: int = 0,
     return _hydrate(entries[start:stop], loaded)
 
 
+def slack_channel_search(channel_name: str, k: int = 8) -> list[dict]:
+    """Recent visible Slack documents for an explicit human channel name."""
+    ctx = access.require_current_access()
+    rows = search_store.slack_channel_candidates(ctx.project_id, channel_name, k)
+    return [row for row in rows if _document_visible(row, ctx)][:k]
+
+
 def hybrid_count(query: str, days: int | None = None) -> int:
     """How many documents this query matches, corpus-wide — not how many were
     returned. The console says "showing N of M" and M has to be the corpus's

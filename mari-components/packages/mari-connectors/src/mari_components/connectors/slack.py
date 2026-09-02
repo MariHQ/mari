@@ -402,7 +402,13 @@ def _thread_document(
         message
         for message in messages
         if message.get("type", "message") == "message"
-        and message.get("subtype") not in {"message_deleted", "tombstone"}
+        # Provider/system events and bot replies are not human knowledge. In
+        # particular, indexing Mari's own answers creates a retrieval feedback
+        # loop that can crowd the original GitHub/Confluence evidence out.
+        and message.get("subtype") not in {
+            "message_deleted", "tombstone", "bot_message", "channel_join",
+            "channel_leave", "channel_name", "channel_purpose", "channel_topic",
+        }
         and str(message.get("text") or "").strip()
     ]
     if not readable:
@@ -412,13 +418,7 @@ def _thread_document(
     root_ts = str(root.get("thread_ts") or root.get("ts") or "")
     channel_id = str(channel.get("id") or "")
     channel_name = str(channel.get("name") or "").strip()
-    # Channel identity is retrieval evidence, not merely connector bookkeeping.
-    # Keep it in the canonical text so lexical search, embeddings, and the answer
-    # model can all resolve questions such as "what was recently said in
-    # private-test?". The metadata mapping is intentionally retained too for
-    # callers that need the structured value.
-    channel_label = f"#{channel_name}" if channel_name else channel_id
-    lines: list[str] = [f"Slack channel: {channel_label}"]
+    lines: list[str] = []
     for message in readable:
         timestamp = dt.datetime.fromtimestamp(float(message["ts"]), tz=dt.timezone.utc)
         author = users.get(str(message.get("user") or ""), str(message.get("user") or "unknown"))

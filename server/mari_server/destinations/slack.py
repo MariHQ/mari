@@ -441,6 +441,7 @@ def _refresh_slack_aggregate(project_id: int, token: str, channel: str,
                 source="slack", initials="SL", acl_visibility="restricted",
                 acl_principals=(f"channel:{channel}",),
                 source_updated_at=document.updated_at,
+                metadata=dict(document.metadata),
             )
             document_index.sync_chunks(conn, doc_id, document.title, document.body,
                                 max_tokens, overlap)

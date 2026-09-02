@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Mapping
 
 from mari_components.documents import DocumentVersion
 
@@ -14,6 +15,7 @@ class ProjectionFields:
     kind: str
     author: str
     author_initials: str
+    metadata: Mapping[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)

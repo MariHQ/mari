@@ -47,7 +47,8 @@ def upsert_document(conn, source_id: int, external_id: str, title: str, body: st
                      source: str = "github", initials: str = "GH",
                      acl_visibility: str = "project",
                      acl_principals: tuple[str, ...] = (),
-                     source_updated_at: str = "") -> tuple[int, bool]:
+                     source_updated_at: str = "",
+                     metadata: dict | None = None) -> tuple[int, bool]:
     """Upsert one document. Returns (doc_id, inserted) — inserted is True for a
     brand-new row, False for an update (xmax = 0 only on fresh inserts).
     `source`/`initials` default to github; connect_sync passes the provider key."""
@@ -69,6 +70,7 @@ def upsert_document(conn, source_id: int, external_id: str, title: str, body: st
         version,
         document_application.ProjectionFields(
             source=source, kind=kind, author=author, author_initials=initials,
+            metadata=metadata or {},
         ),
         ports=document_repository.ports(conn),
     )
@@ -100,6 +102,7 @@ def upsert_documents(conn, documents: list[dict]) -> list[tuple[int, bool]]:
         ), document_application.ProjectionFields(
             source=document["source"], kind="page", author=document["author"],
             author_initials=document["initials"],
+            metadata=document.get("metadata") or {},
         )))
     results = document_application.upsert_many(
         prepared, ports=document_repository.ports(conn),

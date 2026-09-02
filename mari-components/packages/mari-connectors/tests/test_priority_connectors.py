@@ -873,7 +873,6 @@ class PriorityConnectorTests(unittest.TestCase):
         self.assertTrue(complete)
         self.assertEqual(document.external_id, "thread:C1:1.0")
         self.assertEqual(document.metadata["channel_name"], "private-test")
-        self.assertTrue(document.body.startswith("Slack channel: #private-test\n"))
         self.assertIn("Answer", document.body)
 
         drive = FakeHttp([{"id": "channel", "resourceId": "resource", "expiration": "123"}])

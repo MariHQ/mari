@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import secrets
 
 from mari_server.identity import context as access
@@ -11,7 +12,7 @@ from mari_server.persistence.postgres.database import log_usage
 from mari_server.persistence.postgres import chat as chat_store
 from mari_server.persistence.postgres import documents as document_store
 from mari_server.persistence.postgres import trajectories as trajectory_store
-from mari_server.search.service import hybrid_search
+from mari_server.search.service import hybrid_search, slack_channel_search
 from mari_server.conversations import citations
 from mari_server.conversations.prompts import answer_system, workspace_style_text
 from mari_components.destinations.chat import ChatContext, ChatPorts, answer_search_query
@@ -26,6 +27,16 @@ from mari_server.conversations.workflows import cached_response as workflow_cach
 # when the model sent nothing at all; the server says them again when the
 # model sent nothing but whitespace, so both turns read and persist the same.
 MODEL_UNAVAILABLE = "The configured language model is unavailable. Check model settings and try again."
+
+_SLACK_CHANNEL = re.compile(
+    r"(?:in|from)\s+(?:the\s+)?#?([a-z0-9][a-z0-9_-]*)\s+channel\b",
+    re.IGNORECASE,
+)
+
+
+def requested_slack_channel(question: str) -> str | None:
+    match = _SLACK_CHANNEL.search(question)
+    return match.group(1) if match else None
 
 
 def live_destination(project_slug: str, destination_slug: str):
@@ -151,8 +162,12 @@ def ports(project_access: access.AccessContext, usage_detail: str,
         selected_state["execution_mode"] = "workflow_generation" if workflow else "generation"
         source_urls: dict[int, str] = {}
         with access.use_access(project_access):
-            documents = (hybrid_search(retrieval_question, 8)
-                         if "search" in enabled_tools else [])
+            channel_name = requested_slack_channel(retrieval_question)
+            documents = (
+                slack_channel_search(channel_name, 8) if channel_name and "search" in enabled_tools
+                else hybrid_search(retrieval_question, 8) if "search" in enabled_tools
+                else []
+            )
             # Dedupe before numbering, so the [n] in the context and the n in
             # the payload are the same citation.
             documents = citations.dedupe(documents)

@@ -343,6 +343,7 @@ def sync_source(source_id: int, full: bool, *, update_status, fire_document_trig
                         "content_hash": fingerprint, "author": document_author(document), "source": key,
                         "initials": initials, "acl_visibility": document.acl.visibility,
                         "acl_principals": principals, "source_updated_at": document.updated_at,
+                        "metadata": dict(document.metadata),
                     })
 
                 projected = document_index.upsert_documents(conn, projection_rows)

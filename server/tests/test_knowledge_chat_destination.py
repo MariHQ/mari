@@ -53,7 +53,7 @@ class KnowledgeChatDestinationTests(unittest.TestCase):
             "id": 41,
             "title": "a fact is that the sky is blue",
             "source": "slack",
-            "body": "Slack channel: #private-test\n2026-09-02 20:25 @daniel: a fact is that the sky is blue",
+            "body": "2026-09-02 20:25 @daniel: a fact is that the sky is blue",
             "snippet": "a fact is that the sky is blue",
         }]
         with patch.object(conversation_chat.chat_store, "create_session", return_value=9), \
@@ -65,14 +65,16 @@ class KnowledgeChatDestinationTests(unittest.TestCase):
                  {"role": "user", "content": "what was recently said in the private-test channel?"},
              ]), patch.object(conversation_chat, "_pinned_first", side_effect=lambda rows: rows), \
              patch.object(conversation_chat.document_store, "source_urls", return_value={}), \
-             patch.object(conversation_chat, "hybrid_search", return_value=documents) as search:
+             patch.object(conversation_chat, "slack_channel_search", return_value=documents) as search, \
+             patch.object(conversation_chat, "hybrid_search") as broad_search:
             context = conversation_chat.ports(
                 project, "test", frozenset({"search", "facts", "answers"}),
             ).prepare(None, "what was recently said in the private-test channel?")
 
         approved.assert_called_once()
-        search.assert_called_once_with("what was recently said in the private-test channel?", 8)
-        self.assertIn("Slack channel: #private-test", context.messages[-1]["content"])
+        search.assert_called_once_with("private-test", 8)
+        broad_search.assert_not_called()
+        self.assertIn("a fact is that the sky is blue", context.messages[-1]["content"])
         self.assertEqual([source["document_id"] for source in context.sources], [41])
 
     def test_create_validates_slug_and_calls_application_port(self):
