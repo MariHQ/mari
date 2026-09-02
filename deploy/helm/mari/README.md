@@ -2,9 +2,9 @@
 
 The Mari chart deploys one API pod, one web pod, PostgreSQL/pgvector, and persistent
 volumes for PostgreSQL and `/data`. The API migration init container brings a
-new database to the current schema before traffic starts. The images are public,
-multi-architecture releases in Amazon ECR Public; customers do not need an AWS
-account or image pull credential.
+new database to the current schema before traffic starts. The images and chart
+are multi-architecture/public OCI releases in GitHub Container Registry;
+customers do not need an image pull credential.
 
 Install one Mari release per dedicated namespace. The stable internal Service
 names (`api`, `web`, and `postgres`) are part of the application contract.
@@ -54,7 +54,7 @@ versions omit the leading `v` used by the Git tag:
 
 ```sh
 helm upgrade --install mari oci://ghcr.io/marihq/charts/mari \
-  --version 0.2.0 \
+  --version 0.2.1 \
   --namespace mari --create-namespace \
   --set secrets.existingSecret=mari-secrets \
   --wait --timeout 10m
@@ -65,7 +65,7 @@ Release. This is useful before the GHCR package has been made public:
 
 ```sh
 helm upgrade --install mari \
-  https://github.com/MariHQ/mari/releases/download/v0.2.0/mari-0.2.0.tgz \
+  https://github.com/MariHQ/mari/releases/download/v0.2.1/mari-0.2.1.tgz \
   --namespace mari --create-namespace \
   --set secrets.existingSecret=mari-secrets \
   --wait --timeout 10m

@@ -15,28 +15,18 @@ and packages the chart, pushes it to
 `oci://ghcr.io/marihq/charts/mari`, and attaches the `.tgz` and SHA-256 checksum
 to the tag's GitHub Release. A metadata mismatch fails before anything is
 published; both default image tags must match as well. Validate the chart
-locally with `make test-helm` before tagging. After the first OCI publication,
-an organization package administrator must make `charts/mari` public so
-customers can install it anonymously. GHCR creates new packages private by
-default; the chart attached to the public GitHub Release remains available in
-the meantime.
+locally with `make test-helm` before tagging. The `charts/mari`, `mari-api`, and
+`mari-web` packages must be public so customers can install them anonymously.
+Verify anonymous pulls after publication; the chart attached to the public
+GitHub Release remains a fallback.
 
 ## Publishing images
 
-Each release publishes `mari-api` and `mari-web` as multi-architecture images
-to two registries. The GitHub workflow
-`.github/workflows/container-release.yml` pushes to `ghcr.io/marihq` using the
-built-in `GITHUB_TOKEN`. The chart pulls from Amazon ECR Public
-(`public.ecr.aws/k1b8z8i5`), which the workflow cannot reach, so push there
-with `./deploy/publish-images.sh vX.Y.Z` from a checkout with the
-`vendor/mari-design` submodule populated and a live AWS session. Both paths
-build the same Dockerfiles from the repo root and tag the version plus
-`latest`. The script refuses a dirty tree (`MARI_ALLOW_DIRTY=1` overrides) and
-runs the same typecheck and server unit suite as the cloud release. Before
-running it, bump the api and web tags in `deploy/helm/mari/values.yaml` and
-clear the digests, then commit. After the push it prints the two digests as a
-`values.yaml` snippet; paste them in and commit again so the chart pins the
-release immutably.
+Each release tag automatically publishes `mari-api` and `mari-web` as
+multi-architecture images to `ghcr.io/marihq` using the built-in
+`GITHUB_TOKEN`. The chart uses the matching immutable version tag. The manual
+workflow remains available for rebuilding a release version when needed; its
+version must match the chart metadata.
 
 ## Preflight
 
@@ -47,8 +37,8 @@ release immutably.
    credentials are required.
 3. Configure source and model providers in Mari after installation. Their
    credentials are application data, not Kubernetes deployment secrets.
-4. Confirm that the immutable API and web digests in the chart match the v0.1.1
-   release published to the public container registry.
+4. Confirm that the API and web tags match the chart release and resolve from
+   GHCR without authentication.
 5. Set the customer-owned ingress hostname, application URL, and CORS origin.
 
 ## Rollout
@@ -61,7 +51,7 @@ For rollback, deploy the previous immutable image digest. Schema changes must
 remain backward-compatible for at least one release. A rollback is complete only
 after readiness is green and connector lag resumes falling.
 
-Note for 0.2.0: this release introduces migrations 0034 through 0036. The
+Note for 0.2.0 and later: these releases include migrations 0034 and later. The
 `schema-migrations` init container refuses to start a release against a
 database that holds migrations it does not ship, so once 0.2.0 has run its
 migrations an older API image will not come up. 0.2.0 is not downgradable
