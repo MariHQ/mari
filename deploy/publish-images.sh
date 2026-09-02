@@ -13,8 +13,17 @@
 # Dockerfiles expect the root as build context, and the web image compiles
 # against the vendor/mari-design submodule, so the submodule must be checked
 # out before building.
+#
+# Release pattern (see git log 4e3a608 then c3c9382): bump the chart's image
+# tags and clear the digests in deploy/helm/mari/values.yaml, commit, run this
+# script, paste the digests it prints, commit again. The dirty-tree gate is
+# what makes the first commit land before the push.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+
+# Same dirty-tree gate and check suite as deploy/lambda/deploy.sh.
+# shellcheck source=preflight.sh
+source deploy/preflight.sh
 
 REGISTRY="public.ecr.aws/k1b8z8i5"
 PLATFORMS="linux/amd64,linux/arm64"
@@ -50,6 +59,13 @@ if [ ! -e vendor/mari-design/components ]; then
 fi
 
 echo "==> Preflight"
+mari_require_clean_tree || exit 1
+if [ "$(grep -c "tag: $VERSION\$" deploy/helm/mari/values.yaml)" != "2" ]; then
+  echo "    WARNING: deploy/helm/mari/values.yaml does not pin both images to $VERSION yet." >&2
+  echo "    Bump the api/web tags and clear the digests before the push, then pin the digests after." >&2
+fi
+mari_run_checks
+
 # ECR Public authenticates through us-east-1 regardless of where anything
 # else lives. An exported AWS_PROFILE is honored as is, and this also fails
 # loudly when the session has expired.
@@ -76,5 +92,13 @@ for component in api web; do
 done
 
 echo "==> Published mari-api and mari-web at $VERSION and latest"
-echo "    The chart pins images by digest. Copy the new digests into"
-echo "    deploy/helm/mari/values.yaml before packaging the release."
+echo "    The chart pins images by digest. Paste this into"
+echo "    deploy/helm/mari/values.yaml (digest wins over tag), then commit:"
+echo
+for component in api web; do
+  image="$REGISTRY/mari-$component"
+  # The manifest-list digest, which is what the chart's <repository>@<digest>
+  # pull resolves against on both architectures.
+  digest="$(docker buildx imagetools inspect "$image:$VERSION" --format '{{.Manifest.Digest}}')"
+  printf '%s:\n  image:\n    tag: %s\n    digest: %s\n' "$component" "$VERSION" "$digest"
+done

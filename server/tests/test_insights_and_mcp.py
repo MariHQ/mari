@@ -180,3 +180,17 @@ class McpProtocolTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class McpTokenLookupTests(unittest.TestCase):
+    def test_authenticate_matches_only_the_hash_column(self) -> None:
+        # Migration 0036 hashed every legacy plaintext bearer, so the lookup
+        # must not fall back to m.token: only the hash reaches the query.
+        with patch.object(mcp_repository, "q1", return_value=None) as lookup:
+            self.assertIsNone(mcp_repository.authenticate("abc123"))
+        sql, args = lookup.call_args.args
+        normalized = " ".join(sql.split())
+        self.assertIn("WHERE m.token_hash = %s", normalized)
+        self.assertNotIn("m.token =", normalized)
+        self.assertNotIn("m.token <>", normalized)
+        self.assertEqual(args, ("abc123",))

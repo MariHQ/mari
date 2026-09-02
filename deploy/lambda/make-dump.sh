@@ -116,4 +116,4 @@ rm -f /tmp/mari-src.dump
 
 echo
 ls -lh "$OUT"
-echo "Now build and push the image, then point the stack at the new tag (see deploy/lambda/README.md)."
+echo "Now release it with ./deploy/lambda/deploy.sh (its header comment explains why the release goes through the stack)."

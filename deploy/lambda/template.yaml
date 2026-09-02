@@ -74,6 +74,13 @@ Resources:
           MARI_PGDATA: /tmp/mari/pgdata
           MARI_LLM_DEFAULT: !Ref LlmDefault
           MARI_LLM_KEY: !Ref LlmKey
+          # Read by the server since 2026-09-02 (settings.py env_map). Not
+          # wired yet: the token is a secret, so it wants a NoEcho Parameter
+          # like SessionSecret rather than a literal. Example only:
+          # MARI_METRICS_TOKEN: !Ref MetricsToken
+          # MARI_KNOWLEDGE_CHAT_IP_PER_MINUTE: "20"
+          # MARI_KNOWLEDGE_CHAT_DESTINATION_PER_MINUTE: "120"
+          # MARI_KNOWLEDGE_CHAT_DAILY_BUDGET: "2000"
       Tags:
         - Key: Project
           Value: mari-cloud

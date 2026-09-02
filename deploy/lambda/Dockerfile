@@ -1,3 +1,7 @@
+# Every base image here is pinned by tag only. To pin by digest, resolve each
+# with
+#   docker buildx imagetools inspect <image:tag> --format '{{.Manifest.Digest}}'
+# and write <image:tag>@sha256:<digest> (the ARG below included).
 ARG LAMBDA_ADAPTER_IMAGE=public.ecr.aws/awsguru/aws-lambda-adapter:1.0.1
 
 FROM node:20-bookworm-slim AS web-build

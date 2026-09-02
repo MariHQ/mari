@@ -29,7 +29,7 @@ from mari_components.connectors import (
     GoogleDriveConfig, connector_definition, start_google_drive_watch,
 )
 from mari_components.connectors.events import gdrive_change_hint
-from mari_components.errors import IncompleteSnapshot, TransientFailure
+from mari_components.errors import AuthenticationFailure, IncompleteSnapshot, TransientFailure
 
 
 router = APIRouter()
@@ -51,6 +51,37 @@ def _json(value):
 
 def _source(source_id: int, project_id: int) -> dict | None:
     return event_store.source(source_id, project_id, "connector", "gdrive")
+
+
+def _persist_refresh(source_id: int, source_config: dict):
+    """The on_refresh hook for this source: a refreshed access token lands in
+    the stored config through merge_config, the one writer that leaves every
+    other key alone, and in the in-memory copy so the rest of the call uses
+    it. Before this the refreshed token lived only in the poll that minted
+    it, so the next poll and every watch renewal refreshed again or failed."""
+    def persist(refreshed) -> None:
+        updates = dict(refreshed)
+        source_config.update(updates)
+        with document_index.connection() as conn:
+            connector_sync.merge_config(conn, int(source_id), updates, synced=False)
+            conn.commit()
+    return persist
+
+
+def _start_watch(source_config: dict, page_token: str, base: str, channel_id: str,
+                 channel_token: str, expiration: dt.datetime):
+    return start_google_drive_watch(
+        GoogleDriveConfig(
+            str(source_config.get("access_token") or ""),
+            str(source_config.get("folder_id") or ""),
+        ),
+        page_token,
+        f"{base}/webhooks/google-drive",
+        channel_id,
+        channel_token,
+        expiration_ms=round(expiration.timestamp() * 1000),
+        http=component_connectors.http_transport,
+    )
 
 
 @router.post("/connectors/google-drive/watch")
@@ -77,18 +108,23 @@ def create_watch(
     expiration = dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=_WATCH_DAYS)
     event_store.create_drive_watch(project_id, source["id"], channel_id, token_hash, page_token, expiration)
     try:
-        watched = start_google_drive_watch(
-            GoogleDriveConfig(
-                str(source_config.get("access_token") or ""),
-                str(source_config.get("folder_id") or ""),
-            ),
-            page_token,
-            f"{base}/webhooks/google-drive",
-            channel_id,
-            channel_token,
-            expiration_ms=round(expiration.timestamp() * 1000),
-            http=component_connectors.http_transport,
-        )
+        try:
+            watched = _start_watch(source_config, page_token, base, channel_id,
+                                   channel_token, expiration)
+        except AuthenticationFailure:
+            # The stored access token is Google's hour-long grant. The poll
+            # path refreshes it on 401, but this path sent it verbatim, so
+            # the hourly renewal loop failed for any source whose sweep had
+            # not run within the hour and its channel expired. Refresh,
+            # persist, retry once; a source with no refresh grant fails as
+            # before.
+            definition = connector_definition("gdrive")
+            if not definition.can_refresh(source_config):
+                raise
+            _persist_refresh(source["id"], source_config)(
+                definition.refresh(source_config, http=component_connectors.http_transport))
+            watched = _start_watch(source_config, page_token, base, channel_id,
+                                   channel_token, expiration)
     except Exception as exc:
         error = str(exc)
         event_store.update_drive_watch(channel_id, status="error", last_error=error[:1000])
@@ -232,6 +268,7 @@ def process_gdrive_delivery(row: dict) -> None:
                 request = PollRequest(cursor=cursor, page_limit=1)
                 pages = connector_definition("gdrive").poll(
                     source_config, request, http=component_connectors.http_transport,
+                    on_refresh=_persist_refresh(source["id"], source_config),
                 )
                 poll = next(pages)
                 _apply_poll(source, source_config, poll)

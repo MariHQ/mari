@@ -8,6 +8,7 @@ individual definitions without maintaining parallel config/validate/poll maps.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from types import MappingProxyType
 from typing import Any, Callable, Iterator, Mapping
 
@@ -35,7 +36,11 @@ from .zendesk import ZendeskConfig, poll_zendesk, validate_zendesk
 ConfigFactory = Callable[[Mapping[str, Any]], Any]
 ValidateOperation = Callable[..., ValidationResult]
 PollOperation = Callable[..., Iterator[PollPage]]
-RefreshOperation = Callable[[Mapping[str, Any], HttpTransport], Any]
+# A refresh returns the configuration keys it minted (the new access token and
+# when), not a built config: the application persists exactly those keys and
+# nothing else, and the definition builds the config from the merged values.
+RefreshOperation = Callable[[Mapping[str, Any], HttpTransport], Mapping[str, Any]]
+RefreshHook = Callable[[Mapping[str, Any]], None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,21 +70,50 @@ class ConnectorDefinition:
     def config(self, values: Mapping[str, Any]) -> Any:
         return self.config_factory(values)
 
-    def validate(self, values: Mapping[str, Any], *, http: HttpTransport) -> ValidationResult:
+    def can_refresh(self, values: Mapping[str, Any]) -> bool:
+        return self.refresh_operation is not None and _has_refresh(values)
+
+    def refresh(self, values: Mapping[str, Any], *, http: HttpTransport) -> dict[str, Any]:
+        """Mint fresh credentials from the stored refresh grant. Returns only
+        the keys that changed, so a caller can persist exactly those."""
+        if not self.can_refresh(values):
+            raise AuthenticationFailure("provider credentials expired and no refresh grant is stored")
+        return dict(self.refresh_operation(values, http))
+
+    def _refreshed(
+        self, values: Mapping[str, Any], http: HttpTransport, on_refresh: RefreshHook | None,
+    ) -> dict[str, Any]:
+        # The hook runs before the retry so the new token is durable even if
+        # the retried call fails: a refresh that lived only in this call was
+        # repeated on every poll and never reached the watch renewal path.
+        refreshed = self.refresh(values, http=http)
+        if on_refresh is not None:
+            on_refresh(refreshed)
+        return {**values, **refreshed}
+
+    def validate(
+        self, values: Mapping[str, Any], *, http: HttpTransport,
+        on_refresh: RefreshHook | None = None,
+    ) -> ValidationResult:
         result = self.validate_operation(self.config(values), http=http)
-        if result.ok or self.refresh_operation is None or not _has_refresh(values):
+        if result.ok or not self.can_refresh(values):
             return result
-        return self.validate_operation(self.refresh_operation(values, http), http=http)
+        return self.validate_operation(
+            self.config(self._refreshed(values, http, on_refresh)), http=http,
+        )
 
     def poll(
         self, values: Mapping[str, Any], request: PollRequest, *, http: HttpTransport,
+        on_refresh: RefreshHook | None = None,
     ) -> Iterator[PollPage]:
         try:
             yield from self.poll_operation(self.config(values), request, http=http)
         except AuthenticationFailure:
-            if self.refresh_operation is None or not _has_refresh(values):
+            if not self.can_refresh(values):
                 raise
-            yield from self.poll_operation(self.refresh_operation(values, http), request, http=http)
+            yield from self.poll_operation(
+                self.config(self._refreshed(values, http, on_refresh)), request, http=http,
+            )
 
 
 def _text(values: Mapping[str, Any], key: str) -> str:
@@ -105,7 +139,7 @@ def _github_config(values: Mapping[str, Any]) -> GitHubConfig:
     )
 
 
-def _refresh_drive(values: Mapping[str, Any], http: HttpTransport) -> GoogleDriveConfig:
+def _refresh_drive(values: Mapping[str, Any], http: HttpTransport) -> dict[str, Any]:
     token = refresh_google_access_token(
         GoogleOAuthRefresh(
             _text(values, "refresh_token"), _text(values, "client_id"),
@@ -113,7 +147,10 @@ def _refresh_drive(values: Mapping[str, Any], http: HttpTransport) -> GoogleDriv
         ),
         http=http,
     )
-    return GoogleDriveConfig(token, _text(values, "folder_id"))
+    # Google grants an hour from this moment; the stamp lets a reader tell a
+    # token that is probably live from one that has certainly lapsed.
+    minted = datetime.now(timezone.utc).replace(microsecond=0)
+    return {"access_token": token, "access_token_refreshed_at": minted.isoformat()}
 
 
 def _field(

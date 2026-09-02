@@ -49,6 +49,7 @@ const API = "http://localhost:8000";
 const API_ROUTES = [
   "/graphql", "/chat", "/agent", "/healthz", "/sites",
   "/auth", "/bots", "/webhooks", "/onboard", "/connectors", "/knowledge-chat-api", "/api",
+  "/scim", "/mcp",
 ];
 
 export default defineConfig({
