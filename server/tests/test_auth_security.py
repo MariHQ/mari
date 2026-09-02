@@ -263,5 +263,37 @@ class LegacyOauthTests(unittest.TestCase):
                              ("verified@example.test", True))
 
 
+class ForwardedHeaderTests(unittest.TestCase):
+    """X-Forwarded-For and X-Forwarded-Proto are only believed from a peer in
+    server.trusted_proxies. The rate limiter always checked; the cookie's
+    Secure flag and the access log's IP column did not."""
+
+    @staticmethod
+    def proxied() -> Request:
+        return Request({"type": "http", "method": "GET", "path": "/auth/me",
+                        "headers": [(b"x-forwarded-for", b"203.0.113.9, 10.0.0.1"),
+                                    (b"x-forwarded-proto", b"https")],
+                        "query_string": b"", "scheme": "http", "server": ("test", 80),
+                        "client": ("127.0.0.1", 1)})
+
+    def test_forwarded_headers_are_ignored_from_an_untrusted_peer(self):
+        with patch.object(auth.config, "get", return_value=[]):
+            request = self.proxied()
+            self.assertEqual(auth._client_ip(request), "127.0.0.1")
+            self.assertFalse(auth._is_https(request))
+            self.assertEqual(auth._client_detail(request)[0]["value"], "127.0.0.1")
+
+    def test_forwarded_headers_are_honoured_from_a_configured_proxy(self):
+        with patch.object(auth.config, "get", return_value=["127.0.0.1"]):
+            request = self.proxied()
+            self.assertEqual(auth._client_ip(request), "203.0.113.9")
+            self.assertTrue(auth._is_https(request))
+            self.assertEqual(auth._client_detail(request)[0]["value"], "203.0.113.9")
+
+    def test_direct_https_needs_no_proxy(self):
+        with patch.object(auth.config, "get", return_value=[]):
+            self.assertTrue(auth._is_https(request()))
+
+
 if __name__ == "__main__":
     unittest.main()

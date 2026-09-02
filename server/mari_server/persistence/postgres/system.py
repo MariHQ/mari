@@ -4,7 +4,12 @@ from mari_server.persistence.postgres import connection as db
 
 
 def ready() -> None:
-    with db.connect() as conn:
+    # Borrow from the request pool rather than dialing a fresh connection per
+    # probe: kubelet and the load balancer poll /readyz every few seconds, and
+    # each new socket costs a TLS handshake and a backend slot on the database.
+    # The pool validates the connection at checkout, so a dead one after a
+    # database restart is replaced here instead of failing the probe.
+    with db.request_connection() as conn:
         conn.execute("SELECT 1 AS ok").fetchone()
 
 

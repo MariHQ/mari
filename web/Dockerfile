@@ -6,6 +6,10 @@
 #   docker build -f web/Dockerfile .
 #
 # Clone with --recurse-submodules, or the build fails on a missing vendor dir.
+#
+# Both base images are pinned by tag only. To pin by digest, resolve each with
+#   docker buildx imagetools inspect <image:tag> --format '{{.Manifest.Digest}}'
+# and write FROM <image:tag>@sha256:<digest>.
 FROM node:22-alpine AS build
 WORKDIR /app
 

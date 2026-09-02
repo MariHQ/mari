@@ -29,6 +29,22 @@ class RequestConnectionPoolTests(unittest.TestCase):
             database.open_pool()
         process_pool.wait.assert_called_once_with()
 
+    def test_readiness_probe_borrows_a_pooled_connection_instead_of_dialing(self) -> None:
+        from mari_server.persistence.postgres import system
+        leased = MagicMock()
+        leased.execute.return_value.fetchone.return_value = {"ok": 1}
+        lease = MagicMock()
+        lease.__enter__.return_value = leased
+        process_pool = MagicMock()
+        process_pool.connection.return_value = lease
+        with patch.object(connection, "pool", return_value=process_pool), \
+             patch.object(connection, "connect") as dial:
+            system.ready()
+        dial.assert_not_called()
+        process_pool.connection.assert_called_once_with()
+        leased.execute.assert_called_once_with("SELECT 1 AS ok")
+        lease.__exit__.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

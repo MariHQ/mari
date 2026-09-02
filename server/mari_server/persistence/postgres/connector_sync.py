@@ -171,7 +171,7 @@ def sweep_inputs(cfg: dict, full: bool) -> tuple[str | None, str | None, bool]:
 
 
 def merge_config(conn, source_id: int, updates: dict, *, hashes: dict | None = None,
-                 dropped=()) -> None:
+                 dropped=(), synced: bool = True) -> None:
     """Write one writer's share of sources.config, and the row's document
     count, under the row lock.
 
@@ -187,6 +187,10 @@ def merge_config(conn, source_id: int, updates: dict, *, hashes: dict | None = N
 
     A paused row is never revived here: the page write used to reset
     status='active' on every page, so pausing during a sweep never stuck.
+
+    `synced=False` is for writers that only touched config (a refreshed
+    token, a recorded error): they must not stamp last_sync_at or declare
+    the source Healthy, which the page write legitimately does.
     """
     if hashes and "item_hashes" in updates:
         raise ValueError("pass the whole manifest or per-path entries, not both")
@@ -204,12 +208,14 @@ def merge_config(conn, source_id: int, updates: dict, *, hashes: dict | None = N
               SET config = jsonb_set(config || %(updates)s::jsonb, '{item_hashes}',
                     (COALESCE(%(updates)s::jsonb -> 'item_hashes', config -> 'item_hashes', '{}'::jsonb)
                      - %(dropped)s::text[]) || %(hashes)s::jsonb),
-                  last_sync_at = now(), docs_count = %(count)s, stat_num = %(stat)s,
-                  stat_unit = 'docs', health = 'Healthy', status = 'active'
+                  docs_count = %(count)s, stat_num = %(stat)s, stat_unit = 'docs',
+                  last_sync_at = CASE WHEN %(synced)s THEN now() ELSE last_sync_at END,
+                  health = CASE WHEN %(synced)s THEN 'Healthy' ELSE health END,
+                  status = 'active'
             WHERE id = %(id)s""",
         {"updates": json.dumps(updates), "dropped": [str(path) for path in dropped],
          "hashes": json.dumps(hashes or {}), "count": doc_count, "stat": str(doc_count),
-         "id": source_id},
+         "synced": bool(synced), "id": source_id},
     )
 
 

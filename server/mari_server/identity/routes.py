@@ -69,16 +69,24 @@ _ATTEMPTS: dict[str, list[float]] = {}
 _ATTEMPTS_LOCK = threading.Lock()
 
 
+def _forwarded(request: Request, header: str) -> str:
+    """The first value of an X-Forwarded-* header, and only when the peer is a
+    configured proxy (server.trusted_proxies). Anyone who can reach the port
+    can write these headers, so from any other peer they are ignored: the
+    rate limiter, the cookie's Secure flag and the access log all used to
+    read them and only the first one checked who sent them."""
+    peer = request.client.host if request.client else ""
+    trusted = {str(value).strip() for value in (config.get("server", "trusted_proxies") or [])}
+    if peer not in trusted:
+        return ""
+    return (request.headers.get(header) or "").split(",")[0].strip()
+
+
 def _client_ip(request: Request | None) -> str:
     if request is None:
         return "unknown"
     peer = request.client.host if request.client else "unknown"
-    trusted = {str(value).strip() for value in (config.get("server", "trusted_proxies") or [])}
-    if peer in trusted:
-        forwarded = (request.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
-        if forwarded:
-            return forwarded
-    return peer
+    return _forwarded(request, "X-Forwarded-For") or peer
 
 
 def _rate_limit(bucket: str, key: str, limit: int, window_s: int) -> None:
@@ -238,8 +246,8 @@ def _is_https(request: Request | None) -> bool:
     in production while localhost HTTP dev keeps working."""
     if request is None:
         return False
-    proto = request.headers.get("X-Forwarded-Proto", request.url.scheme)
-    return proto.split(",")[0].strip().lower() == "https"
+    proto = _forwarded(request, "X-Forwarded-Proto") or request.url.scheme
+    return proto.strip().lower() == "https"
 
 
 def _set_session_cookie(response: Response, token: str, request: Request | None,
@@ -267,8 +275,7 @@ def _client_detail(request: Request | None) -> list[dict]:
     header is recorded as unknown, never guessed."""
     if request is None:
         return []
-    forwarded = (request.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
-    ip = forwarded or (request.client.host if request.client else "")
+    ip = _forwarded(request, "X-Forwarded-For") or (request.client.host if request.client else "")
     return [{"label": "IP address", "value": ip or "unknown"},
             {"label": "User agent", "value": (request.headers.get("User-Agent") or "unknown")[:200]}]
 

@@ -16,8 +16,12 @@ built-in `GITHUB_TOKEN`. The chart pulls from Amazon ECR Public
 with `./deploy/publish-images.sh vX.Y.Z` from a checkout with the
 `vendor/mari-design` submodule populated and a live AWS session. Both paths
 build the same Dockerfiles from the repo root and tag the version plus
-`latest`. After the ECR push, copy the new image digests into
-`deploy/helm/mari/values.yaml` so the chart pins the release immutably.
+`latest`. The script refuses a dirty tree (`MARI_ALLOW_DIRTY=1` overrides) and
+runs the same typecheck and server unit suite as the cloud release. Before
+running it, bump the api and web tags in `deploy/helm/mari/values.yaml` and
+clear the digests, then commit. After the push it prints the two digests as a
+`values.yaml` snippet; paste them in and commit again so the chart pins the
+release immutably.
 
 ## Preflight
 

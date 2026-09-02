@@ -1,0 +1,20 @@
+# Local-only additions to docker-compose.yml. Copy to docker-compose.override.yml
+# (gitignored; Compose merges it automatically) and keep only what you need.
+#
+#   cp docker-compose.override.yml.example docker-compose.override.yml
+#
+# Nothing here belongs in the committed compose file: it is your machine's
+# credentials and port layout, not the product's.
+services:
+  api:
+    volumes:
+      # Read-only SSO cache so boto3 can mint credentials for MARI_S3_BUCKET
+      # from the profile named in AWS_PROFILE (.env). Nothing is written back.
+      # In production the task or instance role supplies credentials and this
+      # mount does not exist.
+      - ${HOME}/.aws:/app/.aws:ro
+
+  # If a native Postgres already owns 5432 on your host, move the compose db:
+  # db:
+  #   ports: !override
+  #     - "127.0.0.1:5433:5432"

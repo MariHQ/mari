@@ -248,6 +248,8 @@ class SlackSetupToAnswerTests(unittest.TestCase):
              patch.object(bots, "_EVENT_INBOX", inbox), \
              patch.object(bots, "_refresh_slack_aggregate"), \
              patch.object(search_service.search_store, "keyword_candidates", return_value=documents), \
+             patch.object(search_service.search_store, "documents_by_id",
+                          side_effect=lambda _project_id, ids: [dict(d) for d in documents if d["id"] in ids]), \
              patch.object(search_service.llm, "embed", return_value=None), \
              patch.object(bots.llm, "chat_stream",
                           side_effect=lambda messages, _system: prompts.append(messages[-1]["content"]) or iter(["Use the runbook [1]."])):

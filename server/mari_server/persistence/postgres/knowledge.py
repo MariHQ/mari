@@ -81,6 +81,11 @@ def fact_claims(*, verified_only: bool = False, original_case: bool = False) -> 
 
 
 def add_fact(claim: str, source: str, owner: str, document_id: int | None) -> bool:
+    """Record a claim once per project. False means it was already on the
+    ledger — under any casing, because facts_project_canonical_key_idx (0031)
+    is unique on the casefolded key. Arbitrating on (project_id, claim) as
+    before let a case variant slip past the claim index and hit the key index
+    instead, which surfaced as a UniqueViolation through GraphQL."""
     project_id = access.require_current_access().project_id
     with db.connect() as conn, conn.transaction():
         row = conn.execute(
@@ -88,7 +93,7 @@ def add_fact(claim: str, source: str, owner: str, document_id: int | None) -> bo
                (project_id, canonical_key, claim, source, owner_name, owner_tint,
                 status, verified, document_id, valid_from)
                VALUES (%s, %s, %s, %s, %s, 1, 'Needs review', '—', %s, now())
-               ON CONFLICT (project_id, claim) DO NOTHING RETURNING id""",
+               ON CONFLICT DO NOTHING RETURNING id""",
             (project_id, "claim:" + hashlib.sha256(claim.casefold().encode()).hexdigest(),
              claim, source, owner, document_id),
         ).fetchone()

@@ -51,12 +51,16 @@ def lineage(document_id: int) -> list[dict]:
       (project_id, document_id, document_id))
 
 
-def authenticate(token_hash: str, legacy_token: str) -> dict | None:
+def authenticate(token_hash: str) -> dict | None:
+    """Look a bearer up by its sha256. Only the hash column is consulted:
+    migration 0036 hashed every plaintext `token` a pre-hash release stored
+    and blanked it, so the row no longer holds anything a leaked dump could
+    replay."""
     return q1("""SELECT m.id, m.name, m.config, m.project_id,
       p.slug AS project_slug, p.name AS project_name FROM mcp_servers m
       JOIN projects p ON p.id = m.project_id
-      WHERE (m.token_hash = %s OR (m.token <> '' AND m.token = %s))
-      AND m.status = 'connected' AND p.status = 'active'""", (token_hash, legacy_token))
+      WHERE m.token_hash = %s
+      AND m.status = 'connected' AND p.status = 'active'""", (token_hash,))
 
 
 def _name_exists(project_id: int, name: str) -> bool:

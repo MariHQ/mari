@@ -504,3 +504,23 @@ class FactRepresentationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FactLedgerTests(unittest.TestCase):
+    def test_add_fact_arbitrates_on_every_unique_index_and_reports_an_existing_claim(self):
+        # facts is unique on (project_id, claim) and, since 0031, on the
+        # casefolded canonical key. Naming only the claim index as arbiter
+        # let a case variant raise through GraphQL instead of deduplicating.
+        import hashlib
+        from mari_server.identity import access
+        from mari_server.persistence.postgres import knowledge as knowledge_store
+        conn = RecordingConnection([RecordingResult(None)])
+        context = access.AccessContext(1, 7, "acme", "Acme", "admin", access.CAPABILITIES)
+        with access.use_access(context), patch.object(knowledge_store.db, "connect", return_value=conn):
+            self.assertFalse(knowledge_store.add_fact("Retention Is 30 Days.", "docs", "Eric", 4))
+        sql, args = conn.calls[0]
+        normalized = " ".join(sql.split())
+        self.assertIn("ON CONFLICT DO NOTHING RETURNING id", normalized)
+        self.assertNotIn("ON CONFLICT (project_id, claim)", normalized)
+        self.assertEqual(args[0], 7)
+        self.assertEqual(args[1], "claim:" + hashlib.sha256(b"retention is 30 days.").hexdigest())

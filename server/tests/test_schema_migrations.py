@@ -52,6 +52,19 @@ class SchemaMigrationTests(unittest.TestCase):
         self.assertNotIn("heartbeat_at", baseline)
         self.assertNotIn("last_full_sync_at", baseline)
 
+    def test_release_hashes_legacy_mcp_tokens_before_authenticate_stops_reading_them(self):
+        # authenticate no longer matches the plaintext column, so the ledger
+        # has to carry every legacy bearer into token_hash first, with the
+        # digest the runtime compares (sha256 hex of the UTF-8 bytes), and
+        # leave nothing replayable behind.
+        migrations = {item.version: item for item in discover()}
+        migration = migrations["0036_mcp_legacy_token_hash"]
+        self.assertIn("SET token_hash = encode(sha256(convert_to(token, 'UTF8')), 'hex')", migration.sql)
+        self.assertIn("token_hash = ''", migration.sql)
+        self.assertIn("UPDATE mcp_servers SET token = '' WHERE token IS NOT NULL AND token <> ''",
+                      migration.sql)
+        self.assertNotIn("DROP COLUMN", migration.sql)
+
 
 if __name__ == "__main__":
     unittest.main()

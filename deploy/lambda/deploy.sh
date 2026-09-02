@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Build, push and release cloud.mari.guru.
 #
-#   ./deploy/lambda/deploy.sh              # tag defaults to YYYYMMDD-lambda-N
-#   ./deploy/lambda/deploy.sh 20260725-x   # explicit tag
+#   ./deploy/lambda/deploy.sh              # tag defaults to YYYYMMDD-<short sha>
+#   ./deploy/lambda/deploy.sh 20260725-x   # explicit tag (also how you roll back)
 #
 # The whole deployment is one CloudFormation stack, `mari-cloud-prod`: the
 # Lambda, the HTTP API, the ACM certificate, the custom domain and the Route53
@@ -52,37 +52,31 @@ esac
 
 REPO="$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/mari-cloud"
 
-TAG="${1:-$(date -u +%Y%m%d)-lambda-$(( $(aws ecr list-images --repository-name mari-cloud --region "$REGION" \
-  --query 'length(imageIds)' --output text 2>/dev/null || echo 0) + 1 ))}"
-IMAGE="$REPO:$TAG"
+# Dirty-tree gate and the check suite are shared with deploy/publish-images.sh.
+# shellcheck source=../preflight.sh
+source deploy/preflight.sh
+mari_require_clean_tree || exit 1
 
-# Shipping uncommitted code makes the image tag unreproducible. Refuse unless
-# the operator says so explicitly.
-if [ -n "$(git status --porcelain)" ]; then
-  if [ "${MARI_ALLOW_DIRTY:-}" = "1" ]; then
-    echo "    WARNING: working tree is dirty (MARI_ALLOW_DIRTY=1); shipping uncommitted code"
-  else
-    echo "    working tree is dirty. Commit or stash first, or set MARI_ALLOW_DIRTY=1 to ship anyway." >&2
-    git status --short >&2
-    exit 1
+# Tag: YYYYMMDD-<short sha>, so the tag names the commit that was built and
+# never depends on registry state. (It used to be the ECR image count plus
+# one, so deleting any image made the next tag collide with an existing one.)
+# A tree shipped with MARI_ALLOW_DIRTY=1 gets a -dirty suffix: the sha alone
+# would claim a commit that does not contain what was built.
+if [ -n "${1:-}" ]; then
+  TAG="$1"
+else
+  TAG="$(date -u +%Y%m%d)-$(git rev-parse --short=8 HEAD)"
+  if [ -n "$(git status --porcelain)" ]; then
+    TAG="$TAG-dirty"
   fi
 fi
+IMAGE="$REPO:$TAG"
 
 # The tag we are about to replace, so a failed verify can say how to roll back.
 PREVIOUS_IMAGE="$(aws cloudformation describe-stacks --stack-name "$STACK" --region "$REGION" \
   --query "Stacks[0].Parameters[?ParameterKey=='ImageUri'].ParameterValue" --output text 2>/dev/null || true)"
 
-echo "==> Checks (typecheck + server-render smoke + server unit tests)"
-( cd web && npm run check )
-python3 -m compileall -q server/mari_server mari-components/packages
-# There is no CI on this repo, so the release is the last place the unit
-# suite runs. MARI_SKIP_TESTS=1 is for re-running a release whose tests
-# already passed in this session.
-if [ "${MARI_SKIP_TESTS:-}" = "1" ]; then
-  echo "    skipping server unit tests (MARI_SKIP_TESTS=1)"
-else
-  make test-server
-fi
+mari_run_checks
 
 echo "==> Build + push $IMAGE"
 aws ecr get-login-password --region "$REGION" \
