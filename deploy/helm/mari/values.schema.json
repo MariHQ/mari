@@ -19,6 +19,19 @@
               "description": "The self-contained v0.1.3 chart always persists application data."
             }
           }
+        },
+        "nodeSelector": {
+          "type": "object",
+          "additionalProperties": {"type": "string"}
+        },
+        "affinity": {"type": "object"},
+        "tolerations": {
+          "type": "array",
+          "items": {"type": "object"}
+        },
+        "topologySpreadConstraints": {
+          "type": "array",
+          "items": {"type": "object"}
         }
       }
     },
@@ -29,6 +42,19 @@
           "type": "integer",
           "const": 1,
           "description": "Mari v0.1.3 supports exactly one web replica."
+        },
+        "nodeSelector": {
+          "type": "object",
+          "additionalProperties": {"type": "string"}
+        },
+        "affinity": {"type": "object"},
+        "tolerations": {
+          "type": "array",
+          "items": {"type": "object"}
+        },
+        "topologySpreadConstraints": {
+          "type": "array",
+          "items": {"type": "object"}
         }
       }
     },
@@ -53,6 +79,19 @@
           "type": "boolean",
           "const": true,
           "description": "The self-contained v0.1.3 chart always deploys PostgreSQL/pgvector."
+        },
+        "nodeSelector": {
+          "type": "object",
+          "additionalProperties": {"type": "string"}
+        },
+        "affinity": {"type": "object"},
+        "tolerations": {
+          "type": "array",
+          "items": {"type": "object"}
+        },
+        "topologySpreadConstraints": {
+          "type": "array",
+          "items": {"type": "object"}
         }
       }
     },
