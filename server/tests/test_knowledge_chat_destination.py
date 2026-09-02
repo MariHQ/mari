@@ -33,18 +33,22 @@ ROW = {"id": 2, "project_id": 7, "project_slug": "acme", "project_name": "Acme",
 class KnowledgeChatDestinationTests(unittest.TestCase):
     def test_terse_entity_prompt_is_not_rewritten_for_retrieval_or_generation(self):
         project = SimpleNamespace(project_id=7, user_id=0)
-        document = {"id": 4, "title": "Mari README", "source": "github",
-                    "body": "Mari manages product knowledge.", "snippet": "Mari manages"}
+        documents = [{"id": i, "title": f"Mari document {i}", "source": "github",
+                      "body": "Mari manages product knowledge.", "snippet": "Mari manages"}
+                     for i in range(1, 9)]
         with patch.object(conversation_chat.chat_store, "create_session", return_value=9), \
              patch.object(conversation_chat.chat_store, "add_message"), \
              patch.object(conversation_chat, "select_workflow", return_value=None), \
              patch.object(conversation_chat.chat_store, "messages", return_value=[
                  {"role": "user", "content": "mari"},
-             ]), patch.object(conversation_chat, "hybrid_search", return_value=[document]) as search:
+             ]), patch.object(conversation_chat, "_pinned_first", side_effect=lambda rows: rows), \
+             patch.object(conversation_chat.document_store, "source_urls", return_value={}), \
+             patch.object(conversation_chat, "hybrid_search", return_value=documents) as search:
             context = conversation_chat.ports(project, "test", frozenset({"search"})).prepare(
                 None, "mari",
             )
         search.assert_called_once_with("mari", 8)
+        self.assertEqual(len(context.sources), 8)
         self.assertIn("Question: mari", context.messages[-1]["content"])
 
     def test_document_search_is_not_limited_to_approved_answers_and_keeps_channel_context(self):
@@ -75,8 +79,10 @@ class KnowledgeChatDestinationTests(unittest.TestCase):
         approved.assert_called_once()
         search.assert_called_once_with("private-test", 8)
         broad_search.assert_not_called()
-        self.assertIn("(slack · #private-test)", context.messages[-1]["content"])
-        self.assertIn("a fact is that the sky is blue", context.messages[-1]["content"])
+        self.assertEqual(context.messages, ())
+        self.assertIn("#private-test", context.direct_answer)
+        self.assertIn("a fact is that the sky is blue", context.direct_answer)
+        self.assertIn("[1]", context.direct_answer)
         self.assertEqual([source["document_id"] for source in context.sources], [41])
 
     def test_create_validates_slug_and_calls_application_port(self):

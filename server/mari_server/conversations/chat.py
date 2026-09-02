@@ -27,11 +27,14 @@ from mari_server.conversations.workflows import cached_response as workflow_cach
 # when the model sent nothing at all; the server says them again when the
 # model sent nothing but whitespace, so both turns read and persist the same.
 MODEL_UNAVAILABLE = "The configured language model is unavailable. Check model settings and try again."
+ANSWER_DOCUMENT_LIMIT = 8
 
 _SLACK_CHANNEL = re.compile(
     r"(?:in|from)\s+(?:the\s+)?#?([a-z0-9][a-z0-9_-]*)\s+channel\b",
     re.IGNORECASE,
 )
+_RECENT = re.compile(r"\b(?:recent(?:ly)?|latest|last|newest)\b", re.IGNORECASE)
+_SLACK_LINE = re.compile(r"^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}\s+(@[^:]+):\s*(.+)$")
 
 
 def requested_slack_channel(question: str) -> str | None:
@@ -50,6 +53,21 @@ def _context_source(row: dict) -> str:
             metadata = {}
     channel = str(metadata.get("channel_name") or "").strip() if isinstance(metadata, dict) else ""
     return f"{source} · #{channel}" if source == "slack" and channel else source
+
+
+def _recent_channel_answer(channel_name: str, documents: list[dict]) -> str:
+    statements = []
+    for number, row in enumerate(documents[:4], 1):
+        lines = [line.strip() for line in str(row.get("body") or "").splitlines() if line.strip()]
+        latest = lines[-1] if lines else str(row.get("title") or "").strip()
+        match = _SLACK_LINE.match(latest)
+        author, message = (match.group(1), match.group(2)) if match else ("Someone", latest)
+        message = " ".join(message.split())[:280].replace("“", '"').replace("”", '"')
+        statements.append(f'{author} said “{message}” [{number}]')
+    if not statements:
+        return ""
+    joined = statements[0] if len(statements) == 1 else ", ".join(statements[:-1]) + f", and {statements[-1]}"
+    return f"The most recent messages in #{channel_name} were: {joined}."
 
 
 def live_destination(project_slug: str, destination_slug: str):
@@ -189,7 +207,7 @@ def ports(project_access: access.AccessContext, usage_detail: str,
             # that, among the ones it found, a document somebody vouched for
             # goes in front of the model instead of being cut by the slice
             # below. Stable, so unpinned documents keep their retrieval order.
-            documents = _pinned_first(documents)[:4]
+            documents = _pinned_first(documents)[:ANSWER_DOCUMENT_LIMIT]
             try:
                 source_urls = document_store.source_urls(
                     [row["id"] for row in documents if row.get("id") is not None])
@@ -202,6 +220,11 @@ def ports(project_access: access.AccessContext, usage_detail: str,
         facts = chat_store.verified_facts(project_id) if "facts" in enabled_tools else []
         context += "\n\nVerified facts:\n" + "\n".join(f"- {row['claim']}" for row in facts)
         sources = citations.source_payload(documents, source_urls=source_urls)
+        if channel_name and _RECENT.search(retrieval_question):
+            direct = _recent_channel_answer(channel_name, documents)
+            if direct:
+                selected_state["execution_mode"] = "channel_recent"
+                return ChatContext(session_ref, sources, (), direct_answer=direct)
         history = chat_store.messages(project_id, session_id, 10)
         messages = [{"role": row["role"], "content": row["content"]}
                     for row in reversed(history)]

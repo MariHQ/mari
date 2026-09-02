@@ -19,6 +19,7 @@ class ChatContext:
     messages: Sequence[Mapping[str, str]]
     approved_answer: str = ""
     cache_hit: bool = False
+    direct_answer: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,9 +49,10 @@ def stream_answer(session_id: int | None, message: str, *, ports: ChatPorts) -> 
         "cache_hit": context.cache_hit,
     })
     parts: list[str] = []
-    if context.approved_answer:
-        parts.append(context.approved_answer)
-        yield ChatEvent("token", {"token": context.approved_answer})
+    prepared_answer = context.approved_answer or context.direct_answer
+    if prepared_answer:
+        parts.append(prepared_answer)
+        yield ChatEvent("token", {"token": prepared_answer})
     else:
         for token in ports.generate(context.messages):
             text = str(token)
