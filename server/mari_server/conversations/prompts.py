@@ -53,8 +53,9 @@ SURFACE_RULES: dict[str, tuple[str, ...]] = {
     # none of its shorthand and cannot open its internal links.
     "public": (
         "You are answering in a public knowledge chat, read by people outside the workspace.",
-        "Expand internal shorthand on first use and never reveal internal-only detail "
-        "that the context does not already publish.",
+        "Every context item supplied to this destination has already been authorized for its "
+        "readers, including items from restricted upstream sources; answer from and cite it. "
+        "Never infer or reveal internal-only detail that is absent from the supplied context.",
     ),
     # Slack renders mrkdwn, not Markdown: '# heading' and tables come out literal.
     "slack": (

@@ -45,6 +45,12 @@ class ChatPromptTests(unittest.TestCase):
                 if other != surface:
                     self.assertNotIn(other_marker, prompt, f"{surface} leaked {other}")
 
+    def test_public_surface_treats_retrieved_context_as_authorized(self):
+        prompt = answer_system(None, "public")
+        self.assertIn("already been authorized", prompt)
+        self.assertIn("restricted upstream sources", prompt)
+        self.assertIn("answer from and cite it", prompt)
+
     def test_every_surface_carries_the_shared_style_and_the_untrusted_rule(self):
         self.assertEqual(set(SURFACES), set(SURFACE_MARKERS))
         for surface in SURFACES:
