@@ -346,25 +346,24 @@ def scan_decisions_for(doc_ids: list[int] | None = None,
 def extract_fact_candidates_for(doc_ids: list[int] | None = None,
                                 limit: int = SCAN_DOCS,
                                 claims_per_document: int = CLAIMS_PER_DOC,
-                                instructions: str = "", *, run_id: int | None = None,
+                                instructions: str = "", *, passage_query: str = "",
+                                run_id: int | None = None,
                                 max_llm_calls: int | None = None,
                                 max_input_tokens: int = 100_000,
-                                max_output_tokens: int = 20_000) -> tuple[list[dict], int, str]:
+                                max_output_tokens: int = 20_000) -> tuple[list[dict], int, str, list[dict]]:
     """Mine documents into evidence-bearing candidates without publishing.
 
-    One document per model call, not one call over a pasted-together
-    corpus. The old shape asked the model which document each claim came
-    from and stored the answer as a text label, which meant the provenance
-    was the model's recollection of a title — good enough to print, not
-    good enough to key on, so Doc Review could never list a document's own
-    claims. Reading one document at a time makes `document_id` a fact about
-    the call rather than a guess about the output.
+    One content-addressed passage per model call, not one call over a
+    pasted-together corpus. The chunk checkpoint makes unchanged content a
+    permanent no-op while retaining its document id and exact source hash.
 
-    Returns (candidates, documents read, note)."""
+    Returns (candidates, passages read, note, successful passages). The caller
+    commits candidates and passage checkpoints together so a failed write is
+    safe to retry."""
     docs = [d for d in _scan_batch("facts", doc_ids, limit)
             if (d["body"] or d["snippet"] or "").strip()]
     if not docs:
-        return [], 0, ""
+        return [], 0, "", []
     extraction_purpose = "structured fact extraction"
     call_limit = max(0, min(int(max_llm_calls if max_llm_calls is not None else len(docs)), 200))
     # Each call gets what the recipe needs, not an even slice of the stage
@@ -389,20 +388,29 @@ def extract_fact_candidates_for(doc_ids: list[int] | None = None,
                 "instructions": instructions[:1000],
             },
         )
-    budget_omitted = max(0, len(docs) - call_limit)
-    docs = docs[:call_limit]
-    if not docs:
+    # Deployed documents carry content hashes and are mined passage-by-passage.
+    # Each current chunk hash is checkpointed once; an edit creates exactly one
+    # new unit of work. The fallback is for older adapters and focused tests.
+    chunked = all("content_hash" in doc for doc in docs)
+    units = (knowledge_store.fact_scan_passages(
+        [int(doc["id"]) for doc in docs], passage_query, call_limit,
+    ) if chunked else docs[:call_limit])
+    budget_omitted = max(0, len(docs) - call_limit) if not chunked else 0
+    if not units:
         if run_id is not None:
             fact_store.complete_llm_budget(
                 run_id, stage="scan_facts", purpose=extraction_purpose, status="skipped",
             )
-        return [], 0, f"{budget_omitted} documents not read because the configured LLM call budget is zero"
-    existing = knowledge_store.fact_claims()
+        note = (f"{budget_omitted} documents not read because the configured LLM call budget is zero"
+                if budget_omitted else "No new or changed passages matched this scope")
+        return [], 0, note, []
+    existing = knowledge_store.fact_claim_keys()
 
     def extract(doc: dict):
         if run_id is not None and not fact_store.reserve_llm_call(
             run_id, stage="scan_facts", purpose=extraction_purpose,
-            estimated_input_tokens=max(1, len(str(doc.get("body") or doc.get("snippet") or "")) // 3 + 300),
+            estimated_input_tokens=max(1, len(str(doc.get("content") or doc.get("body")
+                                                    or doc.get("snippet") or "")) // 3 + 300),
             output_tokens=output_per_call,
         ):
             # Not an empty read: the token budget ran out before the call
@@ -410,7 +418,15 @@ def extract_fact_candidates_for(doc_ids: list[int] | None = None,
             # exactly like one with nothing in it, so the step said "passed"
             # and the rotation marked the document scanned without reading it.
             return _BUDGET_REFUSED
-        document = _component_document(doc)
+        if doc.get("chunk_id") is not None:
+            document = KnowledgeDocument(
+                str(doc["document_id"]), str(doc["title"]), str(doc["content"]),
+                revision=str(doc.get("updated_src") or ""),
+                metadata={"source": str(doc.get("source") or ""),
+                          "chunk_id": int(doc["chunk_id"]), "chunk_index": int(doc["idx"])},
+            )
+        else:
+            document = _component_document(doc)
         return component_extract_facts(
             [document],
             generate_json=lambda prompt, _version: _ground_extraction_payload(
@@ -420,10 +436,10 @@ def extract_fact_candidates_for(doc_ids: list[int] | None = None,
                     _FACT_SCHEMA, output_per_call),
                 document, "facts", "claim",
             ),
-            maximum_documents=1, maximum_characters=1500,
+            maximum_documents=1, maximum_characters=max(1, len(document.body)),
         )
 
-    results, unread, failed, errors = _scan_concurrently(docs, extract)
+    results, unread, failed, errors = _scan_concurrently(units, extract)
     refused = sum(1 for _, out in results if out is _BUDGET_REFUSED)
     results = [(doc, out) for doc, out in results if out is not _BUDGET_REFUSED]
     timed_out, failed, errors = _reclassify_timeouts(results, failed, errors)
@@ -441,7 +457,8 @@ def extract_fact_candidates_for(doc_ids: list[int] | None = None,
         for item in out[:max(1, min(int(claims_per_document), 10))]:
             claim = (item.claim if hasattr(item, "claim")
                      else str(item.get("claim", ""))).strip()[:200]
-            if not is_claim(claim) or claim.lower() in seen:
+            claim_key = knowledge_store.normalize_claim(claim)
+            if not is_claim(claim) or not claim_key or claim_key in seen:
                 continue
             evidence = ""
             confidence = 0.0
@@ -455,15 +472,19 @@ def extract_fact_candidates_for(doc_ids: list[int] | None = None,
             candidates.append({
                 "claim": claim,
                 "source": ("Mari scan · " + doc["title"])[:80],
-                "document_id": doc["id"],
+                "document_id": int(doc.get("document_id") or doc["id"]),
+                "chunk_id": doc.get("chunk_id"),
+                "content_hash": doc.get("content_hash") or "",
                 "evidence": evidence[:1000],
                 "confidence": confidence,
                 "structured_claim": dict(getattr(item, "qualifiers", {}) or {}),
                 "extraction_recipe": "facts-extract-v3",
             })
-            seen.add(claim.lower())
+            seen.add(claim_key)
 
-    _mark_scanned("facts", [doc["id"] for doc, _ in results])
+    successful_passages = [doc for doc, _ in results if doc.get("chunk_id") is not None]
+    if not chunked:
+        _mark_scanned("facts", [doc["id"] for doc, _ in results])
     note = _scan_note(unread, failed)
     if budget_omitted:
         note = "; ".join(part for part in (
@@ -480,16 +501,17 @@ def extract_fact_candidates_for(doc_ids: list[int] | None = None,
             run_id, stage="scan_facts", purpose=extraction_purpose,
             status="exhausted" if refused else "completed",
         )
-    audit("scanned for facts", f"{len(candidates)} candidates from {len(results)} documents"
+    unit_name = "passages" if chunked else "documents"
+    audit("scanned for facts", f"{len(candidates)} candidates from {len(results)} {unit_name}"
                                + (f" ({note})" if note else ""))
-    return candidates, len(results), note
+    return candidates, len(results), note, successful_passages
 
 
 def scan_facts_for(doc_ids: list[int] | None = None,
                    limit: int = SCAN_DOCS,
                    claims_per_document: int = CLAIMS_PER_DOC) -> tuple[int, int, str]:
     """Legacy immediate scan. Workflow runs use staged candidates instead."""
-    candidates, scanned, note = extract_fact_candidates_for(
+    candidates, scanned, note, successful_passages = extract_fact_candidates_for(
         doc_ids, limit=limit, claims_per_document=claims_per_document,
     )
     added = 0
@@ -498,6 +520,7 @@ def scan_facts_for(doc_ids: list[int] | None = None,
             candidate["claim"], candidate["source"], actor_name(), candidate["document_id"],
         ):
             added += 1
+    knowledge_store.mark_fact_passages_scanned(successful_passages)
     return added, scanned, note
 
 
@@ -689,6 +712,12 @@ def map_fact_candidate_impact(run_id: int, *, retrieval_backend: str = "postgres
             if detect_contradictions([{"claim": candidate["claim"]}, {"claim": neighbor["claim"]}]):
                 relation = "contradicts"
                 contradictions += 1
+            # Same-run proposed assertions now participate in adjudication,
+            # but the compatibility semantic-link projection only accepts
+            # durable fact ids. Their assertion relation is already persisted
+            # by replace_embedding_relations above.
+            if neighbor.get("fact_id") is None:
+                continue
             links.append({
                 "target_type": "fact", "target_id": neighbor["fact_id"],
                 "similarity": float(neighbor["similarity"]), "relation": relation,

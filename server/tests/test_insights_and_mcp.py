@@ -79,7 +79,7 @@ class FactInsightTests(unittest.TestCase):
         ]]
         with patch.object(knowledge_service, "_scan_batch", return_value=docs), \
              patch.object(knowledge_service, "_scan_concurrently", return_value=(list(zip(docs, model)), 0, 0, [])), \
-             patch.object(knowledge_service.knowledge_store, "fact_claims", return_value=set()), \
+             patch.object(knowledge_service.knowledge_store, "fact_claim_keys", return_value=set()), \
              patch.object(knowledge_service.knowledge_store, "add_fact", return_value=True) as add, \
              patch.object(knowledge_service, "_mark_scanned") as marked, \
              patch.object(knowledge_service, "audit"):

@@ -43,16 +43,22 @@ def _elapsed(start: float) -> str:
 # interpolates into SQL.
 def _step_fetch(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
     query, tag, k = cfg.get("query", ""), cfg.get("tag", ""), max(1, int(cfg.get("k", 3)))
+    path_glob = str(cfg.get("path_glob") or "")
     rotation = str(cfg.get("rotate") or "")
     trigger_ids = ctx.get("trigger_doc_ids") or []
     rows = workflow_store.select_documents(
         trigger_ids=trigger_ids, tag=tag, query=query, limit=min(k, 200), rotation=rotation,
-        source_ids=cfg.get("source_ids") or [],
+        source_ids=cfg.get("source_ids") or [], path_glob=path_glob,
     )
     ids = [r["id"] for r in rows]
     names = ", ".join(r["title"][:40] for r in rows[:3])
     src = " (from trigger)" if trigger_ids else (" (least recently scanned)" if rotation else "")
-    return "passed", f"{len(ids)} documents{src} · {names}", {"doc_ids": ids}
+    return "passed", f"{len(ids)} documents{src} · {names}", {
+        "doc_ids": ids,
+        # The same text that selected a document scopes extraction to its
+        # matching passages. Keeping it in run context makes retries stable.
+        "fact_passage_query": str(query or "").strip(),
+    }
 
 
 def _step_refine(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
@@ -221,9 +227,10 @@ def _step_sync_source(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
                               "items_changed": stats["items_changed"], "embedded": stats["embedded"]}
 
 
-def _scan_detail(added: int, scanned: int, note: str, noun: str) -> str:
+def _scan_detail(added: int, scanned: int, note: str, noun: str,
+                 unit: str = "document") -> str:
     detail = (f"{added} new {noun}{'' if added == 1 else 's'} captured "
-              f"from {scanned} document{'' if scanned == 1 else 's'}")
+              f"from {scanned} {unit}{'' if scanned == 1 else 's'}")
     return f"{detail} · {note}" if note else detail
 
 
@@ -241,8 +248,9 @@ def _step_scan_facts(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
     from mari_server.knowledge.service import extract_fact_candidates_for
     from mari_server.persistence.postgres import knowledge as knowledge_store
     doc_ids = ctx.get("doc_ids") or None
-    candidates, scanned, note = extract_fact_candidates_for(
+    candidates, scanned, note, successful_passages = extract_fact_candidates_for(
         doc_ids,
+        passage_query=str(ctx.get("fact_passage_query") or ""),
         claims_per_document=max(1, min(int(cfg.get("claims_per_document") or 2), 10)),
         instructions=str(cfg.get("instructions") or ""),
         run_id=int(ctx["run_id"]),
@@ -250,8 +258,10 @@ def _step_scan_facts(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
         max_input_tokens=max(0, min(int(cfg.get("max_input_tokens") or 100000), 2_000_000)),
         max_output_tokens=max(0, min(int(cfg.get("max_output_tokens") or 20000), 400_000)),
     )
-    added = knowledge_store.stage_fact_candidates(int(ctx["run_id"]), candidates)
-    return "passed", _scan_detail(added, scanned, note, "claim"), {"facts": added}
+    added = knowledge_store.stage_fact_candidates(
+        int(ctx["run_id"]), candidates, passages=successful_passages,
+    )
+    return "passed", _scan_detail(added, scanned, note, "claim", "passage"), {"facts": added}
 
 
 def _step_review_facts(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
@@ -1093,6 +1103,7 @@ def configure_fact_scan_flow(workflow_id: int, raw: dict | None) -> dict:
     source_ids = sorted({int(value) for value in raw.get("source_ids") or [] if int(value) > 0})
     query = str(raw.get("query") or "").strip()[:200]
     tag = str(raw.get("tag") or "").strip()[:80]
+    path_glob = str(raw.get("path_glob") or "").strip()[:240]
     schedule = int(raw.get("schedule_minutes") or 0)
     review_mode = str(raw.get("review_mode") or "ai")
     if review_mode not in {"human", "ai"}:
@@ -1134,7 +1145,7 @@ def configure_fact_scan_flow(workflow_id: int, raw: dict | None) -> dict:
     }
     fetch_config = {
         "k": limit, "rotate": "facts", "query": query, "tag": tag,
-        "source_ids": source_ids,
+        "source_ids": source_ids, "path_glob": path_glob,
     }
     nodes = workflow_store.workflow_nodes(workflow_id)
     for node in nodes:

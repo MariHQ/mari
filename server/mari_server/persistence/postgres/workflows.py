@@ -15,23 +15,54 @@ _ROTATION_COLUMNS = {"facts": "facts_scanned_at", "decisions": "decisions_scanne
 
 def select_documents(*, trigger_ids: list[int], tag: str, query: str,
                      limit: int, rotation: str,
-                     source_ids: list[int] | None = None) -> list[dict]:
+                     source_ids: list[int] | None = None,
+                     path_glob: str = "") -> list[dict]:
     column = _ROTATION_COLUMNS.get(rotation)
     order = (f"{column} NULLS FIRST, d.updated_src DESC NULLS LAST, d.id"
              if column else "d.updated_src DESC NULLS LAST, d.id DESC")
     project_id = access.require_current_access().project_id
     source_ids = [int(value) for value in (source_ids or []) if int(value) > 0]
+    # User-facing path globs need only the familiar *, **, and ? forms. SQL
+    # LIKE treats both star forms as %, which is correct for repository/folder
+    # scoping because source_path always uses slash-separated relative paths.
+    path_like = str(path_glob or "").strip().replace("**", "%").replace("*", "%").replace("?", "_")
     with db.connect() as conn:
         if trigger_ids:
             return conn.execute(
                 """SELECT id, title FROM documents
                      WHERE project_id = %s AND id = ANY(%s)
-                       AND (%s::int[] = '{}' OR source_id = ANY(%s)) ORDER BY id""",
-                (project_id, trigger_ids, source_ids, source_ids),
+                       AND (%s::int[] = '{}' OR source_id = ANY(%s))
+                       AND (%s = '' OR source_path LIKE %s) ORDER BY id""",
+                (project_id, trigger_ids, source_ids, source_ids, path_like, path_like),
+            ).fetchall()
+        if rotation == "facts":
+            return conn.execute(
+                """SELECT d.id, d.title FROM documents d
+                    WHERE d.project_id = %s
+                      AND (%s = '' OR d.source_path LIKE %s)
+                      AND (%s = '' OR EXISTS (
+                        SELECT 1 FROM tags t WHERE t.project_id = d.project_id
+                          AND t.document_id = d.id AND t.tag = %s))
+                      AND (%s::int[] = '{}' OR d.source_id = ANY(%s))
+                      AND EXISTS (
+                        SELECT 1 FROM chunks c
+                         WHERE c.project_id = d.project_id AND c.document_id = d.id
+                           AND NOT EXISTS (
+                             SELECT 1 FROM fact_chunk_scans scanned
+                              WHERE scanned.project_id = c.project_id AND scanned.chunk_id = c.id
+                                AND scanned.content_hash = c.content_hash)
+                           AND (%s = '' OR to_tsvector('english', c.content)
+                                @@ plainto_tsquery('english', %s) OR c.content ILIKE %s))
+                    ORDER BY d.facts_scanned_at NULLS FIRST,
+                             d.updated_src DESC NULLS LAST, d.id
+                    LIMIT %s""",
+                (project_id, path_like, path_like, tag, tag, source_ids, source_ids,
+                 query, query, f"%{query}%", limit),
             ).fetchall()
         needs_scan = (f" AND ({column} IS NULL OR d.updated_src > {column})" if column else "")
         return conn.execute(
             f"""SELECT d.id, d.title FROM documents d WHERE d.project_id = %s{needs_scan}
+                   AND (%s = '' OR d.source_path LIKE %s)
                    AND (%s = '' OR d.search_vec @@ plainto_tsquery('english', %s)
                         OR d.title ILIKE %s)
                    AND (%s = '' OR EXISTS (
@@ -39,7 +70,7 @@ def select_documents(*, trigger_ids: list[int], tag: str, query: str,
                        AND t.document_id = d.id AND t.tag = %s))
                    AND (%s::int[] = '{{}}' OR d.source_id = ANY(%s))
                  ORDER BY {order} LIMIT %s""",
-            (project_id, query, query, f"%{query}%", tag, tag,
+            (project_id, path_like, path_like, query, query, f"%{query}%", tag, tag,
              source_ids, source_ids, limit),
         ).fetchall()
 

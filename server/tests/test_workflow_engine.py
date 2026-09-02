@@ -67,16 +67,18 @@ class WorkflowStepTests(unittest.TestCase):
     def test_scan_steps_use_document_ids_selected_by_fetch_step(self) -> None:
         from mari_server.knowledge import service
         candidates = [{"claim": "A", "document_id": 7}]
-        with patch.object(service, "extract_fact_candidates_for", return_value=(candidates, 2, "")) as scan, \
+        passages = [{"document_id": 7, "chunk_id": 70, "content_hash": "v1"}]
+        with patch.object(service, "extract_fact_candidates_for",
+                          return_value=(candidates, 2, "", passages)) as scan, \
              patch("mari_server.persistence.postgres.knowledge.stage_fact_candidates", return_value=1) as stage:
             status, _, updates = flowengine._step_scan_facts({}, {"doc_ids": [7, 8], "run_id": 91})
         self.assertEqual(status, "passed")
         self.assertEqual(updates["facts"], 1)
         scan.assert_called_once_with(
-            [7, 8], claims_per_document=2, instructions="", run_id=91,
+            [7, 8], passage_query="", claims_per_document=2, instructions="", run_id=91,
             max_llm_calls=50, max_input_tokens=100000, max_output_tokens=20000,
         )
-        stage.assert_called_once_with(91, candidates)
+        stage.assert_called_once_with(91, candidates, passages=passages)
 
     def test_fact_extraction_is_registered_hourly_for_each_project(self) -> None:
         context = access.external_access(3, "acme", "Acme", "test", "seed")

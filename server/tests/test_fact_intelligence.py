@@ -107,6 +107,9 @@ class FactRepresentationTests(unittest.TestCase):
         self.assertIn("max(1 - (target.embedding <=> query.embedding))", sql)
         self.assertIn("avg(similarity)", sql)
         self.assertIn("assertion.status = 'active'", sql)
+        self.assertIn("assertion.run_id = qa.run_id", sql)
+        self.assertIn("assertion.id < %s", sql)
+        self.assertIn("LEFT JOIN facts f", sql)
         self.assertEqual(args[-2:], (.72, 8))
 
     def test_llm_reservation_is_one_atomic_bounded_update(self):
@@ -219,12 +222,12 @@ class FactRepresentationTests(unittest.TestCase):
              patch.object(service, "audit"), \
              patch.object(service, "step_progress"), \
              patch.object(service, "component_extract_facts") as extract, \
-             patch.object(service.knowledge_store, "fact_claims", return_value=set()), \
+             patch.object(service.knowledge_store, "fact_claim_keys", return_value=set()), \
              patch.object(service.llm, "generation_model", return_value=("ollama", "model")), \
              patch.object(service.fact_store, "configure_llm_budget"), \
              patch.object(service.fact_store, "reserve_llm_call", return_value=False), \
              patch.object(service.fact_store, "complete_llm_budget", complete):
-            candidates, scanned, note = service.extract_fact_candidates_for(
+            candidates, scanned, note, successful_passages = service.extract_fact_candidates_for(
                 [1, 2], run_id=91, max_llm_calls=2,
             )
 
@@ -233,6 +236,7 @@ class FactRepresentationTests(unittest.TestCase):
         # what happened, and the budget row closes exhausted, not completed.
         self.assertEqual(candidates, [])
         self.assertEqual(scanned, 0)
+        self.assertEqual(successful_passages, [])
         self.assertIn("2 documents skipped after the LLM token budget ran out", note)
         extract.assert_not_called()
         marked.assert_called_once_with("facts", [])
@@ -253,7 +257,7 @@ class FactRepresentationTests(unittest.TestCase):
              patch.object(service, "audit"), \
              patch.object(service, "step_progress"), \
              patch.object(service, "component_extract_facts", return_value=[]), \
-             patch.object(service.knowledge_store, "fact_claims", return_value=set()), \
+             patch.object(service.knowledge_store, "fact_claim_keys", return_value=set()), \
              patch.object(service.llm, "generation_model", return_value=("ollama", "model")), \
              patch.object(service.fact_store, "configure_llm_budget", configure), \
              patch.object(service.fact_store, "reserve_llm_call", return_value=True), \
@@ -329,7 +333,7 @@ class FactRepresentationTests(unittest.TestCase):
              patch.object(knowledge_store.db, "connect", return_value=conn):
             knowledge_store.publish_fact_candidates(91, "Mari")
 
-        owners = [args[4] for sql, args in conn.calls if sql.startswith("INSERT INTO facts")]
+        owners = [args[5] for sql, args in conn.calls if sql.startswith("INSERT INTO facts")]
         # The human reviewer owns what they accepted; the AI-accepted claim
         # keeps the automation actor, because no person vouched for it.
         self.assertEqual(owners, ["Eric Disque", "Mari"])
@@ -392,7 +396,7 @@ class FactRepresentationTests(unittest.TestCase):
              patch.object(service, "step_progress"), \
              patch.object(service, "component_extract_facts",
                           side_effect=RuntimeError("provider returned HTTP 500")), \
-             patch.object(service.knowledge_store, "fact_claims", return_value=set()), \
+             patch.object(service.knowledge_store, "fact_claim_keys", return_value=set()), \
              patch.object(service.llm, "generation_model", return_value=("ollama", "model")), \
              patch.object(service.fact_store, "configure_llm_budget"), \
              patch.object(service.fact_store, "reserve_llm_call", return_value=True), \
@@ -423,18 +427,18 @@ class FactRepresentationTests(unittest.TestCase):
              patch.object(service, "step_progress"), \
              patch.object(service, "component_extract_facts",
                           side_effect=RuntimeError("cannot reach localhost:11434: TimeoutError")), \
-             patch.object(service.knowledge_store, "fact_claims", return_value=set()), \
+             patch.object(service.knowledge_store, "fact_claim_keys", return_value=set()), \
              patch.object(service.llm, "generation_model", return_value=("ollama", "model")), \
              patch.object(service.fact_store, "configure_llm_budget"), \
              patch.object(service.fact_store, "reserve_llm_call", return_value=True), \
              patch.object(service.fact_store, "complete_llm_budget", complete):
-            candidates, scanned, note = service.extract_fact_candidates_for(
+            candidates, scanned, note, successful_passages = service.extract_fact_candidates_for(
                 [1, 2], run_id=91, max_llm_calls=2,
             )
 
         # Time running out is deferral, not failure: a laptop busy enough to
         # starve the local model used to fail every scheduled scan outright.
-        self.assertEqual((candidates, scanned), ([], 0))
+        self.assertEqual((candidates, scanned, successful_passages), ([], 0, []))
         self.assertIn("not read because the scan hit its", note)
         marked.assert_called_once_with("facts", [])
         complete.assert_called_once_with(
@@ -550,7 +554,8 @@ class FactLedgerTests(unittest.TestCase):
         self.assertIn("ON CONFLICT DO NOTHING RETURNING id", normalized)
         self.assertNotIn("ON CONFLICT (project_id, claim)", normalized)
         self.assertEqual(args[0], 7)
-        self.assertEqual(args[1], "claim:" + hashlib.sha256(b"retention is 30 days.").hexdigest())
+        self.assertEqual(args[1], "claim:" + hashlib.sha256(b"retention is 30 days").hexdigest())
+        self.assertEqual(args[2], "retention is 30 days")
 
     def test_add_fact_resolver_reports_a_duplicate_instead_of_a_silent_true(self):
         # The store's False (already on the ledger) used to be ignored: the

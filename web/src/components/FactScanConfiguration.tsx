@@ -5,6 +5,7 @@ export type FactScanConfig = {
   source_ids: number[];
   query: string;
   tag: string;
+  path_glob: string;
   limit: number;
   claims_per_document: number;
   extraction_max_calls: number;
@@ -59,6 +60,7 @@ export function FactScanConfiguration() {
   const [selected, setSelected] = useState<number[]>([]);
   const [query, setQuery] = useState("");
   const [tag, setTag] = useState("");
+  const [pathGlob, setPathGlob] = useState("");
   const [limit, setLimit] = useState(50);
   const [claims, setClaims] = useState(2);
   const [extractionCalls, setExtractionCalls] = useState(50);
@@ -103,6 +105,7 @@ export function FactScanConfiguration() {
       setSelected(Array.isArray(fetch.source_ids) ? fetch.source_ids.map(Number) : []);
       setQuery(String(fetch.query ?? ""));
       setTag(String(fetch.tag ?? ""));
+      setPathGlob(String(fetch.path_glob ?? ""));
       setLimit(Number(fetch.k ?? 50));
       setClaims(Number(scan.claims_per_document ?? 2));
       setExtractionCalls(Number(scan.max_llm_calls ?? 50));
@@ -234,14 +237,23 @@ export function FactScanConfiguration() {
 
         <div className="grid gap-4 sm:grid-cols-2">
           <label className="text-[12px] font-medium text-ink">
-            Search within documents
+            Passage text
             <input className="mt-1 w-full rounded border border-ink/20 bg-white px-3 py-2 font-normal"
-              value={query} onChange={(event) => setQuery(event.target.value)} placeholder="e.g. infrastructure" />
+              value={query} onChange={(event) => setQuery(event.target.value)} placeholder="e.g. retention policy" />
           </label>
           <label className="text-[12px] font-medium text-ink">
             Required tag
             <input className="mt-1 w-full rounded border border-ink/20 bg-white px-3 py-2 font-normal"
               value={tag} onChange={(event) => setTag(event.target.value)} placeholder="e.g. canonical" />
+          </label>
+          <label className="text-[12px] font-medium text-ink sm:col-span-2">
+            Path or folder glob
+            <input className="mt-1 w-full rounded border border-ink/20 bg-white px-3 py-2 font-normal"
+              value={pathGlob} onChange={(event) => setPathGlob(event.target.value)}
+              placeholder="e.g. docs/security/**" />
+            <span className="mt-1 block text-[10.5px] font-normal leading-4 text-ink/60">
+              Sources, path, tag, and passage text combine. Each matching passage is scanned once per content version.
+            </span>
           </label>
           <label className="text-[12px] font-medium text-ink">
             Documents per run
@@ -250,7 +262,7 @@ export function FactScanConfiguration() {
               value={limit} onChange={(event) => setLimit(Number(event.target.value))} />
           </label>
           <label className="text-[12px] font-medium text-ink">
-            Claims per document
+            Claims per passage
             <input type="number" min={1} max={10}
               className="mt-1 w-full rounded border border-ink/20 bg-white px-3 py-2 font-normal"
               value={claims} onChange={(event) => setClaims(Number(event.target.value))} />
@@ -410,6 +422,7 @@ export function FactScanConfiguration() {
             source_ids: selected,
             query: query.trim(),
             tag: tag.trim(),
+            path_glob: pathGlob.trim(),
             limit: Math.max(1, Math.min(limit || 1, 200)),
             claims_per_document: Math.max(1, Math.min(claims || 1, 10)),
             extraction_max_calls: Math.max(0, Math.min(extractionCalls || 0, 200)),

@@ -29,10 +29,12 @@ def ensure_run_assertions(run_id: int, *, model: str = "") -> list[dict]:
         conn.execute(
             """INSERT INTO fact_assertions (
                  project_id, candidate_id, run_id, source_document_id, claim,
+                 normalized_key, source_chunk_id, source_content_hash,
                  structured_claim, extraction_schema, status, confidence,
                  extraction_model, extraction_recipe, content_hash, recorded_from
                )
                SELECT c.project_id, c.id, c.run_id, c.document_id, c.claim,
+                      c.normalized_key, c.source_chunk_id, c.source_content_hash,
                       c.structured_claim, 'fact-assertion-v1',
                       CASE c.review_status WHEN 'rejected' THEN 'rejected'
                                            WHEN 'accepted' THEN 'pending_review'
@@ -43,7 +45,10 @@ def ensure_run_assertions(run_id: int, *, model: str = "") -> list[dict]:
                  FROM fact_extraction_candidates c
                 WHERE c.project_id = %s AND c.run_id = %s
                ON CONFLICT (project_id, candidate_id) WHERE candidate_id IS NOT NULL
-               DO UPDATE SET structured_claim = EXCLUDED.structured_claim,
+               DO UPDATE SET normalized_key = EXCLUDED.normalized_key,
+                 source_chunk_id = EXCLUDED.source_chunk_id,
+                 source_content_hash = EXCLUDED.source_content_hash,
+                 structured_claim = EXCLUDED.structured_claim,
                  extraction_model = EXCLUDED.extraction_model,
                  extraction_recipe = EXCLUDED.extraction_recipe,
                  content_hash = EXCLUDED.content_hash""",
@@ -166,6 +171,9 @@ def assertion_neighbors(assertion_id: int, embedding_profile: str,
                    FROM fact_representation_components
                   WHERE project_id = %s AND assertion_id = %s
                     AND embedding_profile = %s AND representation_profile = %s
+               ), query_assertion AS (
+                 SELECT run_id, normalized_key FROM fact_assertions
+                  WHERE project_id = %s AND id = %s
                ), per_component AS (
                  SELECT target.assertion_id, query.id AS query_component_id,
                         max(1 - (target.embedding <=> query.embedding)) AS similarity
@@ -177,7 +185,10 @@ def assertion_neighbors(assertion_id: int, embedding_profile: str,
                     AND target.assertion_id <> %s
                    JOIN fact_assertions assertion ON assertion.project_id = target.project_id
                     AND assertion.id = target.assertion_id
-                    AND assertion.status = 'active'
+                   CROSS JOIN query_assertion qa
+                  WHERE assertion.status = 'active'
+                     OR (assertion.run_id = qa.run_id AND assertion.id < %s
+                         AND assertion.status IN ('proposed', 'pending_review'))
                   GROUP BY target.assertion_id, query.id
                ), scored AS (
                  SELECT assertion_id, avg(similarity) AS similarity
@@ -188,12 +199,15 @@ def assertion_neighbors(assertion_id: int, embedding_profile: str,
                       f.criticality, f.owner_name
                  FROM scored
                  JOIN fact_assertions a ON a.project_id = %s AND a.id = scored.assertion_id
-                 JOIN facts f ON f.project_id = a.project_id AND f.id = a.fact_id
+                 LEFT JOIN facts f ON f.project_id = a.project_id AND f.id = a.fact_id
+                CROSS JOIN query_assertion qa
                 WHERE scored.similarity >= %s
+                   OR (qa.normalized_key <> '' AND a.normalized_key = qa.normalized_key)
                 ORDER BY scored.similarity DESC, a.id LIMIT %s""",
             (project_id, assertion_id, embedding_profile, representation_profile,
+             project_id, assertion_id,
              project_id, embedding_profile, representation_profile, assertion_id,
-             project_id, minimum_similarity, limit),
+             assertion_id, project_id, minimum_similarity, limit),
         ).fetchall()
 
 

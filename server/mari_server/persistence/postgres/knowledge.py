@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import time
+import unicodedata
 from datetime import datetime, timezone
 
 from mari_server.persistence.postgres import connection as db
@@ -16,20 +18,29 @@ from mari_server.providers import models as llm
 _SCAN_COLUMNS = {"facts": "facts_scanned_at", "decisions": "decisions_scanned_at"}
 
 
+def normalize_claim(claim: str) -> str:
+    """Stable, conservative identity for punctuation/case/spacing variants."""
+    folded = unicodedata.normalize("NFKC", str(claim)).casefold()
+    return " ".join(re.sub(r"[\W_]+", " ", folded, flags=re.UNICODE).split())
+
+
 def scan_documents(kind: str, document_ids: list[int] | None, limit: int) -> list[dict]:
     column = _SCAN_COLUMNS[kind]
     project_id = access.require_current_access().project_id
     with db.connect() as conn:
         if document_ids:
             rows = conn.execute(
-                f"""SELECT id, title, snippet, body, source, updated_src FROM documents
+                f"""SELECT id, title, snippet, body, source, updated_src, content_hash FROM documents
                      WHERE project_id = %s AND id = ANY(%s)
                      ORDER BY {column} NULLS FIRST, updated_src DESC NULLS LAST, id""",
                 (project_id, list(document_ids)),
             ).fetchall()
-            return rows[:limit] if limit else rows
+            # Explicit ids have already been bounded by the workflow fetch
+            # step. Reapplying the legacy default of eight here silently
+            # discarded the rest of a configured scope.
+            return rows
         return conn.execute(
-            f"""SELECT id, title, snippet, body, source, updated_src FROM documents
+            f"""SELECT id, title, snippet, body, source, updated_src, content_hash FROM documents
                  WHERE project_id = %s
                  ORDER BY {column} NULLS FIRST, updated_src DESC NULLS LAST, id
                  LIMIT %s""", (project_id, limit),
@@ -46,6 +57,76 @@ def mark_scanned(kind: str, document_ids: list[int]) -> None:
             f"UPDATE documents SET {column} = now() WHERE project_id = %s AND id = ANY(%s)",
             (project_id, list(document_ids)),
         )
+
+
+def fact_scan_passages(document_ids: list[int], query: str, limit: int) -> list[dict]:
+    """Return current chunks that have never been scanned at this exact hash.
+
+    Ordering by passage round distributes a bounded run across documents
+    before returning to a second chunk from any one long document.
+    """
+    if not document_ids or limit < 1:
+        return []
+    project_id = access.require_current_access().project_id
+    query = str(query or "").strip()
+    with db.connect() as conn:
+        return conn.execute(
+            """WITH pending AS (
+                 SELECT c.id AS chunk_id, c.document_id, c.idx, c.content,
+                        c.content_hash, d.title, d.source, d.updated_src,
+                        row_number() OVER (PARTITION BY c.document_id ORDER BY c.idx, c.id) AS passage_round
+                   FROM chunks c
+                   JOIN documents d ON d.project_id = c.project_id AND d.id = c.document_id
+                  WHERE c.project_id = %s AND c.document_id = ANY(%s)
+                    AND NOT EXISTS (
+                      SELECT 1 FROM fact_chunk_scans scanned
+                       WHERE scanned.project_id = c.project_id AND scanned.chunk_id = c.id
+                         AND scanned.content_hash = c.content_hash
+                    )
+                    AND (%s = '' OR to_tsvector('english', c.content) @@ plainto_tsquery('english', %s)
+                         OR c.content ILIKE %s)
+               )
+               SELECT * FROM pending
+                ORDER BY passage_round, updated_src DESC NULLS LAST, document_id, idx
+                LIMIT %s""",
+            (project_id, document_ids, query, query, f"%{query}%", limit),
+        ).fetchall()
+
+
+def _checkpoint_fact_passages(conn, project_id: int, passages: list[dict]) -> None:
+    """Checkpoint passage hashes using the caller's transaction."""
+    if not passages:
+        return
+    document_ids = sorted({int(row["document_id"]) for row in passages})
+    for row in passages:
+        conn.execute(
+            """INSERT INTO fact_chunk_scans (project_id, chunk_id, content_hash)
+               VALUES (%s, %s, %s) ON CONFLICT DO NOTHING""",
+            (project_id, int(row["chunk_id"]), str(row["content_hash"])),
+        )
+    conn.execute(
+        """UPDATE documents d
+              SET facts_scanned_at = now(),
+                  facts_scanned_hash = CASE WHEN NOT EXISTS (
+                    SELECT 1 FROM chunks c
+                     WHERE c.project_id = d.project_id AND c.document_id = d.id
+                       AND NOT EXISTS (
+                         SELECT 1 FROM fact_chunk_scans scanned
+                          WHERE scanned.project_id = c.project_id AND scanned.chunk_id = c.id
+                            AND scanned.content_hash = c.content_hash)
+                  ) THEN d.content_hash ELSE d.facts_scanned_hash END
+            WHERE d.project_id = %s AND d.id = ANY(%s)""",
+        (project_id, document_ids),
+    )
+
+
+def mark_fact_passages_scanned(passages: list[dict]) -> None:
+    """Checkpoint successful passage reads and close fully scanned documents."""
+    if not passages:
+        return
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn, conn.transaction():
+        _checkpoint_fact_passages(conn, project_id, passages)
 
 
 def decision_statements() -> set[str]:
@@ -72,12 +153,23 @@ def add_decision(statement: str, context: str, source: str, owner: str) -> bool:
 
 def fact_claims(*, verified_only: bool = False, original_case: bool = False) -> set[str]:
     project_id = access.require_current_access().project_id
-    sql = "SELECT claim FROM facts WHERE project_id = %s"
+    sql = "SELECT claim FROM facts WHERE project_id = %s AND merged_into_fact_id IS NULL"
     if verified_only:
         sql += " AND status = 'Verified'"
     with db.connect() as conn:
         rows = conn.execute(sql, (project_id,)).fetchall()
     return {str(row["claim"]) if original_case else str(row["claim"]).lower() for row in rows}
+
+
+def fact_claim_keys() -> set[str]:
+    project_id = access.require_current_access().project_id
+    with db.connect() as conn:
+        rows = conn.execute(
+            """SELECT normalized_key, claim FROM facts
+                WHERE project_id = %s AND merged_into_fact_id IS NULL""",
+            (project_id,),
+        ).fetchall()
+    return {str(row.get("normalized_key") or normalize_claim(row["claim"])) for row in rows}
 
 
 def add_fact(claim: str, source: str, owner: str, document_id: int | None) -> bool:
@@ -90,40 +182,56 @@ def add_fact(claim: str, source: str, owner: str, document_id: int | None) -> bo
     with db.connect() as conn, conn.transaction():
         row = conn.execute(
             """INSERT INTO facts
-               (project_id, canonical_key, claim, source, owner_name, owner_tint,
+               (project_id, canonical_key, normalized_key, claim, source, owner_name, owner_tint,
                 status, verified, document_id, valid_from)
-               VALUES (%s, %s, %s, %s, %s, 1, 'Needs review', '—', %s, now())
+               SELECT %s, %s, %s, %s, %s, %s, 1, 'Needs review', '—', %s, now()
+                WHERE NOT EXISTS (
+                  SELECT 1 FROM facts WHERE project_id = %s
+                    AND merged_into_fact_id IS NULL AND normalized_key = %s
+                )
                ON CONFLICT DO NOTHING RETURNING id""",
-            (project_id, "claim:" + hashlib.sha256(claim.casefold().encode()).hexdigest(),
-             claim, source, owner, document_id),
+            (project_id, "claim:" + hashlib.sha256(normalize_claim(claim).encode()).hexdigest(),
+             normalize_claim(claim), claim, source, owner, document_id,
+             project_id, normalize_claim(claim)),
         ).fetchone()
     return bool(row)
 
 
-def stage_fact_candidates(run_id: int, candidates: list[dict]) -> int:
-    """Persist model output for review without touching the fact ledger."""
+def stage_fact_candidates(run_id: int, candidates: list[dict],
+                          passages: list[dict] | None = None) -> int:
+    """Persist model output and its passage checkpoints atomically."""
     project_id = access.require_current_access().project_id
-    if not candidates:
-        return 0
     added = 0
     with db.connect() as conn, conn.transaction():
         for candidate in candidates:
+            normalized_key = normalize_claim(candidate["claim"])
             row = conn.execute(
                 """INSERT INTO fact_extraction_candidates
-                     (project_id, run_id, document_id, claim, source_label, evidence, confidence,
+                   (project_id, run_id, document_id, claim, normalized_key,
+                      source_chunk_id, source_content_hash, source_label, evidence, confidence,
                       structured_claim, extraction_recipe)
-                   SELECT %s, r.id, %s, %s, %s, %s, %s, %s, %s
+                   SELECT %s, r.id, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
                      FROM workflow_runs r
                     WHERE r.project_id = %s AND r.id = %s
-                   ON CONFLICT (run_id, claim) DO NOTHING RETURNING id""",
-                (project_id, candidate.get("document_id"), candidate["claim"],
+                      AND NOT EXISTS (
+                        SELECT 1 FROM fact_extraction_candidates prior
+                         WHERE prior.run_id = r.id AND prior.normalized_key = %s
+                      )
+                      AND NOT EXISTS (
+                        SELECT 1 FROM facts f WHERE f.project_id = r.project_id
+                          AND f.merged_into_fact_id IS NULL AND f.normalized_key = %s
+                      )
+                   ON CONFLICT DO NOTHING RETURNING id""",
+                (project_id, candidate.get("document_id"), candidate["claim"], normalized_key,
+                 candidate.get("chunk_id"), candidate.get("content_hash") or "",
                  candidate.get("source") or "", candidate.get("evidence") or "",
                  float(candidate.get("confidence") or 0),
                  json.dumps(candidate.get("structured_claim") or {}),
                  str(candidate.get("extraction_recipe") or "facts-extract-v3"),
-                 project_id, run_id),
+                 project_id, run_id, normalized_key, normalized_key),
             ).fetchone()
             added += bool(row)
+        _checkpoint_fact_passages(conn, project_id, passages or [])
     return added
 
 
@@ -350,10 +458,14 @@ def publish_fact_candidates(run_id: int, owner: str, *, verified: bool = False) 
             target = None
             if target_assertion_id and recommendation in {"supersede", "duplicate"}:
                 target = conn.execute(
-                    """SELECT a.id AS assertion_id, a.fact_id
+                    """SELECT a.id AS assertion_id,
+                              COALESCE(a.fact_id, candidate.published_fact_id) AS fact_id
                          FROM fact_assertions a
-                         JOIN facts f ON f.project_id = a.project_id AND f.id = a.fact_id
-                        WHERE a.project_id = %s AND a.id = %s FOR UPDATE""",
+                         LEFT JOIN fact_extraction_candidates candidate
+                           ON candidate.project_id = a.project_id AND candidate.id = a.candidate_id
+                        WHERE a.project_id = %s AND a.id = %s
+                          AND COALESCE(a.fact_id, candidate.published_fact_id) IS NOT NULL
+                        FOR UPDATE OF a""",
                     (project_id, target_assertion_id),
                 ).fetchone()
             if target and recommendation == "duplicate":
@@ -390,30 +502,43 @@ def publish_fact_candidates(run_id: int, owner: str, *, verified: bool = False) 
                      candidate["document_id"], boundary, assertion["id"], project_id, fact["id"]),
                 )
             else:
+                normalized_key = normalize_claim(candidate["claim"])
                 canonical_key = "claim:" + hashlib.sha256(
-                    candidate["claim"].casefold().encode()
+                    normalized_key.encode()
                 ).hexdigest()
                 fact = conn.execute(
                     """INSERT INTO facts
-                         (project_id, canonical_key, claim, source, owner_name, owner_tint, status,
+                         (project_id, canonical_key, normalized_key, claim, source,
+                          owner_name, owner_tint, status,
                           verified, verified_at, document_id, valid_from)
-                       VALUES (%s, %s, %s, %s, %s, 1, %s, %s,
+                       SELECT %s, %s, %s, %s, %s, %s, 1, %s, %s,
                                CASE WHEN %s THEN current_date ELSE NULL END, %s,
                                COALESCE((SELECT updated_src FROM documents
-                                          WHERE project_id = %s AND id = %s), now()))
+                                          WHERE project_id = %s AND id = %s), now())
+                        WHERE NOT EXISTS (
+                          SELECT 1 FROM facts existing
+                           WHERE existing.project_id = %s
+                             AND existing.merged_into_fact_id IS NULL
+                             AND existing.normalized_key = %s)
                        ON CONFLICT DO NOTHING
                        RETURNING id, current_assertion_id""",
-                    (project_id, canonical_key, candidate["claim"], candidate["source_label"], fact_owner,
+                    (project_id, canonical_key, normalized_key, candidate["claim"],
+                     candidate["source_label"], fact_owner,
                      status, time.strftime("%b %d, %Y") if verified else "—", verified,
-                     candidate["document_id"], project_id, candidate["document_id"]),
+                     candidate["document_id"], project_id, candidate["document_id"],
+                     project_id, normalized_key),
                 ).fetchone()
                 created = bool(fact)
                 if not fact:
                     fact = conn.execute(
                         """SELECT id, current_assertion_id FROM facts
-                            WHERE project_id = %s AND (claim = %s OR canonical_key = %s)
-                            ORDER BY CASE WHEN claim = %s THEN 0 ELSE 1 END LIMIT 1 FOR UPDATE""",
-                        (project_id, candidate["claim"], canonical_key, candidate["claim"]),
+                            WHERE project_id = %s AND merged_into_fact_id IS NULL
+                              AND (normalized_key = %s OR claim = %s OR canonical_key = %s)
+                            ORDER BY CASE WHEN normalized_key = %s THEN 0
+                                          WHEN claim = %s THEN 1 ELSE 2 END,
+                                     id LIMIT 1 FOR UPDATE""",
+                        (project_id, normalized_key, candidate["claim"], canonical_key,
+                         normalized_key, candidate["claim"]),
                     ).fetchone()
                 if fact and assertion:
                     if created or not fact.get("current_assertion_id"):
@@ -665,7 +790,7 @@ def facts(document_id: int | None = None) -> list[dict]:
                      WHERE link.project_id = f.project_id AND link.subject_type = 'fact'
                        AND link.subject_id = f.id AND link.embedding_profile = %s AND link.active
                   ) impact ON true
-                 WHERE f.project_id = %s{clause} ORDER BY f.id""",
+                 WHERE f.project_id = %s AND f.merged_into_fact_id IS NULL{clause} ORDER BY f.id""",
             # SQL reads profile inside the lateral before the outer project.
             ((profile, project_id, document_id) if document_id is not None else (profile, project_id)),
         ).fetchall()
