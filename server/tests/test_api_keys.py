@@ -9,6 +9,7 @@ from mari_server.identity import access
 from mari_server.search import routes as search_routes
 from mari_server.identity import graphql as mutations_admin
 from mari_server.persistence.postgres import admin as admin_store
+from mari_server.identity import access as access_module
 
 
 def context() -> access.AccessContext:
@@ -21,7 +22,8 @@ class ApiKeyTests(unittest.TestCase):
 
     def test_creation_stores_hash_only_and_rejects_duplicate_name(self) -> None:
         class Info:
-            context = {"user": {"id": 1, "name": "Admin", "role": "admin"}}
+            context = {"user": {"id": 1, "name": "Admin", "role": "admin"},
+                       "access": access_module.AccessContext(1, 7, "acme", "Acme", "admin", access_module.capabilities_for_role("admin"))}
 
         class Result:
             def __init__(self, row=None):

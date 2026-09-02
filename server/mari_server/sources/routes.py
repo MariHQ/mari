@@ -38,7 +38,7 @@ router = APIRouter(prefix="/connectors")
 # source row: those are the admin operations the GraphQL side calls
 # connectSource, so they carry the same guard here (AUTH-4). The router-level
 # `dependencies=_authed` in app.py stays; this narrows the two that write.
-_admin = [Depends(auth.require_admin)]
+_admin = [Depends(access.require_capability("source.manage"))]
 
 class ProviderIn(BaseModel):
     provider: str

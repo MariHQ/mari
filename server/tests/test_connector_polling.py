@@ -8,6 +8,7 @@ from mari_server.providers import connectors as connector_provider
 from mari_server.sources import routes as connectors_api
 from mari_components.connectors import CONNECTOR_CATALOG
 from mari_components.types import KnowledgeDocument
+from mari_server.identity import access as access_module
 
 
 class ConnectorContractTests(unittest.TestCase):
@@ -266,7 +267,10 @@ class RemoveSourceTests(unittest.TestCase):
     worker could still be writing documents for the source."""
 
     class _Info:
-        context = {"user": {"id": 1, "name": "Admin", "role": "admin"}}
+        # The admin tier is the caller's membership in the request's project,
+        # so the fake context carries one (identity.graphql._require_admin).
+        context = {"user": {"id": 1, "name": "Admin", "role": "admin"},
+                   "access": access_module.AccessContext(1, 7, "acme", "Acme", "admin", access_module.capabilities_for_role("admin"))}
 
     def _remove(self, source_row, flows=(), running=False, delete_documents=True,
                 siblings=0):

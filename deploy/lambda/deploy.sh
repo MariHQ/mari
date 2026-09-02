@@ -56,11 +56,33 @@ TAG="${1:-$(date -u +%Y%m%d)-lambda-$(( $(aws ecr list-images --repository-name 
   --query 'length(imageIds)' --output text 2>/dev/null || echo 0) + 1 ))}"
 IMAGE="$REPO:$TAG"
 
-[ -z "$(git status --porcelain)" ] || echo "    WARNING: working tree is dirty; you are shipping uncommitted code"
+# Shipping uncommitted code makes the image tag unreproducible. Refuse unless
+# the operator says so explicitly.
+if [ -n "$(git status --porcelain)" ]; then
+  if [ "${MARI_ALLOW_DIRTY:-}" = "1" ]; then
+    echo "    WARNING: working tree is dirty (MARI_ALLOW_DIRTY=1); shipping uncommitted code"
+  else
+    echo "    working tree is dirty. Commit or stash first, or set MARI_ALLOW_DIRTY=1 to ship anyway." >&2
+    git status --short >&2
+    exit 1
+  fi
+fi
 
-echo "==> Checks (typecheck + server-render smoke)"
+# The tag we are about to replace, so a failed verify can say how to roll back.
+PREVIOUS_IMAGE="$(aws cloudformation describe-stacks --stack-name "$STACK" --region "$REGION" \
+  --query "Stacks[0].Parameters[?ParameterKey=='ImageUri'].ParameterValue" --output text 2>/dev/null || true)"
+
+echo "==> Checks (typecheck + server-render smoke + server unit tests)"
 ( cd web && npm run check )
 python3 -m compileall -q server/mari_server mari-components/packages
+# There is no CI on this repo, so the release is the last place the unit
+# suite runs. MARI_SKIP_TESTS=1 is for re-running a release whose tests
+# already passed in this session.
+if [ "${MARI_SKIP_TESTS:-}" = "1" ]; then
+  echo "    skipping server unit tests (MARI_SKIP_TESTS=1)"
+else
+  make test-server
+fi
 
 echo "==> Build + push $IMAGE"
 aws ecr get-login-password --region "$REGION" \
@@ -95,12 +117,28 @@ aws cloudformation deploy \
   --region "$REGION"
 
 echo "==> Verify"
+code=""
 for i in 1 2 3 4 5; do
   code=$(curl -sS -o /tmp/mari-healthz -w "%{http_code}" --max-time 120 "https://$DOMAIN/healthz" || true)
   echo "    /healthz -> $code"
   [ "$code" = "200" ] && { cat /tmp/mari-healthz; echo; break; }
   sleep 8
 done
+if [ "$code" != "200" ]; then
+  echo "    /healthz never returned 200. The stack now points at $IMAGE and it is not healthy." >&2
+  if [ -n "$PREVIOUS_IMAGE" ]; then
+    echo "    Roll back with: MARI_SKIP_TESTS=1 $0 ${PREVIOUS_IMAGE##*:}" >&2
+  fi
+  exit 1
+fi
+# /auth/me proves the API router and the database answer, not just the
+# process: 401 (no cookie) is the healthy answer, anything else is not.
+auth_code=$(curl -sS -o /dev/null -w "%{http_code}" --max-time 60 "https://$DOMAIN/auth/me" || true)
+echo "    /auth/me -> $auth_code"
+if [ "$auth_code" != "401" ] && [ "$auth_code" != "200" ]; then
+  echo "    /auth/me did not answer like a running API. Roll back as above." >&2
+  exit 1
+fi
 
 echo "==> Released $IMAGE"
 echo "    Stack parameter and running function now agree; drift is what this avoids."
