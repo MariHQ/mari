@@ -38,6 +38,11 @@ from mari_server.persistence.postgres.database import audit
 #              destination/workflow transports), unchanged.
 #
 # Anything unlisted stays at "any authenticated user", which is what it was.
+#
+# The tier is read from the caller's membership in the project the request
+# names (X-Mari-Project), never from the global users.role column. A person
+# can be an admin in one project and a viewer in another, and every write
+# below is scoped to the resolved project, so the check must be too.
 ROLES = ("admin", "manager", "user")
 
 # Keys in sources.config that identify WHICH thing a source is: repointing them
@@ -55,17 +60,28 @@ def _actor(info: strawberry.Info) -> dict:
     return user
 
 
+def _project_access(info: strawberry.Info):
+    """The caller's membership in the request's project (app.graphql_context)."""
+    ctx = info.context if isinstance(info.context, dict) else {}
+    project = ctx.get("access")
+    if project is None:
+        raise PermissionError("Choose a project.")
+    return project
+
+
 def _require_admin(info: strawberry.Info) -> dict:
+    """Admin tier: only owner and admin memberships hold member.manage."""
     user = _actor(info)
-    if user.get("role") != "admin":
-        raise PermissionError("Admin role required for this operation")
+    if not _project_access(info).allows("member.manage"):
+        raise PermissionError("Admin role in this project required for this operation")
     return user
 
 
 def _require_manager(info: strawberry.Info) -> dict:
+    """Manager tier: manager, admin and owner memberships hold source.sync."""
     user = _actor(info)
-    if user.get("role") not in ("admin", "manager"):
-        raise PermissionError("Manager or admin role required for this operation")
+    if not _project_access(info).allows("source.sync"):
+        raise PermissionError("Manager or admin role in this project required for this operation")
     return user
 
 

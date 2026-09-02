@@ -828,7 +828,7 @@ def chat_stream(messages: list[dict], system: str = "") -> t.Iterator[str]:
         if not key:
             _fail("settings.llm names the anthropic provider but no Anthropic API key is set")
             return
-        payload = {"model": model, "max_tokens": max_tokens or 1024, "stream": True, "messages": messages}
+        payload = {"model": model, "max_tokens": 1024, "stream": True, "messages": messages}
         if system:
             payload["system"] = system
         for line in _stream(f"{ANTHROPIC_BASE}/messages", payload,

@@ -282,7 +282,9 @@ def deprovision_user(user_id: int) -> None:
     with _conn() as conn:
         user = conn.execute("SELECT * FROM users WHERE id=%s", (user_id,)).fetchone()
         if not user: raise HTTPException(404, "SCIM User not found.")
-        conn.execute("UPDATE users SET status='disabled' WHERE id=%s", (user_id,))
+        # Blank the password too: a disabled account must not keep a working
+        # credential waiting for a membership to be re-enabled.
+        conn.execute("UPDATE users SET status='disabled', password_hash='' WHERE id=%s", (user_id,))
         conn.execute("UPDATE project_members SET status='disabled' WHERE user_id=%s", (user_id,))
         control_store.revoke_user_sessions(user_id)
         _audit(conn, "SCIM", "deactivated user", user["email"])

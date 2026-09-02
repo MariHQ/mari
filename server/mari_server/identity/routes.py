@@ -314,6 +314,10 @@ def current_user(request: Request) -> dict | None:
         if session:
             with _conn() as conn:
                 user = conn.execute("SELECT * FROM users WHERE id = %s", (session["user_id"],)).fetchone()
+            # A deactivated account (SCIM deprovision, admin disable) keeps no
+            # identity even if a session row outlived the revocation.
+            if user and user.get("status", "active") != "active":
+                user = None
     if isinstance(scope, dict):
         scope["mari_user"] = user
     set_caller(user)
@@ -374,11 +378,22 @@ def require_user(request: Request) -> dict:
     return user
 
 
+# The admin and manager tiers are properties of the caller's membership in the
+# project named by X-Mari-Project, never of the global users.role column: a
+# person can be an admin in one project and a viewer in another, and every
+# write is scoped to the resolved project. The capability each tier implies is
+# the one only that tier holds (identity/context.py ROLE_CAPABILITIES).
+_TIER_CAPABILITY = {"admin": "member.manage", "manager": "source.sync"}
+
+
 def require_role(request: Request, *roles: str) -> dict:
     user = require_user(request)
-    if user.get("role") not in roles:
-        raise HTTPException(403, f"This action needs the {' or '.join(roles)} role.")
-    return user
+    context = access_module.require_project(request)
+    for role in roles:
+        capability = _TIER_CAPABILITY.get(role)
+        if (capability and context.allows(capability)) or context.role == role:
+            return user
+    raise HTTPException(403, f"This action needs the {' or '.join(roles)} role in this project.")
 
 
 def require_admin(request: Request) -> dict:
@@ -649,6 +664,11 @@ def login(body: Credentials, request: Request, response: Response):
                  AND password_hash <> ''""",
             (identifier, identifier),
         ).fetchone()
+    # The OAuth and OIDC paths refuse deactivated accounts; the password path
+    # must too, or a SCIM-deprovisioned person signs straight back in. Fold it
+    # into the same "wrong credentials" answer so status is not enumerable.
+    if user and user.get("status", "active") != "active":
+        user = None
     valid_password = _verify(body.password, user["password_hash"] if user else _DUMMY_PASSWORD_HASH)
     if not user or not valid_password:
         raise HTTPException(401, "Wrong email or password.")
