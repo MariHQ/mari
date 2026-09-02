@@ -397,6 +397,18 @@ class PriorityConnectorTests(unittest.TestCase):
         params = urllib.parse.parse_qs((api.requests[1].body or b"").decode())
         self.assertEqual(params["types"], ["public_channel,private_channel"])
 
+    def test_slack_app_messages_without_a_bot_subtype_are_not_indexed(self):
+        api = FakeHttp([
+            {"ok": True, "members": [{"id": "U1", "name": "Mari"}]},
+            {"ok": True, "channels": [{"id": "C1", "name": "product", "is_member": True}]},
+            {"ok": True, "messages": [{
+                "type": "message", "ts": "2.0", "user": "U1", "text": "An answer copied from docs",
+                "bot_id": "B1", "app_id": "A1",
+            }]},
+        ])
+        page = list(poll_slack(SlackConfig("xoxb-token"), PollRequest(), http=api))[0]
+        self.assertEqual(page.upserts, ())
+
     def test_slack_configured_private_channel_must_be_visible_to_the_bot(self):
         api = FakeHttp([
             {"ok": True, "members": []},

@@ -409,6 +409,8 @@ def _thread_document(
             "message_deleted", "tombstone", "bot_message", "channel_join",
             "channel_leave", "channel_name", "channel_purpose", "channel_topic",
         }
+        and not message.get("bot_id")
+        and not message.get("app_id")
         and str(message.get("text") or "").strip()
     ]
     if not readable:
