@@ -39,6 +39,19 @@ def requested_slack_channel(question: str) -> str | None:
     return match.group(1) if match else None
 
 
+def _context_source(row: dict) -> str:
+    """Human-readable source identity for the model, including structured scope."""
+    source = str(row.get("source") or "source")
+    metadata = row.get("metadata") or {}
+    if isinstance(metadata, str):
+        try:
+            metadata = json.loads(metadata)
+        except json.JSONDecodeError:
+            metadata = {}
+    channel = str(metadata.get("channel_name") or "").strip() if isinstance(metadata, dict) else ""
+    return f"{source} · #{channel}" if source == "slack" and channel else source
+
+
 def live_destination(project_slug: str, destination_slug: str):
     return chat_store.live_destination(project_slug, destination_slug)
 
@@ -183,7 +196,7 @@ def ports(project_access: access.AccessContext, usage_detail: str,
             except Exception:
                 source_urls = {}
         context = "\n\n".join(
-            f"[{i + 1}] {row['title']} ({row['source']})\n{row['body'] or row['snippet']}"
+            f"[{i + 1}] {row['title']} ({_context_source(row)})\n{row['body'] or row['snippet']}"
             for i, row in enumerate(documents)
         )
         facts = chat_store.verified_facts(project_id) if "facts" in enabled_tools else []

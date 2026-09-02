@@ -112,7 +112,8 @@ def keyword_candidates(project_id: int, query: str | None, limit: int) -> list[d
         return conn.execute(
             f"""SELECT d.id, d.source, d.title, d.snippet, d.body, d.author,
                        d.author_initials, d.updated_src, d.kind, d.acl_visibility,
-                       d.acl_principals, array_remove(array_agg(t.tag), NULL) AS tags,
+                       d.acl_principals, d.metadata,
+                       array_remove(array_agg(t.tag), NULL) AS tags,
                        coalesce(max(td.search_weight), 1.0) AS boost
                   FROM documents d
                   LEFT JOIN tags t ON t.document_id = d.id AND t.project_id = d.project_id
@@ -130,7 +131,8 @@ def documents_by_id(project_id: int, document_ids: list[int]) -> list[dict]:
         return conn.execute(
             """SELECT d.id, d.source, d.title, d.snippet, d.body, d.author,
                       d.author_initials, d.updated_src, d.kind, d.acl_visibility,
-                      d.acl_principals, array_remove(array_agg(t.tag), NULL) AS tags,
+                      d.acl_principals, d.metadata,
+                      array_remove(array_agg(t.tag), NULL) AS tags,
                       coalesce(max(td.search_weight), 1.0) AS boost
                  FROM documents d
                  LEFT JOIN tags t ON t.document_id = d.id AND t.project_id = d.project_id

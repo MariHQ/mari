@@ -55,6 +55,7 @@ class KnowledgeChatDestinationTests(unittest.TestCase):
             "source": "slack",
             "body": "2026-09-02 20:25 @daniel: a fact is that the sky is blue",
             "snippet": "a fact is that the sky is blue",
+            "metadata": {"channel": "C1", "channel_name": "private-test"},
         }]
         with patch.object(conversation_chat.chat_store, "create_session", return_value=9), \
              patch.object(conversation_chat.chat_store, "add_message"), \
@@ -74,6 +75,7 @@ class KnowledgeChatDestinationTests(unittest.TestCase):
         approved.assert_called_once()
         search.assert_called_once_with("private-test", 8)
         broad_search.assert_not_called()
+        self.assertIn("(slack · #private-test)", context.messages[-1]["content"])
         self.assertIn("a fact is that the sky is blue", context.messages[-1]["content"])
         self.assertEqual([source["document_id"] for source in context.sources], [41])
 
