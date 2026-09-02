@@ -196,7 +196,9 @@ _DEFINITIONS = (
             ),
             _field(
                 "channels", "Channels", required=False, placeholder="general, C0123456789",
-                help=("Comma-separated channel names or IDs. Invite the app to each one. "
+                help=("Comma-separated channel names or IDs. This is a fixed scan scope: "
+                      "inviting the app to another channel does not add it here automatically. "
+                      "Invite the app to each one, add it to this field, then save to run a full resync. "
                       "For a private channel the app must be a member, and the install needs "
                       "groups:read and groups:history (plus users:read)."),
             ),

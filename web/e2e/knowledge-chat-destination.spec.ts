@@ -13,6 +13,8 @@ test("admin creates, configures, and deploys a knowledge chat destination", asyn
   await page.getByLabel("Welcome message").fill("Ask about company policy.");
   await page.getByRole("button", { name: "Create knowledge chat" }).click();
   await expect(page).toHaveURL(/tab=chat&chat=7/);
+  await expect(page.getByLabel("Destination name")).toHaveValue("Company knowledge");
+  await expect(page.getByLabel("Assistant title")).toHaveValue("Ask Acme");
   expect(api.calls.some((call) => call.query.includes("createKnowledgeChatDestination") && call.variables.slug === "company-knowledge")).toBeTruthy();
 
   await page.getByLabel("Welcome message").fill("Ask about trusted company policy.");

@@ -504,7 +504,7 @@ oauth_config:
 settings:
   event_subscriptions:
     request_url: https://mari.example.test/webhooks/slack
-    bot_events: [app_mention, message.channels, message.im]
+    bot_events: [app_mention, message.channels, message.groups, message.im]
   socket_mode_enabled: true` });
   });
   await page.route("**/bots/slack/setup", async (route) => {

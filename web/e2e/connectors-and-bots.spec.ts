@@ -167,6 +167,7 @@ test("Slack bot setup persists the verified project installation, calls auth.tes
   await expect(drawer).toContainText("channels:history");
   await expect(drawer).toContainText("im:write");
   await expect(drawer).toContainText("message.channels");
+  await expect(drawer).toContainText("message.groups");
   await expect(drawer).toContainText("messages_tab_enabled: true");
   await expect(drawer).toContainText("messages_tab_read_only_enabled: false");
   await expect(drawer).toContainText("socket_mode_enabled: true");

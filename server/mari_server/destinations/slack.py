@@ -301,6 +301,7 @@ settings:
     bot_events:
       - app_mention
       - message.channels
+      - message.groups
       - message.im
   interactivity:
     is_enabled: false

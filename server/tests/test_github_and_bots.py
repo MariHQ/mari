@@ -149,6 +149,7 @@ class SlackBotTests(unittest.TestCase):
         self.assertIn("messages_tab_enabled: true", manifest)
         self.assertIn("messages_tab_read_only_enabled: false", manifest)
         self.assertIn("message.im", manifest)
+        self.assertIn("message.groups", manifest)
         self.assertIn("socket_mode_enabled: true", manifest)
 
     def test_signature_accepts_current_exact_body_and_rejects_tampering(self) -> None:

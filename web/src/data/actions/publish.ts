@@ -31,9 +31,17 @@ export function publishActions({ navigate }: ActionContext): PublishActions {
       const data = await mutate(CREATE_CHAT, args);
       const id = data?.createKnowledgeChatDestination;
       if (typeof id !== "number" || id <= 0) throw new Error("The knowledge chat could not be created.");
+      // A destination is immediately readable after the mutation. Explicitly
+      // refresh the adapter as well as changing the selection so a create from
+      // a cached/list route cannot open an editor backed by the pre-create
+      // response (the visible symptom is an empty or half-drawn chat card).
+      window.dispatchEvent(new Event("mari:publish-refresh"));
       navigate(`/publish?tab=chat&chat=${id}`);
     },
-    updateKnowledgeChat: async (id, args) => { await mutate(UPDATE_CHAT, { id, ...args }); },
+    updateKnowledgeChat: async (id, args) => {
+      await mutate(UPDATE_CHAT, { id, ...args });
+      window.dispatchEvent(new Event("mari:publish-refresh"));
+    },
     deployKnowledgeChat: async (id) => {
       await mutate(DEPLOY_CHAT, { id });
       window.dispatchEvent(new Event("mari:publish-refresh"));
