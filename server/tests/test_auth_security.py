@@ -290,6 +290,20 @@ class ForwardedHeaderTests(unittest.TestCase):
             self.assertTrue(auth._is_https(request))
             self.assertEqual(auth._client_detail(request)[0]["value"], "203.0.113.9")
 
+    def test_a_range_or_wildcard_names_a_proxy_with_a_dynamic_address(self):
+        # The chart's nginx is a pod with whatever address the cluster gave
+        # it, so the trust list takes a CIDR, and "*" when nothing but the
+        # proxy can reach the port at all.
+        with patch.object(auth.config, "get", return_value=["10.0.0.0/8"]):
+            self.assertFalse(auth._is_https(self.proxied()))
+        with patch.object(auth.config, "get", return_value=["127.0.0.0/8"]):
+            self.assertTrue(auth._is_https(self.proxied()))
+            self.assertEqual(auth._client_ip(self.proxied()), "203.0.113.9")
+        with patch.object(auth.config, "get", return_value=["*"]):
+            self.assertTrue(auth._is_https(self.proxied()))
+        with patch.object(auth.config, "get", return_value=["not-a-range/x", "10.1.2.3"]):
+            self.assertFalse(auth._is_https(self.proxied()))
+
     def test_direct_https_needs_no_proxy(self):
         with patch.object(auth.config, "get", return_value=[]):
             self.assertTrue(auth._is_https(request()))

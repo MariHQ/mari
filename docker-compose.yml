@@ -62,6 +62,9 @@ services:
       # gracefully without it). To use the compose-managed ollama service
       # below instead, change this to http://ollama:11434.
       MARI_OLLAMA_HOST: ${MARI_OLLAMA_HOST:-http://host.docker.internal:11434}
+      # The api port is not published; only the web container's nginx
+      # reaches it, so its X-Forwarded-* headers are the truth.
+      MARI_TRUSTED_PROXIES: "*"
       # OAuth credentials come from .env (see .env.example), e.g.:
       # MARI_GITHUB_CLIENT_ID / MARI_GITHUB_CLIENT_SECRET
       # MARI_GOOGLE_CLIENT_ID / MARI_GOOGLE_CLIENT_SECRET

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import contextvars
 import hashlib
+import ipaddress
 import json
 import logging
 import os
@@ -69,6 +70,33 @@ _ATTEMPTS: dict[str, list[float]] = {}
 _ATTEMPTS_LOCK = threading.Lock()
 
 
+def _peer_is_trusted_proxy(peer: str) -> bool:
+    """server.trusted_proxies entries are an address, a CIDR range, or "*".
+    The range form is for clusters where the proxy is a pod with a dynamic
+    address; "*" is for deployments where the API port is not reachable by
+    anything except the proxy in front of it (the chart's ClusterIP service,
+    the compose network), so every peer is that proxy by construction."""
+    entries = [str(value).strip() for value in (config.get("server", "trusted_proxies") or [])]
+    if "*" in entries:
+        return True
+    if not peer:
+        return False
+    try:
+        address = ipaddress.ip_address(peer)
+    except ValueError:
+        return peer in entries
+    for entry in entries:
+        if "/" in entry:
+            try:
+                if address in ipaddress.ip_network(entry, strict=False):
+                    return True
+            except ValueError:
+                continue
+        elif entry == peer:
+            return True
+    return False
+
+
 def _forwarded(request: Request, header: str) -> str:
     """The first value of an X-Forwarded-* header, and only when the peer is a
     configured proxy (server.trusted_proxies). Anyone who can reach the port
@@ -76,8 +104,7 @@ def _forwarded(request: Request, header: str) -> str:
     rate limiter, the cookie's Secure flag and the access log all used to
     read them and only the first one checked who sent them."""
     peer = request.client.host if request.client else ""
-    trusted = {str(value).strip() for value in (config.get("server", "trusted_proxies") or [])}
-    if peer not in trusted:
+    if not _peer_is_trusted_proxy(peer):
         return ""
     return (request.headers.get(header) or "").split(",")[0].strip()
 

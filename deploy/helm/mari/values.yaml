@@ -63,6 +63,10 @@ config:
   MARI_AUTH_BYPASS: "false"
   MARI_AUTH_BYPASS_DEV_MODE: "false"
   MARI_AUTH_REGISTRATION: "false"
+  # The API service is ClusterIP and only the web pod's nginx talks to it,
+  # so every peer is that proxy: believe its X-Forwarded-* headers. Narrow
+  # this to the web pod's CIDR if the API is ever reachable another way.
+  MARI_TRUSTED_PROXIES: "*"
 
 ingress:
   enabled: false
