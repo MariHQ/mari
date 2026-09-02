@@ -165,13 +165,21 @@ export function sourcesActions(): SourcesActions {
     // Destructive; the page puts it behind a ConfirmButton. The server pauses
     // the source and its running checkpoint rather than deleting documents,
     // which is what "disconnect" has always meant here.
-    disconnect: (s) => mutate(`mutation($id: Int!) { pauseSource(sourceId: $id) }`, { id: idOf(s) }),
+    // `false` is the server declining: pauseSource resolves the id among
+    // connector rows only, so a legacy row (an orphan the retired
+    // connectSource mutation left) answers false and nothing was paused.
+    // Throwing keeps the card from drawing it paused.
+    disconnect: async (s) => {
+      const d = await mutate(`mutation($id: Int!) { pauseSource(sourceId: $id) }`, { id: idOf(s) });
+      if (d?.pauseSource === false) throw new Error("This source has no connector behind it, so it cannot be paused. Remove it and connect again.");
+    },
 
     /* The real delete disconnect never was: the server drops the source row,
        its documents and everything hanging off them, its checkpoints, and its
-       scheduled sync flow, in one transaction. Refusals are the server's own
-       words — "Only connector sources can be removed.", "A sync for this
-       source is still running." — and they reach the confirm dialog verbatim.
+       scheduled sync flow, in one transaction. Connector and legacy rows
+       (an orphan the retired connectSource mutation left) both go; refusals
+       are the server's own words — the upload row, "A sync for this source
+       is still running." — and they reach the confirm dialog verbatim.
        `false` is the row already being gone, which is what removing wanted. */
     removeSource: async (s, deleteDocuments) => {
       await mutate(`mutation($id: Int!, $deleteDocuments: Boolean!) {

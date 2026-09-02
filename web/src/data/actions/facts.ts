@@ -204,7 +204,13 @@ export function factsActions({ currentUserName }: ActionContext): FactsActions {
      * this returns as soon as the run exists and the page follows it. */
     scanFacts: async () => {
       const config = await requestFactScanConfiguration();
-      if (!config) throw new Error("Fact scan cancelled.");
+      // A cancelled dialog is a no-op, not a failure. Throwing here landed in
+      // the page's WriteError as a "Could not save" banner for a scan nobody
+      // asked to start. FactsPage.launchScan does `setScan(started || null)`,
+      // so a null result clears its "starting" placeholder and draws nothing.
+      // The library type says `FactScan`, not `FactScan | null`, hence the
+      // cast; widening `FactsActions.scanFacts` lives in vendor, not here.
+      if (!config) return null as unknown as FactScan;
       const d = await mutate(
         "mutation($config: JSON) { startFactScan(config: $config) }",
         { config },

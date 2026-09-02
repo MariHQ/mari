@@ -384,6 +384,33 @@ class FactRepresentationTests(unittest.TestCase):
         # The AI-accepted candidate transfers nothing.
         self.assertEqual(transfers, [("Eric Disque", 7, 9, "Mari")])
 
+    def test_a_scan_whose_every_call_failed_raises_a_readable_error(self):
+        docs = [{"id": 1, "title": "Alpha", "source": "upload", "body": "Alpha holds.", "snippet": ""}]
+        with patch.object(service, "_scan_batch", return_value=docs), \
+             patch.object(service, "_mark_scanned"), \
+             patch.object(service, "audit"), \
+             patch.object(service, "step_progress"), \
+             patch.object(service, "component_extract_facts",
+                          side_effect=RuntimeError("provider returned HTTP 500")), \
+             patch.object(service.knowledge_store, "fact_claims", return_value=set()), \
+             patch.object(service.llm, "generation_model", return_value=("ollama", "model")), \
+             patch.object(service.fact_store, "configure_llm_budget"), \
+             patch.object(service.fact_store, "reserve_llm_call", return_value=True), \
+             patch.object(service.fact_store, "complete_llm_budget"):
+            # ValueError is the class the GraphQL layer shows as written; a
+            # RuntimeError with the same text was masked as a generic failure.
+            with self.assertRaisesRegex(
+                    ValueError,
+                    r"Model extraction failed for all 1 completed documents; "
+                    r"first error: RuntimeError: provider returned HTTP 500"):
+                service.extract_fact_candidates_for([1], run_id=91, max_llm_calls=2)
+
+    def test_missing_structured_output_is_a_readable_error(self):
+        with patch.object(service.llm, "generate_json", return_value=None), \
+             patch.object(service.llm, "last_error", return_value="model timed out after 60s"):
+            with self.assertRaisesRegex(ValueError, "model timed out after 60s"):
+                service._extraction_json("prompt", "system", {"type": "object"})
+
     def test_all_timeouts_defer_the_documents_instead_of_failing_the_run(self):
         docs = [
             {"id": 1, "title": "Alpha", "source": "upload", "body": "Alpha holds.", "snippet": ""},
@@ -524,3 +551,27 @@ class FactLedgerTests(unittest.TestCase):
         self.assertNotIn("ON CONFLICT (project_id, claim)", normalized)
         self.assertEqual(args[0], 7)
         self.assertEqual(args[1], "claim:" + hashlib.sha256(b"retention is 30 days.").hexdigest())
+
+    def test_add_fact_resolver_reports_a_duplicate_instead_of_a_silent_true(self):
+        # The store's False (already on the ledger) used to be ignored: the
+        # resolver audited "added fact" and answered True while nothing was
+        # written. The console has to hear about it, and the audit log must
+        # not record an addition that did not happen.
+        from mari_server.knowledge import graphql as knowledge_graphql
+        with patch.object(knowledge_graphql.knowledge_store, "add_fact", return_value=False), \
+             patch.object(knowledge_graphql, "audit") as audit, \
+             patch.object(knowledge_graphql, "actor_name", return_value="Eric"):
+            with self.assertRaises(ValueError) as caught:
+                knowledge_graphql.MutKnowledge().add_fact("Retention is 30 days.", "docs")
+        self.assertEqual(str(caught.exception), "That claim is already on the ledger.")
+        audit.assert_not_called()
+
+    def test_add_fact_resolver_audits_a_real_addition(self):
+        from mari_server.knowledge import graphql as knowledge_graphql
+        with patch.object(knowledge_graphql.knowledge_store, "add_fact", return_value=True) as add, \
+             patch.object(knowledge_graphql, "audit") as audit, \
+             patch.object(knowledge_graphql, "actor_name", return_value="Eric"):
+            self.assertTrue(knowledge_graphql.MutKnowledge().add_fact("Retention is 30 days.", "docs"))
+        add.assert_called_once_with("Retention is 30 days.", "docs", "Eric", None)
+        audit.assert_called_once()
+        self.assertEqual(audit.call_args.args[:2], ("added fact", "Retention is 30 days."))

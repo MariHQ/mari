@@ -180,14 +180,17 @@ def _extraction_json(prompt: str, system: str, schema: dict[str, t.Any],
         prompt, system, SCAN_CALL_TIMEOUT, schema=schema, max_tokens=max_tokens,
     )
     if value is None:
-        raise RuntimeError(llm.last_error() or "the model returned no structured output")
+        # ValueError, not RuntimeError: the text is written for the person
+        # reading the run, and the GraphQL layer shows ValueError as-is while
+        # it masks every other class as a generic failure.
+        raise ValueError(llm.last_error() or "the model returned no structured output")
     return value
 
 
-def _all_failed(kind: str, failed: int, errors: list[str]) -> RuntimeError:
+def _all_failed(kind: str, failed: int, errors: list[str]) -> ValueError:
     first = errors[0] if errors else "unknown model error"
     suffix = f"; first error: {first}"
-    return RuntimeError(
+    return ValueError(
         f"Model extraction failed for all {failed} completed {kind}{suffix}"
     )
 

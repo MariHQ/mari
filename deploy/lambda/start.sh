@@ -75,14 +75,28 @@ with psycopg.connect(os.environ["MARI_DB"]) as conn:
         if row:
             conn.execute("UPDATE users SET role = 'admin', provider = 'manual', password_hash = %s WHERE id = %s",
                          (scrypt_hash(pw), row[0]))
-            continue
-        # users.name is unique; a dump row already using this display name
-        # must not block the account (or be taken over by it).
-        if conn.execute("SELECT 1 FROM users WHERE name = %s", (name,)).fetchone():
-            name = name + " (owner)"
-        conn.execute("""INSERT INTO users (name, initials, tint, email, role, provider, password_hash)
-                        VALUES (%s, %s, 1, %s, 'admin', 'manual', %s)""",
-                     (name, initials, email, scrypt_hash(pw)))
+            user_id = row[0]
+        else:
+            # users.name is unique; a dump row already using this display name
+            # must not block the account (or be taken over by it).
+            if conn.execute("SELECT 1 FROM users WHERE name = %s", (name,)).fetchone():
+                name = name + " (owner)"
+            user_id = conn.execute(
+                """INSERT INTO users (name, initials, tint, email, role, provider, password_hash)
+                   VALUES (%s, %s, 1, %s, 'admin', 'manual', %s) RETURNING id""",
+                (name, initials, email, scrypt_hash(pw))).fetchone()[0]
+        # Authorization is the project membership, not users.role: a founder
+        # with no project_members row signs in and gets 403 on every request.
+        # The dump always ships one active project; guard anyway so a bare
+        # database still boots.
+        project = conn.execute(
+            "SELECT id FROM projects WHERE status = 'active' ORDER BY id LIMIT 1").fetchone()
+        if project:
+            conn.execute("""INSERT INTO project_members (project_id, user_id, role, status)
+                            VALUES (%s, %s, 'owner', 'active')
+                            ON CONFLICT (project_id, user_id)
+                            DO UPDATE SET role = 'owner', status = 'active'""",
+                         (project[0], user_id))
     conn.execute("UPDATE users SET password_hash = '', github_id = '', google_id = '' WHERE lower(email) != ALL(%s)",
                  (emails,))
 print(f"seeded {len(admins)} admin account(s); all other credentials blanked", flush=True)

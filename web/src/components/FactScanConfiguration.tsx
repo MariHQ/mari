@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useQuery } from "../lib/api";
 
 export type FactScanConfig = {
@@ -33,6 +33,9 @@ type ReviewStrategy = "human" | "guided" | "auto";
 
 type RequestDetail = { finish: (config: FactScanConfig | null) => void };
 const EVENT = "mari:configure-fact-scan";
+// Tab stops the dialog may land on. Disabled controls are skipped so the trap
+// never parks focus on a greyed-out adjudication field.
+const FOCUSABLE = "input:not([disabled]), select:not([disabled]), textarea:not([disabled]), button:not([disabled])";
 
 export function requestFactScanConfiguration(): Promise<FactScanConfig | null> {
   return new Promise((finish) => {
@@ -76,9 +79,18 @@ export function FactScanConfiguration() {
   const [schedule, setSchedule] = useState(60);
   const [reviewInstructions, setReviewInstructions] = useState("");
   const [publishStatus, setPublishStatus] = useState<"needs_review" | "verified">("needs_review");
+  const dialogRef = useRef<HTMLElement>(null);
+  const openerRef = useRef<HTMLElement | null>(null);
+  const backdropPressRef = useRef(false);
+  const backdropReleaseRef = useRef(false);
 
   useEffect(() => {
     const open = (event: Event) => {
+      // Captured here, inside the click that opened us, not in the effect
+      // below: the page disables the Scan button in the same commit that
+      // mounts the dialog, and a disabled button is blurred before any
+      // effect can read activeElement.
+      openerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
       const workflow = (sources.data?.workflows ?? []).find((row) =>
         (row.nodes ?? []).some((node) => node.kind === "scan_facts"));
       const fetch = (workflow?.nodes ?? []).find((node) => node.kind === "fetch_docs")?.config ?? {};
@@ -125,6 +137,62 @@ export function FactScanConfiguration() {
     return () => window.removeEventListener(EVENT, open);
   }, [sources.data]);
 
+  // aria-modal promises a modal; these keep the promise. Focus enters the
+  // first field on open, Tab cycles inside the dialog, and Escape cancels.
+  // The listener sits on the document so a click on non-focusable text inside
+  // the dialog (which focuses the section itself, tabIndex -1) does not let
+  // Tab escape. An overlay stacked above us (the command palette, a Radix
+  // layer) that already consumed the key keeps it: cancelling this dialog on
+  // a second-hand Escape would discard the form.
+  useEffect(() => {
+    if (!request) return;
+    dialogRef.current?.querySelector<HTMLElement>(FOCUSABLE)?.focus();
+    const onKeyDown = (event: KeyboardEvent) => {
+      const dialog = dialogRef.current;
+      if (!dialog || event.defaultPrevented) return;
+      if (event.key === "Escape") {
+        event.preventDefault();
+        request.finish(null);
+        setRequest(null);
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const stops = Array.from(dialog.querySelectorAll<HTMLElement>(FOCUSABLE));
+      if (stops.length === 0) return;
+      const first = stops[0];
+      const last = stops[stops.length - 1];
+      const active = document.activeElement;
+      // The section is a focus target but not a tab stop, so focus on it
+      // wraps the same way focus outside the dialog does; otherwise Shift+Tab
+      // from the section walks to the previous tabbable behind the modal.
+      const inside = active instanceof HTMLElement && active !== dialog && dialog.contains(active);
+      if (!inside || active === (event.shiftKey ? first : last)) {
+        event.preventDefault();
+        (event.shiftKey ? last : first).focus();
+      }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown);
+      // Every way out (Escape, Cancel, Save, backdrop) lands here. Hand focus
+      // back to whatever opened the dialog, so a keyboard user is not dropped
+      // at the top of the page. Deferred a frame so the page has settled.
+      // After Save the Scan button stays disabled for the whole run, and
+      // focus() on a disabled control is a silent no-op that leaves focus on
+      // body; park it on the main landmark instead.
+      const opener = openerRef.current;
+      openerRef.current = null;
+      if (!opener) return;
+      window.requestAnimationFrame(() => {
+        if (opener.isConnected && !opener.matches(":disabled")) {
+          opener.focus();
+          return;
+        }
+        document.getElementById("main-content")?.focus();
+      });
+    };
+  }, [request]);
+
   if (!request) return null;
   const close = (value: FactScanConfig | null) => {
     request.finish(value);
@@ -133,11 +201,27 @@ export function FactScanConfiguration() {
   const rows = sources.data?.sourcePulse ?? [];
 
   return (
-    <div className="fixed inset-0 z-[100] grid place-items-center bg-ink/30 p-4" role="presentation">
+    <div
+      className="fixed inset-0 z-[100] grid place-items-center bg-ink/30 p-4"
+      role="presentation"
+      // A click that both starts and ends on the backdrop cancels. Tracking
+      // the press and the release keeps a drag that crosses the dialog edge in
+      // either direction from closing it: the browser dispatches click to the
+      // common ancestor, which is the backdrop itself.
+      onMouseDown={(event) => { backdropPressRef.current = event.target === event.currentTarget; }}
+      onMouseUp={(event) => { backdropReleaseRef.current = event.target === event.currentTarget; }}
+      onClick={(event) => {
+        if (backdropPressRef.current && backdropReleaseRef.current && event.target === event.currentTarget) close(null);
+        backdropPressRef.current = false;
+        backdropReleaseRef.current = false;
+      }}
+    >
       <section
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-labelledby="fact-scan-title"
+        tabIndex={-1}
         className="max-h-[calc(100vh-2rem)] w-full max-w-[620px] overflow-y-auto rounded-md border border-ink/15 bg-paper p-5 shadow-xl"
       >
         <div className="mb-5">

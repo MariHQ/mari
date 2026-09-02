@@ -8,6 +8,7 @@ import typing as t
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import PlainTextResponse
+from psycopg_pool import PoolTimeout
 
 from mari_server import settings as config
 from mari_server.operations import telemetry
@@ -28,6 +29,13 @@ def readyz(request: Request) -> dict[str, t.Any]:
         raise HTTPException(503, "Application startup is not complete.")
     try:
         system.ready()
+    except PoolTimeout as error:
+        # Every pooled connection is busy serving requests. The database is
+        # not down, so say so: the fix is capacity, not a restart.
+        logging.getLogger("mari.health").warning(
+            "database readiness check timed out waiting for a pooled connection",
+        )
+        raise HTTPException(503, "Database connection pool is saturated.") from error
     except Exception as error:
         logging.getLogger("mari.health").warning(
             "database readiness check failed", exc_info=error,

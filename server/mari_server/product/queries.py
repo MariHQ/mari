@@ -566,13 +566,14 @@ class Query:
             return [days.get(today - dt.timedelta(days=11 - i), 0) for i in range(12)]
 
         def safe_config(r: dict) -> dict:
-            """Never leak connector credentials: secret field values are masked
-            and bulky internal hash maps dropped (CONNECTORS-CONTRACT.md)."""
+            """Never leak credentials: secret field values are masked and bulky
+            internal hash maps dropped (CONNECTORS-CONTRACT.md). Every kind goes
+            through the same mask, not only connectors: a legacy row the retired
+            connectSource mutation wrote (kind "") can hold the token it was
+            given, and sourcePulse is read by every member of the project."""
             from mari_server.persistence.postgres import connector_sync
             cfg = jload(r["config"]) or {}
-            if r.get("kind") == "connector":
-                return connector_sync.masked_config(r["provider"], cfg)
-            return {k: v for k, v in cfg.items() if k != "shas"}
+            return connector_sync.masked_config(r["provider"], cfg)
 
         # A source's automatic cadence is not a column on `sources`: it is the
         # trigger of the "Sync <name>" flow flowengine.ensure_sync_flow creates

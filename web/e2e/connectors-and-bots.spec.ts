@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { installMockApi, type MockApi } from "./fixtures/mock-api";
+import { installMockApi, NOT_A_CONNECTOR, type MockApi } from "./fixtures/mock-api";
 
 let api: MockApi;
 test.beforeEach(async ({ page }) => {
@@ -113,6 +113,39 @@ test("removing a source deletes its documents by default", async ({ page }) => {
   await dialog.getByRole("button", { name: "Remove source" }).click();
   await expect.poll(() => api.calls.some((call) => call.query.includes("removeSource")
     && call.variables.deleteDocuments === true)).toBeTruthy();
+});
+
+test("an orphan legacy source can be removed from its card", async ({ page }) => {
+  // A row the retired connectSource mutation wrote: no kind, no documents,
+  // no sync. It used to render without a Remove action and could not leave.
+  await openSources(page);
+  const card = page.getByRole("button", { name: "Actions for Confluence (old)" });
+  await card.click();
+  // The real orphan card: its provider is a catalog key, so the menu carries
+  // the Edit entry the server refuses, not a stripped-down card the console
+  // never draws.
+  await expect(page.getByRole("menuitem", { name: "Edit connection" })).toBeVisible();
+  await page.getByRole("menuitem", { name: "Remove…" }).click();
+  const dialog = page.getByRole("dialog", { name: "Remove source" });
+  await dialog.getByRole("button", { name: "Remove source" }).click();
+  await expect.poll(() => api.calls.some((call) => call.query.includes("removeSource")
+    && call.variables.id === 4)).toBeTruthy();
+  // Removed for real: the card is gone once the page re-reads its sources.
+  await expect(dialog).toHaveCount(0);
+  await expect(card).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Actions for Confluence — ENG" })).toBeVisible();
+});
+
+test("an orphan legacy source shows the server's refusal instead of a fake sync", async ({ page }) => {
+  // Every other menu entry on the orphan is refused server-side; the card
+  // shows those words rather than a progress bar for a sync that never ran.
+  await openSources(page);
+  await page.getByRole("button", { name: "Actions for Confluence (old)" }).click();
+  await page.getByRole("menuitem", { name: "Full resync" }).click();
+  await expect.poll(() => api.calls.some((call) => call.query.includes("resyncSource")
+    && call.variables.id === 4)).toBeTruthy();
+  await expect(page.getByText(NOT_A_CONNECTOR, { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Actions for Confluence (old)" })).toBeVisible();
 });
 
 test("Sources exposes connector ingestion without a Bots tab", async ({ page }) => {

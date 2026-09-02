@@ -274,7 +274,11 @@ class MutKnowledge:
         if doc_id and not knowledge_store.document_exists(doc_id):
             raise ValueError(f"No document {doc_id} to attribute this claim to")
         owner = owner.strip() or actor_name()
-        knowledge_store.add_fact(claim, source, owner, doc_id)
+        # The store answers False when the claim (under any casing) is already
+        # on the ledger. Nothing was written, so nothing is audited, and the
+        # console gets told rather than a silent True.
+        if not knowledge_store.add_fact(claim, source, owner, doc_id):
+            raise ValueError("That claim is already on the ledger.")
         audit("added fact", claim, detail=[("Owner", owner), ("Source", source)])
         return True
 

@@ -205,13 +205,18 @@ def _step_sync_source(cfg: dict, ctx: dict) -> tuple[str, str, dict]:
         return "skipped", f"{name}: a sync is already running", {}
     if stats.get("error"):
         return "failed", f"{name}: {stats['error']}"[:140], {}
-    if full:
-        # Recorded only after the pass returned without error, so a failed
-        # full sync is retried on the next tick rather than in a day.
+    # Recorded only when the pass really finished its snapshot. A throttled
+    # or otherwise incomplete full pass returns without an error key, and
+    # recording it made the next 24h of polls incremental against a
+    # reconcile that never happened; left alone, the next tick resumes the
+    # pending snapshot from its checkpoint instead of restarting from zero.
+    reconciled = full and bool(stats.get("snapshot_complete"))
+    if reconciled:
         workflow_store.record_full_sync(source_id)
     detail = (f"{name}: {stats['files_changed']} files · {stats['items_changed']} items changed · "
               f"{stats['embedded']} chunks embedded · {stats['skipped']} unchanged"
-              + (" · full reconcile" if full else ""))
+              + (" · full reconcile" if reconciled else
+                 " · full reconcile incomplete (resumes next run)" if full else ""))
     return "passed", detail, {"files_changed": stats["files_changed"],
                               "items_changed": stats["items_changed"], "embedded": stats["embedded"]}
 
@@ -450,12 +455,21 @@ def _run_step(kind: str, impl: t.Callable | None, cfg: dict, ctx: dict) -> tuple
     )
 
 
+class RunSwept(RuntimeError):
+    """The run's row is no longer live: fail_stale_runs flipped it to
+    'failed' (or it already finished) while this runner was still going.
+    Raised by _persist so the runner stops instead of writing status =
+    'running' back over the sweep next to the replacement run the scheduler
+    has since started."""
+
+
 def _persist(run_id: int, rows: list[dict], status: str, progress: int, stats: dict, start: float) -> None:
     # Also the run's heartbeat: save_run_progress stamps heartbeat_at.
-    workflow_store.save_run_progress(
+    if not workflow_store.save_run_progress(
         run_id, rows=rows, status=status, progress=progress,
         stats=stats, duration=_elapsed(start),
-    )
+    ):
+        raise RunSwept(f"run #{run_id} is no longer live; stopping")
 
 
 # ————— run lease —————
@@ -505,6 +519,11 @@ def execute_run(run_id: int, resume_from: int = 0) -> None:
     keep_alive = _keep_alive(run_id, access.current_access())
     try:
         _execute_steps(run_id, resume_from, loaded)
+    except RunSwept:
+        # The sweep already recorded the failure and its note; a mid-step
+        # reporter swallows this (progress.report), so the run stops at the
+        # next step boundary and writes nothing more.
+        return
     finally:
         keep_alive.set()
 
@@ -596,12 +615,56 @@ def _public_stats(ctx: dict) -> dict:
 FLOW_WORKERS = max(1, int(config.get("runtime", "flow_workers", 4)))
 _run_pool = cf.ThreadPoolExecutor(max_workers=FLOW_WORKERS, thread_name_prefix="mari-flow")
 
+# A run queued behind a busy pool is alive, but nothing beats for it: its
+# heartbeat is whatever the insert (or approveRun) stamped, and a queue wait
+# longer than RUN_STALE_AFTER_SECONDS had the sweep fail it, the scheduler
+# start a replacement, and the original resurrect when a worker finally ran
+# it. One ticker thread beats for every queued run until its worker starts
+# and execute_run's own ticker takes over; it exits when the queue drains.
+_QUEUED: dict[int, access.AccessContext] = {}
+_QUEUE_LOCK = threading.Lock()
+_QUEUE_TICKER: dict[str, t.Any] = {"thread": None, "stop": threading.Event()}
+
+
+def _queue_tick() -> None:
+    while not _QUEUE_TICKER["stop"].wait(HEARTBEAT_SECONDS):
+        with _QUEUE_LOCK:
+            queued = list(_QUEUED.items())
+            if not queued:
+                _QUEUE_TICKER["thread"] = None
+                return
+        for run_id, project_access in queued:
+            try:
+                with access.use_access(project_access):
+                    workflow_store.touch_run_heartbeat(run_id)
+            except Exception:  # noqa: BLE001 — a missed beat is not a failed run
+                pass
+    with _QUEUE_LOCK:
+        _QUEUE_TICKER["thread"] = None
+
+
+def _enqueue(run_id: int, project_access: access.AccessContext) -> None:
+    with _QUEUE_LOCK:
+        _QUEUED[run_id] = project_access
+        if _QUEUE_TICKER["thread"] is None:
+            _QUEUE_TICKER["stop"].clear()
+            thread = threading.Thread(target=_queue_tick, daemon=True,
+                                      name="mari-flow-queue-heartbeat")
+            _QUEUE_TICKER["thread"] = thread
+            thread.start()
+
+
+def _dequeue(run_id: int) -> None:
+    with _QUEUE_LOCK:
+        _QUEUED.pop(run_id, None)
+
 
 def _guarded_run(run_id: int, resume_from: int, project_access: access.AccessContext) -> None:
     """execute_run, with a last-resort failure record. A run whose execution
     raised before it could persist anything would otherwise sit at 'running'
     until the next restart reconciled it — a run that says it is still going
     when nothing is going is the worst of the three possible states."""
+    _dequeue(run_id)
     try:
         with access.use_access(project_access):
             execute_run(run_id, resume_from)
@@ -628,6 +691,7 @@ def start_run(run_id: int, resume_from: int = 0) -> None:
             "automation", str(run_id),
             frozenset({"knowledge.read", "knowledge.write", "automation.run", "source.sync"}),
         )
+    _enqueue(run_id, project_access)
     _run_pool.submit(_guarded_run, run_id, resume_from, project_access)
 
 

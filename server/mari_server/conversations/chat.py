@@ -21,6 +21,13 @@ from mari_server.conversations.workflows import select as select_workflow
 from mari_server.conversations.workflows import cached_response as workflow_cached_response
 
 
+# The library's own words for a turn that produced no answer
+# (mari_components.destinations.chat.stream_answer). The library says them
+# when the model sent nothing at all; the server says them again when the
+# model sent nothing but whitespace, so both turns read and persist the same.
+MODEL_UNAVAILABLE = "The configured language model is unavailable. Check model settings and try again."
+
+
 def live_destination(project_slug: str, destination_slug: str):
     return chat_store.live_destination(project_slug, destination_slug)
 
@@ -173,15 +180,24 @@ def ports(project_access: access.AccessContext, usage_detail: str,
         messages[-1]["content"] = f"Context:\n{context}\n\nQuestion: {retrieval_question}"
         return ChatContext(session_ref, sources, messages)
 
+    def _persist(session_id: int | str, answer: str, sources) -> None:
+        # History must match what the reader saw: the cleaned answer, and only
+        # the sources it cites. A "could not find" answer stores none, so the
+        # transcript never shows four unrelated pages under it. A blank answer
+        # stores the warning the reader was shown, and a warning cites nothing.
+        text = citations.clean_answer(answer) or MODEL_UNAVAILABLE
+        cited = [] if text == MODEL_UNAVAILABLE else citations.cited(text, sources)
+        chat_store.add_message(
+            project_id, session_row(session_id), "assistant", text, json.dumps(cited),
+        )
+
     return ChatPorts(
         prepare=prepare,
         generate=lambda messages: llm.chat_stream(
             [dict(row) for row in messages],
             system + workflow_guidance(selected_state["workflow"]),
         ),
-        persist=lambda session_id, answer, sources: chat_store.add_message(
-            project_id, session_row(session_id), "assistant", answer, json.dumps(list(sources)),
-        ),
+        persist=_persist,
         record_usage=lambda: log_usage("chat_answer", usage_detail),
         observe=lambda session_id, message, sources, approved: trajectory_store.harvest(
             session_row(session_id), message, [{

@@ -291,8 +291,16 @@ def fix_finding(finding_id: int, actor: str, member_name: str = "") -> str:
                              (project_id, f"repo-{stem}", title, text[:180].replace("\n", " "), text))
                 summary = f"indexed {stem}.md"
         elif action == "apply_tag":
-            conn.execute("INSERT INTO tags (document_id, tag) VALUES (%s, %s) ON CONFLICT DO NOTHING",
-                         (payload["doc_id"], payload["tag"]))
+            # Every tag reader filters on tags.project_id, so a row written
+            # without it is invisible. Only tag a document this project owns,
+            # and leave the finding open when it does not.
+            document = conn.execute("SELECT id FROM documents WHERE id = %s AND project_id = %s",
+                                    (payload["doc_id"], project_id)).fetchone()
+            if not document:
+                return "that document is not in this project"
+            conn.execute("""INSERT INTO tags (project_id, document_id, tag) VALUES (%s, %s, %s)
+                            ON CONFLICT DO NOTHING""",
+                         (project_id, document["id"], payload["tag"]))
             summary = f"tagged '{payload['tag']}'"
         elif action == "link_translation":
             stem, lang = payload["stem"], payload["lang"]

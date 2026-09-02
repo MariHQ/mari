@@ -120,19 +120,49 @@ class KeywordPredicateTests(unittest.TestCase):
             return Result({"n": 0}, [])
         return FakeConn(handler)
 
-    def test_search_text_ors_the_scoring_vocabulary(self):
+    def test_search_text_ors_the_scoring_vocabulary_as_prefixes(self):
+        # Each term carries the prefix operator so "auth" still admits
+        # "authentication" and "k8s" still admits "k8s-migration", the
+        # substring hits the ILIKE needles used to give.
         self.assertEqual(search_repository.search_text("How long are customer records retained?"),
-                         "long OR customer OR records OR retained")
-        self.assertEqual(search_repository.search_text("AI"), "AI")
+                         "long:* | customer:* | records:* | retained:*")
+        self.assertEqual(search_repository.search_text("AI"), "AI:*")
+
+    def test_prefix_tsquery_strips_what_to_tsquery_would_choke_on(self):
+        build = search_repository.prefix_tsquery
+        # Hyphens and underscores are parser-safe (checked on Postgres 16).
+        self.assertEqual(build(["k8s-migration"]), "k8s-migration:*")
+        self.assertEqual(build(["snake_case"]), "snake_case:*")
+        # Quotes, operators, parentheses and colons are dropped, not escaped.
+        self.assertEqual(build(["foo'bar"]), "foobar:*")
+        self.assertEqual(build(["a & b", "(c)", "d:*", "e|f"]), "ab:* | c:* | d:* | ef:*")
+        # A term with nothing left after cleaning disappears; so do repeats
+        # and a leading hyphen that would put punctuation first.
+        self.assertEqual(build(["!!", "''", "--foo", "foo"]), "foo:*")
+        self.assertEqual(build([]), "")
+
+    def test_search_text_with_no_usable_token_is_empty_and_skips_the_parser(self):
+        self.assertEqual(search_repository.search_text("!!! ???"), "")
+        # One-letter tokens never become prefixes: "a:*" would admit most of
+        # the corpus. Such a query keeps the literal-substring path.
+        self.assertEqual(search_repository.search_text("a & b"), "")
+        conn = self.conn(usable=True)
+        with patch.object(search_repository.db, "connect", return_value=conn):
+            search_repository.keyword_candidates(7, "!!! ???", 10)
+        self.assertEqual(len(conn.calls), 1)
+        sql, args = conn.calls[-1]
+        self.assertIn("d.body ILIKE needle", sql)
+        self.assertEqual(args, (7, ["%!!! ???%"], 10))
 
     def test_candidates_come_from_the_tsvector_index(self):
         conn = self.conn(usable=True)
         with patch.object(search_repository.db, "connect", return_value=conn):
             search_repository.keyword_candidates(7, "How long are customer records retained?", 10)
         sql, args = conn.calls[-1]
-        self.assertIn("d.search_vec @@ websearch_to_tsquery('english', %s)", sql)
+        self.assertIn("d.search_vec @@ to_tsquery('english', %s)", sql)
+        self.assertNotIn("websearch_to_tsquery", sql)
         self.assertNotIn("ILIKE", sql)
-        self.assertEqual(args, (7, "long OR customer OR records OR retained", 10))
+        self.assertEqual(args, (7, "long:* | customer:* | records:* | retained:*", 10))
 
     def test_text_the_parser_reduces_to_nothing_falls_back_to_ilike(self):
         conn = self.conn(usable=False)
@@ -149,8 +179,8 @@ class KeywordPredicateTests(unittest.TestCase):
             search_repository.document_count(7, "deploy")
             search_repository.document_count(7, None)
         filtered, unfiltered = conn.calls[1], conn.calls[2]
-        self.assertIn("d.search_vec @@ websearch_to_tsquery('english', %s)", filtered[0])
-        self.assertEqual(filtered[1], (7, "deploy"))
+        self.assertIn("d.search_vec @@ to_tsquery('english', %s)", filtered[0])
+        self.assertEqual(filtered[1], (7, "deploy:*"))
         self.assertNotIn("search_vec", unfiltered[0])
         self.assertEqual(unfiltered[1], (7,))
         self.assertEqual(len(conn.calls), 3)
