@@ -1,10 +1,25 @@
 # Kubernetes deployment runbook
 
-The Helm chart in `deploy/helm/mari` is the v0.1.1 deployment path. It starts
+The Helm chart in `deploy/helm/mari` is the Kubernetes deployment path. It starts
 PostgreSQL/pgvector, one API, exactly one web pod, and persistent volumes for
 the database and application data. Never commit a populated Secret; the exact
 required keys and install commands are in the chart README. Helm is the single
 deployment source; generated manifests must not be edited or committed.
+
+## Publishing releases
+
+A release tag must be `vMAJOR.MINOR.PATCH`, and its version without the leading
+`v` must match both `version` and `appVersion` in the chart's `Chart.yaml`.
+Pushing the tag runs `.github/workflows/helm-release.yml`, which lints, renders,
+and packages the chart, pushes it to
+`oci://ghcr.io/marihq/charts/mari`, and attaches the `.tgz` and SHA-256 checksum
+to the tag's GitHub Release. A metadata mismatch fails before anything is
+published; both default image tags must match as well. Validate the chart
+locally with `make test-helm` before tagging. After the first OCI publication,
+an organization package administrator must make `charts/mari` public so
+customers can install it anonymously. GHCR creates new packages private by
+default; the chart attached to the public GitHub Release remains available in
+the meantime.
 
 ## Publishing images
 
