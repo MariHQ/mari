@@ -4,6 +4,17 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- iOS Safari zooms the page to 16px/font-size when a text field under
+         16px gets focus (ours are 11 to 13.5px) and never zooms back out, so
+         one search on a phone left the console 1.23x wide, header clipped on
+         both sides. maximum-scale=1 stops that focus zoom; iOS still lets the
+         user pinch-zoom regardless. Android Chrome would honour it and block
+         pinching, so it is set only on iOS. -->
+    <script>
+      if (/iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1)) {
+        document.querySelector('meta[name="viewport"]').setAttribute("content", "width=device-width, initial-scale=1.0, maximum-scale=1.0");
+      }
+    </script>
     <title>Mari</title>
     <!-- The two brand faces, so the first paint is already in them. -->
     <link rel="preload" href="/fonts/inter-latin.woff2" as="font" type="font/woff2" crossorigin />
