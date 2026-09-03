@@ -240,13 +240,17 @@ function Routed() {
 }
 
 /** Move keyboard/screen-reader context after an SPA page navigation. Skip the
- * first render so a direct load keeps the browser's normal starting point. */
+ * first render so a direct load keeps the browser's normal starting point.
+ * preventScroll: on iOS Safari the shell is taller than the visible viewport
+ * while the toolbars are showing, and a scrolling focus on <main> pushed the
+ * header (and its menu button) off the top of the screen on every
+ * navigation, the sign-in redirect included. */
 function RouteFocus() {
   const { pathname } = useLocation();
   const first = useRef(true);
   useEffect(() => {
     if (first.current) { first.current = false; return; }
-    const frame = requestAnimationFrame(() => document.getElementById("main-content")?.focus());
+    const frame = requestAnimationFrame(() => document.getElementById("main-content")?.focus({ preventScroll: true }));
     return () => cancelAnimationFrame(frame);
   }, [pathname]);
   return null;

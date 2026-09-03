@@ -191,7 +191,7 @@ export function FactScanConfiguration() {
           opener.focus();
           return;
         }
-        document.getElementById("main-content")?.focus();
+        document.getElementById("main-content")?.focus({ preventScroll: true });
       });
     };
   }, [request]);
