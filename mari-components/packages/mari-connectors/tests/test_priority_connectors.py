@@ -401,13 +401,83 @@ class PriorityConnectorTests(unittest.TestCase):
         api = FakeHttp([
             {"ok": True, "members": [{"id": "U1", "name": "Mari"}]},
             {"ok": True, "channels": [{"id": "C1", "name": "product", "is_member": True}]},
-            {"ok": True, "messages": [{
-                "type": "message", "ts": "2.0", "user": "U1", "text": "An answer copied from docs",
-                "bot_id": "B1", "app_id": "A1",
-            }]},
+            {"ok": True, "messages": [
+                {"type": "message", "ts": "2.0", "user": "U1", "text": "An answer copied from docs",
+                 "bot_id": "B1", "app_id": "A1"},
+                {"type": "message", "ts": "3.0", "user": "U1", "text": "Roadmap"},
+            ]},
         ])
         page = list(poll_slack(SlackConfig("xoxb-token"), PollRequest(), http=api))[0]
+        self.assertEqual([document.external_id for document in page.upserts], ["thread:C1:3.0"])
+        self.assertEqual(page.provider_metadata["messages_read"], 2)
+        self.assertEqual(page.provider_metadata["skipped"], {"app": 1, "system": 0, "empty": 0})
+        self.assertEqual(page.provider_metadata["summary"],
+                         "Slack: 2 messages read in 1 channel, 1 documents; skipped 1 from apps or bots")
+
+    def test_slack_first_sweep_that_indexes_nothing_says_what_it_saw(self):
+        # Two private channels the app can read, every message posted by an
+        # integration: the sweep used to end healthy at zero documents.
+        api = FakeHttp([
+            {"ok": True, "members": [{"id": "U1", "name": "Dana"}]},
+            {"ok": True, "channels": [
+                {"id": "G1", "name": "ops-alerts", "is_member": True},
+                {"id": "G2", "name": "deploys", "is_member": True},
+            ]},
+            {"ok": True, "messages": [
+                {"type": "message", "ts": "2.0", "text": "Deploy finished", "bot_id": "B1"},
+                {"type": "message", "ts": "3.0", "user": "U1", "subtype": "channel_join", "text": "joined"},
+            ]},
+            {"ok": True, "messages": [
+                {"type": "message", "ts": "4.0", "text": "Alert", "subtype": "bot_message"},
+                {"type": "message", "ts": "5.0", "user": "U1", "text": "", "files": [{"id": "F1"}]},
+            ]},
+        ])
+        with self.assertRaises(PermanentFailure) as caught:
+            list(poll_slack(
+                SlackConfig("xoxb-token", channels=("ops-alerts", "deploys")),
+                PollRequest(), http=api,
+            ))
+        self.assertEqual(
+            str(caught.exception),
+            "Slack returned 4 messages in ops-alerts, deploys but none were indexable: "
+            "2 from apps or bots, 1 system notices, 1 without text. Mari only indexes what people post.",
+        )
+
+    def test_slack_first_sweep_over_empty_channels_names_them(self):
+        api = FakeHttp([
+            {"ok": True, "members": []},
+            {"ok": True, "channels": [{"id": "G1", "name": "new-private", "is_member": True}]},
+            {"ok": True, "messages": []},
+        ])
+        with self.assertRaisesRegex(
+            PermanentFailure,
+            r"^Slack returned no messages in new-private\. The app can read it, but there is no "
+            r"history to index yet\. Check that this is the channel list you meant\.$",
+        ):
+            list(poll_slack(SlackConfig("xoxb-token", channels=("new-private",)),
+                            PollRequest(), http=api))
+
+    def test_slack_empty_sweep_message_fits_the_card_budget(self):
+        from mari_components.connectors.slack import _empty_sweep_message
+        import collections
+        channels = [{"id": f"G{i}", "name": "a-thirty-character-channel-nam"} for i in range(12)]
+        seen = collections.Counter(read=99999, app=33333, system=22222, empty=11111)
+        message = _empty_sweep_message(channels, seen)
+        self.assertLess(len(message), 300)
+        self.assertIn("and 10 more", message)
+        self.assertIn("33333 in threads with no document", message)
+
+    def test_slack_incremental_sweep_with_nothing_new_stays_quiet(self):
+        api = FakeHttp([
+            {"ok": True, "members": []},
+            {"ok": True, "channels": [{"id": "C1", "name": "product", "is_member": True}]},
+            {"ok": True, "messages": []},
+        ])
+        page = list(poll_slack(SlackConfig("xoxb-token"), PollRequest(cursor="2.000000"), http=api))[0]
         self.assertEqual(page.upserts, ())
+        self.assertEqual(page.next_cursor, "2.000000")
+        self.assertEqual(page.provider_metadata["summary"],
+                         "Slack: no new messages in 1 channel since the last sync")
 
     def test_slack_configured_private_channel_must_be_visible_to_the_bot(self):
         api = FakeHttp([

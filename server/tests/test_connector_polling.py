@@ -584,6 +584,22 @@ class SyncSourceEndingTests(unittest.TestCase):
         self.assertEqual(status.call_args.kwargs["state"], "idle")
         self.assertEqual(status.call_args.kwargs["phase"], "throttled")
 
+    def test_the_connectors_summary_lands_in_the_sync_log(self) -> None:
+        from mari_components import PollPage
+
+        def poll_pages(*_args, **_kwargs):
+            yield PollPage(next_cursor="cur-2", snapshot_complete=True, provider_metadata={
+                "summary": "Slack: 40 messages read in 2 channels, 0 documents; skipped 40 from apps or bots",
+            })
+
+        conn = _FakeSyncConn(status="active", source=self.SRC)
+        result, _, _, _ = self._run(conn, poll_pages)
+        self.assertNotIn("error", result)
+        event = next(args for sql, args in conn.executed
+                     if sql.startswith("INSERT INTO sync_events") and args[2] == "sync: Confluence")
+        self.assertTrue(event[3].endswith(
+            " · Slack: 40 messages read in 2 channels, 0 documents; skipped 40 from apps or bots"))
+
     def test_a_source_paused_before_the_sweep_is_left_alone(self) -> None:
         conn = _FakeSyncConn(status="paused", source={**self.SRC, "status": "paused"})
         result, status, _, polls = self._run(conn, lambda *a, **k: iter(()))
@@ -607,6 +623,49 @@ class SyncSourceEndingTests(unittest.TestCase):
         checkpoint = next(args for sql, args in conn.executed if sql.startswith("INSERT INTO ingest_checkpoints"))
         self.assertEqual(checkpoint[-1], "paused")
         self.assertEqual(status.call_args.kwargs["state"], "idle")
+
+
+class RecordFailureTests(unittest.TestCase):
+    """A crash that escapes sync_source used to reach only the in-memory
+    status registry; the Sources page reads the row."""
+
+    SRC = {"id": 42, "project_id": 7, "provider": "slack", "display_name": "Slack"}
+
+    def test_the_row_and_the_sync_log_carry_the_failure(self) -> None:
+        conn = _FakeSyncConn(status="active", source=self.SRC)
+        with patch.object(connect_sync.document_index, "connection", return_value=conn):
+            connect_sync.record_failure(42, "Connector crashed (KeyError)")
+        health = next(args for sql, args in conn.executed
+                      if sql.startswith("UPDATE sources SET config = config || jsonb_build_object('last_error'"))
+        self.assertEqual(health, ("Connector crashed (KeyError)", 42))
+        event = next(args for sql, args in conn.executed if sql.startswith("INSERT INTO sync_events"))
+        self.assertEqual(event[:4], (7, "slack", "sync failed: slack", "Connector crashed (KeyError)"))
+
+    def test_a_removed_row_is_left_alone(self) -> None:
+        conn = _FakeSyncConn(status=None)
+        with patch.object(connect_sync.document_index, "connection", return_value=conn):
+            connect_sync.record_failure(42, "gone")
+        self.assertFalse(any(sql.startswith(("UPDATE", "INSERT")) for sql, _ in conn.executed))
+
+    def test_run_guarded_records_what_escapes_the_worker(self) -> None:
+        from mari_server.identity import access
+        from mari_server.sources import sync as ingest
+
+        context = access.AccessContext(
+            user_id=1, project_id=7, project_slug="acme", project_name="Acme",
+            role="admin", capabilities=access.CAPABILITIES)
+        with ingest._LOCK:
+            ingest._RUNNING.add(4)
+        try:
+            with patch.object(ingest, "_worker_for", side_effect=RuntimeError("source is not a connector")), \
+                 patch.object(connect_sync, "record_failure") as record:
+                result = ingest._run_guarded(4, False, project_access=context)
+        finally:
+            access.set_access(None)
+        self.assertEqual(result, {"error": "source is not a connector"})
+        record.assert_called_once_with(4, "source is not a connector")
+        self.assertFalse(ingest.is_running(4))
+        self.assertEqual(ingest.status(4)["state"], "error")
 
 
 class _FakeSyncConn:
@@ -635,6 +694,8 @@ class _FakeSyncConn:
         self.executed.append((normalized, args))
         result = unittest.mock.Mock()
         if normalized.startswith("SELECT * FROM sources"):
+            result.fetchone.return_value = self.source
+        elif normalized.startswith("SELECT project_id, provider FROM sources"):
             result.fetchone.return_value = self.source
         elif normalized.startswith("SELECT status FROM sources"):
             result.fetchone.return_value = {"status": self.status} if self.status else None

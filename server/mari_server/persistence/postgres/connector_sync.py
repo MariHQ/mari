@@ -221,6 +221,34 @@ def merge_config(conn, source_id: int, updates: dict, *, hashes: dict | None = N
     )
 
 
+def record_failure(source_id: int, message: str) -> None:
+    """Land a sync that died outside the worker in the same truthful state
+    the worker's own error path writes: `last_error` on the row, health
+    'Error', and a sync_events line.
+
+    ingest._run_guarded catches whatever escapes sync_source (a dispatch
+    error, a crash before the worker's own handler is armed) and used to
+    record it only in the in-memory status registry. The Sources page reads
+    the row, not the registry, so the card stayed Healthy over a sync that
+    never ran. No access context is required: the caller may have lost it
+    with the crash, and the project comes from the row itself.
+    """
+    with document_index.connection() as conn:
+        row = conn.execute("SELECT project_id, provider FROM sources WHERE id = %s",
+                           (source_id,)).fetchone()
+        if not row:
+            return
+        conn.execute(
+            """UPDATE sources SET config = config || jsonb_build_object('last_error', %s::text),
+                 health = 'Error' WHERE id = %s""",
+            (message[:300], source_id))
+        conn.execute(
+            """INSERT INTO sync_events (project_id, provider, event, detail, at_label)
+               VALUES (%s, %s, %s, %s, to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))""",
+            (row["project_id"], row["provider"], f"sync failed: {row['provider']}", message[:300]))
+        conn.commit()
+
+
 def sync_source(source_id: int, full: bool, *, update_status, fire_document_triggers,
                 invalidate_search) -> dict:
     """Run one connector sync. Returns honest stats (plus 'error' on failure) —
@@ -283,6 +311,11 @@ def sync_source(source_id: int, full: bool, *, update_status, fire_document_trig
 
         # —— poll and apply one page at a time ——
         latest_checkpoint = stored_checkpoint
+        # What the connector said about the sweep beyond its documents: a
+        # `summary` line ("Slack: 40 messages read in 2 channels, 0
+        # documents; skipped 40 from apps or bots") is the difference between
+        # a sync log that explains an empty corpus and one that just counts.
+        provider_notes: dict = {}
 
         def provider_pages():
             # A generator that raised is closed, so a rate-limited page fetch
@@ -310,6 +343,7 @@ def sync_source(source_id: int, full: bool, *, update_status, fire_document_trig
                                        maximum_delay=RATE_LIMIT_MAX_WAIT)
                 if page is None:
                     return
+                provider_notes.update(dict(page.provider_metadata or {}))
                 yield page
 
         initials = (key[:2] or "??").upper()
@@ -475,11 +509,13 @@ def sync_source(source_id: int, full: bool, *, update_status, fire_document_trig
         if report.changed or removed:
             invalidate_search(access.require_current_access().project_id)
         durable_cursor = report.state.checkpoint or report.state.cursor or ""
+        summary = str(provider_notes.get("summary") or "").strip()
         detail = (f"{report.changed} items changed · {removed} removed · "
                   f"{report.chunks} chunks · {report.embeddings} embedded · "
                   f"{report.unchanged} unchanged (hash skip)" +
                   (" · snapshot incomplete (cursor held; absence not reconciled)"
-                   if not report.snapshot_complete else ""))
+                   if not report.snapshot_complete else "") +
+                  (f" · {summary[:300]}" if summary else ""))
         with document_index.connection() as conn:
             _event(conn, provider_col, f"sync: {display}", detail)
             conn.execute("INSERT INTO events (actor, verb, target) VALUES (%s, %s, %s)",

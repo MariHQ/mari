@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import collections
 from dataclasses import dataclass
 import datetime as dt
 import json
@@ -26,6 +27,11 @@ VALIDATE_CHANNEL_PAGE_SIZE = 1000
 # never matches while C0123ABCD does.
 CHANNEL_ID_RE = re.compile(r"^[CG][A-Z0-9]+$")
 MENTION_RE = re.compile(r"<@([A-Z0-9]+)(?:\|[^>]*)?>")
+# Rows that are provider bookkeeping rather than something a person said.
+SYSTEM_SUBTYPES = frozenset({
+    "message_deleted", "tombstone", "channel_join", "channel_leave",
+    "channel_name", "channel_purpose", "channel_topic",
+})
 LINK_RE = re.compile(r"<(https?://[^>|]+)(?:\|([^>]*))?>")
 
 
@@ -395,24 +401,78 @@ def _message_ts(message: Mapping[str, Any]) -> float:
     return max(parsed) if parsed else 0.0
 
 
+def _skip_reason(message: Mapping[str, Any]) -> str:
+    """Why one history row is not knowledge, or "" when it is.
+
+    "system" is provider bookkeeping (joins, renames, deletions). "app" is a
+    bot or app post: not human knowledge, and indexing Mari's own answers in
+    particular creates a retrieval feedback loop that can crowd the original
+    GitHub/Confluence evidence out. "empty" is a row with no text, such as a
+    file share or an attachment-only post. The poll counts each kind so a
+    sweep that indexed nothing can say what it saw instead of nothing.
+    """
+    if message.get("type", "message") != "message" or message.get("subtype") in SYSTEM_SUBTYPES:
+        return "system"
+    if message.get("subtype") == "bot_message" or message.get("bot_id") or message.get("app_id"):
+        return "app"
+    if not str(message.get("text") or "").strip():
+        return "empty"
+    return ""
+
+
+def _skipped_breakdown(seen: collections.Counter, *, unaccounted: bool = False) -> str:
+    """"12 from apps or bots, 3 system notices" for the rows a sweep read
+    and did not index. With ``unaccounted`` the rows that belong to threads
+    are named too, for a sweep where even those produced no document."""
+    parts = []
+    if seen["app"]:
+        parts.append(f"{seen['app']} from apps or bots")
+    if seen["system"]:
+        parts.append(f"{seen['system']} system notices")
+    if seen["empty"]:
+        parts.append(f"{seen['empty']} without text")
+    rest = seen["read"] - seen["app"] - seen["system"] - seen["empty"]
+    if unaccounted and rest > 0:
+        parts.append(f"{rest} in threads with no document")
+    return ", ".join(parts)
+
+
+def _empty_sweep_message(channels: list[dict], seen: collections.Counter) -> str:
+    """The failure for a full sweep that read every configured channel and
+    produced nothing to index.
+
+    A healthy card over zero documents told the admin nothing: the token
+    worked, the channels were readable, the sync said done, and the corpus
+    stayed empty with no error anywhere. Naming what the sweep saw lets the
+    admin tell an empty channel from one that only apps post in. Two channel
+    names at most, so the worst case fits the card's 300-character budget.
+    """
+    names = [str(channel.get("name") or channel.get("id") or "") for channel in channels]
+    listed = _channel_list_for_error(names, 2)
+    if not seen["read"]:
+        return (f"Slack returned no messages in {listed}. The app can read "
+                f"{'them' if len(names) > 1 else 'it'}, but there is no history to index yet. "
+                "Check that this is the channel list you meant.")
+    return (f"Slack returned {seen['read']} messages in {listed} but none were indexable: "
+            f"{_skipped_breakdown(seen, unaccounted=True)}. Mari only indexes what people post.")
+
+
+def _sweep_summary(channels: list[dict], seen: collections.Counter, documents: int,
+                   *, incremental: bool) -> str:
+    """One line for the sync log: what the sweep read and what it kept."""
+    count = len(channels)
+    unit = "channel" if count == 1 else "channels"
+    if incremental and not seen["read"]:
+        return f"Slack: no new messages in {count} {unit} since the last sync"
+    skipped = _skipped_breakdown(seen)
+    return (f"Slack: {seen['read']} messages read in {count} {unit}, {documents} documents"
+            + (f"; skipped {skipped}" if skipped else ""))
+
+
 def _thread_document(
     channel: Mapping[str, Any], messages: list[dict], users: Mapping[str, str]
 ) -> KnowledgeDocument | None:
-    readable = [
-        message
-        for message in messages
-        if message.get("type", "message") == "message"
-        # Provider/system events and bot replies are not human knowledge. In
-        # particular, indexing Mari's own answers creates a retrieval feedback
-        # loop that can crowd the original GitHub/Confluence evidence out.
-        and message.get("subtype") not in {
-            "message_deleted", "tombstone", "bot_message", "channel_join",
-            "channel_leave", "channel_name", "channel_purpose", "channel_topic",
-        }
-        and not message.get("bot_id")
-        and not message.get("app_id")
-        and str(message.get("text") or "").strip()
-    ]
+    readable = [message for message in messages if not _skip_reason(message)]
     if not readable:
         return None
     readable.sort(key=lambda message: float(message.get("ts") or 0))
@@ -502,6 +562,9 @@ def poll_slack(
     newest = previous
     documents: list[KnowledgeDocument] = []
     complete = channels_complete
+    # What the sweep read and why rows were left out, so the outcome can be
+    # explained whether or not anything was indexed.
+    seen: collections.Counter = collections.Counter()
     for channel in readable:
         rows, history_complete = _paginate(
             config.bot_token,
@@ -516,9 +579,12 @@ def poll_slack(
             collection="messages",
         )
         complete = complete and history_complete
+        seen["read"] += len(rows)
         thread_roots: set[str] = set()
         for message in rows:
             newest = max(newest, _message_ts(message))
+            if reason := _skip_reason(message):
+                seen[reason] += 1
             if message.get("thread_ts") and message.get("thread_ts") != message.get("ts"):
                 thread_roots.add(str(message["thread_ts"]))
                 continue
@@ -545,11 +611,21 @@ def poll_slack(
             if document is not None:
                 documents.append(document)
             complete = complete and thread_complete
+    if not documents and not previous and readable:
+        # A first sweep that read every configured channel and kept nothing
+        # is a failure the admin can act on, not a healthy empty source. An
+        # incremental sweep with nothing new is the normal quiet case.
+        raise PermanentFailure(_empty_sweep_message(readable, seen))
     yield PollPage(
         tuple(documents),
         next_cursor=f"{newest:.6f}" if complete and newest else request.cursor,
         snapshot_complete=complete,
         provider_metadata={
             "thread_reconciliation": "complete" if complete else "incomplete",
+            "summary": _sweep_summary(readable, seen, len(documents), incremental=bool(previous)),
+            "channels": len(readable),
+            "messages_read": seen["read"],
+            "documents": len(documents),
+            "skipped": {"app": seen["app"], "system": seen["system"], "empty": seen["empty"]},
         },
     )
