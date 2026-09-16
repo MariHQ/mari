@@ -1,9 +1,10 @@
-/* Settings → Models actions — the embedding model and the LLM provider.
+/* Settings → Models actions — the embedding model, the LLM provider, and the
+ * gateway that can serve either.
  *
- * Both live in `settings` rows the ingest pipeline reads at runtime, and
- * `updateSetting` replaces a row WHOLE, so each save reads the row back and
- * merges. Writing only the fields the form knows about would drop `options`
- * (the dropdown's own contents) and every key beside it.
+ * All of them live in `settings` rows the ingest pipeline reads at runtime,
+ * and `updateSetting` replaces a row WHOLE, so each save reads the row back
+ * and merges. Writing only the fields the form knows about would drop
+ * `options` (the dropdown's own contents) and every key beside it.
  *
  * Chunking has no handler: the table names sources the way the console does,
  * not by the provider key the `chunking` row is stored under, so a save could
@@ -86,8 +87,24 @@ export function settingsModelsActions(): SettingsModelsActions {
             ...storedGateway, base_url: gateway.baseUrl.trim(), token: gateway.token,
             compatibility: gateway.compatibility,
             headers, metadata, model_header: gateway.modelHeader.trim(), max_retries: gateway.maxRetries,
+            embeddings_path: gateway.embeddingsPath.trim(),
           },
         },
+      });
+      /* An embedding model named here points the `embedding` row at the
+         gateway, exactly as the dropdown above would. The server re-indexes
+         the corpus on every write to that row, so it is only written when
+         the selection actually moves; saving a token or a header alone must
+         not cost a re-index. A blank field is "leave embeddings where they
+         are", never "clear them": the card cannot know what to fall back to. */
+      const embeddingModel = gateway.embeddingModel.trim();
+      if (!embeddingModel) return;
+      const embeddingRow = await settingRow("embedding");
+      if (embeddingRow.provider === "gateway" && embeddingRow.model === embeddingModel) return;
+      const { dims: _stale, ...rest } = embeddingRow;
+      await mutate(UPDATE_SETTING, {
+        key: "embedding",
+        value: { ...rest, provider: "gateway", model: embeddingModel },
       });
     },
     testGateway: async () => {
