@@ -11,7 +11,51 @@ import uuid
 from dataclasses import asdict, dataclass, field
 
 
-_SENSITIVE = re.compile(r"token|secret|password|authorization|cookie|api[_-]?key", re.I)
+# Key names whose values never belong in the audit store. Matched case-insensitively
+# as substrings so camelCase and dashed variants (apiKey, x-api-key) are caught too;
+# short stems that collide with ordinary words (pin, otp, cred, dsn, pat) are bounded.
+_SENSITIVE = re.compile(
+    r"passw(?:or)?d|passphrase|pwd"
+    r"|token|jwt|bearer|secret|authorization|auth(?!or)|cookie|session"
+    r"|credential|\bcreds?\b"
+    r"|api[_-]?key|(?:private|ssh|signing|encryption|access|master|client|service)[_-]?key"
+    r"|csrf|xsrf|\botp\b|totp|mfa|\bpin\b|nonce|salt|oauth"
+    r"|\bssn\b|social[_-]?security|credit[_-]?card|card[_-]?number|\bcv[cv]\b|\biban\b"
+    r"|account[_-]?number|routing[_-]?number"
+    r"|connection[_-]?string|(?:database|db)[_-]?url|\bdsn\b|webhook|[_-]pat\b",
+    re.I,
+)
+
+
+# String values that look like secrets are scrubbed whatever their key is called.
+# Each pattern is a well-known credential shape; nothing here is an entropy guess,
+# so content hashes, commit ids, and UUIDs pass through untouched.
+_SECRET_VALUES = (
+    # PEM private keys, whole block
+    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.S),
+    # JWT: three base64url segments, header always starts with eyJ
+    re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b"),
+    # HTTP auth headers; the credential must contain a digit so prose like
+    # "bearer token_expired_message" is left alone
+    re.compile(r"\b(?:bearer|basic)\s+(?=[A-Za-z0-9._~+/=-]{16,}\b)(?=[^\s]*\d)[A-Za-z0-9._~+/=-]+", re.I),
+    # vendor token prefixes
+    re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"),                                   # AWS
+    re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b|\bgithub_pat_[A-Za-z0-9_]{20,}\b"),  # GitHub
+    re.compile(r"\bxox[abpors]-[A-Za-z0-9-]{10,}\b"),                                # Slack
+    re.compile(r"https://hooks\.slack\.com/services/[A-Za-z0-9/]+"),                # Slack webhook
+    re.compile(r"\bsk-(?:ant-)?[A-Za-z0-9_-]{20,}\b"),                               # Anthropic, OpenAI
+    re.compile(r"\b[sr]k_(?:live|test)_[A-Za-z0-9]{16,}\b"),                         # Stripe
+    re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b"),                                        # Google
+)
+# user:password@ inside any URL; only the password is replaced
+_URL_CREDENTIALS = re.compile(r"(?<=://)([^/\s:@]+):([^@\s/]+)(?=@)")
+
+
+def scrub(text: str) -> str:
+    """Replace credential-shaped spans inside a string with [REDACTED]."""
+    for pattern in _SECRET_VALUES:
+        text = pattern.sub("[REDACTED]", text)
+    return _URL_CREDENTIALS.sub(r"\1:[REDACTED]", text)
 
 
 def redact(value: t.Any) -> t.Any:
@@ -20,6 +64,8 @@ def redact(value: t.Any) -> t.Any:
                 for key, item in value.items()}
     if isinstance(value, (list, tuple)):
         return [redact(item) for item in value]
+    if isinstance(value, str):
+        return scrub(value)
     return value
 
 
