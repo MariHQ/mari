@@ -75,6 +75,15 @@ def _run_guarded(source_id: int, full: bool, project_access=None) -> dict:
         message = str(error) if authored and str(error) else f"Connector crashed ({type(error).__name__})"
         update_status(source_id, state="error", phase="", error=message)
         log.exception("source sync %s crashed", source_id)
+        # The registry is what a syncStatus poll reads; the row is what the
+        # Sources page reads. A crash that reached only the registry left the
+        # card Healthy with no last error, which is how a sync that never ran
+        # looked exactly like one with nothing to do.
+        try:
+            from mari_server.persistence.postgres import connector_sync  # late: runtime imports ingest
+            connector_sync.record_failure(source_id, message)
+        except Exception:  # noqa: BLE001 — the registry already holds the error
+            log.exception("could not record the failure of source %s on its row", source_id)
         return {"error": message}
     finally:
         with _LOCK:
