@@ -36,7 +36,8 @@ class HttpEmbeddingTests(unittest.TestCase):
     def test_openai_requires_a_key_and_wrong_width_is_rejected(self) -> None:
         with patch.object(llm, "_api_key", return_value=""):
             self.assertEqual(llm._http_embeddings(["x"], "openai", "text-embedding-3-small"), [None])
-            self.assertIn("no credential", llm.last_error())
+            self.assertIn("no OpenAI API key is set", llm.last_error())
+            self.assertIn("gateway's embedding model", llm.last_error())
         with patch.object(llm, "_api_key", return_value="secret"), \
              patch.object(llm, "_post", return_value={"data": [{"index": 0, "embedding": [1.0] * 384}]}):
             self.assertEqual(llm._http_embeddings(["x"], "openai", "text-embedding-3-small"), [None])

@@ -16,9 +16,12 @@ provider/model pair in `mari.toml` or the environment; otherwise the admin-owned
 `settings.llm` / `settings.embedding` row is authoritative. A partial or
 missing selection is an error. Providers are never substituted after an error.
 
-Providers: `ollama` (over HTTP), `openai`, and `anthropic`
-(generation only — Anthropic serves no embedding endpoint). Provider API keys
-come from `settings.llm.keys`, which the console already collects and masks.
+Providers: `ollama` (over HTTP), `openai`, `anthropic` (generation only —
+Anthropic serves no embedding endpoint), and `gateway`, an OpenAI-compatible
+endpoint the deployment owns. The gateway serves generation and, when the
+admin names an embedding model for it, embeddings too, at a configurable
+route under its base URL. Provider API keys come from `settings.llm.keys`,
+which the console already collects and masks.
 
 Every call still degrades rather than raising: `embed` and `generate` return
 None when the model is unreachable, misconfigured, or refuses, and callers
@@ -70,6 +73,11 @@ OLLAMA_MIN_CONTEXT = 4096
 OLLAMA_MAX_CONTEXT = 32768
 
 OPENAI_BASE = "https://api.openai.com/v1"
+#: Where an OpenAI-compatible gateway takes embedding requests, relative to
+#: its base URL. Enterprise gateways sometimes mount the embeddings route
+#: under a different name than chat, so the path is configurable while the
+#: chat route stays fixed.
+DEFAULT_EMBEDDINGS_PATH = "/embeddings"
 ANTHROPIC_BASE = "https://api.anthropic.com/v1"
 ANTHROPIC_VERSION = "2023-06-01"
 
@@ -206,9 +214,11 @@ def gateway_config() -> dict[str, t.Any]:
         "model_header": config.get("llm_gateway", "model_header") or "",
         "max_retries": config.get("llm_gateway", "max_retries", 2),
         "compatibility": config.get("llm_gateway", "compatibility", "openai"),
+        "embeddings_path": config.get("llm_gateway", "embeddings_path") or "",
     }
     cfg.update(stored)
     cfg["base_url"] = str(cfg.get("base_url") or "").rstrip("/")
+    cfg["embeddings_path"] = _endpoint_path(cfg.get("embeddings_path"), DEFAULT_EMBEDDINGS_PATH)
     cfg["token"] = str(cfg.get("token") or _api_key("gateway") or "")
     cfg["headers"] = cfg.get("headers") if isinstance(cfg.get("headers"), dict) else {}
     cfg["metadata"] = cfg.get("metadata") if isinstance(cfg.get("metadata"), dict) else {}
@@ -218,6 +228,15 @@ def gateway_config() -> dict[str, t.Any]:
     except (TypeError, ValueError):
         cfg["max_retries"] = 2
     return cfg
+
+
+def _endpoint_path(value: t.Any, default: str) -> str:
+    """A route relative to the gateway base URL: one leading slash, no
+    trailing one, and the default when nothing was configured."""
+    path = str(value or "").strip()
+    if not path:
+        return default
+    return "/" + path.strip("/")
 
 
 def _gateway_headers(cfg: dict[str, t.Any], model: str) -> dict[str, str]:
@@ -311,6 +330,9 @@ def _gateway_config_error(cfg: dict[str, t.Any]) -> str:
         return "LLM gateway base URL must be an http(s) URL without embedded credentials"
     if cfg.get("compatibility") not in {"openai", "deepseek"}:
         return "LLM gateway compatibility must be configured as openai or deepseek"
+    path = str(cfg.get("embeddings_path") or DEFAULT_EMBEDDINGS_PATH)
+    if "://" in path or any(ch.isspace() for ch in path):
+        return "LLM gateway embeddings path must be a route under the base URL, such as /embeddings"
     return ""
 
 
@@ -507,7 +529,12 @@ def _http_embeddings(values: list[str], provider: str, model: str) -> list[list[
     gateway = gateway_config() if provider == "gateway" else None
     key = _api_key("openai") if provider == "openai" else ""
     if provider == "openai" and not key:
-        _fail("settings.embedding names the openai provider but no credential is set")
+        # The admin most often lands here after routing generation through a
+        # gateway and expecting embeddings to follow. They do not: each
+        # capability has its own selection, so say where the other one is.
+        _fail("settings.embedding names the openai provider but no OpenAI API key is set. "
+              "Add the key under LLM provider keys, or set the gateway's embedding model "
+              "in Settings → Models to embed through the gateway instead")
         return [None] * len(values)
     if gateway and (config_error := _gateway_config_error(gateway)):
         _fail(config_error)
@@ -519,7 +546,8 @@ def _http_embeddings(values: list[str], provider: str, model: str) -> list[list[
     headers = _gateway_headers(gateway, model) if gateway else {"Authorization": f"Bearer {key}"}
     if gateway:
         payload = _gateway_payload(payload, gateway)
-    out = _post(f"{base}/embeddings", payload, headers, timeout=60.0,
+    path = (gateway.get("embeddings_path") or DEFAULT_EMBEDDINGS_PATH) if gateway else DEFAULT_EMBEDDINGS_PATH
+    out = _post(f"{base}{path}", payload, headers, timeout=60.0,
                 provider_name=provider, max_retries=gateway["max_retries"] if gateway else 2)
     _record_response_usage(out, provider, model)
     indexed: dict[int, t.Any] = {}

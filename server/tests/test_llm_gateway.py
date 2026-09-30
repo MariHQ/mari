@@ -183,6 +183,29 @@ class GatewayContractTests(unittest.TestCase):
         self.assertEqual(post.call_args.args[0], "https://gateway.test/v1/embeddings")
         self.assertEqual(post.call_args.args[1]["metadata"], {"application": "mari"})
 
+    def test_embedding_route_follows_the_configured_gateway_path(self) -> None:
+        response = {"data": [{"embedding": [0.5] * llm.EMBED_DIMS}]}
+        cfg = {**self.CFG, "embeddings_path": "/embedded"}
+        with patch.object(llm, "embedding_model", return_value=("gateway", "corp-embed")), \
+             patch.object(llm, "gateway_config", return_value=cfg), \
+             patch.object(llm, "_post", return_value=response) as post:
+            self.assertIsNotNone(llm.embed("knowledge"))
+        self.assertEqual(post.call_args.args[0], "https://gateway.test/v1/embedded")
+        self.assertEqual(post.call_args.args[2]["Authorization"], "Bearer gateway-token")
+        with patch.object(llm, "gateway_config", return_value={**self.CFG, "embeddings_path": "https://x/y"}):
+            self.assertEqual(llm._http_embeddings(["x"], "gateway", "corp-embed"), [None])
+            self.assertIn("embeddings path", llm.last_error())
+
+    def test_embeddings_path_is_normalised_and_defaults(self) -> None:
+        def get(section, key, *default):
+            return default[0] if default else None
+        for stored, expected in (("", "/embeddings"), ("embedded/", "/embedded"),
+                                 (" /v2/embed ", "/v2/embed"), (None, "/embeddings")):
+            with patch.object(llm.config, "get", side_effect=get), \
+                 patch.object(llm, "_settings", return_value=(
+                     {"gateway": {"base_url": "https://g.test/v1", "embeddings_path": stored}}, {})):
+                self.assertEqual(llm.gateway_config()["embeddings_path"], expected, stored)
+
     def test_health_is_prompt_free_get_and_has_explicit_misconfiguration(self) -> None:
         with patch.object(llm, "gateway_config", return_value={**self.CFG, "base_url": ""}):
             self.assertEqual(llm.gateway_health()["detail"], "LLM gateway base URL is not configured")

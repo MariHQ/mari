@@ -143,10 +143,10 @@ test("provider keys use explicit edits, including legitimate bullet characters",
     call.variables.key === "llm" && (call.variables.value as any).keys?.openai === "sk-live-•-valid")).toBeTruthy();
 });
 
-test("generation gateway validates, preserves HTTP embeddings, and runs prompt-free health", async ({ page }) => {
+test("model gateway validates, preserves HTTP embeddings, and runs prompt-free health", async ({ page }) => {
   await page.goto("/settings/models");
-  await expect(page.getByText("Generation gateway", { exact: true })).toBeVisible();
-  await expect(page.getByText(/Embeddings remain independently configured/)).toBeVisible();
+  await expect(page.getByText("Model gateway", { exact: true })).toBeVisible();
+  await expect(page.getByText(/Name an embedding model to embed through the gateway/)).toBeVisible();
   await expect(page.getByText(/Claude plugin/i)).toHaveCount(0);
   await expect(page.getByRole("option", { name: /Enterprise gateway/ })).toHaveCount(1);
   await expect(page.getByRole("option", { name: /OpenAI.*text-embedding-3-small/ })).toHaveCount(1);
@@ -181,6 +181,23 @@ test("generation gateway validates, preserves HTTP embeddings, and runs prompt-f
   const embeddingSaves = api.calls.filter((call) => call.variables.key === "embedding");
   expect(embeddingSaves).toHaveLength(1);
   expect((embeddingSaves[0].variables.value as any).provider).toBe("openai");
+
+  // Naming an embedding model on the gateway card points the embedding row
+  // at the gateway; a malformed route is refused before anything is written.
+  await page.getByLabel("Embeddings path").fill("embedded");
+  await page.getByRole("button", { name: "Save gateway" }).click();
+  await expect(page.getByText("Embeddings path must be a route under the base URL, like /embeddings.")).toBeVisible();
+  await page.getByLabel("Embeddings path").fill("/embedded");
+  await page.getByLabel("Embedding model (optional)").fill("corp-embed");
+  await expect(page.getByText("Saving re-indexes every document. Search is degraded until the run finishes.").last()).toBeVisible();
+  await page.getByRole("button", { name: "Save gateway" }).click();
+  await expect.poll(() => api.calls.filter((call) => call.variables.key === "embedding").length).toBe(2);
+  const gatewayEmbedding = api.calls.filter((call) => call.variables.key === "embedding")[1];
+  expect((gatewayEmbedding.variables.value as any).provider).toBe("gateway");
+  expect((gatewayEmbedding.variables.value as any).model).toBe("corp-embed");
+  expect((gatewayEmbedding.variables.value as any).dims).toBeUndefined();
+  const pathSave = api.calls.filter((call) => call.query.includes("updateSetting") && call.variables.key === "llm").at(-1);
+  expect((pathSave?.variables.value as any).gateway.embeddings_path).toBe("/embedded");
 
   await page.getByRole("button", { name: "Test gateway" }).click();
   await expect(page.getByText("Gateway healthy", { exact: true })).toBeVisible();

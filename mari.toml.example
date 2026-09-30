@@ -31,6 +31,11 @@ base_url = ""
 token = ""
 compatibility = "openai" # use "deepseek" with https://api.deepseek.com
 max_retries = 2
+# The gateway also serves embeddings when [models] names it:
+#   embedding_provider = "gateway"
+#   embedding_model = "enterprise-embed"
+# Requests go to base_url + embeddings_path; chat always uses /chat/completions.
+embeddings_path = "/embeddings"
 
 [auth]
 session_days = 14

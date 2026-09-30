@@ -29,7 +29,7 @@ type Res = {
 };
 
 type EmbeddingRow = { provider?: string; model?: string; dims?: number; options?: string[] };
-type GatewayRow = { base_url?: string; token?: string; compatibility?: "openai" | "deepseek"; headers?: Record<string, string>; metadata?: Record<string, unknown>; model_header?: string; max_retries?: number };
+type GatewayRow = { base_url?: string; token?: string; compatibility?: "openai" | "deepseek"; headers?: Record<string, string>; metadata?: Record<string, unknown>; model_header?: string; max_retries?: number; embeddings_path?: string };
 type LlmRow = { provider?: string; model?: string; options?: string[]; keys?: { openai?: string; anthropic?: string }; gateway?: GatewayRow };
 type ChunkSpec = { strategy?: string; max_tokens?: number; overlap?: number };
 
@@ -61,10 +61,15 @@ export function mapChunking(res: Res): ChunkRow[] {
 }
 
 const NO_KEYS: ProviderKeys = { openai: "", anthropic: "" };
-const gatewayOf = (llm: LlmRow): GatewaySettings => ({
+/* The gateway's connection lives on the `llm` row; which embedding model it
+   serves is the `embedding` row naming the gateway provider, the same way
+   the generation model is the `llm` row naming it. Both rows feed one card. */
+const gatewayOf = (llm: LlmRow, embedding: EmbeddingRow = {}): GatewaySettings => ({
   baseUrl: llm.gateway?.base_url ?? "",
   token: llm.gateway?.token ?? "",
   generationModel: llm.provider === "gateway" ? (llm.model ?? "") : "",
+  embeddingModel: embedding.provider === "gateway" ? (embedding.model ?? "") : "",
+  embeddingsPath: llm.gateway?.embeddings_path ?? "",
   compatibility: llm.gateway?.compatibility === "deepseek" ? "deepseek" : "openai",
   headersJson: JSON.stringify(llm.gateway?.headers ?? {}, null, 2),
   metadataJson: JSON.stringify(llm.gateway?.metadata ?? {}, null, 2),
@@ -103,7 +108,7 @@ export function buildSettingsModels(res: Res | null): SettingsModelsData {
     // Masked by the server (queries.py `_mask_setting`); "" means no key set,
     // which is what the field should read as.
     keys: { openai: llm.keys?.openai ?? "", anthropic: llm.keys?.anthropic ?? "" },
-    gateway: gatewayOf(llm),
+    gateway: gatewayOf(llm, embedding),
     indexSummary,
     // Connection tests run against a provider and produce their result then.
     // Nothing has been tested on a plain page load, so there is no outcome to
